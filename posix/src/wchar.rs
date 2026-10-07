@@ -1184,57 +1184,276 @@ pub extern "C" fn towctrans(wc: WcharT, tr: WctransT) -> WcharT {
 }
 
 // ---------------------------------------------------------------------------
+// The wide scanners
+// ---------------------------------------------------------------------------
+//
+// The byte functions' method (`string.rs`, "The engines" and "The
+// scanners"), four wide characters to a 16-byte block: `pcmpeqd` where
+// those compare bytes with `pcmpeqb`, so each character owns four bits of a
+// `pmovmskb` mask and a mask's bit index, divided by four, is a character
+// index.  A `wchar_t` is four-byte aligned, so an aligned block holds whole
+// characters; a string that is not (which C does not allow, but a program
+// may still pass) is scanned a character at a time instead.  The copies are
+// a length and then `memcpy`, `memmove` or `memset`.  They were all loops of
+// one character an iteration.
+
+use core::arch::x86_64::__m128i;
+
+/// `wc` in all four 32-bit lanes of a vector.
+#[inline(always)]
+fn splat_wide(wc: WcharT) -> __m128i {
+    // SAFETY: an `__m128i` is sixteen bytes, and any bits are a valid one.
+    unsafe { core::mem::transmute::<[WcharT; 4], __m128i>([wc; 4]) }
+}
+
+/// The characters of the 16-byte-aligned block at `block` that are zero,
+/// and those equal to `needle`'s: four bits of each mask for each
+/// character, bits `4i` to `4i + 3` for character `i`.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte, which makes all
+/// sixteen readable: an aligned block lies within one page.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn wide_block_masks(block: *const WcharT, needle: __m128i) -> (u32, u32) {
+    let zeros: u32;
+    let hits: u32;
+    // SAFETY: the caller's readable block, aligned as `movdqa` needs.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {chunk}, xmmword ptr [{block}]",
+            "pxor {zero}, {zero}",
+            "pcmpeqd {zero}, {chunk}",
+            "pcmpeqd {chunk}, {needle}",
+            "pmovmskb {zeros:e}, {zero}",
+            "pmovmskb {hits:e}, {chunk}",
+            block = in(reg) block,
+            needle = in(xmm_reg) needle,
+            chunk = out(xmm_reg) _,
+            zero = out(xmm_reg) _,
+            zeros = lateout(reg) zeros,
+            hits = lateout(reg) hits,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    (zeros, hits)
+}
+
+/// Where the sixteen bytes (four characters) at `a` and `b` are equal, and
+/// where `a`'s are zero, as [`wide_block_masks`]'s masks.
+///
+/// # Safety
+///
+/// `a` and `b` readable for sixteen bytes each.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn wide_stop_masks(a: *const WcharT, b: *const WcharT) -> (u32, u32) {
+    let equal: u32;
+    let zeros: u32;
+    // SAFETY: the caller's readable bytes; unaligned loads.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {x}, xmmword ptr [{a}]",
+            "movdqu {y}, xmmword ptr [{b}]",
+            "pcmpeqd {y}, {x}",
+            "pxor {zero}, {zero}",
+            "pcmpeqd {zero}, {x}",
+            "pmovmskb {equal:e}, {y}",
+            "pmovmskb {zeros:e}, {zero}",
+            a = in(reg) a,
+            b = in(reg) b,
+            x = out(xmm_reg) _,
+            y = out(xmm_reg) _,
+            zero = out(xmm_reg) _,
+            equal = lateout(reg) equal,
+            zeros = lateout(reg) zeros,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    (equal, zeros)
+}
+
+/// The characters of the sixteen bytes at `p` equal to `needle`'s, as
+/// [`wide_block_masks`]'s mask.
+///
+/// # Safety
+///
+/// `p` readable for sixteen bytes.
+#[inline(always)]
+unsafe fn wide_matches16(p: *const WcharT, needle: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi32, _mm_loadu_si128, _mm_movemask_epi8};
+    // SAFETY: the caller's sixteen bytes; an unaligned load.
+    unsafe {
+        let chunk = _mm_loadu_si128(p.cast::<__m128i>());
+        // pmovmskb's 16 bits: never negative.
+        _mm_movemask_epi8(_mm_cmpeq_epi32(chunk, needle)) as u32
+    }
+}
+
+/// Whether the sixteen bytes from `p` lie within one page (the smallest
+/// x86-64 page, which SlateOS's 16 KiB ones are multiples of).
+#[inline(always)]
+fn wide_within_page(p: *const WcharT) -> bool {
+    p as usize & 4095 <= 4096 - 16
+}
+
+/// Whether `p` is four-byte aligned, as a `wchar_t` must be and the block
+/// scans need.
+#[inline(always)]
+fn wide_aligned(p: *const WcharT) -> bool {
+    (p as usize).is_multiple_of(4)
+}
+
+/// The answer the comparisons give for characters `a` and `b`: -1, 0 or 1,
+/// as signed numbers, as glibc's do.
+#[inline(always)]
+fn wide_order(a: WcharT, b: WcharT) -> i32 {
+    match a.cmp(&b) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Greater => 1,
+        core::cmp::Ordering::Equal => 0,
+    }
+}
+
+/// The first character of the wide string at `s` that is `wc` or its
+/// terminator: `wcschrnul`, which `wcschr` and `wcslen` share.
+///
+/// # Safety
+///
+/// `s` is a readable wide string.
+#[inline(always)]
+unsafe fn wide_char_or_nul(s: *const WcharT, wc: WcharT) -> *const WcharT {
+    if !wide_aligned(s) {
+        let mut i = 0usize;
+        // SAFETY: up to the terminator, which ends the loop.
+        unsafe {
+            loop {
+                let c = s.add(i).read_unaligned();
+                if c == wc || c == 0 {
+                    return s.add(i);
+                }
+                i = i.wrapping_add(1);
+            }
+        }
+    }
+    let needle = splat_wide(wc);
+    let skip = (s as usize & 15) as u32;
+    let mut block = s.wrapping_byte_sub(skip as usize);
+    // SAFETY: the string is readable to its terminator.  The first block
+    // holds `s`; each later one is read only when the one before held
+    // neither `wc` nor the terminator, so it starts at a character of the
+    // string not yet examined, and lies in that character's page.
+    unsafe {
+        let (zeros, hits) = wide_block_masks(block, needle);
+        // The first block's bytes below `s` are not the string's.
+        let first = (zeros | hits).wrapping_shr(skip);
+        if first != 0 {
+            return s.wrapping_byte_add(first.trailing_zeros() as usize);
+        }
+        loop {
+            block = block.wrapping_byte_add(16);
+            let (zeros, hits) = wide_block_masks(block, needle);
+            if zeros | hits != 0 {
+                return block.wrapping_byte_add((zeros | hits).trailing_zeros() as usize);
+            }
+        }
+    }
+}
+
+/// The length of the wide string at `s`, or `max` if its first `max`
+/// characters hold no terminator: `wcsnlen`, which the bounded copies and
+/// the fortified entry points share.
+///
+/// # Safety
+///
+/// `s` readable for `max` characters, or to a terminator within them.
+#[inline(always)]
+unsafe fn wide_length_within(s: *const WcharT, max: usize) -> usize {
+    if max == 0 {
+        return 0;
+    }
+    if !wide_aligned(s) {
+        let mut i = 0usize;
+        // SAFETY: `i < max` at every read, before any terminator.
+        while i < max && unsafe { s.add(i).read_unaligned() } != 0 {
+            i = i.wrapping_add(1);
+        }
+        return i;
+    }
+    let none = splat_wide(0);
+    let skip = (s as usize & 15) as u32;
+    // SAFETY: `s`'s first character is readable (`max` is not 0), so its
+    // block is.  A later block is read only while it starts below `max`
+    // characters and no terminator came before it: at a character the
+    // caller vouches for.
+    unsafe {
+        let (zeros, _) = wide_block_masks(s.wrapping_byte_sub(skip as usize), none);
+        let first = zeros.wrapping_shr(skip);
+        if first != 0 {
+            return (first.trailing_zeros() as usize / 4).min(max);
+        }
+        // Characters to the next block.
+        let mut at = (16usize.wrapping_sub(skip as usize)) / 4;
+        while at < max {
+            let (zeros, _) = wide_block_masks(s.wrapping_add(at), none);
+            if zeros != 0 {
+                return at
+                    .wrapping_add(zeros.trailing_zeros() as usize / 4)
+                    .min(max);
+            }
+            at = at.saturating_add(4);
+        }
+    }
+    max
+}
+
+/// `n` characters' bytes, or `usize::MAX` where that does not fit -- a
+/// count no buffer has, which the copy then faults on rather than wrapping
+/// to a small one.
+#[inline(always)]
+fn wide_bytes(n: usize) -> usize {
+    n.saturating_mul(4)
+}
+
+// ---------------------------------------------------------------------------
 // Wide string operations
 // ---------------------------------------------------------------------------
 
 /// Copy a wide string.
+///
+/// `wcslen`, then `memcpy`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscpy(dst: *mut WcharT, src: *const WcharT) -> *mut WcharT {
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *src.add(i) };
-        unsafe {
-            *dst.add(i) = c;
-        }
-        if c == 0 {
-            return dst;
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: the caller's string, and room for it with its terminator.
+    unsafe {
+        let len = wcslen(src);
+        crate::string::memcpy(dst.cast(), src.cast(), wide_bytes(len.wrapping_add(1)));
     }
+    dst
 }
 
-/// Copy at most `n` wide characters.
+/// Copy at most `n` wide characters, padding with NULs to `n`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncpy(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
-    let mut i: usize = 0;
-    let mut done = false;
-    while i < n {
-        if done {
-            unsafe {
-                *dst.add(i) = 0;
-            }
-        } else {
-            let c = unsafe { *src.add(i) };
-            unsafe {
-                *dst.add(i) = c;
-            }
-            if c == 0 {
-                done = true;
-            }
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: `src` is read to its terminator or for `n` characters, and
+    // `dst` written for `n`: the string's `len`, then zeros.
+    unsafe {
+        let len = wide_length_within(src, n);
+        crate::string::memcpy(dst.cast(), src.cast(), wide_bytes(len));
+        crate::string::memset(dst.add(len).cast(), 0, wide_bytes(n.wrapping_sub(len)));
     }
     dst
 }
 
 /// Return the length of a wide string.
+///
+/// Four characters a step: aligned 16-byte blocks, as `strlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcslen(s: *const WcharT) -> usize {
-    let mut i: usize = 0;
-    while unsafe { *s.add(i) } != 0 {
-        i = i.wrapping_add(1);
-    }
-    i
+    // SAFETY: the caller's string; the answer is its terminator.
+    let end = unsafe { wide_char_or_nul(s, 0) };
+    (end as usize).wrapping_sub(s as usize) / 4
 }
 
 /// The length of the wide string at `s`, counting at most `maxlen`
@@ -1248,42 +1467,51 @@ pub unsafe extern "C" fn wcslen(s: *const WcharT) -> usize {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsnlen(s: *const WcharT, maxlen: usize) -> usize {
     // SAFETY: this function's contract is the helper's.
-    unsafe { wcsnlen_bounded(s, maxlen) }
+    unsafe { wide_length_within(s, maxlen) }
 }
 
 /// Compare two wide strings.
+///
+/// -1, 0 or 1 as the first characters that differ compare as signed
+/// numbers, as glibc's.  Four characters a step where sixteen bytes cross
+/// no page, else one.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
-    let mut i: usize = 0;
-    loop {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b || a == 0 {
-            return match a.cmp(&b) {
-                core::cmp::Ordering::Less => -1,
-                core::cmp::Ordering::Greater => 1,
-                core::cmp::Ordering::Equal => 0,
-            };
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: as `wcsncmp`'s, with no bound.
+    unsafe { wcsncmp(s1, s2, usize::MAX) }
 }
 
-/// Compare at most `n` wide characters.
+/// Compare at most `n` wide characters, as `wcscmp`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncmp(s1: *const WcharT, s2: *const WcharT, n: usize) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b || a == 0 {
-            return match a.cmp(&b) {
-                core::cmp::Ordering::Less => -1,
-                core::cmp::Ordering::Greater => 1,
-                core::cmp::Ordering::Equal => 0,
-            };
+    let mut i = 0usize;
+    // SAFETY: both strings are readable to their terminators or for `n`
+    // characters, and nothing is compared past the first difference, the
+    // first terminator or `n`.  Sixteen bytes are read only where neither
+    // run crosses a page, so each shares a page with its string's character
+    // `i`, which is readable; otherwise one character of each.
+    unsafe {
+        while i < n {
+            let (a, b) = (s1.wrapping_add(i), s2.wrapping_add(i));
+            if wide_within_page(a) && wide_within_page(b) {
+                let (equal, zeros) = wide_stop_masks(a, b);
+                let stops = (!equal & 0xFFFF) | zeros;
+                if stops != 0 {
+                    let at = stops.trailing_zeros() as usize / 4;
+                    if at >= n.wrapping_sub(i) {
+                        return 0;
+                    }
+                    return wide_order(a.add(at).read_unaligned(), b.add(at).read_unaligned());
+                }
+                i = i.saturating_add(4);
+            } else {
+                let (x, y) = (a.read_unaligned(), b.read_unaligned());
+                if x != y || x == 0 {
+                    return wide_order(x, y);
+                }
+                i = i.wrapping_add(1);
+            }
         }
-        i = i.wrapping_add(1);
     }
     0
 }
@@ -1297,18 +1525,18 @@ pub unsafe extern "C" fn wcscat(dst: *mut WcharT, src: *const WcharT) -> *mut Wc
 }
 
 /// Find a wide character in a wide string.
+///
+/// Four characters a step; `wc` may be 0, which finds the terminator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcschr(s: *const WcharT, wc: WcharT) -> *const WcharT {
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *s.add(i) };
-        if c == wc {
-            return unsafe { s.add(i) };
+    // SAFETY: the caller's string; the answer is a character of it.
+    unsafe {
+        let found = wide_char_or_nul(s, wc);
+        if found.read_unaligned() == wc {
+            found
+        } else {
+            core::ptr::null()
         }
-        if c == 0 {
-            return core::ptr::null();
-        }
-        i = i.wrapping_add(1);
     }
 }
 
@@ -1320,16 +1548,8 @@ pub unsafe extern "C" fn wcschr(s: *const WcharT, wc: WcharT) -> *const WcharT {
 /// `s` must be a valid NUL-terminated wide string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcschrnul(s: *const WcharT, wc: WcharT) -> *const WcharT {
-    let mut i: usize = 0;
-    loop {
-        // SAFETY: within the caller's string, up to and including its NUL.
-        let c = unsafe { *s.add(i) };
-        if c == wc || c == 0 {
-            // SAFETY: as above.
-            return unsafe { s.add(i) };
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: the caller's string.
+    unsafe { wide_char_or_nul(s, wc) }
 }
 
 /// `wcslcpy(dst, src, size)` -- [`crate::string::strlcpy`] for wide strings:
@@ -1381,64 +1601,176 @@ pub unsafe extern "C" fn wcslcat(dst: *mut WcharT, src: *const WcharT, size: usi
 }
 
 /// Find the last occurrence of a wide character.
+///
+/// One pass, four characters a step: the last block that held `wc` is
+/// remembered until the block holding the terminator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsrchr(s: *const WcharT, wc: WcharT) -> *const WcharT {
-    let len = unsafe { wcslen(s) };
-    let mut i = len;
-    // Include position `len` to check for searching null terminator.
-    loop {
-        if unsafe { *s.add(i) } == wc {
-            return unsafe { s.add(i) };
+    if !wide_aligned(s) {
+        let mut last = core::ptr::null();
+        let mut i = 0usize;
+        // SAFETY: up to the terminator, which ends the loop.
+        unsafe {
+            loop {
+                let c = s.add(i).read_unaligned();
+                if c == wc {
+                    last = s.add(i);
+                }
+                if c == 0 {
+                    return last;
+                }
+                i = i.wrapping_add(1);
+            }
         }
-        if i == 0 {
-            break;
-        }
-        i = i.wrapping_sub(1);
     }
-    core::ptr::null()
+    let needle = splat_wide(wc);
+    let skip = (s as usize & 15) as u32;
+    let mut block = s.wrapping_byte_sub(skip as usize);
+    let mut last = core::ptr::null();
+    // SAFETY: as `wide_char_or_nul`'s: each block read starts at a character
+    // of the string not yet examined, the first holding `s`.
+    unsafe {
+        let (zeros, hits) = wide_block_masks(block, needle);
+        // Bit `i` of the masks is the byte at `base + i`; the first block's
+        // bytes below `s` are not the string's.
+        let (mut zeros, mut hits, mut base) =
+            (zeros.wrapping_shr(skip), hits.wrapping_shr(skip), s);
+        loop {
+            if zeros != 0 {
+                // The terminator's block: what counts is up to the
+                // terminator, inclusive -- `wc` may be 0.
+                let hits = hits & (zeros ^ zeros.wrapping_sub(1));
+                if hits != 0 {
+                    return base.wrapping_byte_add(highest_character(hits));
+                }
+                return last;
+            }
+            if hits != 0 {
+                last = base.wrapping_byte_add(highest_character(hits));
+            }
+            block = block.wrapping_byte_add(16);
+            base = block;
+            (zeros, hits) = wide_block_masks(block, needle);
+        }
+    }
+}
+
+/// The byte offset of the last character a mask of four bits a character
+/// marks, which is not 0.
+#[inline(always)]
+fn highest_character(mask: u32) -> usize {
+    // `leading_zeros` is 0 to 31 here, and 31 ^ x is 31 - x for those: the
+    // highest bit, whose character starts at that bit rounded down to four.
+    ((31 ^ mask.leading_zeros()) & !3) as usize
 }
 
 // ---------------------------------------------------------------------------
 // Wide memory operations
 // ---------------------------------------------------------------------------
 
-/// Copy wide characters.
+/// Copy wide characters: `memcpy` of their bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemcpy(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
-    let mut i: usize = 0;
-    while i < n {
-        unsafe {
-            *dst.add(i) = *src.add(i);
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: the caller's `n` characters each side.
+    unsafe {
+        crate::string::memcpy(dst.cast(), src.cast(), wide_bytes(n));
     }
     dst
 }
 
 /// Set wide characters to a value.
+///
+/// `memset` when the character's four bytes are one byte repeated (0, and
+/// -1, the commonest); else the first character, and then what is written
+/// copied after itself, doubling, so the whole is a few `memcpy`s.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemset(dst: *mut WcharT, wc: WcharT, n: usize) -> *mut WcharT {
-    let mut i: usize = 0;
-    while i < n {
-        unsafe {
-            *dst.add(i) = wc;
+    let bytes = wc.to_ne_bytes();
+    // SAFETY: the caller's `n` writable characters.  Each copy is from the
+    // `done` characters already written to the `chunk <= done` after them,
+    // which do not overlap them.
+    unsafe {
+        if bytes.iter().all(|&b| b == bytes[0]) {
+            crate::string::memset(dst.cast(), i32::from(bytes[0]), wide_bytes(n));
+            return dst;
         }
-        i = i.wrapping_add(1);
+        if n < 16 {
+            for i in 0..n {
+                dst.add(i).write_unaligned(wc);
+            }
+            return dst;
+        }
+        dst.write_unaligned(wc);
+        let mut done = 1usize;
+        while done < n {
+            let chunk = done.min(n.wrapping_sub(done));
+            crate::string::memcpy(
+                dst.add(done).cast(),
+                dst.cast_const().cast(),
+                wide_bytes(chunk),
+            );
+            done = done.wrapping_add(chunk);
+        }
     }
     dst
 }
 
 /// Compare wide character regions.
+///
+/// -1, 0 or 1 as the first characters that differ compare as signed
+/// numbers; four characters a step (SSE2), never reading past `n`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemcmp(s1: *const WcharT, s2: *const WcharT, n: usize) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b {
-            return if a < b { -1 } else { 1 };
+    use core::arch::x86_64::{_mm_cmpeq_epi32, _mm_loadu_si128, _mm_movemask_epi8};
+    /// The characters of the sixteen bytes at `a` and `b` that are equal,
+    /// four bits each.
+    ///
+    /// # Safety
+    ///
+    /// `a` and `b` readable for sixteen bytes.
+    #[inline(always)]
+    unsafe fn equal16(a: *const WcharT, b: *const WcharT) -> u32 {
+        // SAFETY: the caller's bytes; unaligned loads.
+        unsafe {
+            let x = _mm_loadu_si128(a.cast::<__m128i>());
+            let y = _mm_loadu_si128(b.cast::<__m128i>());
+            _mm_movemask_epi8(_mm_cmpeq_epi32(x, y)) as u32
         }
-        i = i.wrapping_add(1);
+    }
+    // SAFETY: every read lies within the first `n` characters of both,
+    // which the caller vouches for.
+    unsafe {
+        let mut i = 0usize;
+        if n >= 4 {
+            while n.wrapping_sub(i) >= 4 {
+                let (a, b) = (s1.add(i), s2.add(i));
+                let equal = equal16(a, b);
+                if equal != 0xFFFF {
+                    let at = (!equal).trailing_zeros() as usize / 4;
+                    return wide_order(a.add(at).read_unaligned(), b.add(at).read_unaligned());
+                }
+                i = i.wrapping_add(4);
+            }
+            if i < n {
+                // The last four, overlapping some already found equal,
+                // which cannot hold the first difference.
+                let at = n.wrapping_sub(4);
+                let (a, b) = (s1.add(at), s2.add(at));
+                let equal = equal16(a, b);
+                if equal != 0xFFFF {
+                    let k = (!equal).trailing_zeros() as usize / 4;
+                    return wide_order(a.add(k).read_unaligned(), b.add(k).read_unaligned());
+                }
+            }
+            return 0;
+        }
+        while i < n {
+            let (a, b) = (s1.add(i).read_unaligned(), s2.add(i).read_unaligned());
+            if a != b {
+                return wide_order(a, b);
+            }
+            i = i.wrapping_add(1);
+        }
     }
     0
 }
@@ -2091,65 +2423,72 @@ pub unsafe extern "C" fn mbrlen(s: *const u8, n: usize, ps: *mut MbstateT) -> us
 /// `dst` must have room for the existing string plus `n` + 1 wide chars.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncat(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
-    let dlen = unsafe { wcslen(dst) };
-    let mut j: usize = 0;
-    while j < n {
-        let c = unsafe { *src.add(j) };
-        unsafe {
-            *dst.add(dlen.wrapping_add(j)) = c;
-        }
-        if c == 0 {
-            return dst;
-        }
-        j = j.wrapping_add(1);
-    }
-    // Null-terminate.
+    // SAFETY: the caller's strings, `src` read to its terminator or for `n`
+    // characters, and room after `dst`'s for those and a terminator.
     unsafe {
-        *dst.add(dlen.wrapping_add(j)) = 0;
+        let end = dst.add(wcslen(dst));
+        let len = wide_length_within(src, n);
+        crate::string::memcpy(end.cast(), src.cast(), wide_bytes(len));
+        end.add(len).write_unaligned(0);
     }
     dst
 }
 
 /// Search for a wide character in a memory region.
 ///
+/// Four characters a step (SSE2), never reading past `n`.
+///
 /// # Safety
 ///
 /// `s` must be valid for `n * sizeof(wchar_t)` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemchr(s: *const WcharT, wc: WcharT, n: usize) -> *const WcharT {
-    let mut i: usize = 0;
-    while i < n {
-        if unsafe { *s.add(i) } == wc {
-            return unsafe { s.add(i) };
+    // SAFETY: every read lies within the first `n` characters of `s`, which
+    // the caller vouches for.
+    unsafe {
+        if n >= 4 {
+            let needle = splat_wide(wc);
+            let mut i = 0usize;
+            while n.wrapping_sub(i) >= 4 {
+                let mask = wide_matches16(s.add(i), needle);
+                if mask != 0 {
+                    return s.add(i).wrapping_byte_add(mask.trailing_zeros() as usize);
+                }
+                i = i.wrapping_add(4);
+            }
+            if i < n {
+                // The last four, overlapping some already searched.
+                let at = n.wrapping_sub(4);
+                let mask = wide_matches16(s.add(at), needle);
+                if mask != 0 {
+                    return s.add(at).wrapping_byte_add(mask.trailing_zeros() as usize);
+                }
+            }
+            return core::ptr::null();
         }
-        i = i.wrapping_add(1);
+        let mut i = 0usize;
+        while i < n {
+            if s.add(i).read_unaligned() == wc {
+                return s.add(i);
+            }
+            i = i.wrapping_add(1);
+        }
     }
     core::ptr::null()
 }
 
-/// Move wide characters (overlapping regions safe).
+/// Move wide characters (overlapping regions safe): `memmove` of their
+/// bytes.
 ///
 /// # Safety
 ///
 /// Both `dst` and `src` must be valid for `n * sizeof(wchar_t)` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemmove(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
-    if (dst as usize) < (src as usize) {
-        let mut i: usize = 0;
-        while i < n {
-            unsafe {
-                *dst.add(i) = *src.add(i);
-            }
-            i = i.wrapping_add(1);
-        }
-    } else if (dst as usize) > (src as usize) {
-        let mut i = n;
-        while i > 0 {
-            i = i.wrapping_sub(1);
-            unsafe {
-                *dst.add(i) = *src.add(i);
-            }
-        }
+    // SAFETY: the caller's `n` characters each side; `memmove` takes them
+    // overlapping either way.
+    unsafe {
+        crate::string::memmove(dst.cast(), src.cast(), wide_bytes(n));
     }
     dst
 }
@@ -2167,32 +2506,38 @@ pub unsafe extern "C" fn wcswcs(haystack: *const WcharT, needle: *const WcharT) 
 
 /// Find a wide substring in a wide string.
 ///
+/// The Two-Way search `strstr` uses (`string::TwoWay`): linear time,
+/// constant space, where the loop it replaced took the product of the
+/// lengths.  The haystack's length is found only as far as the search goes.
+///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated wide strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsstr(haystack: *const WcharT, needle: *const WcharT) -> *const WcharT {
-    if unsafe { *needle } == 0 {
-        return haystack;
-    }
-
-    let mut h: usize = 0;
-    while unsafe { *haystack.add(h) } != 0 {
-        let mut j: usize = 0;
-        loop {
-            let n_ch = unsafe { *needle.add(j) };
-            if n_ch == 0 {
-                return unsafe { haystack.add(h) };
-            }
-            let h_ch = unsafe { *haystack.add(h.wrapping_add(j)) };
-            if h_ch != n_ch {
-                break;
-            }
-            j = j.wrapping_add(1);
+    // SAFETY: the caller's strings.  The haystack is read one character
+    // past `known` only while `known` is before its terminator.
+    unsafe {
+        let nlen = wcslen(needle);
+        if nlen == 0 {
+            return haystack;
         }
-        h = h.wrapping_add(1);
+        // How many of the haystack's characters precede its terminator, as
+        // far as anyone has looked.
+        let mut known = 0usize;
+        let mut fits = |end: usize| {
+            while known < end && haystack.add(known).read() != 0 {
+                known = known.wrapping_add(1);
+            }
+            end <= known
+        };
+        // A haystack shorter than the needle holds no match, which is
+        // cheaper to see than the needle's factorization is to make.
+        if !fits(nlen) {
+            return core::ptr::null();
+        }
+        crate::string::TwoWay::new(needle, nlen, |wc: WcharT| wc).find(haystack, fits)
     }
-    core::ptr::null()
 }
 
 // ---------------------------------------------------------------------------
@@ -3146,12 +3491,9 @@ mod gnu_wmempcpy {
         n: usize,
     ) -> *mut WcharT {
         if !dest.is_null() && !src.is_null() {
-            let mut i: usize = 0;
-            while i < n {
-                unsafe {
-                    *dest.add(i) = *src.add(i);
-                }
-                i = i.wrapping_add(1);
+            // SAFETY: the caller's `n` characters each side.
+            unsafe {
+                crate::string::memcpy(dest.cast(), src.cast(), wide_bytes(n));
             }
         }
         // SAFETY: dest + n is one past the last element written.
@@ -3175,18 +3517,12 @@ mod gnu_wcpcpy {
     /// `wcslen(src) + 1` wide characters; the two must not overlap.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn wcpcpy(dst: *mut WcharT, src: *const WcharT) -> *mut WcharT {
-        let mut i: usize = 0;
-        loop {
-            // SAFETY: caller contract -- `src` is readable to its NUL and
-            // `dst` writable for as many wide characters.
-            let c = unsafe { *src.add(i) };
-            // SAFETY: as above.
-            unsafe { *dst.add(i) = c };
-            if c == 0 {
-                // SAFETY: `i` is within the string just written.
-                return unsafe { dst.add(i) };
-            }
-            i = i.wrapping_add(1);
+        // SAFETY: caller contract -- `src` is readable to its NUL and `dst`
+        // writable for as many wide characters; `len` is within both.
+        unsafe {
+            let len = (wide_char_or_nul(src, 0) as usize).wrapping_sub(src as usize) / 4;
+            crate::string::memcpy(dst.cast(), src.cast(), wide_bytes(len.wrapping_add(1)));
+            dst.add(len)
         }
     }
 }
@@ -3211,25 +3547,15 @@ mod gnu_wcpncpy {
         src: *const WcharT,
         n: usize,
     ) -> *mut WcharT {
-        let mut end = n;
-        let mut i: usize = 0;
-        while i < n {
-            let c = if end == n {
-                // SAFETY: caller contract -- `src` is readable up to its NUL
-                // or `n` characters, and no NUL has been read yet.
-                unsafe { *src.add(i) }
-            } else {
-                0
-            };
-            if c == 0 && end == n {
-                end = i;
-            }
-            // SAFETY: `i < n` and `dst` is writable for `n` characters.
-            unsafe { *dst.add(i) = c };
-            i = i.wrapping_add(1);
+        // SAFETY: caller contract -- `src` is readable up to its NUL or `n`
+        // characters, and `dst` writable for `n`: the string's `len`, then
+        // zeros.  `len <= n`, so the answer is within, or one past, `dst`.
+        unsafe {
+            let len = wide_length_within(src, n);
+            crate::string::memcpy(dst.cast(), src.cast(), wide_bytes(len));
+            crate::string::memset(dst.add(len).cast(), 0, wide_bytes(n.wrapping_sub(len)));
+            dst.add(len)
         }
-        // SAFETY: `end <= n`, so this is within, or one past, `dst`.
-        unsafe { dst.add(end) }
     }
 }
 pub use gnu_wcpncpy::wcpncpy;
@@ -3255,12 +3581,8 @@ pub use gnu_wcpncpy::wcpncpy;
 /// `s` must be readable up to its first NUL or `max` wide characters,
 /// whichever comes first.
 unsafe fn wcsnlen_bounded(s: *const WcharT, max: usize) -> usize {
-    let mut i: usize = 0;
-    // SAFETY: caller contract; `i < max` at every read.
-    while i < max && unsafe { *s.add(i) } != 0 {
-        i = i.wrapping_add(1);
-    }
-    i
+    // SAFETY: caller contract, the helper's.
+    unsafe { wide_length_within(s, max) }
 }
 
 /// [`crate::fortify::concatenation_fits`] for wide strings: the string
@@ -5446,6 +5768,551 @@ mod tests {
         let needle: &[WcharT] = &[0];
         let ret = unsafe { wcsstr(hay.as_ptr(), needle.as_ptr()) };
         assert_eq!(ret, hay.as_ptr());
+    }
+
+    /// The wide scanners and what is built on them, against loops of one
+    /// character at a time: every length past several blocks, every block
+    /// alignment and three misaligned ones (which take the one-at-a-time
+    /// path), the character sought at every place, negative characters and
+    /// ones past the BMP; then against pages that fault.
+    mod wide_scanners {
+        use super::*;
+
+        /// The characters the searches look for; [`wfiller`] never holds them.
+        const WSOUGHT: [WcharT; 3] = [0x71, -2, 0x1F4A9];
+
+        /// Byte offsets from a 16-byte boundary: the four a `wchar_t` may
+        /// have, then three it may not.
+        const OFFSETS: [usize; 7] = [0, 4, 8, 12, 1, 2, 3];
+
+        /// `len` characters, none 0 or sought: letters, a negative one,
+        /// past-BMP ones, the largest.
+        fn wfiller(len: usize, seed: usize) -> Vec<WcharT> {
+            const POOL: [WcharT; 8] = [0x41, 0x7A, 0x1F600, -5, 0x10_FFFF, 0x20AC, i32::MAX, 1];
+            (0..len)
+                .map(|i| POOL[(i * 3 + seed) % POOL.len()])
+                .collect()
+        }
+
+        /// `chars` and a terminator.
+        fn wterminated(chars: &[WcharT]) -> Vec<WcharT> {
+            let mut v = chars.to_vec();
+            v.push(0);
+            v
+        }
+
+        /// `chars`' bytes at `offset` past a 16-byte boundary, 0x5A bytes
+        /// around them: the buffer and where they start.
+        fn wplace(chars: &[WcharT], offset: usize) -> (Vec<u8>, usize) {
+            let mut buf = vec![0x5A_u8; chars.len() * 4 + 96];
+            let at = (16 - buf.as_ptr() as usize % 16) % 16 + offset;
+            for (i, c) in chars.iter().enumerate() {
+                buf[at + 4 * i..at + 4 * i + 4].copy_from_slice(&c.to_ne_bytes());
+            }
+            (buf, at)
+        }
+
+        fn wptr(buf: &[u8], at: usize) -> *const WcharT {
+            buf.as_ptr().wrapping_add(at).cast()
+        }
+
+        /// How many characters `found` is past `base`, or `None` for null.
+        fn woffset(found: *const WcharT, base: *const WcharT) -> Option<usize> {
+            (!found.is_null()).then(|| (found as usize - base as usize) / 4)
+        }
+
+        /// The characters at `p`, `n` of them.
+        fn wread(p: *const WcharT, n: usize) -> Vec<WcharT> {
+            // SAFETY: the callers' `n` readable characters.
+            (0..n)
+                .map(|i| unsafe { p.add(i).read_unaligned() })
+                .collect()
+        }
+
+        #[test]
+        fn the_lengths_and_wcschr_find_what_a_loop_finds() {
+            for len in 0..=40 {
+                for off in OFFSETS {
+                    for sought in WSOUGHT {
+                        for first in 0..=len {
+                            let mut s = wfiller(len, off);
+                            if first < len {
+                                s[first] = sought;
+                                if first + 3 < len {
+                                    s[first + 3] = sought;
+                                }
+                            }
+                            let (buf, at) = wplace(&wterminated(&s), off);
+                            let p = wptr(&buf, at);
+                            let found = (first < len).then_some(first);
+                            let what = format!("len {len}, offset {off}, {sought:#x} at {first}");
+                            // SAFETY: a terminated wide string.
+                            unsafe {
+                                assert_eq!(wcslen(p), len, "{what}");
+                                for max in [0, 1, 3, 4, 5, 8, len, len + 1, usize::MAX] {
+                                    assert_eq!(wcsnlen(p, max), len.min(max), "{what}, max {max}");
+                                }
+                                assert_eq!(woffset(wcschr(p, sought), p), found, "{what}");
+                                assert_eq!(
+                                    woffset(wcschrnul(p, sought), p),
+                                    Some(found.unwrap_or(len)),
+                                    "{what}"
+                                );
+                                assert_eq!(
+                                    woffset(wcschr(p, 0), p),
+                                    Some(len),
+                                    "{what}: the terminator"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wcsrchr_finds_the_last() {
+            for len in 0..=40 {
+                for off in OFFSETS {
+                    for sought in WSOUGHT {
+                        for first in 0..=len {
+                            for gap in [0, 1, 5] {
+                                let mut s = wfiller(len, off + 1);
+                                let mut last = None;
+                                if first < len {
+                                    s[first] = sought;
+                                    last = Some(first);
+                                    if gap > 0 && first + gap < len {
+                                        s[first + gap] = sought;
+                                        last = Some(first + gap);
+                                    }
+                                }
+                                let (buf, at) = wplace(&wterminated(&s), off);
+                                let p = wptr(&buf, at);
+                                // SAFETY: a terminated wide string.
+                                unsafe {
+                                    assert_eq!(
+                                        woffset(wcsrchr(p, sought), p),
+                                        last,
+                                        "len {len}, offset {off}, {sought:#x} at {first}+{gap}"
+                                    );
+                                    assert_eq!(woffset(wcsrchr(p, 0), p), Some(len), "len {len}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wmemchr_finds_the_first_within_n() {
+            let sought = WSOUGHT[1];
+            for n in 0..=40 {
+                for off in OFFSETS {
+                    for first in 0..=n {
+                        // The character sought just before `s` and from `n`
+                        // on, where it must not be found.
+                        let mut chars = vec![sought; 4];
+                        chars.extend(wfiller(n, off));
+                        chars.extend([sought; 4]);
+                        if first < n {
+                            chars[4 + first] = sought;
+                            if first + 2 < n {
+                                chars[4 + first + 2] = sought;
+                            }
+                        }
+                        let (buf, at) = wplace(&chars, off);
+                        let s = wptr(&buf, at + 16);
+                        // SAFETY: `n` readable characters from `s`.
+                        let got = unsafe { wmemchr(s, sought, n) };
+                        assert_eq!(
+                            woffset(got, s),
+                            (first < n).then_some(first),
+                            "n {n}, offset {off}, first {first}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// `wcsncmp` as a loop over terminated strings: -1, 0 or 1.
+        fn loop_wcsncmp(a: &[WcharT], b: &[WcharT], n: usize) -> i32 {
+            for (&x, &y) in a.iter().zip(b).take(n) {
+                if x != y || x == 0 {
+                    return x.cmp(&y) as i32;
+                }
+            }
+            0
+        }
+
+        /// Pairs to compare: equal; differing at each place, by a larger
+        /// and a smaller character (as signed numbers); one a prefix of the
+        /// other.
+        fn wide_pairs() -> Vec<(Vec<WcharT>, Vec<WcharT>)> {
+            let mut pairs = Vec::new();
+            for len in 0..=24 {
+                let base = wfiller(len, len);
+                pairs.push((base.clone(), base.clone()));
+                for d in 0..len {
+                    for v in [-0x7FFF_FFFF, -1, 2, 0x1F_FFFF] {
+                        if v != base[d] {
+                            let mut other = base.clone();
+                            other[d] = v;
+                            pairs.push((base.clone(), other));
+                        }
+                    }
+                    pairs.push((base.clone(), base[..d].to_vec()));
+                }
+            }
+            pairs
+        }
+
+        #[test]
+        fn the_comparisons_answer_as_loops() {
+            let aligns = [(0, 0), (4, 0), (0, 8), (12, 4), (1, 0), (0, 3), (2, 2)];
+            for (a, b) in wide_pairs() {
+                for (x, y) in [(&a, &b), (&b, &a)] {
+                    let (x, y) = (wterminated(x), wterminated(y));
+                    for (ax, ay) in aligns {
+                        let (bx, px) = wplace(&x, ax);
+                        let (by, py) = wplace(&y, ay);
+                        let (p, q) = (wptr(&bx, px), wptr(&by, py));
+                        let what = format!("{x:?} {y:?} at {ax}/{ay}");
+                        // SAFETY: terminated wide strings, and `n` characters
+                        // of each for `wmemcmp`.
+                        unsafe {
+                            assert_eq!(wcscmp(p, q), loop_wcsncmp(&x, &y, usize::MAX), "{what}");
+                            for n in [0, 1, 3, 4, 5, 8, x.len() - 1, x.len(), usize::MAX] {
+                                assert_eq!(
+                                    wcsncmp(p, q, n),
+                                    loop_wcsncmp(&x, &y, n),
+                                    "{what}, n {n}"
+                                );
+                            }
+                            let n = x.len().min(y.len());
+                            let want = x
+                                .iter()
+                                .zip(&y)
+                                .find(|(c, d)| c != d)
+                                .map_or(0, |(c, d)| c.cmp(d) as i32);
+                            assert_eq!(wmemcmp(p, q, n), want, "{what}: wmemcmp {n}");
+                        }
+                    }
+                }
+            }
+        }
+
+        /// The one-at-a-time path, where sixteen bytes would cross a page.
+        #[test]
+        fn wcscmp_across_a_page_boundary() {
+            let base = wfiller(30, 2);
+            for k1 in 1..=40 {
+                for k2 in [4, 5, 12, 16, 20, 33] {
+                    for d in [None, Some(0), Some(k1 / 4), Some(k2 / 4), Some(29)] {
+                        let x = wterminated(&base);
+                        let mut y = base.clone();
+                        if let Some(d) = d {
+                            y[d] = if y[d] == -1 { 1 } else { -1 };
+                        }
+                        let y = wterminated(&y);
+                        let mut bufs = [vec![0x5A_u8; 3 * 4096], vec![0x5A_u8; 3 * 4096]];
+                        let mut ptrs = [core::ptr::null::<WcharT>(); 2];
+                        for (i, (chars, k)) in [(&x, k1), (&y, k2)].into_iter().enumerate() {
+                            let buf = &mut bufs[i];
+                            let boundary = (4096 - buf.as_ptr() as usize % 4096) % 4096 + 4096;
+                            let at = boundary - k;
+                            for (j, c) in chars.iter().enumerate() {
+                                buf[at + 4 * j..at + 4 * j + 4].copy_from_slice(&c.to_ne_bytes());
+                            }
+                            ptrs[i] = buf.as_ptr().wrapping_add(at).cast();
+                        }
+                        let [p, q] = ptrs;
+                        let what =
+                            format!("{k1} and {k2} bytes before the boundary, differing at {d:?}");
+                        // SAFETY: terminated wide strings.
+                        unsafe {
+                            assert_eq!(wcscmp(p, q), loop_wcsncmp(&x, &y, usize::MAX), "{what}");
+                            assert_eq!(wcscmp(q, p), loop_wcsncmp(&y, &x, usize::MAX), "{what}");
+                            assert_eq!(wcsncmp(p, q, 7), loop_wcsncmp(&x, &y, 7), "{what}");
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Room for `room` characters at `offset` past a 16-byte boundary,
+        /// 0xEE bytes throughout: the buffer and where the room starts.
+        fn wroom(room: usize, offset: usize) -> (Vec<u8>, usize) {
+            let buf = vec![0xEE_u8; room * 4 + 96];
+            let at = (16 - buf.as_ptr() as usize % 16) % 16 + offset;
+            (buf, at)
+        }
+
+        /// That nothing of `buf` outside the `chars` characters from byte
+        /// `at` changed from 0xEE.
+        fn wuntouched(buf: &[u8], at: usize, chars: usize, what: &str) {
+            assert!(buf[..at].iter().all(|&b| b == 0xEE), "{what}: before");
+            assert!(
+                buf[at + 4 * chars..].iter().all(|&b| b == 0xEE),
+                "{what}: after"
+            );
+        }
+
+        #[test]
+        fn the_copies_write_what_loops_write() {
+            for len in 0..=40 {
+                let src = wterminated(&wfiller(len, 3));
+                for (sa, da) in [(0, 0), (4, 0), (0, 12), (8, 4), (1, 0), (0, 2)] {
+                    let (sbuf, sat) = wplace(&src, sa);
+                    let s = wptr(&sbuf, sat);
+                    let what = format!("len {len}, at {sa}/{da}");
+                    // SAFETY (each block): a terminated wide string, and the
+                    // room each destination is given.
+                    unsafe {
+                        for pointer_past in [false, true] {
+                            let (mut dbuf, dat) = wroom(len + 1, da);
+                            let d = dbuf.as_mut_ptr().wrapping_add(dat).cast::<WcharT>();
+                            let r = if pointer_past {
+                                wcpcpy(d, s)
+                            } else {
+                                wcscpy(d, s)
+                            };
+                            assert_eq!(
+                                r,
+                                if pointer_past { d.wrapping_add(len) } else { d },
+                                "{what}"
+                            );
+                            assert_eq!(wread(d, len + 1), src, "{what}");
+                            wuntouched(&dbuf, dat, len + 1, &what);
+                        }
+                        for n in [0, 1, len.saturating_sub(1), len, len + 1, len + 9] {
+                            for pointer_past in [false, true] {
+                                let (mut dbuf, dat) = wroom(n, da);
+                                let d = dbuf.as_mut_ptr().wrapping_add(dat).cast::<WcharT>();
+                                let r = if pointer_past {
+                                    wcpncpy(d, s, n)
+                                } else {
+                                    wcsncpy(d, s, n)
+                                };
+                                let copied = len.min(n);
+                                assert_eq!(
+                                    r,
+                                    if pointer_past {
+                                        d.wrapping_add(copied)
+                                    } else {
+                                        d
+                                    },
+                                    "{what}, n {n}"
+                                );
+                                let mut want = src[..copied].to_vec();
+                                want.resize(n, 0);
+                                assert_eq!(wread(d, n), want, "{what}, n {n}");
+                                wuntouched(&dbuf, dat, n, &what);
+                            }
+                            // wcscat / wcsncat after a prefix of 5.
+                            let prefix = wfiller(5, 7);
+                            let (mut dbuf, dat) = wroom(5 + len + 1, da);
+                            let d = dbuf.as_mut_ptr().wrapping_add(dat).cast::<WcharT>();
+                            for (i, &c) in wterminated(&prefix).iter().enumerate() {
+                                d.add(i).write_unaligned(c);
+                            }
+                            let r = wcsncat(d, s, n);
+                            assert_eq!(r, d, "{what}, n {n}");
+                            let mut want = prefix.clone();
+                            want.extend_from_slice(&src[..len.min(n)]);
+                            want.push(0);
+                            assert_eq!(wread(d, want.len()), want, "{what}, wcsncat {n}");
+                            wuntouched(&dbuf, dat, want.len(), &what);
+                        }
+                        let (mut dbuf, dat) = wroom(len, da);
+                        let d = dbuf.as_mut_ptr().wrapping_add(dat).cast::<WcharT>();
+                        assert_eq!(wmemcpy(d, s, len), d, "{what}");
+                        assert_eq!(wread(d, len), &src[..len], "{what}");
+                        wuntouched(&dbuf, dat, len, &what);
+                        let (mut dbuf, dat) = wroom(len, da);
+                        let d = dbuf.as_mut_ptr().wrapping_add(dat).cast::<WcharT>();
+                        assert_eq!(wmempcpy(d, s, len), d.wrapping_add(len), "{what}");
+                        assert_eq!(wread(d, len), &src[..len], "{what}");
+                        wuntouched(&dbuf, dat, len, &what);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wmemmove_moves_overlapping_either_way() {
+            for n in 0..=40 {
+                for shift in [-9_isize, -4, -1, 0, 1, 4, 9] {
+                    for off in [0, 4, 1] {
+                        let chars = wfiller(n + 20, 5);
+                        let (mut buf, at) = wplace(&chars, off);
+                        let base = buf.as_mut_ptr().wrapping_add(at).cast::<WcharT>();
+                        let (from, to) = (10_usize, 10_usize.wrapping_add_signed(shift));
+                        let mut want = chars.clone();
+                        want.copy_within(from..from + n, to);
+                        // SAFETY: both runs lie within the 20 + n characters.
+                        let r =
+                            unsafe { wmemmove(base.wrapping_add(to), base.wrapping_add(from), n) };
+                        assert_eq!(r, base.wrapping_add(to), "n {n}, shift {shift}");
+                        assert_eq!(
+                            wread(base, n + 20),
+                            want,
+                            "n {n}, shift {shift}, offset {off}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wmemset_fills_with_any_character() {
+            for n in (0..=70).chain([255, 1000]) {
+                for wc in [0, -1, 0x0101_0101, 0x41, -2, 0x1F600, 0x0102_0304] {
+                    for off in [0, 4, 8, 1] {
+                        let (mut buf, at) = wroom(n, off);
+                        let d = buf.as_mut_ptr().wrapping_add(at).cast::<WcharT>();
+                        // SAFETY: room for `n` characters.
+                        let r = unsafe { wmemset(d, wc, n) };
+                        assert_eq!(r, d, "n {n}, {wc:#x}");
+                        assert!(
+                            wread(d, n).iter().all(|&c| c == wc),
+                            "n {n}, {wc:#x}, offset {off}"
+                        );
+                        wuntouched(&buf, at, n, &format!("n {n}, {wc:#x}"));
+                    }
+                }
+            }
+        }
+
+        /// The wide functions with their strings against the edges of a
+        /// page between two that fault (`crate::guard_pages`).
+        #[cfg(any(windows, target_os = "linux"))]
+        mod guarded {
+            use super::*;
+            use crate::guard_pages::Guarded;
+
+            /// `chars`' bytes.
+            fn bytes(chars: &[WcharT]) -> Vec<u8> {
+                chars.iter().flat_map(|c| c.to_ne_bytes()).collect()
+            }
+
+            #[test]
+            fn nothing_reads_past_a_wide_strings_page() {
+                let (g, h, out) = (Guarded::new(), Guarded::new(), Guarded::new());
+                let sought = WSOUGHT[0];
+                for len in 0..=24 {
+                    let s = wterminated(&wfiller(len, len));
+                    let p = g.at_end(&bytes(&s)).cast::<WcharT>().cast_const();
+                    let q = h.at_end(&bytes(&s)).cast::<WcharT>().cast_const();
+                    let d = out.end().wrapping_sub(4 * (len + 1)).cast::<WcharT>();
+                    // SAFETY: terminated wide strings ending at their pages'
+                    // ends, and room for them before `out`'s.
+                    unsafe {
+                        assert_eq!(wcslen(p), len);
+                        assert_eq!(wcsnlen(p, usize::MAX), len);
+                        assert!(wcschr(p, sought).is_null());
+                        assert_eq!(woffset(wcschrnul(p, sought), p), Some(len));
+                        assert!(wcsrchr(p, sought).is_null());
+                        assert_eq!(wcscmp(p, q), 0);
+                        assert_eq!(wcsncmp(p, q, usize::MAX), 0);
+                        assert_eq!(wcscpy(d, p), d);
+                        assert_eq!(wcpcpy(d, p), d.wrapping_add(len));
+                        assert_eq!(wcsncpy(d, p, len + 1), d);
+                        assert_eq!(wread(d, len + 1), s);
+                    }
+                }
+                // Runs with no terminator, ending at the page's end.
+                for n in 0..=24 {
+                    let run = wfiller(n, 2);
+                    let p = g.at_end(&bytes(&run)).cast::<WcharT>().cast_const();
+                    let q = h.at_end(&bytes(&run)).cast::<WcharT>().cast_const();
+                    let d = out.end().wrapping_sub(4 * n).cast::<WcharT>();
+                    // SAFETY: `n` readable characters at each, and room for
+                    // them before `out`'s page end.
+                    unsafe {
+                        assert_eq!(wcsnlen(p, n), n);
+                        assert!(wmemchr(p, sought, n).is_null());
+                        assert_eq!(wmemcmp(p, q, n), 0);
+                        assert_eq!(wcsncmp(p, q, n), 0);
+                        assert_eq!(wcsncpy(d, p, n), d);
+                        assert_eq!(wcpncpy(d, p, n), d.wrapping_add(n));
+                        assert_eq!(wmemcpy(d, p, n), d);
+                        assert_eq!(wmemset(d, 0x0102_0304, n), d);
+                        assert_eq!(wread(d, n), vec![0x0102_0304; n]);
+                    }
+                }
+            }
+
+            #[test]
+            fn nothing_reads_before_a_wide_buffers_page() {
+                let (g, h, out) = (Guarded::new(), Guarded::new(), Guarded::new());
+                for n in 0..=24 {
+                    let run = wfiller(n, 6);
+                    let p = g.at_start(&bytes(&run)).cast::<WcharT>().cast_const();
+                    let q = h.at_start(&bytes(&run)).cast::<WcharT>().cast_const();
+                    let d = out.start().cast::<WcharT>();
+                    // SAFETY: `n` readable characters at each, and room at
+                    // `d`.
+                    unsafe {
+                        assert!(wmemchr(p, WSOUGHT[0], n).is_null());
+                        assert_eq!(wmemcmp(p, q, n), 0);
+                        assert_eq!(wmemcpy(d, p, n), d);
+                        assert_eq!(wmemmove(d, p, n), d);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `wcsstr` (the Two-Way search) against trying every place: every
+    /// needle and haystack over two alphabets, one of them with characters
+    /// past the BMP and a negative `wchar_t`, which the search orders as
+    /// signed numbers.
+    #[test]
+    fn wcsstr_agrees_with_trying_every_place() {
+        /// Every string over `alphabet` up to `max_len` long.
+        fn all(alphabet: &[WcharT], max_len: usize) -> Vec<Vec<WcharT>> {
+            let mut all = vec![Vec::new()];
+            let mut longest: Vec<Vec<WcharT>> = vec![Vec::new()];
+            for _ in 0..max_len {
+                longest = longest
+                    .iter()
+                    .flat_map(|s| {
+                        alphabet.iter().map(move |&c| {
+                            let mut t = s.clone();
+                            t.push(c);
+                            t
+                        })
+                    })
+                    .collect();
+                all.extend(longest.iter().cloned());
+            }
+            all
+        }
+        for (alphabet, needles, hays) in
+            [(&[0x61, 0x62][..], 6, 10), (&[0x41, 0x1F600, -5][..], 4, 7)]
+        {
+            let needles = all(alphabet, needles);
+            let hays = all(alphabet, hays);
+            for needle in &needles {
+                let mut n = needle.clone();
+                n.push(0);
+                for hay in &hays {
+                    let want = if needle.is_empty() {
+                        Some(0)
+                    } else {
+                        hay.windows(needle.len()).position(|w| w == &needle[..])
+                    };
+                    let mut h = hay.clone();
+                    h.push(0);
+                    // SAFETY: terminated wide strings.
+                    let got = unsafe { wcsstr(h.as_ptr(), n.as_ptr()) };
+                    let got = (!got.is_null()).then(|| (got as usize - h.as_ptr() as usize) / 4);
+                    assert_eq!(got, want, "wcsstr({hay:?}, {needle:?})");
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -1,10 +1,26 @@
-# Build configuration for the posix crate.
+# Build configuration for the posix crate, when cargo is run in this directory.
 #
-# Default target is bare-metal x86_64 (our OS kernel target).
+# WHAT SHIPS IS NOT THIS.  The libc every SlateOS program links,
+# `toolchain/sysroot/lib/libc.a`, is built by `toolchain/build-sysroot.ps1`
+# for its own target, `posix/x86_64-slateos-libc.json` (hard-float, SSE2;
+# design-decisions.md §1106), with `-Zbuild-std` on nightly.  The pipeline
+# runs it, so that is the build that generates the code.
+#
+# WHAT THIS PIN IS FOR.  Pre-push gate 40
+# (`scripts/check-pinned-target-build.py`) runs a plain `cargo check` here,
+# which type-checks the libc's configuration -- target_os = "none", so
+# no_std, `no_mangle` and the assembly -- on a stock target.  It is a type
+# check and no more: the stock target is a kernel's, soft-float with SSE
+# off, and cannot generate code for the SSE2 string functions (§1181), whose
+# assembly helpers enable SSE2 themselves so that the check passes.  Keep it
+# the stock target and nothing more.  On 2026-10-06 it briefly also had
+# `+sse,+sse2`, and the gate then checked a configuration nothing else used.
+#
+# The workspace root no longer builds posix at all (it was a
+# `default-members` entry until 2026-10-06; the root `Cargo.toml` says why).
+#
 # For running tests on the host:
-#   cargo test --target x86_64-pc-windows-gnu -- --test-threads=1
-#
-# Single-threaded is required because getopt/stdlib tests use global state.
+#   cargo test --target x86_64-pc-windows-gnu
 # The crate conditionally compiles:
 #   - target_os = "none": no_std, no_mangle symbols, global_asm trampolines
 #   - otherwise (host):   std, mangled symbols, asm excluded

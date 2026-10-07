@@ -27,9 +27,17 @@ separated by blanks; `#` to the end of a line is a comment:
     ctest-stdio      file     60
 
 - **name** -- the fixture: `/mnt/tests/<name>.elf`, and its `argv[0]`.
-- **grants** -- `-` for none, or `file` for one wildcard File capability,
-  `(ResourceType::File, 0, READ | WRITE | EXECUTE | METADATA)`: those two
-  cover every fixture so far (each request below says which).
+- **grants** -- `-` for none, or a comma-separated list of these kinds,
+  each at most once (each request below says which a fixture needs):
+  - `file` -- one wildcard File capability,
+    `(ResourceType::File, 0, READ | WRITE | EXECUTE | METADATA)`;
+  - `creds` -- `(ResourceType::Process, 0, SET_CREDENTIALS)`, the grant
+    `self_test_fastpy_setuid` gives: a fixture that sets its own uid, gid
+    or supplementary groups needs it (`SYS_PROCESS_SETGROUPS` checks it,
+    and the library's `CAP_SETUID`/`CAP_SETGID` are projected from it).
+    Added 2026-10-06 for `ctest-resuid` and `ctest-groups`.
+
+  So `file,creds` is both. The rootfs script refuses any other spelling.
 - **seconds** -- how long it may take, from spawn to Zombie: a time, not a
   count of yields, as several of the requests below ask.
 
@@ -91,12 +99,21 @@ will close them myself as each one goes on.
 | `ctest-rusage` | -- (filed with `getrusage`, 2026-10-06) | - | 60 |
 | `ctest-pi-mutex` | -- (filed with priority-inheritance mutexes, 2026-10-06; §1177) | - | 60 |
 | `ctest-system` | -- (filed with `system()`, 2026-10-06); needs a `/bin/sh` in the root (`d-ab-the-booted-system-has-no-bin-sh.md`) | file | 60 |
+| `ctest-mmap-file` | -- (filed with file mappings, 2026-10-06; `d-a-a-native-program-cannot-map-a-file.md` is the kernel's half) | file | 30 |
+| `ctest-resuid` | -- (filed with `getresuid`, 2026-10-06); starts as root and drops to uid 1000 | creds | 30 |
+| `ctest-groups` | -- (filed with `getgroups`, 2026-10-06); installs groups, reads them back, and runs a copy of itself from `/tmp` under a name that forges a `Groups:` line | file,creds | 30 |
+| `ctest-fallocate` | -- (filed with `fallocate`, 2026-10-06); grows a file in `/tmp` by 200 KB of zeros | file | 30 |
+| `ctest-string` | -- (filed with the SSE2 memory and string functions, 2026-10-06); sets strings against pages it takes away with `mprotect` | - | 60 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
-The last four rows were added on 2026-10-06, which makes sixteen fixtures
-waiting where the summary above says eleven. `ctest-llvm-tools` runs LLVM's
+The last nine rows were added on 2026-10-06, which makes twenty-one
+fixtures waiting where the summary above says eleven.  `ctest-string` is
+the one whose subject every program runs: the C library's `memcpy`,
+`strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned
+blocks past a string's end but never past its page, and only a SlateOS
+boot has SlateOS's 16 KiB pages to set a string against. `ctest-llvm-tools` runs LLVM's
 three tools from the image, each bounded at 60 s, hence its 600.
 `ctest-pi-mutex` sets its threads' scheduler priorities itself
 (`SYS_THREAD_SET_PRIORITY`, its own threads only) and keeps every CPU busy

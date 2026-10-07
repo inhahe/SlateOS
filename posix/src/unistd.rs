@@ -1065,13 +1065,13 @@ pub extern "C" fn getegid() -> GidT {
 /// the caller already legitimately holds), or when the caller holds
 /// `CAP_SETUID`.  Anything else fails with `EPERM`.
 ///
-/// Our process model is single-user: real, effective, and saved uid
-/// are all `0` ("root").  That collapses the three matching arms into
-/// "uid == 0", so:
+/// The kernel keeps one uid a process -- real, effective and saved are the
+/// same -- which collapses the three matching arms into "uid == the
+/// current uid", so:
 ///
-/// * `setuid(0)`  — always succeeds, no cap required (target equals
-///                  current).
-/// * `setuid(N)` with `N != 0` — requires `CAP_SETUID`, else `EPERM`.
+/// * `setuid(getuid())` — always succeeds, no cap required (target equals
+///                        current).
+/// * any other uid — requires `CAP_SETUID`, else `EPERM`.
 ///
 /// **Phase 192:** pre-Phase-192 we returned `0` for *every* uid value,
 /// ignoring caps.  That let an unprivileged sandbox call
@@ -1117,8 +1117,9 @@ pub extern "C" fn setuid(uid: UidT) -> i32 {
 ///     return -EPERM;
 /// ```
 ///
-/// Match-against-any-current-uid OR `CAP_SETUID`.  Same collapse to
-/// "uid == 0" in our single-user model.
+/// Match-against-any-current-uid OR `CAP_SETUID`.  Same collapse as
+/// [`setuid`]'s: the process's one uid is all three, so "uid == the current
+/// uid".
 ///
 /// **Phase 192:** the previous "succeeds silently" stub had the same
 /// hole as [`setuid`] — `seteuid(1000)` looked like it dropped
@@ -1148,9 +1149,9 @@ pub extern "C" fn seteuid(uid: UidT) -> i32 {
 /// the real, effective, or saved gid OR the caller holds `CAP_SETGID`;
 /// otherwise `-EPERM`.  This is the gid analogue of `setuid`'s rule.
 ///
-/// In our flat single-gid (always 0) model the three match arms
-/// collapse to "target == 0 always OK; target != 0 requires
-/// CAP_SETGID".
+/// The kernel keeps one gid a process -- real, effective and saved are the
+/// same -- so the three match arms collapse to "target == the current gid
+/// always OK; any other requires CAP_SETGID".
 ///
 /// **Phase 193:** pre-Phase-193 the stub returned `0` for every gid
 /// value, mirroring the silent-success bug Phase 192 fixed for
@@ -1191,7 +1192,7 @@ pub extern "C" fn setgid(gid: GidT) -> i32 {
 ///     return -EPERM;
 /// ```
 ///
-/// Same collapse to "gid == 0" in our single-group model.
+/// Same collapse as [`setgid`]'s: "gid == the current gid".
 ///
 /// **Phase 193:** the previous "succeeds silently" stub had the same
 /// hole as [`setgid`] — `setegid(1000)` looked like it changed the
@@ -1228,9 +1229,9 @@ pub extern "C" fn setegid(gid: GidT) -> i32 {
 ///     return -EPERM;
 /// ```
 ///
-/// For the euid field the match list also includes `suid`.  In our
-/// flat single-uid (always 0) model both arms collapse to "value ==
-/// 0 or value == -1 always OK; any other value requires CAP_SETUID".
+/// For the euid field the match list also includes `suid`.  With the
+/// kernel's one uid a process, both arms collapse to "value == the current
+/// uid or value == -1 always OK; any other value requires CAP_SETUID".
 ///
 /// **Phase 194:** pre-Phase-194 we returned `0` for every (ruid,
 /// euid) pair, masking the same silent privilege-skip bug Phase 192
@@ -1289,26 +1290,41 @@ pub extern "C" fn setregid(rgid: GidT, egid: GidT) -> i32 {
     0
 }
 
-/// Get the supplementary group IDs.
+mod groups;
+pub(crate) use groups::in_supplementary_groups;
+
+/// Get the supplementary group IDs: the kernel's list for this process, the
+/// one [`setgroups`] and `initgroups` install and the kernel's file access
+/// gate consults.
 ///
-/// Linux semantics (kernel/groups.c::SYSCALL_DEFINE2(getgroups)):
-/// * `size < 0` → `-EINVAL`.
-/// * `size == 0` → return the number of supplementary groups
-///   without touching `list` (the query form).
-/// * `size > 0` and our supplementary group count fits → copy the
-///   list and return the count.
+/// The native ABI has no call that reports the list, so it is read from
+/// `/proc/self/status`'s last `Groups:` line -- the last, because a task's
+/// name, which comes first and is written raw, can forge an earlier one
+/// (`unistd/groups.rs` has the details).
 ///
-/// We have no supplementary groups, so once the prologue passes we
-/// always return 0.  `list` is never dereferenced because there is
-/// nothing to copy — matching Linux's behaviour, which only invokes
-/// `copy_to_user` when `ngroups > 0`.
+/// Linux semantics (`kernel/groups.c::SYSCALL_DEFINE2(getgroups)`):
+/// * `size < 0` → `EINVAL`.
+/// * `size == 0` → the number of groups, `list` untouched (the query form).
+/// * `size` short of the number → `EINVAL`.
+/// * otherwise the groups, in ascending order as Linux keeps them, and their
+///   number; a NULL `list` is `EFAULT` there, unless there are none.
+///
+/// A list that cannot be read -- in a process holding no File capability,
+/// which opening `/proc/self/status` takes, or in a `chroot` without
+/// `/proc` -- is `EIO` (`known-issues/D-POSIX-GETGROUPS-NEEDS-A-FILE-CAPABILITY.md`).
+/// Not an empty list: "no groups" is a claim about the process. And not
+/// `ENOSYS`, which gnulib's `mgetgroups` takes to mean the system has no
+/// such lists, and answers from `/etc/group` instead -- vouching for groups
+/// the kernel may not have granted.
+///
+/// Until 2026-10-06 this answered 0 for every process. That was the truth
+/// until `setgroups` reached the kernel (2026-09-12) and `initgroups` called
+/// it (2026-09-27); after that, `id` left out every group `login` had
+/// installed, and `group_member` and the SysV IPC permission checks said a
+/// process was outside groups the kernel had it in.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
-    if size < 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    0
+pub extern "C" fn getgroups(size: i32, list: *mut GidT) -> i32 {
+    groups::getgroups_with(size, list, groups::supplementary_groups)
 }
 
 /// Set the supplementary group IDs.
@@ -1334,18 +1350,20 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 ///      `groups_from_user`'s `copy_from_user` on a NULL grouplist).
 ///   4. `size == 0` passes validation regardless of `list` (Linux
 ///      explicitly permits a NULL `list` when `size == 0`).
-///   5. Validation having passed, the call fails with `ENOSYS` -- see
-///      below.  No per-gid validation (Linux accepts any gid_t value
-///      here; range/policy enforcement happens at the LSM layer, which
-///      we do not model), and none would mean anything, because
-///      nothing consumes the list.
+///   5. Validation having passed, the kernel installs the list
+///      (`SYS_PROCESS_SETGROUPS`, 1067), and refuses it with `EPERM` if
+///      the process lacks `(Process, SET_CREDENTIALS)`.  No per-gid
+///      validation (Linux accepts any gid_t value here; range/policy
+///      enforcement happens at the LSM layer, which we do not model).
+///      The kernel's file access gate consults the list
+///      (`check_path_access`, `kernel/src/fs/vfs.rs`).
 ///
 /// Note: our `_SC_NGROUPS_MAX` advertises 32 (the POSIX minimum
 /// guarantee), but Linux's kernel ceiling is 65536 and we accept up
 /// to that for binary-compat parity with programs probing the kernel
 /// limit directly.
 ///
-/// # Why this fails rather than succeeding
+/// # History: a false success, an honest refusal, then the real call
 ///
 /// Until 2026-09-07 the last line of this function was `0`: every
 /// well-formed call was told its supplementary groups had been set, and
@@ -1361,33 +1379,30 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 /// retains every supplementary group, and goes on to lower its uid.
 /// The check it wrote is the reason it stops looking.
 ///
-/// `ENOSYS` is accurate, and is what [`chroot`] in this file already
-/// returns for the identical reason: the kernel implements `setgroups`
-/// for real, but only in the Linux-ABI table
-/// (`kernel/src/syscall/linux.rs`), and `posix/src/syscall.rs` has no
-/// native `SYS_SETGROUPS` constant for native libc to call.  Filed as
-/// `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
-/// When that number exists this body becomes a real syscall and the
-/// `ENOSYS` goes away.
+/// From 2026-09-07 it failed with `ENOSYS` instead, as [`chroot`] did for
+/// the same reason: the kernel implemented `setgroups` only in the
+/// Linux-ABI table (`kernel/src/syscall/linux.rs`), with no native number
+/// for this library to call
+/// (`requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`).
+/// Since 2026-09-12 it calls lane A's `SYS_PROCESS_SETGROUPS`.  Failing
+/// closed in between is why that could be wired up without auditing
+/// anything: nothing could have been relying on a success that never came.
 ///
-/// Failing closed is also the useful pressure: privilege-dropping code
-/// written against this libc can no longer ship believing it dropped
-/// something, which is the outcome the false success was quietly
-/// arranging for.
+/// # [`getgroups`] reads back what this installs
 ///
-/// # Why [`getgroups`] still succeeds with zero groups
+/// While this refused, [`getgroups`] answered "no supplementary groups",
+/// which was then the truth: a function that reports state may report an
+/// empty one, where a function that performs an action may not report
+/// having performed it. Once this reached the kernel, that answer was a
+/// claim about state that had changed; since 2026-10-06 [`getgroups`] reads
+/// the kernel's list. It fails with `EIO`, never `ENOSYS`, when the list
+/// cannot be read: `id(1)` synthesises a list from `/etc/group` only on
+/// `ENOSYS` (see `userspace/coreutils/src/bin/id.rs`, which follows gnulib
+/// here), and that list is not one the kernel vouches for.
 ///
-/// That asymmetry is deliberate, not an oversight.  `getgroups` reports
-/// *state*, and "no supplementary groups" is a coherent state this libc
-/// can honestly report; `id(1)` is written against exactly that reading,
-/// synthesising a list only when `getgroups` fails with `ENOSYS` and
-/// never when it succeeds with none (see
-/// `userspace/coreutils/src/bin/id.rs`, which follows gnulib here).  A
-/// function that reports state may report an empty one.  A function that
-/// performs an action may not report having performed it.
-///
-/// Returns -1 with `ENOSYS`, or -1 with `EPERM`, `EINVAL` or `EFAULT`
-/// if the corresponding validation fails first.
+/// Returns 0, or -1 with `EPERM`, `EINVAL` or `EFAULT` as above, or with
+/// the kernel's refusal.  The host build has no kernel, and answers
+/// `ENOSYS` once validation passes (`kernel_setgroups`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
     const NGROUPS_KERNEL_MAX: usize = 65536;
@@ -1449,11 +1464,17 @@ fn kernel_setgroups(_size: usize, _list: *const GidT) -> i32 {
 ///
 /// Returns 1 if the process was started with elevated privileges
 /// (real uid != effective uid, or real gid != effective gid), 0
-/// otherwise.  Since our OS is single-user and always runs as root,
-/// this always returns 0.
+/// otherwise.  Always 0 here: the kernel keeps one uid and one gid a
+/// process, so the real and effective ids cannot differ, and `exec` does
+/// not honour a file's set-user-ID or set-group-ID bit, so nothing changes
+/// them when a program starts (the auxiliary vector's `AT_SECURE` is 0 for
+/// the same reason).  If `exec` ever honours the bits, this must answer 1
+/// for a program they raised.  (This said "the OS is single-user and always
+/// runs as root" until 2026-10-06; a process may run as any user, which
+/// does not change the answer.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn issetugid() -> i32 {
-    // Single-user OS: uid/gid are always 0/0.
+    // One uid and one gid a process, and exec honours no set-ID bit.
     0
 }
 
@@ -2942,10 +2963,12 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
 
 /// Change the root directory.
 ///
-/// Stub: validates arguments per Linux `fs/open.c::sys_chroot`, then
-/// returns `-1` with `ENOSYS` (filesystem-root remapping isn't wired
-/// up yet — `design.txt` puts root selection in the capability layer
-/// rather than via legacy chroot semantics).
+/// Validates its arguments as Linux's `fs/open.c::sys_chroot` does, then
+/// asks the kernel to install the new root (`SYS_PROCESS_CHROOT`, 1068,
+/// since 2026-09-07). The kernel's own Linux-ABI `chroot` refuses outright,
+/// because no Linux caller holds `CAP_SYS_CHROOT`; the native call is the
+/// one that installs a root. (This comment said "stub ... ENOSYS" until
+/// 2026-10-06, long after it stopped being true.)
 ///
 /// Errors (Linux-matching priority order — `fs/open.c::sys_chroot`
 /// resolves the user pointer with `user_path_at` *before* checking
@@ -2956,10 +2979,8 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
 ///                                rejects the empty-name path)
 /// 3. `!CAP_SYS_CHROOT`        → `EPERM`   (Phase 166)
 ///
-/// After argument and capability validation we return `ENOSYS`:
-/// filesystem-root remapping isn't wired up yet — `design.txt`
-/// puts root selection in the capability layer rather than via
-/// legacy chroot semantics.
+/// Then whatever the kernel answers -- `ENOENT`, `ENOTDIR` and the rest of
+/// a path lookup's errors.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chroot(path: *const u8) -> i32 {
     if path.is_null() {
@@ -3077,8 +3098,11 @@ pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
 /// 5-min, 15-min).  Returns the number of samples stored, or -1 on
 /// error.
 ///
-/// Stub: returns synthetic idle-system values (0.0) since our OS
-/// doesn't track load averages yet.
+/// The scheduler's 1-, 5- and 15-minute load averages (`SYS_LOADAVG`, the
+/// moving averages `/proc/loadavg` shows), as many as `nelem` asks for up to
+/// three. The host's tests have no scheduler and read 0.0. (This comment
+/// called it a stub returning 0.0 until 2026-10-06, long after the kernel
+/// kept the averages.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
     if loadavg.is_null() || nelem <= 0 {
@@ -3692,9 +3716,9 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
 /// }
 /// ```
 ///
-/// In our flat single-uid (always 0) model each non-sentinel field
-/// must be 0 (matches current uid/euid/suid) OR the caller must
-/// hold CAP_SETUID.  Order: ruid → euid → suid (matches Linux).
+/// With the kernel's one uid a process, each non-sentinel field must be
+/// that uid (it is the current uid, euid and suid at once) OR the caller
+/// must hold CAP_SETUID.  Order: ruid → euid → suid (matches Linux).
 ///
 /// **Phase 195:** pre-Phase-195 returned `0` for every triple,
 /// continuing the silent-success bug pattern Phases 192-194 fixed
@@ -3777,36 +3801,42 @@ pub extern "C" fn setresgid(rgid: GidT, egid: GidT, sgid: GidT) -> i32 {
 
 /// Get real, effective, and saved set-user-ID.
 ///
-/// Stub: returns 0 (root) for all three.
+/// The kernel keeps one uid for a process, which is all three; `getuid` and
+/// `geteuid` report it too. Until 2026-10-06 this answered 0 -- root -- for
+/// all three whatever the process was, so a program that checked its ids
+/// before doing something privileged (OpenSSH, sudo, polkit do) was told it
+/// was root after it had dropped to another user.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresuid(ruid: *mut UidT, euid: *mut UidT, suid: *mut UidT) -> i32 {
     if ruid.is_null() || euid.is_null() || suid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
+    let (uid, _) = process_credentials();
     // SAFETY: All pointers verified non-null.
     unsafe {
-        *ruid = 0;
-        *euid = 0;
-        *suid = 0;
+        *ruid = uid;
+        *euid = uid;
+        *suid = uid;
     }
     0
 }
 
-/// Get real, effective, and saved set-group-ID.
-///
-/// Stub: returns 0 (root) for all three.
+/// Get real, effective, and saved set-group-ID: the process's one gid, as
+/// [`getresuid`] reports its one uid. It answered 0 for all three until
+/// 2026-10-06.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresgid(rgid: *mut GidT, egid: *mut GidT, sgid: *mut GidT) -> i32 {
     if rgid.is_null() || egid.is_null() || sgid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
+    let (_, gid) = process_credentials();
     // SAFETY: All pointers verified non-null.
     unsafe {
-        *rgid = 0;
-        *egid = 0;
-        *sgid = 0;
+        *rgid = gid;
+        *egid = gid;
+        *sgid = gid;
     }
     0
 }
@@ -3890,6 +3920,100 @@ fn read_process_count() -> u16 {
     1
 }
 
+/// What `sysinfo` takes from `/proc/meminfo`, which no system call reports:
+/// each in KiB, as the file gives it, and `None` where the file has no
+/// such line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MeminfoExtras {
+    swap_total: Option<u64>,
+    swap_free: Option<u64>,
+    shmem: Option<u64>,
+    buffers: Option<u64>,
+}
+
+/// Read the lines of a `/proc/meminfo` text `sysinfo` needs: `SwapTotal`,
+/// `SwapFree`, `Shmem` and `Buffers`, each `Key:`, blanks, a decimal count
+/// and ` kB`.  A line in another shape is passed over.
+fn parse_meminfo(text: &[u8]) -> MeminfoExtras {
+    let mut out = MeminfoExtras::default();
+    for line in text.split(|&b| b == b'\n') {
+        let Some((key, rest)) = line
+            .iter()
+            .position(|&b| b == b':')
+            .and_then(|colon| line.split_at_checked(colon))
+        else {
+            continue;
+        };
+        let slot = match key {
+            b"SwapTotal" => &mut out.swap_total,
+            b"SwapFree" => &mut out.swap_free,
+            b"Shmem" => &mut out.shmem,
+            b"Buffers" => &mut out.buffers,
+            _ => continue,
+        };
+        // `rest` is ":", blanks, the count, " kB".
+        let Some(digits) = rest
+            .get(1..)
+            .map(<[u8]>::trim_ascii)
+            .and_then(|r| r.strip_suffix(b" kB"))
+            .map(<[u8]>::trim_ascii_end)
+        else {
+            continue;
+        };
+        if digits.is_empty() {
+            continue;
+        }
+        *slot = digits.iter().try_fold(0u64, |n, &d| {
+            let digit = char::from(d).to_digit(10)?;
+            n.checked_mul(10)?.checked_add(u64::from(digit))
+        });
+    }
+    out
+}
+
+/// `/proc/meminfo`'s figures, or none when it cannot be read -- which
+/// takes a File capability (the same limit as
+/// `known-issues/D-POSIX-GETGROUPS-NEEDS-A-FILE-CAPABILITY.md`).
+#[cfg(target_os = "none")]
+fn read_meminfo() -> MeminfoExtras {
+    let saved = errno::get_errno();
+    let fd = crate::file::open(
+        b"/proc/meminfo\0".as_ptr(),
+        crate::fcntl::O_RDONLY | crate::fcntl::O_CLOEXEC,
+        0,
+    );
+    let mut out = MeminfoExtras::default();
+    if fd >= 0 {
+        // The file is about a kilobyte; a fuller one is read as far as
+        // this holds, and the keys wanted are in its first half.
+        let mut buf = [0u8; 4096];
+        let mut len = 0usize;
+        while let Some(room) = buf.get_mut(len..).filter(|r| !r.is_empty()) {
+            let n = crate::file::read(fd, room.as_mut_ptr(), room.len());
+            match usize::try_from(n) {
+                Ok(0) => break,
+                Ok(n) => len = len.saturating_add(n).min(buf.len()),
+                Err(_) if errno::get_errno() == errno::EINTR => {}
+                Err(_) => break,
+            }
+        }
+        // Nothing was written through `fd`, so a failed close loses nothing.
+        let _ = crate::file::close(fd);
+        out = parse_meminfo(buf.get(..len).unwrap_or_default());
+    }
+    errno::set_errno(saved);
+    out
+}
+
+/// The host's: it has no kernel and no `/proc`, so a stand-in of the file's
+/// shape, with nothing in swap, read by the target's parser.
+#[cfg(not(target_os = "none"))]
+fn read_meminfo() -> MeminfoExtras {
+    parse_meminfo(
+        b"MemTotal: 262144 kB\nBuffers: 0 kB\nShmem: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+    )
+}
+
 /// Return overall system statistics.
 ///
 /// Fills the `Sysinfo` structure from real kernel data on the kernel
@@ -3902,9 +4026,13 @@ fn read_process_count() -> u16 {
 ///   multiplied by `mem_unit` (which is set to our 16 KiB frame size).
 /// - `procs`: live process count from `SYS_PROCESS_COUNT`, capped to
 ///   `u16::MAX` (the Linux ABI uses `unsigned short` here).
-/// - `sharedram` / `bufferram` / `totalswap` / `freeswap` / `totalhigh`
-///   / `freehigh`: 0 (no swap, no buffer-cache accounting, no high-mem
-///   region — we're 64-bit only).
+/// - `totalswap` / `freeswap` / `sharedram` / `bufferram`: `/proc/meminfo`'s
+///   `SwapTotal`, `SwapFree`, `Shmem` and `Buffers`, in `mem_unit`s -- no
+///   system call reports them.  Until 2026-10-06 all four were 0, which said
+///   "no swap" of a kernel that always has zram swap.  They are 0 still
+///   where the file cannot be read (a process holding no File capability).
+/// - `totalhigh` / `freehigh`: 0 -- no high-memory region on a 64-bit
+///   machine, as on Linux.
 ///
 /// On host builds, returns synthetic values (256 MiB total / 128 MiB free,
 /// zero loads, uptime 0) so unit tests get deterministic output.
@@ -3933,10 +4061,6 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
     unsafe {
         let s = &mut *info;
         s.uptime = uptime;
-        s.sharedram = 0;
-        s.bufferram = 0;
-        s.totalswap = 0;
-        s.freeswap = 0;
         s.procs = read_process_count();
         s._pad = [0; 6];
         s.totalhigh = 0;
@@ -3986,6 +4110,21 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
             s.freeram = 128 * 1024 * 1024;
             s.mem_unit = 1;
         }
+
+        // KiB to `mem_unit`s: Linux keeps these in the same units as
+        // `totalram`.
+        let extras = read_meminfo();
+        let bytes_per_unit = u64::from(s.mem_unit.max(1));
+        let units = |kib: Option<u64>| {
+            kib.unwrap_or(0)
+                .saturating_mul(1024)
+                .checked_div(bytes_per_unit)
+                .unwrap_or(0)
+        };
+        s.totalswap = units(extras.swap_total);
+        s.freeswap = units(extras.swap_free);
+        s.sharedram = units(extras.shmem);
+        s.bufferram = units(extras.buffers);
     }
 
     0
@@ -5499,7 +5638,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // uid/gid stubs (single-user → always 0/root)
+    // uid/gid (the host's tests have no kernel: every id reads 0, root)
     // ------------------------------------------------------------------
 
     #[test]
@@ -5536,16 +5675,17 @@ mod tests {
     // getresuid / getresgid
     // ------------------------------------------------------------------
 
+    /// All three are the process's one uid, the one `getuid` and `geteuid`
+    /// report (root in the host's tests, which have no kernel; on SlateOS
+    /// `services/ctest-resuid` drops to another user and reads them back).
     #[test]
-    fn test_getresuid_fills_zeros() {
+    fn test_getresuid_reports_the_process_uid() {
         let mut ruid: UidT = 99;
         let mut euid: UidT = 99;
         let mut suid: UidT = 99;
         let ret = getresuid(&raw mut ruid, &raw mut euid, &raw mut suid);
         assert_eq!(ret, 0);
-        assert_eq!(ruid, 0);
-        assert_eq!(euid, 0);
-        assert_eq!(suid, 0);
+        assert_eq!((ruid, euid, suid), (getuid(), geteuid(), getuid()));
     }
 
     #[test]
@@ -5560,16 +5700,15 @@ mod tests {
         );
     }
 
+    /// As `getresuid`, for the process's one gid.
     #[test]
-    fn test_getresgid_fills_zeros() {
+    fn test_getresgid_reports_the_process_gid() {
         let mut rgid: GidT = 99;
         let mut egid: GidT = 99;
         let mut sgid: GidT = 99;
         let ret = getresgid(&raw mut rgid, &raw mut egid, &raw mut sgid);
         assert_eq!(ret, 0);
-        assert_eq!(rgid, 0);
-        assert_eq!(egid, 0);
-        assert_eq!(sgid, 0);
+        assert_eq!((rgid, egid, sgid), (getgid(), getegid(), getgid()));
     }
 
     #[test]
@@ -7735,9 +7874,9 @@ mod tests {
     //
     // Linux's `kernel/sys.c::sys_setuid` allows the call when the target
     // uid matches the real, effective, or saved uid OR the caller holds
-    // CAP_SETUID; otherwise EPERM.  Our flat single-uid (always 0) model
-    // collapses that to "target == 0 always OK; target != 0 needs
-    // CAP_SETUID".  Pre-Phase-192 we returned 0 unconditionally, which
+    // CAP_SETUID; otherwise EPERM.  The kernel's one uid a process
+    // collapses that to "target == the current uid always OK; any other
+    // needs CAP_SETUID" -- and the current uid is 0 in the host's tests.  Pre-Phase-192 we returned 0 unconditionally, which
     // silently masked sandbox-drop bugs in callers.
     mod setuid_cap_phase192 {
         use super::*;
@@ -7995,7 +8134,7 @@ mod tests {
         }
 
         /// A failed setuid must not perturb `getuid`/`geteuid` — they
-        /// remain 0 (the single-user model is unchanged).
+        /// remain 0, the host's tests' uid.
         #[test]
         fn test_setuid_phase192_failed_call_no_observable_uid_change() {
             let _g = CapGuard::snapshot();
@@ -8097,9 +8236,9 @@ mod tests {
     // Companion to Phase 192's setuid/seteuid gate.  Linux's
     // `kernel/sys.c::sys_setgid` allows the call when the target gid
     // matches the real, effective, or saved gid OR the caller holds
-    // CAP_SETGID; otherwise EPERM.  Our flat single-gid (always 0)
-    // model collapses that to "target == 0 always OK; target != 0
-    // needs CAP_SETGID".  Pre-Phase-193 we returned 0 unconditionally,
+    // CAP_SETGID; otherwise EPERM.  The kernel's one gid a process
+    // collapses that to "target == the current gid always OK; any other
+    // needs CAP_SETGID" -- and the current gid is 0 in the host's tests.  Pre-Phase-193 we returned 0 unconditionally,
     // silently masking group-drop bugs in callers.
     mod setgid_cap_phase193 {
         use super::*;
@@ -8429,9 +8568,10 @@ mod tests {
     // field independently.  The `(uid_t)-1` / `(gid_t)-1` sentinel
     // ("leave alone") bypasses its field's check.  Each non-sentinel
     // field must either match a currently-held id (real / effective /
-    // saved) OR the caller must hold the relevant SET-id cap.  In
-    // our flat single-id (always 0) model: value == 0 or value ==
-    // MAX always OK; any other value requires the cap.
+    // saved) OR the caller must hold the relevant SET-id cap.  With the
+    // kernel's one id of each kind a process (0 in the host's tests):
+    // value == that id or value == MAX always OK; any other value requires
+    // the cap.
     //
     // The order of evaluation matters for ordering tests: Linux
     // checks ruid before euid, so a (bad_ruid, bad_euid) call EPERMs
@@ -8800,9 +8940,10 @@ mod tests {
     // The three-arg saved-id variants.  Linux's sys_setresuid uses a
     // single CAP_SETUID outer-guard: if the cap is held, all three
     // fields are accepted; otherwise each non-sentinel field must
-    // match a currently-held id.  Order: ruid → euid → suid.  Our
-    // flat single-uid (always 0) model collapses to "value == 0 or
-    // value == MAX always OK; any other value requires the cap".
+    // match a currently-held id.  Order: ruid → euid → suid.  The
+    // kernel's one uid a process (0 in the host's tests) collapses that to
+    // "value == that uid or value == MAX always OK; any other value
+    // requires the cap".
     //
     // This was the highest-stakes silent-success bug in the
     // setuid-family series — setresuid is what sandbox/jail code
@@ -10011,6 +10152,68 @@ mod tests {
             size >= 64,
             "Sysinfo should be at least 64 bytes, got {size}"
         );
+    }
+
+    /// The kernel's `/proc/meminfo`, trimmed: the four lines `sysinfo`
+    /// reads, among the rest.
+    const MEMINFO: &[u8] = b"MemTotal:       1048576 kB\nMemFree:        524288 kB\n\
+MemAvailable:   524288 kB\nBuffers:        1024 kB\nCached:         2048 kB\n\
+Shmem:          512 kB\nSReclaimable:   0 kB\nMemUsed:        524288 kB\n\
+SwapTotal:      262144 kB\nSwapFree:       200000 kB\nSwapUsed:       62144 kB\n";
+
+    #[test]
+    fn meminfo_gives_swap_shared_and_buffers() {
+        assert_eq!(
+            parse_meminfo(MEMINFO),
+            MeminfoExtras {
+                swap_total: Some(262_144),
+                swap_free: Some(200_000),
+                shmem: Some(512),
+                buffers: Some(1024),
+            }
+        );
+    }
+
+    /// A key not there is `None`; a line not in the file's shape is passed
+    /// over, never read as 0.
+    #[test]
+    fn meminfo_lines_out_of_shape_are_passed_over() {
+        assert_eq!(parse_meminfo(b""), MeminfoExtras::default());
+        assert_eq!(
+            parse_meminfo(b"MemTotal: 5 kB\n"),
+            MeminfoExtras::default(),
+            "no key of interest"
+        );
+        let bad = b"SwapTotal: 12\nSwapFree: x kB\nShmem: kB\nBuffers 7 kB\n";
+        assert_eq!(parse_meminfo(bad), MeminfoExtras::default());
+        assert_eq!(
+            parse_meminfo(b"SwapTotal:99999999999999999999 kB\n").swap_total,
+            None,
+            "past u64"
+        );
+        // Blanks around the count are the file's own (it aligns the column).
+        assert_eq!(parse_meminfo(b"SwapTotal:\t7 kB \n").swap_total, Some(7));
+        assert_eq!(parse_meminfo(b"SwapTotal:7 kB").swap_total, Some(7));
+    }
+
+    /// The host's stand-in has no swap, so neither has `sysinfo` there, in
+    /// bytes as its `mem_unit` of 1 says.
+    #[test]
+    fn test_sysinfo_swap_comes_from_meminfo() {
+        let mut info = core::mem::MaybeUninit::<Sysinfo>::zeroed();
+        assert_eq!(sysinfo(info.as_mut_ptr()), 0);
+        // SAFETY: `sysinfo` succeeded and wrote every field.
+        let info = unsafe { info.assume_init() };
+        assert_eq!(
+            (
+                info.totalswap,
+                info.freeswap,
+                info.sharedram,
+                info.bufferram
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(read_meminfo().swap_total, Some(0), "the stand-in is read");
     }
 
     #[test]

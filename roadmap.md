@@ -3142,6 +3142,16 @@ D's to act on once answered).
   in libc — see design-decisions.md §345 for the alternative and why it fails.
 
 - `[D]` Translate POSIX calls to native syscalls (line ~1738)
+  - `[-]` **`mmap` of a file, for native programs** (2026-10-06). It gave
+    anonymous memory -- zeros, with no error -- because the native
+    `SYS_MMAP` takes no file and the library passed the descriptor where
+    nothing reads it. The library now copies the file into the mapping
+    (`posix/src/mman/file_map.rs`): the bytes are right, but read at once,
+    and a writable `MAP_SHARED` mapping is refused with `ENODEV`.
+    `services/ctest-mmap-file` checks it on SlateOS. The real fix is native
+    file mappings in the kernel
+    (`requests/d-a-a-native-program-cannot-map-a-file.md`;
+    `known-issues/D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY.md`).
 
 - `[D]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 
@@ -3179,8 +3189,15 @@ D's to act on once answered).
     (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`);
   - it is not on the image or started at boot.
 
-  Still lane D's: learning the address from the router (UPnP, NAT-PMP),
-  and the port forwards.
+  **The router half, 2026-10-06** (design-decisions §1178): the same service
+  finds the router (the default gateway, asked over NAT-PMP, then UPnP),
+  learns its internet address -- which a custom URL naming `{ip}` now
+  takes -- and keeps the port forwards of `/etc/portforwards.yaml`,
+  reporting to `/run/portforwards.yaml`. The protocols are
+  `services/dyndns/router` (`dyndnsrouter`), tested against a router
+  simulated in memory; no real router has been asked yet. Settings' page
+  for it is lane E's (the request's third reply), and the kernel's own
+  UPnP module can go (`requests/d-a-the-kernels-upnp-module-is-done-in-userspace-now.md`).
 
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;
@@ -5511,6 +5528,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Wall-clock time (CRITICAL bugfix): clock_gettime(CLOCK_REALTIME)/gettimeofday()/time() all read SYS_CLOCK_MONOTONIC (boot-relative ns), so they returned "seconds since boot" instead of "seconds since 1970" — breaking file mtimes, `date`, logs, `make`, TLS cert validity, cron. The kernel already had timekeeping::clock_realtime() (CMOS RTC + TSC) but no syscall exposed it. Added kernel SYS_CLOCK_REALTIME=14 (handler sys_clock_realtime + dispatch self-test); posix clock_gettime now routes CLOCK_REALTIME/CLOCK_REALTIME_COARSE to it via is_realtime_clock(), and gettimeofday()/time() use it. Monotonic/boottime/cputime clocks and all timeout/uptime callers stay on SYS_CLOCK_MONOTONIC. 17097 posix tests pass; kernel + bare-metal posix build clean. clock_settime/settimeofday now wired via SYS_CLOCK_SETTIME=15 (absolute set), and adjtimex's ADJ_SETOFFSET clock step via SYS_CLOCK_ADJTIME=16 (signed-delta adjust, backed by atomic timekeeping::adjust_realtime).
   - [x] Memory: mmap, munmap, mprotect
   - [x] Strings: memcpy, memmove, memset, memcmp, memchr, strlen, strnlen, strcmp, strncmp, strcpy, strncpy, strchr, strrchr
+    - [x] Fast (2026-10-06): they were byte loops at ~1.5 GB/s -- and every Rust `Vec`/`String` copy goes through this `memcpy`, the sysroot's `compiler_builtins` having no `mem` feature. Now SSE2 and `rep movsb` (memory primitives, 12-37 GB/s) and 16-byte SSE2 scanners (`strchr`, `strrchr`, `strnlen`, `strcmp`, ... 5-14 GB/s); the copies are length + `memcpy`; `strspn`'s family a 256-bit set; `strstr`, `memmem`, `strcasestr` and `wcsstr` the Two-Way search, linear where they took the needle's length times the haystack's. `posix/benches/mem.rs` measures them; `string.rs` "The engines" and "The scanners" explain them.
   - [x] Directory: opendir, readdir, closedir — each stream a heap snapshot of the listing, up to `dirent::MAX_OPEN_DIRS` (64) open at once (was a static pool of 8)
   - [x] Misc: getcwd, chdir (full CWD tracking with path normalization + resolve_path() wired into all file ops), isatty, getuid/geteuid/getgid/getegid, sysconf, abort
   - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits

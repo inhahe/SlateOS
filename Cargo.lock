@@ -1092,6 +1092,7 @@ name = "dyndns"
 version = "0.1.0"
 dependencies = [
  "dyndnsproviders",
+ "dyndnsrouter",
  "httpclient",
  "journalrec",
  "yamldoc",
@@ -1099,6 +1100,10 @@ dependencies = [
 
 [[package]]
 name = "dyndnsproviders"
+version = "0.1.0"
+
+[[package]]
+name = "dyndnsrouter"
 version = "0.1.0"
 
 [[package]]

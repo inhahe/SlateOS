@@ -24,8 +24,10 @@ programs GCC's build runs on the build machine (`genattrtab`, `gengtype` ...)
 are made with the host's own `gcc` and `g++`.
 
 `make all-gcc`, and each program's link measured on its own: the drivers
-`gcc` and `g++`, `cpp`, the compilers proper `cc1` and `cc1plus`, `collect2`,
-`lto-wrapper` and `lto1`. C and C++ only; no plugins; no isl.
+`gcc` and `g++`, `cpp`, the compilers proper `cc1` and `cc1plus`, and
+`collect2`. C and C++ only; no plugins; no isl; no link-time optimisation,
+whose `liblto_plugin` is a shared object the linker loads, which a static-only
+link cannot make (the first run stopped there).
 
 ## What this does not answer
 

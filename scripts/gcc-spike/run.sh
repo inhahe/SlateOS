@@ -12,9 +12,8 @@
 # WHAT THIS ANSWERS, AND WHAT IT DOES NOT
 #
 # One question: do GCC 16.2's programs -- the drivers gcc and g++, the
-# preprocessor, the compilers proper cc1 and cc1plus, collect2, lto-wrapper
-# and lto1 -- resolve every symbol they need against
-# `toolchain/sysroot/lib/libc.a`?
+# preprocessor, the compilers proper cc1 and cc1plus, and collect2 --
+# resolve every symbol they need against `toolchain/sysroot/lib/libc.a`?
 #
 # Not whether they can build a program on SlateOS. That needs three more
 # things, each a step of its own: an assembler and a linker there (GNU
@@ -104,13 +103,18 @@ mkdir build && cd build || exit 1
 #   --disable-multilib: one ABI, x86-64; there is no 32-bit SlateOS.
 #   --disable-plugin: GCC plugins are shared objects, and nothing here loads
 #       one.
+#   --disable-lto: link-time optimisation needs liblto_plugin, a shared
+#       object the linker loads, which a static-only link cannot make (the
+#       first run stopped there, in all-lto-plugin, which all-gcc builds
+#       whenever LTO is on); lto1 and lto-wrapper go with it.
 #   --without-isl: the loop optimiser's library, optional, and a port of its
 #       own.
 #   --disable-nls: message catalogues; the C locale is the only one we have.
 "../gcc-$VER/configure" \
     --build=x86_64-pc-linux-gnu --host=x86_64-linux-musl --target=x86_64-linux-musl \
     --prefix=/usr --disable-bootstrap --disable-multilib --disable-nls \
-    --disable-werror --enable-languages=c,c++ --disable-plugin --without-isl \
+    --disable-werror --enable-languages=c,c++ --disable-plugin --disable-lto \
+    --without-isl \
     >conf.log 2>&1
 echo "CONFIGURE_EXIT=$?"
 tail -5 conf.log
@@ -180,7 +184,5 @@ link_one CPP cpp
 link_one CC1 cc1
 link_one CC1PLUS cc1plus
 link_one COLLECT2 collect2
-link_one LTO_WRAPPER lto-wrapper
-link_one LTO1 lto1
 echo "PROGRAMS_BUILT=$built of $tried"
 [ "$built" -eq "$tried" ] || exit 1

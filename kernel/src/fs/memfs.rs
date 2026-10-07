@@ -1643,18 +1643,49 @@ impl FileSystem for MemFs {
         // would have reported it twice.
         let node_count = self.inodes.len() as u64;
 
+        // What this file system holds, in blocks: each file's bytes and each
+        // symlink's target, rounded up to whole blocks as tmpfs charges whole
+        // pages.
+        let held_blocks = self
+            .inodes
+            .values()
+            .map(|n| match &n.kind {
+                MemFsNodeKind::File(data) => blocks_for(data.len()),
+                MemFsNodeKind::Symlink(target) => blocks_for(target.as_bytes().len()),
+                MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket => 0,
+            })
+            .fold(0u64, u64::saturating_add);
+        // memfs has no cap of its own: it grows until memory runs out. So its
+        // room is what it holds plus the free memory it could still take.
+        // This answered 0 blocks, 0 free and 0 inodes free until 2026-10-07,
+        // which every caller reads as a full volume: `df` showed /tmp full,
+        // and a program checking for room before a write refused it
+        // (requests/d-a-memfs-reports-itself-full.md).
+        let free_blocks =
+            crate::mm::frame::stats().map_or(0, |s| (s.free_bytes as u64) / MEMFS_BLOCK_SIZE);
         Ok(FsInfo {
             fs_type: String::from("memfs"),
             volume_label: String::new(),
-            block_size: 1,   // Byte-granular allocation.
-            total_blocks: 0, // Unlimited (bounded by heap).
-            free_blocks: 0,
-            total_inodes: node_count,
-            free_inodes: 0, // Unlimited.
+            block_size: MEMFS_BLOCK_SIZE,
+            total_blocks: held_blocks.saturating_add(free_blocks),
+            free_blocks,
+            // Inodes as tmpfs counts them by default: one per block of room.
+            total_inodes: node_count.saturating_add(free_blocks),
+            free_inodes: free_blocks,
             max_name_len: 255,
             read_only: false,
         })
     }
+}
+
+/// The block size memfs reports: 4096, the page tmpfs reports on Linux and the
+/// page size the Linux ABI is told (`AT_PAGESZ`). memfs allocates bytes, not
+/// blocks; the size is only the unit its room is counted in.
+const MEMFS_BLOCK_SIZE: u64 = 4096;
+
+/// Whole [`MEMFS_BLOCK_SIZE`] blocks needed for `len` bytes.
+fn blocks_for(len: usize) -> u64 {
+    (len as u64).div_ceil(MEMFS_BLOCK_SIZE)
 }
 
 // ---------------------------------------------------------------------------
@@ -2250,7 +2281,10 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     // which copied instead of linking would fail, which is why they check
     // shared data and shared inode numbers rather than merely that `link`
     // returned Ok.
-    let inodes_before = fs.statvfs()?.total_inodes;
+    // Inodes in use: what the inode counts say beyond what is free (the free
+    // part follows free memory, which this test does not hold still).
+    let used_inodes = |info: FsInfo| info.total_inodes.saturating_sub(info.free_inodes);
+    let inodes_before = used_inodes(fs.statvfs()?);
 
     fs.write_file(Path::new("/hl_orig.txt"), b"shared")?;
     fs.link(Path::new("/hl_orig.txt"), Path::new("/hl_second.txt"))?;
@@ -2378,7 +2412,7 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
     }
-    let inodes_after = fs.statvfs()?.total_inodes;
+    let inodes_after = used_inodes(fs.statvfs()?);
     if inodes_after != inodes_before {
         crate::serial_println!(
             "[memfs]   FAILED: hard link test leaked inodes ({} -> {})",
@@ -2388,6 +2422,33 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     crate::serial_println!("[memfs]   last unlink frees the inode: OK");
+
+    // statvfs reports room: 4096-byte blocks, some free when memory is, and
+    // what is held -- total less free -- grows by a file's whole blocks.
+    let held = |info: &FsInfo| info.total_blocks.saturating_sub(info.free_blocks);
+    let before = fs.statvfs()?;
+    fs.write_file(Path::new("/room.bin"), &alloc::vec![7u8; 10_000])?;
+    let after = fs.statvfs()?;
+    fs.remove(Path::new("/room.bin"))?;
+    let gone = fs.statvfs()?;
+    let frames_known = crate::mm::frame::stats().is_some();
+    if after.block_size != 4096
+        || (frames_known && after.free_blocks == 0)
+        || held(&after) != held(&before).saturating_add(3)
+        || held(&gone) != held(&before)
+        || after.free_inodes != after.free_blocks
+    {
+        crate::serial_println!(
+            "[memfs]   FAILED: statvfs room: bsize {}, free {}, held {} -> {} -> {}",
+            after.block_size,
+            after.free_blocks,
+            held(&before),
+            held(&after),
+            held(&gone)
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   statvfs reports the room left, in 4096-byte blocks: OK");
 
     // Clean up.
     fs.remove(Path::new("/target.txt"))?;

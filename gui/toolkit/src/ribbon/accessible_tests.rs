@@ -369,6 +369,325 @@ fn a_folded_group_opens_as_a_panel() {
     );
 }
 
+// ---- the dialog for the user's changes ----
+
+/// The tree's rows as `(part, name)`, nested ones after their parent, the
+/// tabs' boxes left out.
+fn tree_rows(tool: &RibbonAccess<'_>) -> Vec<(RibbonPart, String)> {
+    node(tool, RibbonPart::CustomizeTree)
+        .walk()
+        .filter(|n| {
+            matches!(
+                n.id,
+                RibbonPart::CustomizeTab(_)
+                    | RibbonPart::CustomizeGroup(..)
+                    | RibbonPart::CustomizeEntry(..)
+            )
+        })
+        .map(|n| (n.id, n.name.clone()))
+        .collect()
+}
+
+/// **While the dialog for the user's changes is open, tools see it**, drawn
+/// over the ribbon, which takes no press: its list of every command; its
+/// tree of tabs, groups and commands, nested as the list indents them, each
+/// tab with its box, ticked while it is shown; and its buttons, those that
+/// cannot act yet disabled.
+#[test]
+fn the_customize_dialog_is_seen_while_it_is_open() {
+    let mut ribbon = ribbon();
+    {
+        let tool = access(&mut ribbon, 2000.0);
+        assert!(
+            tool.automation(0.0, 0.0)
+                .walk()
+                .all(|n| n.id != RibbonPart::Customize),
+            "a closed dialog is seen"
+        );
+    }
+    ribbon.open_customize();
+    let mut tool = access(&mut ribbon, 2000.0);
+    let root = tool.automation(0.0, 0.0);
+    let dialog = root.children.last().expect("children");
+    assert_eq!(
+        (dialog.id, dialog.role, dialog.name.as_str()),
+        (RibbonPart::Customize, Role::Dialog, "Customize the ribbon")
+    );
+    let commands: Vec<String> = node(&tool, RibbonPart::CustomizeCommands)
+        .children
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "Paste",
+            "Cut",
+            "Font",
+            "Bold",
+            "Underline",
+            "Styles",
+            "Zoom"
+        ]
+    );
+    let names: Vec<String> = tree_rows(&tool).into_iter().map(|(_, n)| n).collect();
+    assert_eq!(
+        names,
+        [
+            "Home",
+            "Clipboard",
+            "Paste",
+            "Cut",
+            "Font",
+            "Font",
+            "Bold",
+            "Underline",
+            "Styles",
+            "Styles",
+            "View",
+            "Zoom",
+            "Zoom"
+        ]
+    );
+    let home = node(&tool, RibbonPart::CustomizeTab(0));
+    assert_eq!(
+        (home.children[0].id, home.children[0].value.clone()),
+        (
+            RibbonPart::CustomizeTabShown(0),
+            Some(Value::Check(CheckState::Checked))
+        )
+    );
+    assert_eq!(
+        node(&tool, RibbonPart::CustomizeGroup(0, 0)).children[1].id,
+        RibbonPart::CustomizeEntry(0, 0, CUT),
+        "Cut is not under Clipboard"
+    );
+    let buttons: Vec<(&str, bool)> = dialog
+        .children
+        .iter()
+        .filter(|n| matches!(n.id, RibbonPart::CustomizeButton(_)))
+        .map(|n| (n.name.as_str(), n.enabled))
+        .collect();
+    assert_eq!(
+        buttons,
+        [
+            ("Add \u{203a}", false),
+            ("\u{2039} Remove", false),
+            ("Move up", false),
+            ("Move down", false),
+            ("Undo all changes", false),
+            ("Close", true)
+        ]
+    );
+    assert_eq!(
+        act(&mut tool, RibbonPart::Tab(1), Action::Press),
+        Err(Refusal::Hidden),
+        "the ribbon took a press under the dialog"
+    );
+}
+
+/// **A command is put into a group as the user puts it there**: the group
+/// chosen on the right, the command on the left, Add pressed -- and pressed
+/// twice, a command on the left is added at once, as a double click adds it.
+#[test]
+fn a_command_is_added_to_a_group_as_the_user_adds_it() {
+    let mut ribbon = ribbon();
+    ribbon.open_customize();
+    let mut tool = access(&mut ribbon, 2000.0);
+    let add = RibbonPart::CustomizeButton(Button::Add);
+    assert_eq!(act(&mut tool, add, Action::Press), Err(Refusal::Disabled));
+
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeGroup(0, 0), Action::Choose),
+        Ok(None)
+    );
+    assert_eq!(
+        node(&tool, RibbonPart::CustomizeGroup(0, 0)).value,
+        Some(Value::Chosen(true))
+    );
+    assert_eq!(
+        act(
+            &mut tool,
+            RibbonPart::CustomizeCommand(ZOOM),
+            Action::Choose
+        ),
+        Ok(None)
+    );
+    let zoom = node(&tool, RibbonPart::CustomizeCommand(ZOOM));
+    assert!(
+        zoom.value == Some(Value::Chosen(true)) && zoom.focused,
+        "{zoom:?}"
+    );
+    assert!(node(&tool, add).enabled);
+    assert_eq!(
+        act(&mut tool, add, Action::Press),
+        Ok(Some(RibbonEvent::Customized))
+    );
+    let added = node(&tool, RibbonPart::CustomizeEntry(0, 0, ZOOM));
+    assert_eq!(
+        added.value,
+        Some(Value::Chosen(true)),
+        "the new row is not chosen"
+    );
+
+    // Pressed, a command on the left goes into the group chosen at once.
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeCommand(BOLD), Action::Press),
+        Ok(Some(RibbonEvent::Customized))
+    );
+    assert!(
+        tree_rows(&tool)
+            .iter()
+            .any(|(part, _)| *part == RibbonPart::CustomizeEntry(0, 0, BOLD)),
+        "Bold is not in Clipboard"
+    );
+}
+
+/// **A command's row pressed is taken out of its group**, as a double click
+/// takes it out; pressed again it is no part.
+#[test]
+fn a_command_is_taken_out_of_its_group_as_the_user_takes_it() {
+    let mut ribbon = ribbon();
+    ribbon.open_customize();
+    let mut tool = access(&mut ribbon, 2000.0);
+    let cut = RibbonPart::CustomizeEntry(0, 0, CUT);
+    assert_eq!(
+        act(&mut tool, cut, Action::Press),
+        Ok(Some(RibbonEvent::Customized))
+    );
+    assert!(tree_rows(&tool).iter().all(|(part, _)| *part != cut));
+    assert_eq!(
+        act(&mut tool, cut, Action::Press),
+        Err(Refusal::NoSuchWidget)
+    );
+    assert!(node(&tool, RibbonPart::CustomizeButton(Button::Reset)).enabled);
+}
+
+/// **A tab is hidden with its box**, as clicked -- toggled on the row or
+/// pressed on the box -- its groups leaving the tree; and moved, chosen and
+/// "Move down" pressed.
+#[test]
+fn a_tab_is_hidden_and_moved_as_the_user_does_it() {
+    let mut ribbon = ribbon();
+    ribbon.open_customize();
+    let mut tool = access(&mut ribbon, 2000.0);
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeTab(1), Action::Toggle),
+        Ok(Some(RibbonEvent::Customized))
+    );
+    assert_eq!(
+        node(&tool, RibbonPart::CustomizeTabShown(1)).value,
+        Some(Value::Check(CheckState::Unchecked))
+    );
+    assert!(
+        tree_rows(&tool)
+            .iter()
+            .all(|(part, _)| !matches!(part, RibbonPart::CustomizeGroup(1, _))),
+        "a hidden tab's groups are listed"
+    );
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeTabShown(1), Action::Press),
+        Ok(Some(RibbonEvent::Customized))
+    );
+    assert_eq!(
+        node(&tool, RibbonPart::CustomizeTabShown(1)).value,
+        Some(Value::Check(CheckState::Checked))
+    );
+
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeTab(0), Action::Choose),
+        Ok(None)
+    );
+    assert_eq!(
+        act(
+            &mut tool,
+            RibbonPart::CustomizeButton(Button::Down),
+            Action::Press
+        ),
+        Ok(Some(RibbonEvent::Customized))
+    );
+    assert_eq!(
+        tree_rows(&tool)[0],
+        (RibbonPart::CustomizeTab(1), "View".to_owned()),
+        "Home did not move down"
+    );
+}
+
+/// **A row scrolled out of its list is scrolled into it before it is
+/// clicked**: told where it would be, below the list, and chosen there.
+#[test]
+fn a_row_out_of_its_list_is_scrolled_into_it() {
+    let mut ribbon = ribbon();
+    ribbon.open_customize();
+    // A window short enough that the tree shows some of its rows.
+    let mut tool = RibbonAccess {
+        ribbon: &mut ribbon,
+        x: 0.0,
+        y: 0.0,
+        width: 2000.0,
+        viewport: (2400.0, 300.0),
+    };
+    let tree = node(&tool, RibbonPart::CustomizeTree).bounds;
+    let last = RibbonPart::CustomizeEntry(1, 0, ZOOM);
+    let before = node(&tool, last).bounds;
+    assert!(
+        before.y >= tree.bottom(),
+        "the last row is in the list: {before:?}"
+    );
+    assert_eq!(act(&mut tool, last, Action::Choose), Ok(None));
+    let after = node(&tool, last);
+    assert!(
+        after.bounds.y >= tree.y && after.bounds.bottom() <= tree.bottom() + 0.01,
+        "not scrolled into the list: {:?}",
+        after.bounds
+    );
+    assert_eq!(after.value, Some(Value::Chosen(true)));
+}
+
+/// **What the dialog's parts are not for is refused, and Close closes it**:
+/// a command's text, a tab's press; then, closed, nothing of it is a part.
+#[test]
+fn the_customize_dialog_refuses_what_its_parts_are_not_for() {
+    let mut ribbon = ribbon();
+    ribbon.open_customize();
+    let mut tool = access(&mut ribbon, 2000.0);
+    assert_eq!(
+        act(
+            &mut tool,
+            RibbonPart::CustomizeCommand(CUT),
+            Action::SetText("x".to_owned())
+        ),
+        Err(Refusal::NotApplicable {
+            role: Role::ListItem,
+            action: "set the text of"
+        })
+    );
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeTab(0), Action::Press),
+        Err(Refusal::NotApplicable {
+            role: Role::TreeItem,
+            action: "press"
+        })
+    );
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeCommand(999), Action::Choose),
+        Err(Refusal::NoSuchWidget)
+    );
+    assert_eq!(
+        act(
+            &mut tool,
+            RibbonPart::CustomizeButton(Button::Close),
+            Action::Press
+        ),
+        Ok(None)
+    );
+    assert!(!tool.ribbon.customize_open());
+    assert_eq!(
+        act(&mut tool, RibbonPart::CustomizeCommand(CUT), Action::Choose),
+        Err(Refusal::NoSuchWidget)
+    );
+}
+
 /// **A gallery's chosen choice is said chosen**, and the others not.
 #[test]
 fn a_gallerys_choice_is_said_chosen() {

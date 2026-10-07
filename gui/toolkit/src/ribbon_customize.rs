@@ -98,7 +98,9 @@ impl Button {
         Self::Close,
     ];
 
-    fn label(self) -> &'static str {
+    /// What the button says: what tools call it, too.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Add => "Add \u{203a}",
             Self::Remove => "\u{2039} Remove",
@@ -141,6 +143,11 @@ impl Customize {
             pressed: None,
         }
     }
+
+    /// The first row each list shows: the commands', the tabs'.
+    pub(super) const fn tops(&self) -> (usize, usize) {
+        self.top
+    }
 }
 
 impl Default for Customize {
@@ -151,8 +158,9 @@ impl Default for Customize {
 
 /// Every row of the right-hand list, in order: each tab -- the ordinary ones
 /// in the user's order, hidden ones too, then the contextual ones -- and
-/// under a shown tab its groups, and under each group its commands.
-fn tree(ribbon: &Ribbon) -> Vec<(TreeRow, String, bool)> {
+/// under a shown tab its groups, and under each group its commands; with
+/// its label, and whether it is a hidden tab.
+pub(super) fn tree(ribbon: &Ribbon) -> Vec<(TreeRow, String, bool)> {
     let mut ordinary: Vec<usize> = (0..ribbon.tabs.len())
         .filter(|&i| ribbon.tabs.get(i).is_some_and(|t| t.context.is_none()))
         .collect();
@@ -188,8 +196,20 @@ fn tree(ribbon: &Ribbon) -> Vec<(TreeRow, String, bool)> {
     rows
 }
 
+/// Where a tab's box is in its row `row`, the row's text `indent` in: one
+/// answer for the layout and for tools, who are told a box scrolled out of
+/// the list where it would be.
+pub(super) fn tab_check(row: Rect, indent: f32) -> Rect {
+    Rect::new(
+        row.x + 6.0 + indent,
+        row.y + (ROW - CHECK) / 2.0,
+        CHECK,
+        CHECK,
+    )
+}
+
 /// How many rows a list box `h` high shows.
-fn rows_in(h: f32) -> usize {
+pub(super) fn rows_in(h: f32) -> usize {
     (h / ROW).floor().max(0.0) as usize
 }
 
@@ -232,8 +252,7 @@ pub(super) fn lay(ribbon: &Ribbon, dialog: &Customize, viewport: (f32, f32)) -> 
                 TreeRow::Command(..) => 2.0 * INDENT,
             };
             let r = Rect::new(tree_box.x, tree_box.y + n as f32 * ROW, tree_box.w, ROW);
-            let check = matches!(row, TreeRow::Tab(_))
-                .then(|| Rect::new(r.x + 6.0 + indent, r.y + (ROW - CHECK) / 2.0, CHECK, CHECK));
+            let check = matches!(row, TreeRow::Tab(_)).then(|| tab_check(r, indent));
             (row, r, check)
         })
         .collect();
@@ -376,6 +395,21 @@ impl Ribbon {
             RibbonEvent::Customized
         } else {
             RibbonEvent::Handled
+        }
+    }
+
+    /// Scroll the dialog's list -- the commands', where `commands`, else the
+    /// tabs' -- so that its row `row` shows, `shown` rows at a time, as the
+    /// user scrolls to a row before clicking it: for a tool's press
+    /// (`ribbon::accessible`).
+    pub(super) fn reveal_customize_row(&mut self, commands: bool, row: usize, shown: usize) {
+        if let Some(dialog) = self.customize.as_mut() {
+            let top = if commands {
+                &mut dialog.top.0
+            } else {
+                &mut dialog.top.1
+            };
+            *top = reveal(*top, row, shown);
         }
     }
 

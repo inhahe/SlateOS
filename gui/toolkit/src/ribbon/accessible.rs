@@ -6,8 +6,14 @@
 //! each named by its command, described by why it cannot be used where it
 //! cannot, or by its tooltip; a group folded into one button; the `»` of
 //! the groups that do not fit; the Quick Access Toolbar; a panel the ribbon
-//! has open over the page; and a menu it has open, with its rows
-//! ([`crate::menu::MenuPart`]).
+//! has open over the page; a menu it has open, with its rows
+//! ([`crate::menu::MenuPart`]); and, while it is open, the dialog for the
+//! user's changes ([`Ribbon::open_customize`]): its list of every command,
+//! its tree of tabs -- each with its box, ticked while the tab is shown --
+//! their groups and their commands, and its buttons. A row of either list is
+//! scrolled into it before it is clicked, as the user would; one chosen is
+//! clicked, one pressed clicked twice -- a command added, on the left, or
+//! taken out of its group, on the right.
 //!
 //! A ribbon keeps no place of its own -- its host lays it out each frame --
 //! so what implements [`Accessible`] is the ribbon with where its host puts
@@ -25,6 +31,7 @@
 //! command, a toggle, a menu row, a choice, a tab brought to the front -- is
 //! the tool's answer.
 
+use super::customize::{self, Button, DialogSlots, Focus, TreeRow};
 use super::{
     BodySlots, CommandId, Control, ControlSlot, Hit, Part, Ribbon, RibbonEvent, RibbonLayout,
 };
@@ -66,6 +73,26 @@ pub enum RibbonPart {
     QatButton(usize),
     /// A part of the menu the ribbon has open.
     Menu(MenuPart),
+    /// The dialog for the user's changes, while it is open
+    /// ([`Ribbon::open_customize`]).
+    Customize,
+    /// Its list of every command, on the left.
+    CustomizeCommands,
+    /// A command in that list.
+    CustomizeCommand(CommandId),
+    /// Its tree of tabs, their groups and their commands, on the right.
+    CustomizeTree,
+    /// A tab's row in the tree, by its place in [`Ribbon::tabs`].
+    CustomizeTab(usize),
+    /// A tab's box in the tree, ticked while the tab is shown.
+    CustomizeTabShown(usize),
+    /// A group's row in the tree: its tab's place, and its own in the tab.
+    CustomizeGroup(usize, usize),
+    /// A command's row in a group in the tree: its tab's place, its group's,
+    /// and the command.
+    CustomizeEntry(usize, usize, CommandId),
+    /// One of the dialog's buttons.
+    CustomizeButton(Button),
 }
 
 /// A ribbon with where its host lays it out: what serves a tool.
@@ -329,6 +356,313 @@ impl RibbonAccess<'_> {
         }
         out
     }
+
+    /// Where row `index` of one of the dialog's lists, `list`, is while the
+    /// list shows from row `top`: its row, or above or below the list for
+    /// one scrolled out of it -- where the user would find it, scrolling.
+    fn list_row(list: Rect, index: usize, top: usize) -> Rect {
+        let rows = |n: usize| f32::from(u16::try_from(n).unwrap_or(u16::MAX)) * customize::ROW;
+        let y = if index >= top {
+            list.y + rows(index.saturating_sub(top))
+        } else {
+            list.y - rows(top.saturating_sub(index))
+        };
+        Rect::new(list.x, y, list.w, customize::ROW)
+    }
+
+    /// The part a row of the dialog's tree is, named by places rather than
+    /// ids, as tools name parts.
+    fn part_of_row(&self, row: &TreeRow) -> Option<RibbonPart> {
+        let tabs = self.ribbon.tabs();
+        let tab_at = |id: &str| tabs.iter().position(|tab| tab.id == id);
+        let group_at = |tab: usize, id: &str| {
+            tabs.get(tab)?
+                .groups
+                .iter()
+                .position(|group| group.id == id)
+        };
+        Some(match row {
+            TreeRow::Tab(tab) => RibbonPart::CustomizeTab(tab_at(tab)?),
+            TreeRow::Group(tab, group) => {
+                let tab = tab_at(tab)?;
+                RibbonPart::CustomizeGroup(tab, group_at(tab, group)?)
+            }
+            TreeRow::Command(tab, group, id) => {
+                let tab = tab_at(tab)?;
+                RibbonPart::CustomizeEntry(tab, group_at(tab, group)?, *id)
+            }
+        })
+    }
+
+    /// The row of the dialog's tree `part` is: the inverse of
+    /// [`part_of_row`](Self::part_of_row). A tab's box is its tab's row.
+    fn row_of(&self, part: RibbonPart) -> Option<TreeRow> {
+        let tabs = self.ribbon.tabs();
+        match part {
+            RibbonPart::CustomizeTab(tab) | RibbonPart::CustomizeTabShown(tab) => {
+                Some(TreeRow::Tab(tabs.get(tab)?.id.clone()))
+            }
+            RibbonPart::CustomizeGroup(tab, group) => {
+                let tab = tabs.get(tab)?;
+                Some(TreeRow::Group(
+                    tab.id.clone(),
+                    tab.groups.get(group)?.id.clone(),
+                ))
+            }
+            // Whether the group still holds the command is the tree's to
+            // say: a row it does not list is no part.
+            RibbonPart::CustomizeEntry(tab, group, id) => {
+                let tab = tabs.get(tab)?;
+                let group = tab.groups.get(group)?;
+                Some(TreeRow::Command(tab.id.clone(), group.id.clone(), id))
+            }
+            _ => None,
+        }
+    }
+
+    /// The dialog for the user's changes, while it is open: its list of
+    /// commands, every one, the chosen one chosen; its tree, the rows
+    /// nested as the list indents them -- a tab's groups under it, its box
+    /// ticked while it is shown; a group's commands under it -- the chosen
+    /// row chosen; and its buttons, one that cannot act now disabled. The
+    /// row the keys move in has the keyboard.
+    fn customize_node(&self, slots: &DialogSlots) -> Option<Node<RibbonPart>> {
+        let dialog = self.ribbon.customize.as_ref()?;
+        let (left_top, right_top) = dialog.tops();
+        let mut node = Node::new(
+            RibbonPart::Customize,
+            Role::Dialog,
+            "Customize the ribbon",
+            slots.rect,
+        );
+
+        let mut commands = Node::new(
+            RibbonPart::CustomizeCommands,
+            Role::List,
+            "Commands",
+            slots.commands,
+        );
+        for (index, command) in self.ribbon.catalog().iter().enumerate() {
+            let mut item = Node::new(
+                RibbonPart::CustomizeCommand(command.id),
+                Role::ListItem,
+                command.label.clone(),
+                Self::list_row(slots.commands, index, left_top),
+            );
+            let chosen = dialog.command == Some(command.id);
+            item.value = Some(Value::Chosen(chosen));
+            item.focused = chosen && dialog.focus == Focus::Commands;
+            item.focusable = true;
+            commands.children.push(item);
+        }
+        node.children.push(commands);
+
+        let mut tabs: Vec<Node<RibbonPart>> = Vec::new();
+        for (index, (row, label, hidden)) in customize::tree(self.ribbon).into_iter().enumerate() {
+            let Some(part) = self.part_of_row(&row) else {
+                continue;
+            };
+            let bounds = Self::list_row(slots.tree, index, right_top);
+            let chosen = dialog.chosen.as_ref() == Some(&row);
+            let mut item = Node::new(part, Role::TreeItem, label, bounds);
+            item.value = Some(Value::Chosen(chosen));
+            item.focused = chosen && dialog.focus == Focus::Tabs;
+            item.focusable = true;
+            match (part, row) {
+                (RibbonPart::CustomizeTab(tab), TreeRow::Tab(_)) => {
+                    let mut shown = Node::new(
+                        RibbonPart::CustomizeTabShown(tab),
+                        Role::CheckBox,
+                        "Shown",
+                        customize::tab_check(bounds, 0.0),
+                    );
+                    shown.value = Some(Value::Check(if hidden {
+                        CheckState::Unchecked
+                    } else {
+                        CheckState::Checked
+                    }));
+                    item.children.push(shown);
+                    tabs.push(item);
+                }
+                (_, TreeRow::Group(..)) => {
+                    if let Some(tab) = tabs.last_mut() {
+                        tab.children.push(item);
+                    }
+                }
+                (_, TreeRow::Command(..)) => {
+                    let group = tabs.last_mut().and_then(|tab| {
+                        tab.children
+                            .iter_mut()
+                            .rev()
+                            .find(|child| matches!(child.id, RibbonPart::CustomizeGroup(..)))
+                    });
+                    if let Some(group) = group {
+                        group.children.push(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut tree = Node::new(RibbonPart::CustomizeTree, Role::Tree, "Tabs", slots.tree);
+        tree.children = tabs;
+        node.children.push(tree);
+
+        for (button, rect) in &slots.buttons {
+            let mut node_of = Node::new(
+                RibbonPart::CustomizeButton(*button),
+                Role::Button,
+                button.label(),
+                *rect,
+            );
+            node_of.enabled = customize::enabled(self.ribbon, dialog, *button);
+            node.children.push(node_of);
+        }
+        Some(node)
+    }
+
+    /// Scroll the dialog's list -- the commands', where `commands`, else the
+    /// tree -- so its row `index` shows, as the user would before clicking
+    /// it, and answer where the row is now. A list too short to show a row
+    /// shows none of them (`Hidden`).
+    fn reveal_row(&mut self, commands: bool, index: usize) -> Result<Rect, Refusal> {
+        let layout = self.layout();
+        let slots = layout.dialog.as_ref().ok_or(Refusal::NoSuchWidget)?;
+        let list = if commands { slots.commands } else { slots.tree };
+        let shown = customize::rows_in(list.h);
+        if shown == 0 {
+            return Err(Refusal::Hidden);
+        }
+        self.ribbon.reveal_customize_row(commands, index, shown);
+        let dialog = self
+            .ribbon
+            .customize
+            .as_ref()
+            .ok_or(Refusal::NoSuchWidget)?;
+        let (left_top, right_top) = dialog.tops();
+        Ok(Self::list_row(
+            list,
+            index,
+            if commands { left_top } else { right_top },
+        ))
+    }
+
+    /// The second press of a double click at `(x, y)`, and its let go:
+    /// what the ribbon reported.
+    fn double_click_at(&mut self, (x, y): (f32, f32)) -> Option<RibbonEvent> {
+        let layout = self.layout();
+        let doubled = self.ribbon.handle_mouse(
+            &layout,
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+        );
+        let layout = self.layout();
+        let released = self.ribbon.handle_mouse(
+            &layout,
+            &MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            },
+        );
+        [doubled, released]
+            .into_iter()
+            .find(|said| !matches!(said, RibbonEvent::Handled | RibbonEvent::Ignored))
+    }
+
+    /// Do `action` to `part` of the open dialog, as the user would: a row
+    /// chosen with a click on it, scrolled into its list first if it was out
+    /// of it; one pressed clicked twice, as a double click adds a command,
+    /// on the left, or takes it out of its group, on the right; a tab's box
+    /// toggled with a click on it; a button pressed as clicked, refused while
+    /// it cannot act.
+    fn invoke_customize(
+        &mut self,
+        part: RibbonPart,
+        action: &Action,
+    ) -> Result<Option<RibbonEvent>, Refusal> {
+        let not_for = |role: Role| Refusal::NotApplicable {
+            role,
+            action: action.name(),
+        };
+        let dialog = self
+            .ribbon
+            .customize
+            .as_ref()
+            .ok_or(Refusal::NoSuchWidget)?;
+        match (part, action) {
+            (RibbonPart::CustomizeButton(button), Action::Press) => {
+                if !customize::enabled(self.ribbon, dialog, button) {
+                    return Err(Refusal::Disabled);
+                }
+                let layout = self.layout();
+                let slots = layout.dialog.as_ref().ok_or(Refusal::NoSuchWidget)?;
+                let (_, rect) = slots
+                    .buttons
+                    .iter()
+                    .find(|(shown, _)| *shown == button)
+                    .ok_or(Refusal::NoSuchWidget)?;
+                Ok(self.press_at(rect.centre(), true))
+            }
+            (RibbonPart::CustomizeButton(_), _) => Err(not_for(Role::Button)),
+            (RibbonPart::CustomizeCommand(id), Action::Choose | Action::Focus | Action::Press) => {
+                let index = self
+                    .ribbon
+                    .catalog()
+                    .iter()
+                    .position(|command| command.id == id)
+                    .ok_or(Refusal::NoSuchWidget)?;
+                let at = self.reveal_row(true, index)?.centre();
+                let chosen = self.press_at(at, true);
+                if *action == Action::Press {
+                    return Ok(self.double_click_at(at).or(chosen));
+                }
+                Ok(chosen)
+            }
+            (RibbonPart::CustomizeCommand(_), _) => Err(not_for(Role::ListItem)),
+            (
+                RibbonPart::CustomizeTab(_)
+                | RibbonPart::CustomizeGroup(..)
+                | RibbonPart::CustomizeEntry(..),
+                Action::Choose | Action::Focus,
+            )
+            | (RibbonPart::CustomizeEntry(..), Action::Press) => {
+                let row = self.row_of(part).ok_or(Refusal::NoSuchWidget)?;
+                let index = customize::tree(self.ribbon)
+                    .iter()
+                    .position(|(shown, _, _)| *shown == row)
+                    .ok_or(Refusal::NoSuchWidget)?;
+                let at = self.reveal_row(false, index)?.centre();
+                let chosen = self.press_at(at, true);
+                if *action == Action::Press {
+                    return Ok(self.double_click_at(at).or(chosen));
+                }
+                Ok(chosen)
+            }
+            (RibbonPart::CustomizeTab(_), Action::Toggle)
+            | (RibbonPart::CustomizeTabShown(_), Action::Toggle | Action::Press) => {
+                let row = self.row_of(part).ok_or(Refusal::NoSuchWidget)?;
+                let index = customize::tree(self.ribbon)
+                    .iter()
+                    .position(|(shown, _, _)| *shown == row)
+                    .ok_or(Refusal::NoSuchWidget)?;
+                let at = customize::tab_check(self.reveal_row(false, index)?, 0.0).centre();
+                Ok(self.press_at(at, true))
+            }
+            (RibbonPart::CustomizeTabShown(_), _) => Err(not_for(Role::CheckBox)),
+            (
+                RibbonPart::CustomizeTab(_)
+                | RibbonPart::CustomizeGroup(..)
+                | RibbonPart::CustomizeEntry(..),
+                _,
+            ) => Err(not_for(Role::TreeItem)),
+            (RibbonPart::CustomizeCommands, _) => Err(not_for(Role::List)),
+            (RibbonPart::CustomizeTree, _) => Err(not_for(Role::Tree)),
+            _ => Err(not_for(Role::Dialog)),
+        }
+    }
 }
 
 impl Accessible for RibbonAccess<'_> {
@@ -405,6 +739,14 @@ impl Accessible for RibbonAccess<'_> {
                     .map(&RibbonPart::Menu),
             );
         }
+        // Last, as it is drawn over everything.
+        if let Some(dialog) = layout
+            .dialog
+            .as_ref()
+            .and_then(|slots| self.customize_node(slots))
+        {
+            root.children.push(dialog);
+        }
         root
     }
 
@@ -415,6 +757,20 @@ impl Accessible for RibbonAccess<'_> {
         _width: f32,
         _height: f32,
     ) -> Result<Option<RibbonEvent>, Refusal> {
+        if matches!(
+            *part,
+            RibbonPart::Customize
+                | RibbonPart::CustomizeCommands
+                | RibbonPart::CustomizeCommand(_)
+                | RibbonPart::CustomizeTree
+                | RibbonPart::CustomizeTab(_)
+                | RibbonPart::CustomizeTabShown(_)
+                | RibbonPart::CustomizeGroup(..)
+                | RibbonPart::CustomizeEntry(..)
+                | RibbonPart::CustomizeButton(_)
+        ) {
+            return self.invoke_customize(*part, &action);
+        }
         let not_for = |role: Role| Refusal::NotApplicable {
             role,
             action: action.name(),

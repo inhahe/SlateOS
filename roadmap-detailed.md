@@ -2755,7 +2755,10 @@ authors never wrote a single automation handler.
   (`guitk::ribbon::RibbonAccess`): its tabs, each group's controls --
   buttons, toggles, split buttons and their arrows, drop-downs, galleries --
   a folded group's button and panel, the Quick Access Toolbar and an open
-  menu's rows, each used as clicked. Its dock (`guitk::dock::DockAccess`):
+  menu's rows, each used as clicked; and, open, its "Customize the ribbon"
+  dialog -- every command, the tree of tabs (each with its box), groups and
+  commands, and the buttons, a row added or taken out as a double click
+  does. Its dock (`guitk::dock::DockAccess`):
   each group's tabs, the front one chosen and its close button, the front
   panel's contents for the application to fill, and each divider, where it
   stands and dragged to where it is set. Its icon grid

@@ -222,7 +222,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
 | `scripts/gather-notices.py` | Gather the third-party notices a SlateOS image must carry (design-decisions §1433). |
+| `scripts/gcc-spike/cross-check.sh` | Compile and link a C program and a C++ one with cross.sh's GCC, against the CURRENT libc.a. |
+| `scripts/gcc-spike/cross.sh` | Build GCC 16.2 as a cross compiler for SlateOS, with libgcc and libstdc++ built for SlateOS. |
+| `scripts/gcc-spike/native.sh` | Build GCC 16.2 to run ON SlateOS, with libgcc and libstdc++; slatelink.sh then makes the image's tree. |
 | `scripts/gcc-spike/run.sh` | Cross-compile GCC's compilers (gcc, g++, cc1, cc1plus, ...) and link them against SlateOS's libc.a. |
+| `scripts/gcc-spike/slatelink.sh` | Relink the GCC native.sh built against the CURRENT libc.a, install it, and make the image's tree. |
 | `scripts/gdb-spike/run.sh` | Cross-compile upstream GDB, with GMP and MPFR, and link it against SlateOS's libc.a. |
 | `scripts/gdb-spike/slatelink.sh` | Link GDB's and gdbserver's built objects against the CURRENT libc.a, and stage them. |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
@@ -520,4 +524,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_510 scripts._
+_514 scripts._

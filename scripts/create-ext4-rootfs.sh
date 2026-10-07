@@ -1181,6 +1181,11 @@ else
     # the fourteen, which are always linked and staged together.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/binutils/as" \
         scripts/binutils-spike/slatelink.sh
+    # GCC's relink is minutes: slatelink.sh links its programs against the
+    # new libc.a, installs them again and remakes build/spike/gcc. libgcc
+    # and libstdc++ are archives, which a libc.a rebuild leaves as they are.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/gcc/usr/bin/gcc" \
+        scripts/gcc-spike/slatelink.sh
     # Mono's relink is seconds: slatelink.sh links the runtime's objects
     # against the new libc.a and stages mono-sgen again. Its class libraries
     # are .NET bytecode, which no libc.a change makes stale.
@@ -1931,6 +1936,66 @@ else
     echo "[rootfs]       wsl -d Ubuntu --exec bash scripts/binutils-spike/run.sh)"
 fi
 
+# --- GCC 16.2, the GNU C and C++ compilers, running on SlateOS ----------------
+# Built by scripts/gcc-spike/native.sh with the cross GCC cross.sh makes, and
+# relinked against libc.a by its slatelink.sh, which also assembles
+# build/spike/gcc: a tree rooted at /, with --prefix=/usr -- the drivers in
+# /usr/bin, cc1, cc1plus and collect2 in /usr/libexec/gcc/, libgcc and GCC's
+# own headers in /usr/lib/gcc/, libstdc++ and its headers, musl's and Linux's
+# headers in /usr/include, and the empty crt objects and archives
+# (design-decisions.md 1185 says why each is what it is). Staged whole, and
+# then what changes with this tree rather than with GCC:
+#
+#   /usr/lib/libc.a                       the C library a program is linked
+#                                         with, the sysroot's
+#   /usr/x86_64-linux-musl/include        our overlay of musl's headers
+#                                         (posix/include), in GCC's tool
+#                                         include directory: searched after
+#                                         C++'s headers and immediately before
+#                                         /usr/include, as #include_next needs
+#   /usr/x86_64-linux-musl/bin/as, ld     binutils' assembler and linker,
+#                                         where GCC looks for them first --
+#                                         found relative to GCC itself, so a
+#                                         compiler run from /mnt/usr/bin finds
+#                                         them under /mnt too
+#
+# Not without binutils: a compiler with no assembler compiles nothing. Not
+# stale: GCC's programs link libc.a, and the gate below refuses them older
+# than it, as every port's.
+# PROGRAM: /usr/bin/gcc -- GCC 16.2, the GNU C compiler. (scripts/gcc-spike/)
+# PROGRAM: /usr/bin/g++, /usr/bin/c++ -- GCC 16.2, the GNU C++ compiler. (scripts/gcc-spike/)
+# PROGRAM: /usr/bin/cpp -- GCC 16.2's C preprocessor. (scripts/gcc-spike/)
+# PROGRAM: /usr/bin/gcov -- GCC 16.2's test-coverage tool. (scripts/gcc-spike/)
+GCC_TREE="$ROOT_DIR/build/spike/gcc"
+GCC_STALE=0
+if [ -x "$GCC_TREE/usr/bin/gcc" ] && [ "$binutils_present" -eq 14 ]; then
+    cp -a "$GCC_TREE/." "$STAGE/"
+    chmod 0755 "$STAGE/usr/bin/gcc" "$STAGE/usr/bin/g++" "$STAGE/usr/bin/c++" "$STAGE/usr/bin/cpp" \
+        "$STAGE/usr/bin/gcov"
+    mkdir -p "$STAGE/usr/x86_64-linux-musl/include" "$STAGE/usr/x86_64-linux-musl/bin"
+    cp -R "$ROOT_DIR/posix/include/." "$STAGE/usr/x86_64-linux-musl/include/"
+    cp "$SYSROOT_LIBC" "$STAGE/usr/lib/libc.a"
+    cp -L "$BINUTILS_DIR/as" "$STAGE/usr/x86_64-linux-musl/bin/as"
+    cp -L "$BINUTILS_DIR/ld.bfd" "$STAGE/usr/x86_64-linux-musl/bin/ld"
+    chmod 0755 "$STAGE/usr/x86_64-linux-musl/bin/as" "$STAGE/usr/x86_64-linux-musl/bin/ld"
+    echo "[rootfs] staged GCC 16.2 (linked against our libc.a): /usr/bin/gcc, g++, c++, cpp," \
+         "cc1 and cc1plus, libgcc, libstdc++, the C library's headers and libc.a" \
+         "($(du -sm "$GCC_TREE" | cut -f1) MB)"
+    if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$GCC_TREE/usr/bin/gcc" ]; then
+        echo "[rootfs] WARNING: build/spike/gcc is OLDER than the sysroot libc.a -- its programs"
+        echo "[rootfs]          link a stale libc. Relink them, minutes:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/gcc-spike/slatelink.sh"
+        GCC_STALE=1
+    fi
+elif [ -x "$GCC_TREE/usr/bin/gcc" ]; then
+    echo "[rootfs] WARNING: GCC is built but binutils is not -- leaving GCC off the image:"
+    echo "[rootfs]          without an assembler it compiles nothing. Build binutils:"
+    echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/binutils-spike/run.sh"
+else
+    echo "[rootfs] NOTE: GCC is not in build/spike -- /usr/bin/gcc and g++ will be absent"
+    echo "[rootfs]       (build them with scripts/gcc-spike/cross.sh, then native.sh)"
+fi
+
 # --- fastpy, lane B's Python compiler: built here, from its checkout ----------
 # `fastpy hello.py -o hello` on SlateOS: /bin/python3 runs the compiler, and
 # LLVM's tools above make an object and then a program of the IR it writes,
@@ -2667,6 +2732,22 @@ if [ "$BINUTILS_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/as, /bin/ld.bfd and the rest on the image would be built"
         echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$GCC_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: build/spike/gcc is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/gcc is STALE."
+        echo "[rootfs]        Its programs link an older libc.a than the one in the sysroot,"
+        echo "[rootfs]        so /usr/bin/gcc and the rest on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/gcc-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1

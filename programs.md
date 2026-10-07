@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**482 programs; 323 on the image, 6 carried inside the kernel.**
+**486 programs; 327 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -499,7 +499,7 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/`, the rootfs recipe's) -- 28
+## Ported programs (`scripts/`, the rootfs recipe's) -- 32
 
 Programs that are no cargo target, each built by its own scripts and
 staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs
@@ -514,9 +514,13 @@ when it has been built on the machine that makes it.
 | `bash` | GNU bash 5.2, the shell. | yes | `scripts/bash-spike/` |  |
 | `c++filt` | GNU c++filt 2.47: turns mangled C++ symbol names back into C++. | yes | `scripts/binutils-spike/` |  |
 | `cmake` | CMake 4.4.3, the build-system generator. | yes | `scripts/cmake-spike/` |  |
+| `cpp` | GCC 16.2's C preprocessor. | yes | `scripts/gcc-spike/` |  |
 | `elfedit` | GNU elfedit 2.47: edits the header of an ELF file. | yes | `scripts/binutils-spike/` |  |
 | `espeak-ng` | eSpeak NG 1.52.0, the speech synthesizer. | yes | `scripts/espeak-spike/` |  |
 | `fastpy` | fastpy, which compiles a Python program into a native SlateOS program. | yes | `scripts/fastpy-slateos-bundle.py` |  |
+| `g++` | GCC 16.2, the GNU C++ compiler. | yes | `scripts/gcc-spike/` | `c++` |
+| `gcc` | GCC 16.2, the GNU C compiler. | yes | `scripts/gcc-spike/` |  |
+| `gcov` | GCC 16.2's test-coverage tool. | yes | `scripts/gcc-spike/` |  |
 | `gdbserver` | GDB 18.1's remote stub, run beside the program being debugged; waits on the kernel as gdb does. | yes | `scripts/gdb-spike/` |  |
 | `gnu-ar` | GNU ar 2.47: makes, edits and lists static libraries. | yes | `scripts/binutils-spike/` |  |
 | `gnu-gdb` | GDB 18.1, the GNU debugger: examines a program's symbols and machine code; running one under it waits on the kernel. | yes | `scripts/gdb-spike/` |  |

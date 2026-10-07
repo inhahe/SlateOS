@@ -637,7 +637,7 @@ impl DesktopShell {
             Hit::StartMenuShortcut(which) if self.start_menu_open => {
                 Some(self.start_shortcut_rect(which))
             }
-            Hit::PowerButton if self.start_menu_open => Some(self.power_button_rect()),
+            Hit::PowerButton if self.start_menu_open => Some(self.power_shut_down_rect()),
             Hit::PowerCaret if self.start_menu_open => Some(self.power_caret_rect()),
             Hit::PowerMenuEntry(row) if self.power_menu_open => {
                 (row < self.power_menu_visible_rows()).then(|| self.power_menu_row_rect(row))
@@ -1333,7 +1333,7 @@ impl DesktopShell {
         menu.children.push(button(
             Hit::PowerButton,
             power::PowerChoice::ShutDown.label(),
-            self.power_button_rect(),
+            self.power_shut_down_rect(),
         ));
         let mut caret = button(Hit::PowerCaret, "Power options", self.power_caret_rect());
         caret.value = Some(Value::Chosen(self.power_menu_open));

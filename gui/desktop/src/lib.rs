@@ -148,6 +148,8 @@ pub mod window_rules;
 #[cfg(test)]
 mod field_menu_tests;
 #[cfg(test)]
+mod layout_lint_tests;
+#[cfg(test)]
 mod note_tests;
 #[cfg(test)]
 mod notification_menu_tests;
@@ -4324,6 +4326,17 @@ impl DesktopShell {
         let button = self.power_button_rect();
         let w = self.scale(POWER_CARET_WIDTH).min(button.w);
         Rect::new(button.x + button.w - w, button.y, w, button.h)
+    }
+
+    /// Where a press on the power button means "Shut down": all of it but
+    /// its caret -- the gap before the caret included, which
+    /// [`hit_test`](Self::hit_test) gives the button. What tools are told the
+    /// button is: the whole button holds the caret, and a press there is the
+    /// caret's.
+    pub(crate) fn power_shut_down_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let caret = self.power_caret_rect();
+        Rect::new(button.x, button.y, (caret.x - button.x).max(0.0), button.h)
     }
 
     /// The part of the power button drawn as "Shut down": all of it but the
@@ -20467,6 +20480,14 @@ mod overview_wiring_tests {
             let mut file = notifsettings::NotifFile::load();
             file.settings.grouping = notifsettings::Grouping::ByTime;
             file.save().expect("save the grouping");
+            // Read at start, too: a desktop starting with the file as it is.
+            let mut started = shell();
+            started.load_notification_rules();
+            assert_eq!(
+                started.notifications.grouping(),
+                notifsettings::Grouping::ByTime,
+                "the file's grouping was not read at start"
+            );
             assert!(
                 s.poll_notification_rules(),
                 "the grouping was not picked up"

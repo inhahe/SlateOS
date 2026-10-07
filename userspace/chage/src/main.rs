@@ -505,6 +505,23 @@ fn cmd_chage(argv: &[OsString], path: &Path, caller_uid: u32) -> i32 {
         return 1;
     }
 
+    // Anything but `-l` changes the database, so it is held (`userdb::Lock`)
+    // from before the read until this function returns, after the save --
+    // across the interactive prompts too, as shadow-utils' `chage` holds
+    // `/etc/shadow`. Without it, another account tool's change made in the
+    // meantime would be erased by this save.
+    let _lock = if args.list {
+        None
+    } else {
+        match UserDb::lock(path) {
+            Ok(lock) => Some(lock),
+            Err(_) => {
+                eprintln!("chage: cannot lock {}; try again later.", path.display());
+                return 1;
+            }
+        }
+    };
+
     // The database is loaded before the permission check rather than after,
     // because identifying the caller now means resolving their uid against it.
     let mut db = match load(path) {

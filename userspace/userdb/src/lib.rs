@@ -1048,6 +1048,60 @@ impl UserDb {
         out
     }
 
+    /// Take the exclusive hold on the database at `path` that a load, a change
+    /// and a save must happen under. See [`Lock`].
+    ///
+    /// While another program holds it this tries [`LOCK_TRIES`] times, a second
+    /// apart, as shadow-utils' `commonio_lock` does. Any other failure -- the
+    /// directory is not writable, the caller is not privileged -- is returned
+    /// at once, since waiting cannot change it. (Upstream retries those too,
+    /// so an unprivileged `chpasswd` takes fifteen seconds to say it cannot
+    /// lock `/etc/passwd`.)
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::WouldBlock`] if another program still holds the
+    /// database after the last try; otherwise the error from creating or
+    /// locking `<path>.lock`.
+    pub fn lock(path: impl AsRef<std::path::Path>) -> std::io::Result<Lock> {
+        Self::lock_trying(path.as_ref(), LOCK_TRIES, std::time::Duration::from_secs(1))
+    }
+
+    /// [`UserDb::lock`] with the number of tries and the pause between them
+    /// given, so that a test of a held lock does not take fifteen seconds.
+    fn lock_trying(
+        path: &std::path::Path,
+        tries: u32,
+        pause: std::time::Duration,
+    ) -> std::io::Result<Lock> {
+        let lock_path = lock_path_for(path);
+        let mut open = std::fs::OpenOptions::new();
+        open.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // Owner-only, as the database itself is: the file holds nothing,
+            // but nobody else has a reason to open it, and a world-writable
+            // lock is one anybody could hold to keep the administrator out.
+            open.mode(0o600);
+        }
+        let file = open.open(&lock_path)?;
+        let mut tried: u32 = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Lock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tried = tried.saturating_add(1);
+                    if tried >= tries {
+                        return Err(std::io::ErrorKind::WouldBlock.into());
+                    }
+                    std::thread::sleep(pause);
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            }
+        }
+    }
+
     /// Read the database from `path`.
     ///
     /// A file that does not exist is an empty database; every *other* failure
@@ -1554,6 +1608,40 @@ impl Staged {
     }
 }
 
+/// How many times [`UserDb::lock`] tries a database another program holds,
+/// one second apart: shadow-utils' `LOCK_TRIES` and `LOCK_SLEEP`
+/// (`lib/commonio.c`).
+pub const LOCK_TRIES: u32 = 15;
+
+/// An exclusive hold on an account database, released when it is dropped.
+///
+/// A program that loads the database, changes it and saves it holds this from
+/// before the load until after the save. Without it two such programs running
+/// at once both load the same state, and the second save silently erases the
+/// first one's change: the lost update shadow-utils' `/etc/passwd.lock`
+/// exists to prevent, and one this database had no defence against until
+/// 2026-10-07.
+///
+/// The hold is an advisory `flock` on `<database>.lock` beside the database
+/// ([`std::fs::File::try_lock`]). Advisory is enough because every writer of
+/// the database takes it, and a lock the kernel holds dies with its holder,
+/// so a crash leaves nothing behind to clear by hand. shadow-utils' lock
+/// *files* do, and have to carry a pid to tell a stale one from a live one.
+/// The file itself stays, empty: removing it on release would let a third
+/// program lock a fresh file while a second still waits on the old one.
+#[derive(Debug)]
+pub struct Lock {
+    _file: std::fs::File,
+}
+
+/// `<path>.lock`: the database's whole file name with `.lock` after it, so
+/// `/etc/users.yaml` is held through `/etc/users.yaml.lock`.
+fn lock_path_for(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    std::path::PathBuf::from(name)
+}
+
 /// Draw a salt for the method new passwords get from `/dev/urandom`, or
 /// `None` if it cannot be read. See [`random_salt_of`].
 #[must_use]
@@ -1922,6 +2010,41 @@ users:
         let mut record = Record::new();
         assert_eq!(record.set_password("pw"), Ok(()));
         assert_eq!(record.check_password("pw"), Auth::Accepted);
+    }
+
+    /// One holder at a time, and the hold ends with the [`Lock`]. A second
+    /// open of the lock file is a second holder even within one process --
+    /// `flock` belongs to the open, not the process -- which is what lets
+    /// this be tested here.
+    #[test]
+    fn a_held_database_cannot_be_held_again_until_it_is_released() {
+        let scratch = ScratchDir::new("userdb-lock");
+        let path = scratch.path("users.yaml");
+        let held = UserDb::lock(&path).expect("the first hold");
+        let second = UserDb::lock_trying(&path, 2, std::time::Duration::from_millis(10));
+        assert_eq!(
+            second.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert!(UserDb::lock_trying(&path, 1, std::time::Duration::ZERO).is_ok());
+        // The file stays: see `Lock`.
+        assert!(scratch.path("users.yaml.lock").exists());
+    }
+
+    /// A lock that cannot even be created is not one another program holds,
+    /// so it is refused at once rather than after fifteen seconds of waiting.
+    #[test]
+    fn a_lock_that_cannot_be_made_is_refused_without_waiting() {
+        let scratch = ScratchDir::new("userdb-lock-nodir");
+        let path = scratch.path("no-such-dir/users.yaml");
+        let started = std::time::Instant::now();
+        let refused = UserDb::lock_trying(&path, LOCK_TRIES, std::time::Duration::from_secs(1));
+        assert_eq!(
+            refused.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     /// A quotation mark in a display name used to end the value early and

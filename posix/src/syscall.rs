@@ -168,6 +168,14 @@ pub const SYS_PROCESS_IS_READY: u64 = 509;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;
 pub const SYS_THREAD_JOIN: u64 = 512;
+/// Join a thread waiting at most a time: `thread_join_timeout(target,
+/// out_ptr, timeout_ns)`, as [`SYS_THREAD_JOIN`] -- the exit value through
+/// `out_ptr`, `Cancelled` for a thread that was killed -- with `timeout_ns`
+/// of the monotonic clock the most it waits: 0 answers at once, `u64::MAX`
+/// waits for ever. `TimedOut` for a thread still running when the time is
+/// up; `WouldBlock` still means another thread is joining it. Lane A's
+/// (1085); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_THREAD_JOIN_TIMEOUT: u64 = 1085;
 pub const SYS_PROCESS_KILL: u64 = 506;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 /// Spawn with an explicit capability policy. arg0 = `*const SpawnEx2Args`.

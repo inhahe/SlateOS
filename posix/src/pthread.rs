@@ -1124,7 +1124,14 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
         }
         exit_value = PTHREAD_CANCELED_VALUE;
     }
+    finish_join(thread_id, retval, exit_value)
+}
 
+/// The end of a join the kernel has confirmed -- the thread has exited, or
+/// was killed (`exit_value` then `PTHREAD_CANCELED`): its exit value to
+/// `*retval`, and its mapping freed. Shared by [`pthread_join`] and the
+/// kernel's timed join ([`kernel_join`]).
+fn finish_join(thread_id: PthreadT, retval: *mut *mut u8, exit_value: i64) -> i32 {
     if !retval.is_null() {
         // SAFETY: caller guarantees retval is a valid pointer.
         unsafe {
@@ -1159,9 +1166,9 @@ fn is_calling_thread(thread_id: PthreadT) -> bool {
 ///
 /// "Exited" is the thread's own word on its way out, its slot's
 /// `STATE_EXITED`. A thread killed before it could say so -- by a fault it
-/// did not handle -- is never seen to have exited here, though
-/// `pthread_join` would return `PTHREAD_CANCELED` for it: the kernel's join
-/// only waits (known-issues.md, D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD).
+/// did not handle -- is never seen to have exited here; the timed and
+/// non-waiting joins ask the kernel about it ([`kernel_join`]), which knows
+/// (known-issues/D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD.md).
 fn join_readiness(thread_id: PthreadT) -> Result<bool, i32> {
     if is_calling_thread(thread_id) {
         return Err(errno::EDEADLK);
@@ -1174,21 +1181,100 @@ fn join_readiness(thread_id: PthreadT) -> Result<bool, i32> {
     }
 }
 
+/// What the kernel's join with a time limit came to ([`kernel_join`]).
+enum KernelJoin {
+    /// The thread is gone -- it exited, or was killed -- and the join is
+    /// done here too ([`finish_join`]): its answer.
+    Joined(i32),
+    /// Still running when the time was up.
+    Running,
+    /// Another thread is joining it already.
+    Joining,
+    /// A kernel without `SYS_THREAD_JOIN_TIMEOUT`.
+    Unsupported,
+    /// No such thread for the kernel either.
+    Gone,
+}
+
+/// Join `thread_id` through the kernel, waiting at most `timeout_ns` of the
+/// monotonic clock -- 0 not at all, `u64::MAX` for ever
+/// (`SYS_THREAD_JOIN_TIMEOUT`, lane A's). The kernel sees a thread that was
+/// killed before it could exit, which the slot's own word never reports
+/// ([`join_readiness`]): it joins as `PTHREAD_CANCELED`, as
+/// [`pthread_join`]'s does (known-issues/D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-
+/// THREAD.md). A wait a signal ends goes on for the time that is left: no
+/// join answers `EINTR`.
+fn kernel_join(thread_id: PthreadT, retval: *mut *mut u8, timeout_ns: u64) -> KernelJoin {
+    let started = monotonic_ns();
+    loop {
+        let left = if timeout_ns == u64::MAX {
+            u64::MAX
+        } else {
+            timeout_ns.saturating_sub(monotonic_ns().saturating_sub(started))
+        };
+        let mut exit_value: i64 = 0;
+        let ret = syscall::syscall3(
+            syscall::SYS_THREAD_JOIN_TIMEOUT,
+            thread_id,
+            (&raw mut exit_value) as u64,
+            left,
+        );
+        match ret {
+            r if r >= 0 => {
+                return KernelJoin::Joined(finish_join(thread_id, retval, exit_value));
+            }
+            KERNEL_ERR_CANCELLED => {
+                return KernelJoin::Joined(finish_join(thread_id, retval, PTHREAD_CANCELED_VALUE));
+            }
+            errno::native::TIMED_OUT => return KernelJoin::Running,
+            errno::native::WOULD_BLOCK => return KernelJoin::Joining,
+            // A signal: wait again, for what is left of the time.
+            errno::native::INTERRUPTED => {}
+            r if r == errno::native::NO_SUCH_SYSCALL
+                || (cfg!(not(target_os = "none")) && r == syscall::HOST_ENOSYS) =>
+            {
+                return KernelJoin::Unsupported;
+            }
+            _ => return KernelJoin::Gone,
+        }
+    }
+}
+
+/// Nanoseconds on the monotonic clock, for [`kernel_join`]'s time left.
+fn monotonic_ns() -> u64 {
+    let mut now = crate::stat::Timespec::default();
+    if crate::time::clock_gettime(crate::time::CLOCK_MONOTONIC, &raw mut now) != 0 {
+        return 0;
+    }
+    u64::try_from(now.tv_sec)
+        .unwrap_or(0)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or(0))
+}
+
 /// Join a thread only if it has already exited (`pthread_tryjoin_np`, GNU):
 /// as [`pthread_join`] then, and `EBUSY` at once while it runs. `EDEADLK`
 /// for the calling thread, `EINVAL` for a detached one, `ESRCH` for one
 /// this process does not know.
+///
+/// A thread that was killed has "exited" too: the kernel is asked, without
+/// waiting, when the thread has not said so itself ([`kernel_join`]). On a
+/// kernel without that call such a thread is `EBUSY` for ever, as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_tryjoin_np(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
     match join_readiness(thread_id) {
         Ok(true) => pthread_join(thread_id, retval),
-        Ok(false) => errno::EBUSY,
+        Ok(false) => match kernel_join(thread_id, retval, 0) {
+            KernelJoin::Joined(r) => r,
+            KernelJoin::Running | KernelJoin::Joining | KernelJoin::Unsupported => errno::EBUSY,
+            KernelJoin::Gone => errno::ESRCH,
+        },
         Err(e) => e,
     }
 }
 
-/// How long [`pthread_timedjoin_np`] sleeps between looks: the kernel has
-/// no timed join, so it polls.
+/// How long [`pthread_timedjoin_np`] sleeps between looks on a kernel
+/// without a timed join, where it polls.
 const TIMEDJOIN_POLL_NS: i64 = 1_000_000;
 
 /// Join a thread, waiting for it until `abstime` on `CLOCK_REALTIME`
@@ -1250,6 +1336,12 @@ unsafe fn timed_join(
     }
     // SAFETY: non-null, the caller's.
     let deadline = unsafe { *abstime };
+    // The kernel waits, in one call, for the time left on `clockid` --
+    // measured again after a wait it ends early -- and sees a thread killed
+    // before it could exit ([`kernel_join`]). A kernel without that call
+    // leaves the loop below, which looks at the thread's own word every
+    // millisecond and never sees such a thread go.
+    let mut kernel_can = true;
     loop {
         match join_readiness(thread_id) {
             Ok(true) => return pthread_join(thread_id, retval),
@@ -1268,6 +1360,23 @@ unsafe fn timed_join(
             .saturating_mul(1_000_000_000)
             .saturating_add(i128::from(deadline.tv_nsec))
             .saturating_sub(i128::from(now.tv_nsec));
+        if kernel_can {
+            // Asked even when the time is already up, without waiting: a
+            // thread already gone is joined whatever the deadline, as glibc
+            // joins one.
+            let wait = u64::try_from(left_ns.max(0)).unwrap_or(u64::MAX);
+            match kernel_join(thread_id, retval, wait) {
+                KernelJoin::Joined(r) => return r,
+                KernelJoin::Gone => return errno::ESRCH,
+                // glibc's answer to a second joiner.
+                KernelJoin::Joining => return errno::EINVAL,
+                KernelJoin::Running if left_ns <= 0 => return errno::ETIMEDOUT,
+                // The kernel's monotonic wait ended before `clockid`'s
+                // deadline (a clock set back): measure again.
+                KernelJoin::Running => continue,
+                KernelJoin::Unsupported => kernel_can = false,
+            }
+        }
         if left_ns <= 0 {
             return errno::ETIMEDOUT;
         }

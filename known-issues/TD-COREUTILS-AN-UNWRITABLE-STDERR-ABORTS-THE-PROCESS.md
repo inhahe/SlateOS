@@ -216,9 +216,21 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Twenty-one programs still lack it: `bc chmod chown cmp csplit
-date df dir du ed find install kill ls more patch stat tail vdir awk hostname`.
-(`sort` was converted on 2026-10-03, its output moved onto
+all. Nineteen programs still lack it: `awk bc chmod csplit date df dir du ed
+find hostname install kill ls more patch stat tail vdir`. That list is now
+pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
+a program is added without the guard, when one is converted without being
+taken off the list, and when a program has only one half of it. Two had
+exactly that until 2026-10-07: `ps` expanded the macro and never called
+`restore`, and `chown` called `restore` without the macro. Both were
+silent successes with their standard output closed. Both are fixed, and
+`ps` also reports a lost diagnostic, as procps' `close_stdout` does.
+Since 2026-10-07 the guard also puts `SIGPIPE` back (design-decisions §1060),
+so each of these is also still the old exception there: a reader leaving
+ends it quietly with status 0 or the status it had earned, where GNU's dies
+of the signal with 141. (`cmp` was converted on 2026-10-07 with diffutils'
+`xstdopen` and its own stdout checks: 163 rows agree with GNU 3.10, 10 differ
+on purpose. `sort` was converted on 2026-10-03, its output moved onto
 `stdio::StdioFile` so that a failure is upstream's `write failed` or `fflush
 failed` -- whichever glibc's buffer makes it -- followed by `close_stdout`'s
 `write error`; 32 of 35 descriptor rows agree, the rest `--help`'s text.

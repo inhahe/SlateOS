@@ -71,7 +71,6 @@ mod select;
 mod signames;
 mod sortformat;
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use coreutils::procps::devname::Devname;
@@ -418,8 +417,10 @@ impl Ps {
         line.extend_from_slice(b": ");
         line.extend_from_slice(msg);
         line.push(b'\n');
-        // Standard error is the last place a failure could be reported.
-        let _ = std::io::stderr().write_all(&line);
+        // Standard error is the last place a failure could be reported, so
+        // a lost one is recorded for `main`'s `close_stderr` to act on, as
+        // procps' `close_stdout` does: the run then fails.
+        coreutils::stdfd::diag_bytes(&line);
     }
 
     /// `catastrophic_failure`: glibc's `error_at_line`, then exit 1.
@@ -427,8 +428,8 @@ impl Ps {
         self.flush();
         let mut text = self.argv0.clone();
         text.extend_from_slice(format!(":{file}:{line}: {msg}\n").as_bytes());
-        // As above: nowhere else to report a failure to write it.
-        let _ = std::io::stderr().write_all(&text);
+        // As above.
+        coreutils::stdfd::diag_bytes(&text);
         Exit::Status(1)
     }
 
@@ -436,19 +437,29 @@ impl Ps {
     pub fn eprint(&mut self, text: &[u8]) {
         self.flush();
         // As above.
-        let _ = std::io::stderr().write_all(text);
+        coreutils::stdfd::diag_bytes(text);
     }
 
     /// Write what has been printed so far. A closed pipe ends `ps` with
-    /// status 0 (upstream's SIGPIPE handler); any other write error is
-    /// `close_stdout`'s `write error`, status 1.
+    /// status 0 (upstream's `SIGPIPE` handler); any other write error -- a
+    /// closed or full standard output -- is `close_stdout`'s `write error`,
+    /// status 1.
     pub fn flush(&mut self) {
         if self.out.is_empty() {
             return;
         }
         let data = std::mem::take(&mut self.out);
-        let mut stdout = std::io::stdout().lock();
-        if let Err(e) = stdout.write_all(&data).and_then(|()| stdout.flush()) {
+        // Descriptor 1 itself: `io::stdout()` answers a closed one's `EBADF`
+        // with success, where procps' `ps >&-` is `write error: Bad file
+        // descriptor`, status 1.
+        if let Err(e) = coreutils::stdfd::write_all(1, &data) {
+            // Always quiet, and never `stdfd::reader_gone`: procps does not
+            // die of `SIGPIPE`, it catches it (`signal_handler`'s
+            // `if (signo == SIGPIPE) _exit (0);`), and it installs that handler
+            // whatever disposition it inherited, so `ps | head` ends with
+            // status 0 even under `trap '' PIPE`. Here `main` ignores
+            // `SIGPIPE` after restoring the descriptors, so the write returns
+            // `EPIPE`.
             if e.kind() == std::io::ErrorKind::BrokenPipe {
                 std::process::exit(0);
             }
@@ -457,8 +468,9 @@ impl Ps {
                 format!(": write error: {}\n", coreutils::errmsg::strerror(&e)).as_bytes(),
             );
             // The write that failed was the report channel's sibling; this is
-            // the last place to say so.
-            let _ = std::io::stderr().write_all(&msg);
+            // the last place to say so, and the status is 1 whether or not
+            // it arrives.
+            coreutils::stdfd::diag_bytes(&msg);
             std::process::exit(1);
         }
     }
@@ -887,6 +899,16 @@ fn main() -> std::process::ExitCode {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     coreutils::guard_std_fds!();
+    // The descriptors as they were given: a closed standard output is
+    // procps' `write error: Bad file descriptor`, not a run whose output
+    // went to the `/dev/null` the runtime put there. This expanded the macro
+    // and never called it until 2026-10-07, so `ps >&-` reported success.
+    coreutils::stdfd::restore();
+    // procps catches `SIGPIPE` and exits 0, whatever disposition it was
+    // given (`signal_handler`), so here a write into a closed pipe must come
+    // back as `EPIPE` for `Ps::flush` to answer the same way. `restore` has
+    // just put back whatever was inherited, which may be the default.
+    coreutils::stdfd::ignore_sigpipe();
     let argv: Vec<Vec<u8>> = std::env::args_os().map(OsString::into_vec).collect();
     // `setenv ("TZ", ":/etc/localtime", 0)`.
     let tz = env_bytes("TZ").unwrap_or_else(|| b":/etc/localtime".to_vec());
@@ -898,7 +920,14 @@ fn main() -> std::process::ExitCode {
         Err(Exit::Status(c)) => c,
     };
     ps.flush();
-    std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
+    // procps' `close_stdout`, whose last act is to close standard error and
+    // fail the run if that does: a diagnostic that was lost turns the earned
+    // status into 1. Measured, and with WSL's terminal size `ps` always has
+    // one: its "screen size is bogus" warning, so `ps 2>&-` is status 1.
+    coreutils::stdfd::close_stderr(
+        std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        1,
+    )
 }
 
 #[cfg(not(unix))]

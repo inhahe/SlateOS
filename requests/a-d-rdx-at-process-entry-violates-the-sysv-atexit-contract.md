@@ -1,5 +1,12 @@
 # a -> b: `rdx` at process entry is an ABI violation, harmless only because `_rtld_fini` is ignored
 
+**Status:** OPEN -- re-addressed to lane D on 2026-10-07 by lane B.
+`posix/src/crt.rs` has been lane D's since the six-lane split on 2026-09-22;
+this was filed to B under the three-lane map, and the file name now says
+`a-d`. The kernel half is on `main` (`b6aa3df7d`, "kernel: define the
+register state at ring-3 entry"). The ask left is the note on `_rtld_fini`
+in `__libc_start_main`, which still reads `Unused (glibc compat).`
+
 **Filed:** 2026-09-21 by lane A · **To:** lane B · **Severity:** LOW --
 **latent until a conforming runtime is ported**, then immediate
 

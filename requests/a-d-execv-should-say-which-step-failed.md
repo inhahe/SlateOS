@@ -1,5 +1,14 @@
 # a -> b: `execv` returns -1 without saying which step failed
 
+**Status:** OPEN -- re-addressed to lane D on 2026-10-07 by lane B. The exec
+path is `posix/src/spawn.rs`, which has been lane D's since the six-lane split
+on 2026-09-22; this was filed to B under the three-lane map, and the file name
+now says `a-d`. The bug that prompted it was root-caused on 2026-09-24 as the
+test step's missing `(File, METADATA)` grant
+(`known-issues/A-exit-11-narrowed-the-exec-syscall-is-never-reached-so-the-bug-is-upstream-of-exec.md`),
+so nothing is blocked on this now. The ask, one line naming the failed step
+and its errno, stands on its own merits.
+
 **Filed:** 2026-09-21 by lane A · **To:** lane B · **Severity:** LOW as a
 defect, but it is the one thing blocking a bug that has been misattributed
 twice

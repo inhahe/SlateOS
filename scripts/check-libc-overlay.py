@@ -127,9 +127,7 @@ EXTRA_BUILDS: dict[str, list[str]] = {
 # (name, config) -> why its visibility there is not glibc's: a difference
 # musl's own header makes, which the overlay has no say in.
 KNOWN: dict[tuple[str, str], str] = {
-    ("getdents64", "lfs64"): "musl's <dirent.h> makes it a macro for getdents under "
-                             "_LARGEFILE64_SOURCE, which glibc declares it without",
-    **{("pidfd_send_signal", cfg): "musl's <signal.h> has siginfo_t only for a POSIX "
+    **{("pidfd_send_signal", cfg):"musl's <signal.h> has siginfo_t only for a POSIX "
                                    "compilation, and there is none in a strict ISO C one "
                                    "for the declaration to take"
        for cfg in ("c17", "c23", "bfp", "ext", "lfs64")},

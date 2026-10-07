@@ -21,6 +21,15 @@
 
 #include <bits/slateos-features.h>
 
+/* Under _LARGEFILE64_SOURCE -- which _GNU_SOURCE turns on, as glibc's does
+ * (<features.h> here) -- musl's <dirent.h> makes getdents64 a macro for its
+ * getdents, `int (int, struct dirent *, size_t)`. glibc's getdents64 is a
+ * function of its own, `ssize_t (int, void *, size_t)`, declared under
+ * _GNU_SOURCE alone, and it is the one this library defines; the macro also
+ * named a function nothing declares when _LARGEFILE64_SOURCE came without
+ * _GNU_SOURCE. So the macro goes, and glibc's declaration stands below. */
+#undef getdents64
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,11 +40,8 @@ int scandirat(int, const char *__restrict, struct dirent ***__restrict,
               int (*)(const struct dirent *),
               int (*)(const struct dirent **, const struct dirent **));
 
-/* The Linux system call, whose records are struct linux_dirent64. (Under
- * _LARGEFILE64_SOURCE musl's <dirent.h> makes the name getdents'.) */
-#ifndef getdents64
+/* The Linux system call, whose records are struct linux_dirent64. */
 ssize_t getdents64(int, void *, size_t);
-#endif
 #endif
 
 #ifdef _SLATEOS_USE_MISC

@@ -1,5 +1,14 @@
 ## TD-C-THE-DESKTOP-OFFERS-A-CALENDAR-WIDGET-THAT-SHOWS-ONLY-ITS-NAME (lane C, 2026-10-06) — OPEN
-**Status:** OPEN -- (1) done 2026-10-06; (2) to (4) open.
+**Status:** OPEN -- (1), (2) and (4) done 2026-10-06; (3) open.
+
+**2026-10-06, later still: (2) and (4).** The edit mode and its selected
+widget are one thing now, the widget *held* (`DesktopWidgetManager::hold`):
+the shell takes hold of a widget as its drag starts and lets go as it ends,
+and meanwhile the layer draws the grid it lands on and rings it in the
+accent -- a drag had no grid to show where the widget would go. The picker
+is deleted, with its seven palette defects (retired in
+`scripts/reintro-palette.py`), and so is `toggle_visibility`; `visible`
+stays, as a layout file may say it. Left: (3), sizes on the widget's menu.
 
 **2026-10-06, later: the calendar shows a month.** The month today is in,
 made by the popup's calendar (`CalendarView::month_glance`) and handed to the

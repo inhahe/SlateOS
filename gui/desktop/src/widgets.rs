@@ -9,7 +9,6 @@
 //! via a capability-gated registration API.
 
 use appearance::Palette;
-use appearance::Surface;
 use appearance::readable_on;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
@@ -38,16 +37,17 @@ pub use accessible::WidgetPart;
 // role is everything else.  Every alpha below is untouched by the conversion;
 // only the three channels in front of it changed hands.
 //
-// Four judgements had to be made when the hardcoded hexes came out, because a
-// literal carries no role until someone assigns one:
+// Three judgements had to be made when the hardcoded hexes came out, because a
+// literal carries no role until someone assigns one, and one since:
 //
-// *The selected widget's outline takes the accent.*  In edit mode a 2px ring is
-// drawn around exactly the widget you have picked, and around nothing else.  It
-// was a hardcoded blue that appears in no other state, and a colour that
-// appears in exactly one state marks that state -- here, which widget you are
-// working on, which is a position, which is what the accent is for.  A ring
-// floating on the wallpaper cannot say "here" with a surface step the way a
-// hovered list row can, so the accent is also the only mark available to it.
+// *The held widget's outline takes the accent.*  While a widget is being moved
+// a 2px ring is drawn around exactly it, and around nothing else.  It was a
+// hardcoded blue that appears in no other state, and a colour that appears in
+// exactly one state marks that state -- here, which widget you are moving,
+// which is a position, which is what the accent is for; within a single render
+// the accent has to mean that one thing.  A ring floating on the wallpaper
+// cannot say "here" with a surface step the way a hovered list row can, so the
+// accent is also the only mark available to it.
 //
 // *Everything that reports a measurement is frozen, because a meter reports
 // rather than invites.*  Module 19 gave sliders a `surface1` track and an
@@ -62,22 +62,15 @@ pub use accessible::WidgetPart;
 // charge is healthy -- so it would be saying something false the day someone
 // picked a red accent.
 //
-// *The picker joins the shared popup shadow; a widget's own shadow does not.*
-// The picker is a panel that sits on top of everything else, so its
-// `rgba(0, 0, 0, 100)` became `Palette::shadow()` -- the same move the
-// shell's other menus made, for the same reason.  The per-widget shadow keeps
+// *A widget's own shadow does not join the shared popup shadow.*  It keeps
 // `rgba(0, 0, 0, bg_opacity / 3)` deliberately: its depth is a function of the
 // widget's own translucency, so a widget you can see through casts a shadow you
 // can see through, and pinning it to one shared depth would make a nearly
 // invisible widget cast a solid shadow.  Note that the membership sweep waves
-// black through at any alpha, so it checks neither shadow; both therefore carry
-// their own assertions.
-//
-// *The picker's row icons stay `p.blue` rather than becoming the accent.*
-// Every row in the picker is drawn identically, so an accent there would be
-// saying nothing about any particular row -- and it would cost the accent the
-// one job it has in this module, which is to say which widget is selected.
-// Within a single render the accent has to mean one thing.
+// black through at any alpha, so it does not check it; it carries its own
+// assertion.  (The layer's own "Add Widget" picker, a panel over everything
+// that did join `Palette::shadow()`, was deleted on 2026-10-06: nothing could
+// open it, and the desktop menu's "Add widget" does its job.)
 //
 // *Today on the calendar sits on the accent's disc*, as on the clock's popup,
 // which marks it so for the ring's reason: today is the one day the user is
@@ -353,8 +346,7 @@ impl WidgetKind {
     }
 
     /// The icon this kind is drawn with, by its name in the icon theme -- in
-    /// its title bar, in the picker, and as the placeholder of a kind with no
-    /// content yet.
+    /// its title bar, and as the placeholder of a kind with no content yet.
     ///
     /// Emoji until 2026-09-26, which no font the desktop has can draw, so
     /// every widget's title bar began with a box (design-decisions.md §881).
@@ -395,25 +387,6 @@ impl WidgetKind {
             Self::BatteryStatus => WidgetSize::SMALL,
             Self::Custom { .. } => WidgetSize::MEDIUM,
         }
-    }
-
-    /// All built-in widget types (for the add-widget picker).
-    pub fn all_builtin() -> Vec<Self> {
-        vec![
-            Self::Clock,
-            Self::Weather,
-            Self::SystemMonitor,
-            Self::Calendar,
-            Self::Notes,
-            Self::RssFeed,
-            Self::MusicPlayer,
-            Self::PhotoFrame,
-            Self::WorldClock,
-            Self::Reminders,
-            Self::DiskUsage,
-            Self::NetworkMonitor,
-            Self::BatteryStatus,
-        ]
     }
 }
 
@@ -893,16 +866,18 @@ pub struct DesktopWidgetManager {
     pub grid: WidgetGridConfig,
     /// Whether the widget layer is visible.
     pub layer_visible: bool,
-    /// Whether in edit mode (can move/resize/add/remove widgets).
-    pub edit_mode: bool,
     /// Source of widget instance IDs.
     ids: IdSeq<WidgetInstanceId>,
     /// Maximum number of widgets.
     pub max_widgets: usize,
-    /// Whether the add-widget picker is open.
-    pub picker_open: bool,
-    /// Currently selected widget for editing.
-    pub selected_widget: Option<WidgetInstanceId>,
+    /// The widget being moved, if one is ([`hold`](Self::hold)): while it
+    /// is, the layer shows the grid it lands on, and rings the widget in
+    /// the accent.
+    ///
+    /// Until 2026-10-06 this was an "edit mode" and a "selected widget" that
+    /// drew the same grid and ring, and that nothing ever turned on: widgets
+    /// were dragged with no grid to show where they would land.
+    held: Option<WidgetInstanceId>,
     /// The note being written in, if one is: at most one at a time, as a
     /// desktop has one keyboard.
     note: Option<NoteEditor>,
@@ -1045,11 +1020,9 @@ impl DesktopWidgetManager {
             widgets: Vec::new(),
             grid: WidgetGridConfig::default(),
             layer_visible: true,
-            edit_mode: false,
             ids: IdSeq::new(),
             max_widgets: 20,
-            picker_open: false,
-            selected_widget: None,
+            held: None,
             note: None,
             caret_width: guitk::textedit::CARET_WIDTH,
             icon_registry: crate::IconRegistry::default(),
@@ -1353,12 +1326,32 @@ impl DesktopWidgetManager {
         Some(id)
     }
 
+    /// The user took hold of the widget `id` to move it: until
+    /// [`let_go`](Self::let_go), the layer shows the grid it lands on and
+    /// rings it. Nothing for a widget that is not out.
+    pub fn hold(&mut self, id: WidgetInstanceId) {
+        if self.get(id).is_some() {
+            self.held = Some(id);
+        }
+    }
+
+    /// The widget held was let go: the grid and the ring go with it.
+    pub fn let_go(&mut self) {
+        self.held = None;
+    }
+
+    /// The widget being moved, if one is.
+    #[must_use]
+    pub const fn held(&self) -> Option<WidgetInstanceId> {
+        self.held
+    }
+
     /// Remove a widget by ID.
     pub fn remove_widget(&mut self, id: WidgetInstanceId) -> bool {
         let len_before = self.widgets.len();
         self.widgets.retain(|w| w.id != id);
-        if self.selected_widget == Some(id) {
-            self.selected_widget = None;
+        if self.held == Some(id) {
+            self.held = None;
         }
         if self.writing_note() == Some(id) {
             self.note = None;
@@ -1598,16 +1591,6 @@ impl DesktopWidgetManager {
         }
     }
 
-    /// Toggle visibility of a widget.
-    pub fn toggle_visibility(&mut self, id: WidgetInstanceId) -> bool {
-        if let Some(w) = self.widgets.iter_mut().find(|w| w.id == id) {
-            w.visible = !w.visible;
-            true
-        } else {
-            false
-        }
-    }
-
     /// Get a widget by ID.
     pub fn get(&self, id: WidgetInstanceId) -> Option<&WidgetInstance> {
         self.widgets.iter().find(|w| w.id == id)
@@ -1744,8 +1727,10 @@ impl DesktopWidgetManager {
     pub fn read_from(&mut self, doc: &Document) {
         self.widgets.clear();
         // The widgets come back under new ids, so what a frame showed is
-        // nobody's: the session releases it, and each frame looks afresh.
+        // nobody's: the session releases it, and each frame looks afresh --
+        // and a widget held is no longer out.
         self.frames.clear();
+        self.held = None;
         let mut keys = doc.keys(&["widgets"]);
         keys.sort();
         for key in keys {
@@ -1869,8 +1854,8 @@ impl DesktopWidgetManager {
 
         let mut commands = Vec::new();
 
-        // In edit mode, render the grid.
-        if self.edit_mode {
+        // While a widget is moved, the grid it lands on.
+        if self.held.is_some() {
             self.render_grid(p, &mut commands);
         }
 
@@ -1880,11 +1865,6 @@ impl DesktopWidgetManager {
                 continue;
             }
             self.render_widget(w, p, live, &mut commands);
-        }
-
-        // Widget picker overlay.
-        if self.picker_open {
-            self.render_picker(p, &mut commands);
         }
 
         commands
@@ -1964,8 +1944,8 @@ impl DesktopWidgetManager {
             corner_radii: CornerRadii::all(cr),
         });
 
-        // Selection highlight in edit mode.
-        if self.edit_mode && self.selected_widget == Some(w.id) {
+        // The widget being moved, ringed.
+        if self.held == Some(w.id) {
             commands.push(RenderCommand::StrokeRect {
                 x: x - 2.0,
                 y: y - 2.0,
@@ -2395,88 +2375,6 @@ impl DesktopWidgetManager {
             }
         }
     }
-
-    fn render_picker(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
-        let picker_w = 300.0;
-        let picker_h = 400.0;
-        let px = self.grid.origin_x + 50.0;
-        let py = self.grid.origin_y + 50.0;
-
-        // Backdrop.
-        commands.push(RenderCommand::BoxShadow {
-            x: px,
-            y: py,
-            width: picker_w,
-            height: picker_h,
-            offset_x: 0.0,
-            offset_y: 6.0,
-            blur: 20.0,
-            spread: 0.0,
-            color: p.shadow(),
-            corner_radii: CornerRadii::all(12.0),
-        });
-        let mut paint = p.surface_paint(Surface::Card);
-        paint.border = Some(paint.border.unwrap_or(p.surface1));
-        p.push_paint_radii(
-            commands,
-            px,
-            py,
-            picker_w,
-            picker_h,
-            CornerRadii::all(12.0),
-            paint,
-        );
-
-        // Title.
-        commands.push(RenderCommand::Text {
-            x: px + 16.0,
-            y: py + 14.0,
-            text: "Add Widget".to_string(),
-            font_size: 16.0,
-            color: p.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Widget list.
-        let mut cy = py + 48.0;
-        for kind in WidgetKind::all_builtin() {
-            if cy + 32.0 > py + picker_h {
-                break;
-            }
-            self.icon(
-                commands,
-                px + 16.0,
-                cy + 4.0,
-                16.0,
-                kind.icon_name(),
-                p.ink(p.blue),
-            );
-            commands.push(RenderCommand::Text {
-                x: px + 40.0,
-                y: cy + 6.0,
-                text: kind.label().to_string(),
-                font_size: 13.0,
-                color: p.text,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            let sz = kind.default_size();
-            commands.push(RenderCommand::Text {
-                x: px + picker_w - 60.0,
-                y: cy + 8.0,
-                text: format!("{}x{}", sz.cols, sz.rows),
-                font_size: 10.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Light,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 26.0;
-        }
-    }
 }
 
 impl Default for DesktopWidgetManager {
@@ -2565,6 +2463,26 @@ mod tests {
 
     fn make_mgr() -> DesktopWidgetManager {
         DesktopWidgetManager::new()
+    }
+
+    /// Every built-in kind: what the layer's own "Add Widget" picker listed,
+    /// until the desktop menu's "Add widget" replaced it and it went.
+    fn all_builtin() -> Vec<WidgetKind> {
+        vec![
+            WidgetKind::Clock,
+            WidgetKind::Weather,
+            WidgetKind::SystemMonitor,
+            WidgetKind::Calendar,
+            WidgetKind::Notes,
+            WidgetKind::RssFeed,
+            WidgetKind::MusicPlayer,
+            WidgetKind::PhotoFrame,
+            WidgetKind::WorldClock,
+            WidgetKind::Reminders,
+            WidgetKind::DiskUsage,
+            WidgetKind::NetworkMonitor,
+            WidgetKind::BatteryStatus,
+        ]
     }
 
     // ---- GridRect ----
@@ -2706,13 +2624,13 @@ mod tests {
 
     #[test]
     fn all_builtin_kinds() {
-        let kinds = WidgetKind::all_builtin();
+        let kinds = all_builtin();
         assert_eq!(kinds.len(), 13);
     }
 
     #[test]
     fn kind_labels_not_empty() {
-        for kind in WidgetKind::all_builtin() {
+        for kind in all_builtin() {
             assert!(!kind.label().is_empty());
         }
     }
@@ -2723,12 +2641,9 @@ mod tests {
     #[test]
     fn every_widget_picture_is_an_icon_the_built_in_set_draws() {
         let drawn = appearance::icons::built_in_names();
-        for kind in WidgetKind::all_builtin()
-            .into_iter()
-            .chain([WidgetKind::Custom {
-                app_name: "x".into(),
-            }])
-        {
+        for kind in all_builtin().into_iter().chain([WidgetKind::Custom {
+            app_name: "x".into(),
+        }]) {
             assert!(
                 drawn.contains(&kind.icon_name()),
                 "{kind:?}: {} is not in the built-in set",
@@ -2942,16 +2857,52 @@ mod tests {
         assert!(!mgr.resize_widget(id, WidgetSize::MEDIUM)); // would overlap
     }
 
+    /// A widget is out and shown when added; one a layout file hides is
+    /// among the widgets and not among the shown ones.
     #[test]
-    fn toggle_visibility() {
+    fn a_hidden_widget_is_not_among_the_shown() {
         let mut mgr = make_mgr();
         let id = mgr
             .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
             .unwrap();
         assert!(mgr.get(id).unwrap().visible);
-        mgr.toggle_visibility(id);
-        assert!(!mgr.get(id).unwrap().visible);
+        mgr.get_mut(id).unwrap().visible = false;
+        assert_eq!(mgr.count(), 1);
         assert_eq!(mgr.visible_widgets().len(), 0);
+    }
+
+    /// While a widget is held -- being moved -- the layer shows the grid it
+    /// lands on and rings it; let go, neither. Only a widget that is out can
+    /// be held, and one removed or read away is held no longer.
+    #[test]
+    fn a_held_widget_shows_the_grid_until_let_go() {
+        let mut mgr = make_mgr();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
+        let p = Palette::for_mode(false);
+        let grid_cells = |mgr: &DesktopWidgetManager| {
+            strokes_of_width(&mgr.render(&p, &sample_readings()), 1.0).len()
+        };
+        assert_eq!(grid_cells(&mgr), 0, "a grid with nothing held");
+        mgr.hold(id);
+        assert_eq!(mgr.held(), Some(id));
+        assert_eq!(grid_cells(&mgr), 8 * 6);
+        mgr.let_go();
+        assert_eq!(mgr.held(), None);
+        assert_eq!(grid_cells(&mgr), 0, "the grid stays after letting go");
+
+        mgr.hold(id + 1000);
+        assert_eq!(mgr.held(), None, "a widget not out was held");
+        mgr.hold(id);
+        assert!(mgr.remove_widget(id));
+        assert_eq!(mgr.held(), None, "a widget removed is still held");
+        let other = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
+        mgr.hold(other);
+        mgr.read_from(&Document::default());
+        assert_eq!(mgr.held(), None, "a widget read away is still held");
     }
 
     #[test]
@@ -3212,23 +3163,6 @@ mod tests {
     }
 
     #[test]
-    fn render_edit_mode_shows_grid() {
-        let mut mgr = make_mgr();
-        mgr.edit_mode = true;
-        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
-        // Should have grid cells rendered.
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn render_picker() {
-        let mut mgr = make_mgr();
-        mgr.picker_open = true;
-        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
     fn render_system_monitor() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::SystemMonitor, GridPos::new(0, 0));
@@ -3326,19 +3260,20 @@ mod tests {
     /// A manager configured so that `render` takes every branch it has.
     ///
     /// The shape is not arbitrary and must not be trimmed. `render` branches on
-    /// `layer_visible`, `edit_mode`, each widget's `visible`, and `picker_open`;
-    /// `render_widget` branches on whether the widget is the selected one; and
-    /// `render_widget_content` has five arms, one of which branches again on
-    /// whether the note is empty. Every one of those branches draws a colour
-    /// nothing else draws, so a fixture that misses one takes a colour site out
-    /// of *every* test below at once.
+    /// `layer_visible`, whether a widget is held (the grid) and each widget's
+    /// `visible`; `render_widget` branches on whether the widget is the one
+    /// held (the ring); and `render_widget_content` has its arms, one of which
+    /// branches again on whether the note is empty. Every one of those
+    /// branches draws a colour nothing else draws, so a fixture that misses
+    /// one takes a colour site out of *every* test below at once.
     ///
     /// So: `Clock`, `SystemMonitor`, `Notes` twice (empty and written),
     /// `BatteryStatus`, and `Weather` for the generic arm — six visible, plus a
-    /// `Calendar` hidden to exercise the `visible` filter. The clock is the
-    /// selected widget, edit mode and the picker are both on, and every widget
-    /// carries `ODD_OPACITY` so the washes have an alpha that cannot be right by
-    /// accident.
+    /// `Calendar` hidden to exercise the `visible` filter. The calendar's own
+    /// arm has a sweep of its own (`every_colour_the_calendar_draws_comes_from_its_palette`),
+    /// as its today wears the accent the ring here is counted by. The clock is
+    /// held, as while it is moved, and every widget carries `ODD_OPACITY` so
+    /// the washes have an alpha that cannot be right by accident.
     ///
     /// The `layer_visible == false` arm is the one branch not taken here: it
     /// draws nothing at all, which is the point, and
@@ -3364,27 +3299,14 @@ mod tests {
             .unwrap();
 
         mgr.get_mut(written).unwrap().state_text = WRITTEN_NOTE.to_string();
-        assert!(mgr.toggle_visibility(hidden));
+        mgr.get_mut(hidden).unwrap().visible = false;
 
         let ids: Vec<_> = mgr.all_widgets().iter().map(|w| w.id).collect();
         for id in ids {
             mgr.get_mut(id).unwrap().bg_opacity = ODD_OPACITY;
         }
 
-        mgr.edit_mode = true;
-        mgr.selected_widget = Some(clock);
-        mgr.picker_open = true;
-        mgr
-    }
-
-    /// The same manager with the picker shut.
-    ///
-    /// The picker draws a row per built-in kind, and those rows reuse the font
-    /// sizes the widget bodies use. Closing it is cheaper and clearer than
-    /// disambiguating every body assertion by x-coordinate.
-    fn body_mgr() -> DesktopWidgetManager {
-        let mut mgr = full_mgr();
-        mgr.picker_open = false;
+        mgr.hold(clock);
         mgr
     }
 
@@ -3392,8 +3314,8 @@ mod tests {
     ///
     /// The font size is part of the key because the same string is drawn more
     /// than once at different sizes — a widget's icon appears in its title bar
-    /// at 12pt and again as the generic arm's placeholder at 32pt, and every
-    /// kind's label appears in the picker as well as on the widget.
+    /// at 12pt and again as the generic arm's placeholder at 32pt, and a
+    /// kind's label in its title bar at 11pt and as that placeholder at 13pt.
     /// `mgr`'s render of `live` in `p`, with each icon it drew stood in for
     /// by a text of the icon's name, at the icon's size and in its colour --
     /// so the tables in this module find an icon the way they find a text.
@@ -3532,33 +3454,22 @@ mod tests {
     #[test]
     fn the_fixture_takes_every_branch_the_widget_layer_has() {
         let p = Palette::for_mode(false);
-        let body = render_named(&body_mgr(), &p, &sample_readings());
-        let full = render_named(&full_mgr(), &p, &sample_readings());
+        let body = render_named(&full_mgr(), &p, &sample_readings());
 
         assert_eq!(
             strokes_of_width(&body, 1.0).len(),
             8 * 6,
-            "the edit-mode grid is not drawn, so no test sees its wash"
+            "the grid a held widget is moved over is not drawn, so no test sees its wash"
         );
         assert_eq!(
             strokes_of_width(&body, 2.0).len(),
             1,
-            "no widget is selected, so no test sees the accent"
+            "no widget is held, so no test sees the accent"
         );
         assert_eq!(
             shadows_with_blur(&body, 12.0).len(),
             6,
             "expected six visible widgets, each casting its own shadow"
-        );
-        assert_eq!(
-            shadows_with_blur(&body, 20.0).len(),
-            0,
-            "the picker is open in the render that is supposed to omit it"
-        );
-        assert_eq!(
-            shadows_with_blur(&full, 20.0).len(),
-            1,
-            "the picker is not open, so no test sees the shared popup shadow"
         );
         assert_eq!(
             meter_rects(&body).len(),
@@ -3594,19 +3505,6 @@ mod tests {
             );
         }
 
-        // The picker's own three text colours.
-        for (glyph, size, what) in [
-            ("Add Widget", 16.0, "the picker's title"),
-            (WidgetKind::Clock.icon_name(), 16.0, "a picker row's icon"),
-            (WidgetKind::Clock.label(), 13.0, "a picker row's label"),
-            ("1x1", 10.0, "a picker row's size hint"),
-        ] {
-            assert!(
-                !texts_saying(&full, glyph, size).is_empty(),
-                "{what} is not drawn, so no test in this module checks its colour"
-            );
-        }
-
         assert!(
             texts_saying(&body, WidgetKind::Calendar.label(), 11.0).is_empty(),
             "the hidden widget is drawn, so the visible filter is untested"
@@ -3623,16 +3521,16 @@ mod tests {
         );
     }
 
-    /// The ring around the selected widget is the module's one accent site.
+    /// The ring around the widget being moved wears the accent.
     ///
-    /// In edit mode a 2px ring is drawn around exactly the widget you have
-    /// picked and around nothing else, which makes it a colour that appears in
-    /// exactly one state — and a colour that appears in exactly one state marks
-    /// that state. Checked as equality with `p.accent` rather than inequality
-    /// with the blue it used to be: a ring that had been frozen to some *other*
+    /// While a widget is held a 2px ring is drawn around exactly it and
+    /// around nothing else, which makes it a colour that appears in exactly
+    /// one state — and a colour that appears in exactly one state marks that
+    /// state. Checked as equality with `p.accent` rather than inequality with
+    /// the blue it used to be: a ring that had been frozen to some *other*
     /// literal would pass the inequality and fail the user.
     #[test]
-    fn the_selected_widgets_outline_follows_the_accent() {
+    fn the_held_widgets_outline_follows_the_accent() {
         for light in [false, true] {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
@@ -3640,27 +3538,19 @@ mod tests {
 
                 let ring =
                     strokes_of_width(&render_named(&full_mgr(), &p, &sample_readings()), 2.0);
-                assert_eq!(ring.len(), 1, "expected exactly one selection ring");
+                assert_eq!(ring.len(), 1, "expected exactly one ring");
                 assert_eq!(
                     ring[0], p.accent,
-                    "the selected widget's ring is not the accent (light={light})"
+                    "the held widget's ring is not the accent (light={light})"
                 );
 
-                // And only while something is selected.
+                // And only while something is held: let go, the ring would
+                // be marking a widget the user is not moving.
                 let mut none = full_mgr();
-                none.selected_widget = None;
+                none.let_go();
                 assert!(
                     strokes_of_width(&none.render(&p, &sample_readings()), 2.0).is_empty(),
-                    "a ring is drawn with nothing selected (light={light})"
-                );
-
-                // And only in edit mode: outside it the ring would be marking a
-                // widget the user cannot act on.
-                let mut viewing = full_mgr();
-                viewing.edit_mode = false;
-                assert!(
-                    strokes_of_width(&viewing.render(&p, &sample_readings()), 2.0).is_empty(),
-                    "a ring is drawn outside edit mode (light={light})"
+                    "a ring is drawn with nothing held (light={light})"
                 );
             }
         }
@@ -4066,7 +3956,7 @@ mod tests {
     fn an_empty_note_and_a_written_one_never_look_alike() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let cmds = render_named(&body_mgr(), &p, &sample_readings());
+            let cmds = render_named(&full_mgr(), &p, &sample_readings());
 
             let empty = texts_saying(&cmds, EMPTY_NOTE, 12.0);
             let written = texts_saying(&cmds, WRITTEN_NOTE, 12.0);
@@ -4105,7 +3995,7 @@ mod tests {
     fn every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let cmds = render_named(&body_mgr(), &p, &sample_readings());
+            let cmds = render_named(&full_mgr(), &p, &sample_readings());
 
             // The grid's wash is a fixed 80, independent of any widget: it is a
             // property of the grid, which no widget owns.
@@ -4188,26 +4078,6 @@ mod tests {
         }
     }
 
-    /// The picker casts the shared popup shadow.
-    ///
-    /// The sweep waves black through at any alpha, which is right — a shadow is
-    /// an absence of light rather than a colour — and is exactly why a shadow
-    /// needs a test of its own. The picker is a panel sitting on top of
-    /// everything else, so its depth is the one every popup uses.
-    #[test]
-    fn the_picker_casts_the_shared_popup_shadow() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let s = shadows_with_blur(&render_named(&full_mgr(), &p, &sample_readings()), 20.0);
-            assert_eq!(s.len(), 1, "expected exactly one picker shadow");
-            assert_eq!(
-                s[0],
-                p.shadow(),
-                "the picker does not cast the shared popup shadow (light={light})"
-            );
-        }
-    }
-
     /// A widget you can see through casts a shadow you can see through.
     ///
     /// This is the one shadow that does *not* join `Palette::shadow()`, and the
@@ -4218,7 +4088,7 @@ mod tests {
     fn a_translucent_widget_casts_a_translucent_shadow() {
         let p = Palette::for_mode(false);
 
-        for s in shadows_with_blur(&render_named(&body_mgr(), &p, &sample_readings()), 12.0) {
+        for s in shadows_with_blur(&render_named(&full_mgr(), &p, &sample_readings()), 12.0) {
             assert_eq!(rgb(s), (0, 0, 0), "a widget's shadow is not black");
             assert_eq!(
                 s.a, ODD_SHADOW,
@@ -4232,68 +4102,13 @@ mod tests {
         }
 
         // Halve the widget's opacity and its shadow follows.
-        let mut fainter = body_mgr();
+        let mut fainter = full_mgr();
         let ids: Vec<_> = fainter.all_widgets().iter().map(|w| w.id).collect();
         for id in ids {
             fainter.get_mut(id).unwrap().bg_opacity = 60;
         }
         for s in shadows_with_blur(&fainter.render(&p, &sample_readings()), 12.0) {
             assert_eq!(s.a, 20, "a fainter widget did not cast a fainter shadow");
-        }
-    }
-
-    /// The picker's own surfaces come from the palette.
-    ///
-    /// Six source sites, six assertions. The row icons stay `p.blue` on
-    /// purpose: every row is drawn identically, so an accent there would be
-    /// saying nothing about any particular row — and it would cost the accent
-    /// the one job it has in this module, which is to say which widget is
-    /// selected. Within a single render the accent has to mean one thing.
-    #[test]
-    fn the_pickers_own_surfaces_come_from_the_palette() {
-        for light in [false, true] {
-            for accent in SAFE_ACCENTS {
-                let mut p = Palette::for_mode(light);
-                p.accent = accent;
-                let cmds = render_named(&full_mgr(), &p, &sample_readings());
-
-                assert_eq!(
-                    fills_exactly(&cmds, p.painted(appearance::Surface::Card)),
-                    1,
-                    "the picker's panel is not the card surface (light={light})"
-                );
-                // Whatever the theme outlines a card with -- `surface1` under
-                // cards, the border colour under borders. Naming one of them
-                // here would make this test pass under one theme only.
-                let edge = p
-                    .surface_paint(appearance::Surface::Card)
-                    .border
-                    .unwrap_or(p.surface1);
-                let border = strokes_of_width(&cmds, 1.0);
-                assert_eq!(
-                    border.iter().filter(|c| **c == edge).count(),
-                    1,
-                    "the picker's border is not the card edge (light={light})"
-                );
-
-                for (glyph, size, role, what) in [
-                    ("Add Widget", 16.0, p.text, "the picker's title"),
-                    (WidgetKind::Clock.icon_name(), 16.0, p.blue, "a row's icon"),
-                    (WidgetKind::Clock.label(), 13.0, p.text, "a row's label"),
-                    ("1x1", 10.0, p.subtext0, "a row's size hint"),
-                ] {
-                    let t = texts_saying(&cmds, glyph, size);
-                    assert!(!t.is_empty(), "{what} is not drawn (light={light})");
-                    for c in t {
-                        assert_eq!(c, role, "{what} is the wrong role (light={light})");
-                        assert_ne!(
-                            c,
-                            p.ink(p.accent),
-                            "{what} followed the accent (light={light})"
-                        );
-                    }
-                }
-            }
         }
     }
 

@@ -3299,7 +3299,8 @@ DEFECTS = [
         [
             # `p.blue` is a palette member in both modes, so the sweep is
             # supposed to be blind to it. Only the accent test can see this.
-            'the_selected_widgets_outline_follows_the_accent',
+            # Re-derived 2026-10-06: the ring is round the widget being moved.
+            'the_held_widgets_outline_follows_the_accent',
         ],
     ),
     (
@@ -3311,32 +3312,26 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the ring is round the widget being moved.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'the_selected_widgets_outline_follows_the_accent',
+            'the_held_widgets_outline_follows_the_accent',
         ],
     ),
-    (
-        "IIIIIIIIIIIIIIIII: the selection ring is drawn outside edit mode",
-        WID,
-        [
-            ('if self.edit_mode && self.selected_widget == Some(w.id) {',
-             'if self.selected_widget == Some(w.id) {'),
-        ],
-        ["desktop"],
-        [
-            'the_selected_widgets_outline_follows_the_accent',
-        ],
-    ),
+    # RETIRED 2026-10-06: the selection ring is drawn outside edit mode.
+    #   There is no edit mode now: the ring is drawn round the widget being
+    #   moved (`held`), and only then, which the defect below covers.
     (
         "JJJJJJJJJJJJJJJJJ: every widget gets a selection ring once anything is selected",
         WID,
         [
-            ('if self.edit_mode && self.selected_widget == Some(w.id) {',
-             'if self.edit_mode && self.selected_widget.is_some() {'),
+            ('if self.held == Some(w.id) {',
+             'if self.held.is_some() {'),
         ],
         ["desktop"],
         [
-            'the_selected_widgets_outline_follows_the_accent',
+            # Re-derived 2026-10-06: the ring is round the widget being
+            # moved (`held`), which replaced edit mode and its selection.
+            'the_held_widgets_outline_follows_the_accent',
             'the_fixture_takes_every_branch_the_widget_layer_has',
         ],
     ),
@@ -3698,129 +3693,36 @@ DEFECTS = [
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
-    (
-        "KKKKKKKKKKKKKKKKKK: the picker keeps its own shadow depth",
-        WID,
-        [
-            ('            blur: 20.0,\n            spread: 0.0,\n            color: p.shadow(),',
-             '            blur: 20.0,\n            spread: 0.0,\n            color: guitk::color::Color::rgba(0, 0, 0, 100),'),
-        ],
-        ["desktop"],
-        [
-            'the_picker_casts_the_shared_popup_shadow',
-        ],
-    ),
-    (
-        "LLLLLLLLLLLLLLLLLL: the picker's panel keeps Mocha's mantle",
-        WID,
-        [
-            ('        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
-             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n        paint.fill = Some(guitk::color::Color::from_hex(0x181825));\n'),
-        ],
-        ["desktop"],
-        [
-            # Re-derived 2026-09-27 against the code as it now reads. The picker is a card surface now (`surface_paint`).
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
-    (
-        "MMMMMMMMMMMMMMMMMM: the picker's border keeps Mocha's surface1",
-        WID,
-        [
-            ('        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
-             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(guitk::color::Color::from_hex(0x45475A));\n'),
-        ],
-        ["desktop"],
-        [
-            # Re-derived 2026-09-27 against the code as it now reads. The picker is a card surface now (`surface_paint`).
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
-    (
-        "NNNNNNNNNNNNNNNNNN: the picker's title follows the accent",
-        WID,
-        [
-            ('text: "Add Widget".to_string(),\n            font_size: 16.0,\n            color: p.text,',
-             'text: "Add Widget".to_string(),\n            font_size: 16.0,\n            color: p.accent,'),
-        ],
-        ["desktop"],
-        [
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
-    (
-        "OOOOOOOOOOOOOOOOOO: every picker row's icon follows the accent",
-        WID,
-        [
-            ('                kind.icon_name(),\n                p.ink(p.blue),\n',
-             '                kind.icon_name(),\n                p.ink(p.accent),\n'),
-        ],
-        ["desktop"],
-        [
-            # Re-derived 2026-09-27 against the code as it now reads.
-            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
-            # Every row is drawn identically, so an accent here says nothing about
-            # any row -- and it costs the accent its one job, which is the ring.
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
-    (
-        "PPPPPPPPPPPPPPPPPP: the picker's row labels keep Mocha's text",
-        WID,
-        [
-            ('font_size: 13.0,\n                color: p.text,',
-             'font_size: 13.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
-    (
-        "QQQQQQQQQQQQQQQQQQ: the picker's size hints keep Mocha's overlay0",
-        WID,
-        [
-            ('font_size: 10.0,\n                color: p.subtext0,',
-             'font_size: 10.0,\n                color: guitk::color::Color::from_hex(0x6C7086),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
+    # RETIRED 2026-10-06: the picker keeps its own shadow depth.
+    # RETIRED 2026-10-06: the picker's panel keeps Mocha's mantle.
+    # RETIRED 2026-10-06: the picker's border keeps Mocha's surface1.
+    # RETIRED 2026-10-06: the picker's title follows the accent.
+    # RETIRED 2026-10-06: every picker row's icon follows the accent.
+    # RETIRED 2026-10-06: the picker's row labels keep Mocha's text.
+    # RETIRED 2026-10-06: the picker's size hints keep Mocha's overlay0.
+    #   The layer's own "Add Widget" picker was deleted: nothing could open
+    #   it (nothing set `picker_open` but this module's tests), and the
+    #   desktop menu's "Add widget" does its job. Its sites are gone with it.
     (
         "RRRRRRRRRRRRRRRRRR: the edit-mode grid stops being drawn in edit mode",
         WID,
         [
-            ('        if self.edit_mode {\n            self.render_grid(p, &mut commands);',
-             '        if !self.edit_mode {\n            self.render_grid(p, &mut commands);'),
+            ('        if self.held.is_some() {\n            self.render_grid(p, &mut commands);',
+             '        if self.held.is_none() {\n            self.render_grid(p, &mut commands);'),
         ],
         ["desktop"],
         [
             # Not a colour bug. The four defects here exist because module 21 lost
             # three defects to a fixture that never drew them: a branch that stops
             # firing silently removes a colour site from every test at once.
+            # Re-derived 2026-10-06: the grid is drawn while a widget is moved
+            # (`held`), which replaced edit mode.
             'the_fixture_takes_every_branch_the_widget_layer_has',
+            'a_held_widget_shows_the_grid_until_let_go',
         ],
     ),
-    (
-        "SSSSSSSSSSSSSSSSSS: the picker stops being drawn while a widget is selected",
-        WID,
-        [
-            ('        if self.picker_open {',
-             '        if self.picker_open && self.selected_widget.is_none() {'),
-        ],
-        ["desktop"],
-        [
-            'the_fixture_takes_every_branch_the_widget_layer_has',
-            'the_picker_casts_the_shared_popup_shadow',
-            'the_pickers_own_surfaces_come_from_the_palette',
-        ],
-    ),
+    # RETIRED 2026-10-06: the picker stops being drawn while a widget is
+    #   selected. The picker was deleted (above).
     (
         "TTTTTTTTTTTTTTTTTT: a hidden widget is drawn anyway",
         WID,

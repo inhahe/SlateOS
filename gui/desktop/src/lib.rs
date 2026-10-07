@@ -5390,6 +5390,7 @@ impl DesktopShell {
                     // one on disk.
                     self.drag_widget_to(event.x, event.y);
                     self.widget_drag = None;
+                    self.widgets.let_go();
                     self.widgets_dirty = true;
                     return ShellAction::Consumed;
                 }
@@ -14581,6 +14582,8 @@ impl DesktopShell {
             w.position
                 .pixels(g.origin_x, g.origin_y, g.cell_width, g.cell_height, g.gap);
         self.widget_drag = Some((id, x - wx, y - wy));
+        // The grid it lands on, and a ring round it, until it is let go.
+        self.widgets.hold(id);
         true
     }
 

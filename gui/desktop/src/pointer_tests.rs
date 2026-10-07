@@ -2710,6 +2710,48 @@ fn clock_over_this_pc(shell: &mut DesktopShell) -> (icons::IconId, (f32, f32), u
     (pc, (x, y), clock)
 }
 
+/// **While a widget is dragged, the desktop shows the grid it lands on** and
+/// rings the widget held -- the layer's "edit mode", which nothing turned on
+/// -- and letting go puts both away where the widget landed.
+#[test]
+fn dragging_a_widget_shows_the_grid_it_lands_on() {
+    use crate::widgets::{GridPos, WidgetKind};
+    let mut shell = shell();
+    let clock = shell
+        .widgets
+        .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+        .expect("the grid is empty");
+    let (x, y, w, _) = shell.widgets.content_rect(clock).expect("placed");
+    let (px, py) = (x + w / 2.0, y);
+    assert_eq!(shell.widgets.held(), None);
+    assert_eq!(shell.handle_mouse(&click(px, py)), ShellAction::Consumed);
+    assert_eq!(shell.widgets.held(), Some(clock), "the grid is not shown");
+
+    // One cell over, still held.
+    let step = shell.widgets.grid.cell_width + shell.widgets.grid.gap;
+    let moved = MouseEvent {
+        x: px + step,
+        y: py,
+        kind: MouseEventKind::Move,
+    };
+    assert_eq!(shell.handle_mouse(&moved), ShellAction::Consumed);
+    assert_eq!(shell.widgets.held(), Some(clock));
+    let _ = shell.handle_mouse(&MouseEvent {
+        x: px + step,
+        y: py,
+        kind: MouseEventKind::Release(MouseButton::Left),
+    });
+    assert_eq!(
+        shell.widgets.held(),
+        None,
+        "the grid stays after letting go"
+    );
+    assert_eq!(
+        shell.widgets.get(clock).map(|w| w.position),
+        Some(GridPos::new(1, 0))
+    );
+}
+
 /// **With the card of shortcuts up, a press on a widget is still the
 /// widget's.** The card answers no press and lets one through to what is
 /// under it, as a press on an icon goes through to the icon -- but the

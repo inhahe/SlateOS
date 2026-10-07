@@ -471,11 +471,15 @@ pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 
     i32::try_from(count).unwrap_or(i32::MAX)
 }
 
-/// Get the CPU affinity mask for a process: every online CPU, which is the
-/// mask every process here has -- nothing a program can call narrows one
-/// (see [`affinity_change`]).  The kernel shell's `taskset`, a debugging
-/// console's command, can; a mask set that way is not seen here.  The process must exist: another pid is looked up,
-/// and `ESRCH` if there is none, as Linux answers.
+/// Get the CPU affinity mask of a thread: the CPUs it may run on, of those
+/// online.  `pid` names the thread as Linux's does: 0 the calling thread, and
+/// any other id the thread with that id -- a process's id is its first
+/// thread's, so a pid reads that thread, as on Linux.
+///
+/// The kernel answers ([`native_get_affinity`]), for any thread, with no
+/// right needed, as on Linux, where `/proc/<pid>/status` publishes it.  A
+/// kernel without lane A's affinity calls cannot narrow a mask, so there
+/// every thread's is every online CPU, and the process is only looked up.
 ///
 /// Linux 6.6's `SYSCALL_DEFINE3(sched_getaffinity)` and glibc 2.39's wrapper
 /// (sysdeps/unix/sysv/linux/sched_getaffinity.c), in their order:
@@ -494,15 +498,110 @@ pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuSetT) -> i32 {
     let ncpus = online_cpus();
-    let result = affinity_len_ok(cpusetsize, ncpus)
-        .and_then(|()| affinity_target_exists(pid))
-        .and_then(|()| fill_affinity(cpusetsize, mask, ncpus));
+    let result = affinity_len_ok(cpusetsize, ncpus).and_then(|()| {
+        // A negative id names no thread: `ESRCH`, as `find_task_by_vpid`.
+        let thread = u64::try_from(pid).map_err(|_| errno::ESRCH)?;
+        match native_get_affinity(thread) {
+            Some(answer) => {
+                answer.and_then(|cpus| write_affinity(cpusetsize, mask, |i| mask_byte(cpus, i)))
+            }
+            None => {
+                affinity_target_exists(pid)?;
+                fill_affinity(cpusetsize, mask, ncpus)
+            }
+        }
+    });
     match result {
         Ok(()) => 0,
         Err(e) => {
             errno::set_errno(e);
             -1
         }
+    }
+}
+
+/// [`SYS_SCHED_SET_AFFINITY`](crate::syscall::SYS_SCHED_SET_AFFINITY) and
+/// [`SYS_SCHED_GET_AFFINITY`](crate::syscall::SYS_SCHED_GET_AFFINITY)'s flag:
+/// the target is a thread, not a process.  The C calls always name a thread,
+/// as Linux's do; the kernel's process form, which sets every thread a
+/// process has and the ones it starts later, is a task manager's, not POSIX's.
+const SCHED_AFFINITY_THREAD: u64 = 1;
+
+/// The errno for an affinity call's refusal `ret`, as Linux's
+/// `sched_setaffinity` answers: no authority over the target is `EPERM`,
+/// where the shared mapping makes `PermissionDenied` `EACCES`; the rest --
+/// `EINVAL`, `ESRCH`, `EFAULT` -- as it says.
+pub(crate) fn affinity_errno(ret: i64) -> i32 {
+    if ret == errno::native::PERMISSION_DENIED {
+        errno::EPERM
+    } else {
+        errno::errno_for(ret)
+    }
+}
+
+/// Whether `ret` says there are no affinity calls to ask: a kernel without
+/// lane A's (every kernel before 1100/1101), or, in the host build, no kernel.
+fn no_affinity_calls(ret: i64) -> bool {
+    ret == errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+}
+
+/// Restrict thread `thread` (0: the calling one) to the CPUs of `mask` that
+/// the machine has, through lane A's `SYS_SCHED_SET_AFFINITY`: `None` for a
+/// kernel without it.
+///
+/// The kernel's mask is one `u64`, CPUs 0 to 63 -- the most it schedules on
+/// -- so a CPU above those in `mask` is one the machine has not got, which
+/// Linux ignores as well; a mask holding none it has is `EINVAL`, as Linux
+/// says.  The kernel's rule for who may is signalling's: the thread's own
+/// process, its parent, or a holder of a `Process` capability with `DELETE`
+/// rights for it -- else `EPERM`.  A thread running on a CPU it may no
+/// longer use moves at once, and the threads it starts later inherit the
+/// mask.
+pub(crate) fn native_set_affinity(thread: u64, mask: &CpuSetT) -> Option<Result<(), i32>> {
+    let cpus = mask.bits.first().copied().unwrap_or(0);
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_SCHED_SET_AFFINITY,
+        thread,
+        cpus,
+        SCHED_AFFINITY_THREAD,
+    );
+    if no_affinity_calls(ret) {
+        return None;
+    }
+    Some(if ret < 0 {
+        Err(affinity_errno(ret))
+    } else {
+        Ok(())
+    })
+}
+
+/// The CPUs thread `thread` (0: the calling one) may run on now, of those
+/// online, through lane A's `SYS_SCHED_GET_AFFINITY`: CPU N is bit N.  `None`
+/// for a kernel without it.
+pub(crate) fn native_get_affinity(thread: u64) -> Option<Result<u64, i32>> {
+    let mut cpus: u64 = 0;
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_SCHED_GET_AFFINITY,
+        thread,
+        (&raw mut cpus) as u64,
+        SCHED_AFFINITY_THREAD,
+    );
+    if no_affinity_calls(ret) {
+        return None;
+    }
+    Some(if ret < 0 {
+        Err(affinity_errno(ret))
+    } else {
+        Ok(cpus)
+    })
+}
+
+/// Byte `i` of a mask whose CPUs 0 to 63 are `cpus` and the rest none.
+pub(crate) fn mask_byte(cpus: u64, i: usize) -> u8 {
+    match i {
+        0..8 => cpus.to_le_bytes().get(i).copied().unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -532,6 +631,18 @@ pub(crate) fn fill_affinity(
     mask: *mut CpuSetT,
     ncpus: usize,
 ) -> Result<(), i32> {
+    write_affinity(cpusetsize, mask, |i| affinity_byte(i, ncpus))
+}
+
+/// Write `cpusetsize` bytes at `mask`, byte `i` being `byte(i)`: a mask as
+/// the kernel copies one out, with the zeroes glibc writes after it.
+/// `EFAULT` for a NULL `mask`, which [`affinity_len_ok`] having passed means
+/// a byte would be written to.
+pub(crate) fn write_affinity(
+    cpusetsize: usize,
+    mask: *mut CpuSetT,
+    byte: impl Fn(usize) -> u8,
+) -> Result<(), i32> {
     if mask.is_null() {
         return Err(errno::EFAULT);
     }
@@ -539,7 +650,7 @@ pub(crate) fn fill_affinity(
     for i in 0..cpusetsize {
         // SAFETY: the caller's contract makes `mask` writable for
         // `cpusetsize` bytes, which may be more or fewer than a `CpuSetT`.
-        unsafe { out.add(i).write(affinity_byte(i, ncpus)) };
+        unsafe { out.add(i).write(byte(i)) };
     }
     Ok(())
 }
@@ -574,48 +685,44 @@ fn affinity_byte(i: usize, ncpus: usize) -> u8 {
     }
 }
 
-/// Set the CPU affinity mask for a process -- which here can only be to the
-/// mask it has.
+/// Restrict a thread to some CPUs.  `pid` names the thread as Linux's does:
+/// 0 the calling thread, and any other id the thread with that id -- a
+/// process's id is its first thread's, so a pid sets that thread, as on
+/// Linux, and threads it starts later inherit its mask.  Returns 0 on
+/// success, -1 with errno.
 ///
-/// Every process runs on every online CPU, and nothing a program can call
-/// narrows that: the scheduler's per-task mask (`Task::cpu_affinity`) is set
-/// only inside the kernel -- its own tasks at spawn, and the kernel shell's
-/// `taskset` debugging command -- the native ABI has no call for it, and the
-/// Linux ABI's `sys_sched_setaffinity` (`kernel/src/syscall/linux.rs`) checks
-/// its arguments and applies nothing.  So a mask holding every online CPU is
-/// already in force and succeeds, and a narrower one is `ENOSYS` -- until
-/// 2026-09-27 it was accepted and ignored, and `taskset` reported pinning a
-/// process that went on running everywhere
-/// (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`).
-/// `ENOSYS` is what glibc answers where the kernel has no such call, and what
+/// The kernel makes the change and decides who may ([`native_set_affinity`]):
+/// the thread's own process, its parent, or a holder of a `Process`
+/// capability with `DELETE` rights for it -- else `EPERM`, as Linux answers
+/// one not its owner's.  The library tests no capability of its own (§314:
+/// Linux's `check_same_owner` with `CAP_SYS_NICE` as its *alternative*, which
+/// a library cannot evaluate for another process, and a test it cannot
+/// evaluate is a guess).
+///
+/// A kernel without lane A's affinity calls cannot narrow a mask -- the
+/// scheduler's per-task mask was set only inside the kernel -- so there a
+/// mask holding every online CPU, already in force, succeeds, and a narrower
+/// one is `ENOSYS`, glibc's answer where the kernel has no such call, which
 /// hwloc and the OpenMP runtimes take to mean "affinity is not available
-/// here" rather than a failure.  Returns 0 on success, -1 with errno.
+/// here" ([`affinity_change`]).  Until 2026-09-27 a narrower mask was
+/// accepted and ignored, and `taskset` reported pinning a process that went
+/// on running everywhere
+/// (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`).
 ///
 /// Linux's order (`SYSCALL_DEFINE3(sched_setaffinity)`, kernel/sched/):
 ///   1. `mask` unreadable → `EFAULT`: `get_user_cpu_mask` copies it first.
 ///   2. `pid` not found → `ESRCH` (negative pids included).
-///   3. No online CPU in the mask → `EINVAL`.
-///   4. Then the change itself, which is where `ENOSYS` sits.
+///   3. Not the caller's to change → `EPERM`.
+///   4. No online CPU in the mask → `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const CpuSetT) -> i32 {
-    // §314: no capability gate here.  Linux's `sched_setaffinity` calls
-    // `check_same_owner(p)` and only falls back to `ns_capable(CAP_SYS_NICE)`
-    // when that fails — so the capability is the *alternative*, not the rule.
-    //
-    // The Phase-207 gate used `pid > 0` as a stand-in for "not same owner",
-    // which is wrong in the most ordinary case there is: `pid == getpid()` is
-    // `pid > 0` and is trivially same-owner, so a process would have been
-    // denied setting its **own** affinity by explicit pid — working only if it
-    // happened to pass 0. Since libc cannot read another task's credentials,
-    // it cannot evaluate `check_same_owner` for the cases where the answer is
-    // not already obvious, and a test it cannot evaluate is a guess.
-    //
-    // It does not reach the kernel -- there is no call to reach -- so there
-    // is no syscall answer to defer to either.  When the real call lands it
-    // carries the check, as `sys_fs_set_owner` does for `chown`.
     let result = read_affinity_mask(cpusetsize, mask).and_then(|local| {
-        affinity_target_exists(pid)?;
-        affinity_change(&local, online_cpus())
+        // A negative id names no thread: `ESRCH`, as `find_task_by_vpid`.
+        let thread = u64::try_from(pid).map_err(|_| errno::ESRCH)?;
+        native_set_affinity(thread, &local).unwrap_or_else(|| {
+            affinity_target_exists(pid)?;
+            affinity_change(&local, online_cpus())
+        })
     });
     match result {
         Ok(()) => 0,
@@ -650,11 +757,12 @@ pub(crate) fn read_affinity_mask(cpusetsize: usize, mask: *const CpuSetT) -> Res
     Ok(local)
 }
 
-/// What making `mask` a task's affinity would take, with CPUs `0..ncpus`
-/// online: `EINVAL` if it holds none of them, as Linux says of a mask with no
-/// CPU the task may use; nothing, if it holds every one -- the mask every task
-/// already has; and otherwise `ENOSYS`, because confining a task to some CPUs
-/// is a change nothing here can make (see [`sched_setaffinity`]).
+/// What making `mask` a task's affinity would take on a kernel without lane
+/// A's affinity calls, with CPUs `0..ncpus` online: `EINVAL` if it holds none
+/// of them, as Linux says of a mask with no CPU the task may use; nothing, if
+/// it holds every one -- the mask every task already has; and otherwise
+/// `ENOSYS`, because confining a task to some CPUs is a change such a kernel
+/// cannot make (see [`sched_setaffinity`]).
 pub(crate) fn affinity_change(mask: &CpuSetT, ncpus: usize) -> Result<(), i32> {
     let holds = |cpu: usize| {
         mask.bits
@@ -684,38 +792,76 @@ pub(crate) fn affinity_change(mask: &CpuSetT, ncpus: usize) -> Result<(), i32> {
 // to define for itself -- a duplicate symbol at link time once this module's
 // archive member was pulled in for `sched_getaffinity`.
 
-/// Get the CPU number on which the calling thread is running -- which this
-/// library cannot find out, so it answers 0 on every CPU.
-///
-/// The kernel is SMP and knows (`smp::current_cpu_index`, which the Linux
-/// ABI's `sys_getcpu` returns), but the native ABI has no call that asks;
-/// `requests/d-a-a-native-getcpu-for-sched-getcpu.md` asks lane A for one,
-/// and this becomes a route to it.  Until then 0 rather than `-1`/`ENOSYS`:
-/// callers turn the answer into a per-CPU array index (jemalloc's per-CPU
-/// arenas do), where `-1` is out of bounds, whereas 0 is merely every
-/// thread sharing CPU 0's slot -- slower under contention, never wrong,
-/// since a thread may migrate the instant after it asked anyway.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_getcpu() -> i32 {
-    0
+crate::perprocess::process_global! {
+    /// Set once the kernel has answered `NoSuchSyscall` to `SYS_CPU_CURRENT`:
+    /// it cannot say, and is not asked again -- `sched_getcpu` is on hot
+    /// paths, where a refused system call per question would cost what the
+    /// answer is meant to save.
+    fn cpu_current_unsupported_ptr() -> core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
 }
 
-/// Get CPU and NUMA node (Linux's `getcpu`): 0 and 0, for the reason
-/// [`sched_getcpu`] gives -- the node is 0 in fact, the machine being one
-/// node as far as the kernel knows (its `sys_getcpu` says the same).
+/// The CPU the calling thread is on and its NUMA node, from lane A's
+/// `SYS_CPU_CURRENT` (one return value, `cpu | node << 32`, no pointers, so
+/// cheap and unable to fault): `None` for a kernel without it.
+fn cpu_current() -> Option<(u32, u32)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: an atomic, shared by every thread.
+    let unsupported = unsafe { &*cpu_current_unsupported_ptr() };
+    if unsupported.load(Relaxed) {
+        return None;
+    }
+    let ret = crate::syscall::syscall0(crate::syscall::SYS_CPU_CURRENT);
+    if no_affinity_calls(ret) || ret < 0 {
+        // Its only refusal is the kernel not having it: a thread is always
+        // on some CPU.
+        unsupported.store(true, Relaxed);
+        return None;
+    }
+    Some(cpu_and_node(ret))
+}
+
+/// `SYS_CPU_CURRENT`'s answer, `cpu | node << 32`, as its two halves.
+fn cpu_and_node(packed: i64) -> (u32, u32) {
+    let bits = packed.unsigned_abs();
+    let cpu = u32::try_from(bits & 0xFFFF_FFFF).unwrap_or(0);
+    let node = u32::try_from(bits >> 32).unwrap_or(0);
+    (cpu, node)
+}
+
+/// Get the CPU number on which the calling thread is running.
+///
+/// The kernel answers ([`cpu_current`]).  As on Linux, the thread may have
+/// moved by the time the answer is read; callers know that, and use it to
+/// choose a per-CPU slot (jemalloc's arenas do).  A kernel without lane A's
+/// `SYS_CPU_CURRENT` cannot say, and then the answer is 0 rather than
+/// `-1`/`ENOSYS`: callers turn it into an array index, where `-1` is out of
+/// bounds, whereas 0 is merely every thread sharing CPU 0's slot -- slower
+/// under contention, never wrong.  Until 2026-10-07 every kernel was such a
+/// one (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sched_getcpu() -> i32 {
+    cpu_current().map_or(0, |(cpu, _)| i32::try_from(cpu).unwrap_or(0))
+}
+
+/// Get CPU and NUMA node (Linux's `getcpu`), from the kernel as
+/// [`sched_getcpu`] does -- the node is 0 until the kernel knows a NUMA
+/// topology, as its `sys_getcpu` says too; 0 and 0 on a kernel without the
+/// call.  Either pointer may be NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
+    let (here, its_node) = cpu_current().unwrap_or((0, 0));
     if !cpu.is_null() {
         // SAFETY: non-null, and the caller's contract makes it a writable
         // `unsigned`, as for Linux's `getcpu`.
         unsafe {
-            *cpu = 0;
+            *cpu = here;
         }
     }
     if !node.is_null() {
         // SAFETY: as for `cpu`.
         unsafe {
-            *node = 0;
+            *node = its_node;
         }
     }
     0
@@ -1178,9 +1324,71 @@ mod tests {
 
     // -- sched_getcpu / getcpu --
 
+    /// The host has no kernel to ask, so it answers as a kernel without
+    /// `SYS_CPU_CURRENT` does: CPU 0, and it stops asking.
     #[test]
     fn test_sched_getcpu_returns_zero() {
         assert_eq!(sched_getcpu(), 0);
+        // SAFETY: an atomic, shared by every thread.
+        let unsupported = unsafe { &*cpu_current_unsupported_ptr() };
+        assert!(unsupported.load(core::sync::atomic::Ordering::Relaxed));
+        assert_eq!(sched_getcpu(), 0);
+    }
+
+    /// `SYS_CPU_CURRENT` packs the CPU in the low half and the node above it.
+    #[test]
+    fn test_cpu_and_node_splits_the_answer() {
+        assert_eq!(cpu_and_node(0), (0, 0));
+        assert_eq!(cpu_and_node(3), (3, 0));
+        assert_eq!(cpu_and_node(3 | (1 << 32)), (3, 1));
+        assert_eq!(cpu_and_node(0xFFFF_FFFF), (u32::MAX, 0));
+    }
+
+    /// The kernel's refusals are Linux's errnos: another's thread is `EPERM`,
+    /// not the shared mapping's `EACCES`.
+    #[test]
+    fn test_affinity_errno_is_linuxs() {
+        assert_eq!(
+            affinity_errno(errno::native::PERMISSION_DENIED),
+            errno::EPERM
+        );
+        assert_eq!(
+            affinity_errno(errno::native::INVALID_ARGUMENT),
+            errno::EINVAL
+        );
+        assert_eq!(affinity_errno(errno::native::NO_SUCH_PROCESS), errno::ESRCH);
+        assert_eq!(
+            affinity_errno(errno::native::INVALID_ADDRESS),
+            errno::EFAULT
+        );
+        assert!(no_affinity_calls(errno::native::NO_SUCH_SYSCALL));
+        assert!(no_affinity_calls(crate::syscall::HOST_ENOSYS));
+        assert!(!no_affinity_calls(errno::native::INVALID_ARGUMENT));
+    }
+
+    /// A kernel's mask, one `u64`, written as Linux's `cpu_set_t` holds one:
+    /// CPU N is bit N % 8 of byte N / 8, and every byte past the eighth is
+    /// zero, however long the caller's mask.
+    #[test]
+    fn test_a_kernel_mask_is_written_as_linux_lays_one_out() {
+        let mut set = CpuSetT {
+            bits: [u64::MAX; CPU_SETSIZE_BITS / 64],
+        };
+        let cpus = (1u64 << 0) | (1 << 9) | (1 << 63);
+        assert_eq!(
+            write_affinity(size_of::<CpuSetT>(), &raw mut set, |i| mask_byte(cpus, i)),
+            Ok(())
+        );
+        assert_eq!(set.bits[0], cpus);
+        assert!(set.bits[1..].iter().all(|&w| w == 0));
+        assert_eq!(mask_byte(cpus, 0), 1);
+        assert_eq!(mask_byte(cpus, 1), 2);
+        assert_eq!(mask_byte(cpus, 7), 0x80);
+        assert_eq!(mask_byte(cpus, 8), 0);
+        assert_eq!(
+            write_affinity(8, core::ptr::null_mut(), |i| mask_byte(cpus, i)),
+            Err(errno::EFAULT)
+        );
     }
 
     #[test]

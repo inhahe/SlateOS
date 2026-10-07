@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/`), lane D
 (`posix/src/sched.rs`), lane F (`gui/compositor`, `gui/window`).
-**Status:** OPEN for lanes A and F -- part 3 (lane F) is DONE on lane F's side (2026-10-03, design-decisions §1336, §1337): the picker is `oswindow::EventLoop::pick_window`, for lane E to wire into the explorer; its pids are the kernel's once lane A's channel descriptors reach `main` -- see the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
+**Status:** OPEN for lanes A and F -- part 3 (lane F) is DONE on lane F's side (2026-10-03, design-decisions §1336, §1337): the picker is `oswindow::EventLoop::pick_window`, for lane E to wire into the explorer; its pids are the kernel's once lane A's channel descriptors reach `main` -- see the end. Lane D's half of part 2 is written (2026-10-07): the C affinity calls route to lane A's `SYS_SCHED_SET_AFFINITY`/`GET_AFFINITY`, on `lane-a` -- replies at the end.
 
 **In short:** the operator answered C-Q17 (design-decisions §1423): the
 process explorer's finished-but-unreachable tools are to be wired up, not
@@ -205,3 +205,34 @@ for a pick or hear the answer. Asked of lane F in
 `requests/e-f-the-window-picker-has-no-route-through-oswindow-app.md` (two
 `App` hooks, defaulted, in the shape `take_reloads` already has). The
 explorer's side follows as soon as that lands.
+
+---
+
+## Lane D (2026-10-07) -- part 2's library half: the setters pin, the getters read
+
+Lane A's `SYS_SCHED_SET_AFFINITY` and `SYS_SCHED_GET_AFFINITY` (1100/1101, on
+`lane-a`) read and set a process's or a thread's CPUs, with signalling's rule
+for who may, and the C calls route to them (`posix/src/sched.rs`,
+`posix/src/pthread.rs`):
+
+| Call | Answer |
+|---|---|
+| `sched_setaffinity(0, ...)` | the calling thread |
+| `sched_setaffinity(pid, ...)` | the thread with that id -- a process's first, since a process's id is its first thread's -- as on Linux |
+| `pthread_setaffinity_np(t, ...)` | thread `t` |
+| `sched_getaffinity`, `pthread_getaffinity_np` | the thread's mask, of the CPUs online; anyone's, no right needed |
+| no CPU the machine has / no such thread / not the caller's | `EINVAL` / `ESRCH` / `EPERM` |
+
+On a kernel without the calls -- `main`'s today -- the 2026-09-27 refusals
+above still hold.
+
+**Lane E, for the explorer:** the C calls are Linux's, so they name *one
+thread*: `sched_setaffinity(pid)` moves a multi-threaded process's first
+thread only, as `taskset -p` does on Linux (its `-a` walks every thread). A
+task manager's "Set Affinity" means the whole process, and lane A's call has
+that form: `SYS_SCHED_SET_AFFINITY` with the target a process id and no
+`SCHED_AFFINITY_THREAD` flag sets every thread the process has and every one
+it starts later. That is the call for `libcall`'s wrapper; the C library has
+no POSIX function that means it.
+
+— lane D

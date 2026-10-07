@@ -117,21 +117,23 @@ will close them myself as each one goes on.
 | `ctest-timed-join` | -- (filed with the joins on your timed join, 2026-10-07; `known-issues/D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD.md`); `pthread_tryjoin_np`, `pthread_timedjoin_np` and `pthread_clockjoin_np` answering as glibc's -- `EBUSY`, `ETIMEDOUT` on time, a join when the thread exits; asks your `SYS_THREAD_JOIN_TIMEOUT`, and waits about two and a half seconds in all | - | 30 |
 | `ctest-sigign-exec` | -- (filed with the ignored set reaching your record, 2026-10-07; `known-issues/TD-D-SIG-IGN-DOES-NOT-SURVIVE-EXEC-OR-SPAWN.md`); `SIGHUP` ignored across an `exec` of itself and survived, a handler gone default, and an ignored `SIGCHLD` leaving no zombie (`waitpid` `ECHILD`); needs your `SYS_SIGNAL_SET_IGNORED` and `SYS_SIGNAL_GET_IGNORED` | file | 30 |
 | `ctest-renice` | -- (filed with getpriority and setpriority reaching your calls, 2026-10-07; `known-issues/D-POSIX-SETPRIORITY-RENICED-THE-CALLER.md`); a parent lowers its child's priority, a raise beyond `RLIMIT_NICE` is `EACCES`, pid 1 is `EPERM` (asked to keep the nice it has), no such process `ESRCH`, a group reads as its most favoured member, `nice(-1)` is `EPERM`; needs your `SYS_PROCESS_GET_PRIORITY` and `SYS_PROCESS_SET_PRIORITY`, and must run **without** IO_REALTIME | - | 30 |
+| `ctest-affinity` | -- (filed with the affinity calls and `sched_getcpu` reaching yours, 2026-10-07; `known-issues/D-POSIX-AFFINITY-SETTERS-REPORTED-A-CHANGE-THEY-NEVER-MADE.md`); pinned to each CPU in turn a thread reads back that CPU and `sched_getcpu` and `getcpu` say it is there, a new thread inherits the mask, `pthread_setaffinity_np` pins another thread, and no CPU (`EINVAL`), no such process (`ESRCH`) and pid 1 (`EPERM`, asked to keep its mask) are refused; needs your `SYS_SCHED_SET_AFFINITY`, `SYS_SCHED_GET_AFFINITY` and `SYS_CPU_CURRENT`, and means most with more than one CPU | - | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
 The nine rows from `ctest-sigpipe` to `ctest-string` were added on
 2026-10-06, which made twenty-one fixtures waiting where the summary above
-says eleven; the thirteen after them came on 2026-10-07 -- GDB, Mono, binutils
+says eleven; the fourteen after them came on 2026-10-07 -- GDB, Mono, binutils
 and GCC on the image, each run by the fixture named for it, and Unix
 sockets with names, shared anonymous memory, close-on-exec at a native exec,
-record locks, appends, positional I/O, timed joins, ignored signals and
-renicing, which your `SYS_UNIX_*`, native `MAP_SHARED`,
+record locks, appends, positional I/O, timed joins, ignored signals,
+renicing and CPU affinity, which your `SYS_UNIX_*`, native `MAP_SHARED`,
 `SYS_PROCESS_SET_EXEC_CLOSE`, `SYS_FS_RECORD_LOCK`, `SYS_FS_SET_STATUS_FLAGS`,
 `SYS_FS_PREAD`/`PWRITE`, `SYS_THREAD_JOIN_TIMEOUT`,
-`SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED` and `SYS_PROCESS_GET_PRIORITY`/
-`SET_PRIORITY` made possible.
+`SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED`, `SYS_PROCESS_GET_PRIORITY`/
+`SET_PRIORITY`, `SYS_SCHED_SET_AFFINITY`/`GET_AFFINITY` and
+`SYS_CPU_CURRENT` made possible.
 `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned

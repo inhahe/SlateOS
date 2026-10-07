@@ -5371,11 +5371,15 @@ pub(crate) fn atfork_run_child() {
 // pthread_setaffinity_np / pthread_getaffinity_np — CPU affinity
 // ---------------------------------------------------------------------------
 
-/// Set the CPU affinity mask for a thread -- which, as for a process
-/// ([`crate::sched::sched_setaffinity`]), can only be to the mask it has:
-/// every online CPU succeeds, a narrower mask is `ENOSYS`, and one with no
-/// online CPU is `EINVAL`.  Until 2026-09-27 any mask of a whole `cpu_set_t`
-/// was accepted and ignored, and a shorter one refused.
+/// Restrict a thread to some CPUs, as [`crate::sched::sched_setaffinity`]
+/// does the thread a pid names: the kernel makes the change
+/// ([`crate::sched::native_set_affinity`]), `EINVAL` for a mask with no CPU
+/// the machine has, `ESRCH` for a thread that has ended, `EPERM` for one not
+/// the caller's to change.  Returns the error number, as the pthread
+/// functions do.  A kernel without lane A's affinity calls cannot narrow a
+/// mask: there every online CPU succeeds and a narrower mask is `ENOSYS`, as
+/// [`crate::sched::affinity_change`] says.  Until 2026-09-27 any mask of a
+/// whole `cpu_set_t` was accepted and ignored, and a shorter one refused.
 ///
 /// Unlike the rest of this file, `EFAULT` here is the *kernel's* verdict rather
 /// than a substitute for a glibc segfault: glibc's
@@ -5387,24 +5391,43 @@ pub(crate) fn atfork_run_child() {
 /// order from [`pthread_getaffinity_np`].  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setaffinity_np(
-    _thread: PthreadT,
+    thread: PthreadT,
     cpusetsize: usize,
     cpuset: *const CpuSetT,
 ) -> i32 {
-    let result = crate::sched::read_affinity_mask(cpusetsize, cpuset)
-        .and_then(|mask| crate::sched::affinity_change(&mask, crate::sched::online_cpus()));
+    let result = crate::sched::read_affinity_mask(cpusetsize, cpuset).and_then(|mask| {
+        let thread = affinity_target(thread)?;
+        crate::sched::native_set_affinity(thread, &mask)
+            .unwrap_or_else(|| crate::sched::affinity_change(&mask, crate::sched::online_cpus()))
+    });
     match result {
         Ok(()) => 0,
         Err(e) => e,
     }
 }
 
-/// Get the CPU affinity mask for a thread: every online CPU, the mask every
-/// thread has, written as [`crate::sched::sched_getaffinity`] writes it --
-/// the CPUs there are, and zeroes to the end of `cpusetsize` (glibc's
-/// `memset` after the kernel's copy).  Until 2026-09-27 it set all 1024 bits,
-/// CPUs that do not exist included, and refused any mask shorter than a whole
-/// `cpu_set_t`, though Linux takes `CPU_ALLOC_SIZE`'s 8 bytes.
+/// A thread as the kernel's affinity calls name one: its id, which is what a
+/// `pthread_t` holds here ([`pthread_self`]).  0 is never a thread's -- to
+/// the kernel it would mean the calling thread -- so it is `ESRCH`, the
+/// answer for a thread that is not there; glibc, whose `pthread_t` is a
+/// pointer, would fault on it.
+fn affinity_target(thread: PthreadT) -> Result<u64, i32> {
+    if thread == 0 {
+        Err(errno::ESRCH)
+    } else {
+        Ok(thread)
+    }
+}
+
+/// Get the CPUs a thread may run on, of those online, written as
+/// [`crate::sched::sched_getaffinity`] writes them -- the kernel's answer
+/// ([`crate::sched::native_get_affinity`]), and zeroes to the end of
+/// `cpusetsize` (glibc's `memset` after the kernel's copy); `ESRCH` for a
+/// thread that has ended.  On a kernel without lane A's affinity calls,
+/// every online CPU, the mask every thread has there.  Until 2026-09-27 it
+/// set all 1024 bits, CPUs that do not exist included, and refused any mask
+/// shorter than a whole `cpu_set_t`, though Linux takes `CPU_ALLOC_SIZE`'s 8
+/// bytes.
 ///
 /// Both length rejections precede the null check, because glibc's
 /// `__pthread_getaffinity_np` (nptl/pthread_getaffinity.c) forwards straight to
@@ -5414,13 +5437,22 @@ pub extern "C" fn pthread_setaffinity_np(
 /// in `sched_setaffinity`.  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_getaffinity_np(
-    _thread: PthreadT,
+    thread: PthreadT,
     cpusetsize: usize,
     cpuset: *mut CpuSetT,
 ) -> i32 {
     let ncpus = crate::sched::online_cpus();
-    let result = crate::sched::affinity_len_ok(cpusetsize, ncpus)
-        .and_then(|()| crate::sched::fill_affinity(cpusetsize, cpuset, ncpus));
+    let result = crate::sched::affinity_len_ok(cpusetsize, ncpus).and_then(|()| {
+        let thread = affinity_target(thread)?;
+        match crate::sched::native_get_affinity(thread) {
+            Some(answer) => answer.and_then(|cpus| {
+                crate::sched::write_affinity(cpusetsize, cpuset, |i| {
+                    crate::sched::mask_byte(cpus, i)
+                })
+            }),
+            None => crate::sched::fill_affinity(cpusetsize, cpuset, ncpus),
+        }
+    });
     match result {
         Ok(()) => 0,
         Err(e) => e,
@@ -9281,7 +9313,11 @@ mod tests {
 
     #[test]
     fn test_pthread_setaffinity_np_null_cpuset() {
-        let ret = pthread_setaffinity_np(0, core::mem::size_of::<CpuSetT>(), core::ptr::null());
+        let ret = pthread_setaffinity_np(
+            pthread_self(),
+            core::mem::size_of::<CpuSetT>(),
+            core::ptr::null(),
+        );
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
@@ -9290,17 +9326,20 @@ mod tests {
     #[test]
     fn test_pthread_setaffinity_np_small_size() {
         let mut set = empty_set();
-        assert_eq!(pthread_setaffinity_np(0, 1, &set), crate::errno::EINVAL);
+        assert_eq!(
+            pthread_setaffinity_np(pthread_self(), 1, &set),
+            crate::errno::EINVAL
+        );
         set.bits[0] = 1;
-        assert_eq!(pthread_setaffinity_np(0, 1, &set), 0);
-        assert_eq!(pthread_setaffinity_np(0, 8, &set), 0);
+        assert_eq!(pthread_setaffinity_np(pthread_self(), 1, &set), 0);
+        assert_eq!(pthread_setaffinity_np(pthread_self(), 8, &set), 0);
     }
 
     #[test]
     fn test_pthread_setaffinity_np_success() {
         let mut set = empty_set();
         set.bits[0] = 1;
-        let ret = pthread_setaffinity_np(0, core::mem::size_of::<CpuSetT>(), &set);
+        let ret = pthread_setaffinity_np(pthread_self(), core::mem::size_of::<CpuSetT>(), &set);
         assert_eq!(ret, 0);
     }
 
@@ -9308,9 +9347,34 @@ mod tests {
         CpuSetT { bits: [0; 16] }
     }
 
+    /// 0 is no thread's id -- to the kernel it would mean the calling thread
+    /// -- so both calls answer `ESRCH`, once the mask itself has passed.
+    #[test]
+    fn test_affinity_np_refuses_thread_zero() {
+        let mut set = empty_set();
+        set.bits[0] = 1;
+        assert_eq!(
+            pthread_setaffinity_np(0, core::mem::size_of::<CpuSetT>(), &set),
+            crate::errno::ESRCH
+        );
+        assert_eq!(
+            pthread_getaffinity_np(0, core::mem::size_of::<CpuSetT>(), &raw mut set),
+            crate::errno::ESRCH
+        );
+        assert_eq!(
+            pthread_setaffinity_np(0, core::mem::size_of::<CpuSetT>(), core::ptr::null()),
+            crate::errno::EFAULT,
+            "the mask is read first, as the kernel reads it"
+        );
+    }
+
     #[test]
     fn test_pthread_getaffinity_np_null_cpuset() {
-        let ret = pthread_getaffinity_np(0, core::mem::size_of::<CpuSetT>(), core::ptr::null_mut());
+        let ret = pthread_getaffinity_np(
+            pthread_self(),
+            core::mem::size_of::<CpuSetT>(),
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
@@ -9319,10 +9383,10 @@ mod tests {
     #[test]
     fn test_pthread_getaffinity_np_small_size() {
         let mut set = empty_set();
-        let ret = pthread_getaffinity_np(0, 1, &raw mut set);
+        let ret = pthread_getaffinity_np(pthread_self(), 1, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
         set.bits = [u64::MAX; 16];
-        assert_eq!(pthread_getaffinity_np(0, 8, &raw mut set), 0);
+        assert_eq!(pthread_getaffinity_np(pthread_self(), 8, &raw mut set), 0);
         assert_eq!(set.bits[0], 1, "the host's one CPU");
         assert_eq!(set.bits[1], u64::MAX, "past the 8 bytes, left alone");
     }
@@ -9335,7 +9399,7 @@ mod tests {
     fn test_pthread_getaffinity_np_unaligned_size() {
         let mut set = empty_set();
         let unaligned = core::mem::size_of::<CpuSetT>() + 1;
-        let ret = pthread_getaffinity_np(0, unaligned, &raw mut set);
+        let ret = pthread_getaffinity_np(pthread_self(), unaligned, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
     }
 
@@ -9348,11 +9412,11 @@ mod tests {
     #[test]
     fn test_affinity_np_orders_its_checks_oppositely() {
         assert_eq!(
-            pthread_getaffinity_np(0, 1, core::ptr::null_mut()),
+            pthread_getaffinity_np(pthread_self(), 1, core::ptr::null_mut()),
             crate::errno::EINVAL
         );
         assert_eq!(
-            pthread_setaffinity_np(0, 1, core::ptr::null()),
+            pthread_setaffinity_np(pthread_self(), 1, core::ptr::null()),
             crate::errno::EFAULT
         );
     }
@@ -9364,7 +9428,11 @@ mod tests {
         let mut set = CpuSetT {
             bits: [u64::MAX; 16],
         };
-        let ret = pthread_getaffinity_np(0, core::mem::size_of::<CpuSetT>(), &raw mut set);
+        let ret = pthread_getaffinity_np(
+            pthread_self(),
+            core::mem::size_of::<CpuSetT>(),
+            &raw mut set,
+        );
         assert_eq!(ret, 0);
         assert_eq!(set.bits[0], 1);
         assert!(set.bits[1..].iter().all(|&w| w == 0));
@@ -10774,7 +10842,7 @@ mod tests {
     fn getattr_reports_the_threads_cpus_as_glibcs_does() {
         let mut a: PthreadAttrT = [0; 56];
         encode_attr(&mut a, main_thread_stack_attr());
-        assert_eq!(attr_add_thread_affinity(&mut a, 0), 0);
+        assert_eq!(attr_add_thread_affinity(&mut a, pthread_self()), 0);
         let ncpus = crate::sched::online_cpus();
         let mut got = [0u8; 128];
         // SAFETY: a buffer of the size passed.

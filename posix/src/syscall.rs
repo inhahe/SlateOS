@@ -283,6 +283,24 @@ pub const SYS_PROCESS_GET_PRIORITY: u64 = 1088;
 /// `RLIMIT_NICE` without IO_REALTIME; `NoSuchProcess` when nothing is named.
 /// Lane A's (1089); a kernel without it answers `NoSuchSyscall`.
 pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
+/// Restrict CPUs: `sched_set_affinity(target, mask, flags) -> 0`, mask bit N
+/// for CPU N. `target` is a process id, or with flag 1 a thread id; 0 is the
+/// caller's process, or with the flag the calling thread. A process target
+/// sets every thread it has, and the ones it starts later. Who may is
+/// signalling's rule. `InvalidArgument` for a mask with no online CPU or an
+/// unknown flag, `NoSuchProcess`, `PermissionDenied`. Lane A's (1100); a
+/// kernel without it answers `NoSuchSyscall`.
+pub const SYS_SCHED_SET_AFFINITY: u64 = 1100;
+/// Read the CPUs a process (its main thread) or, with flag 1, a thread may run
+/// on now, less the offline ones: `sched_get_affinity(target, out, flags)`,
+/// into a `u64` at `out`. Needs no right. `InvalidArgument` for a null
+/// pointer or an unknown flag, `NoSuchProcess`, `InvalidAddress`. Lane A's
+/// (1101); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_SCHED_GET_AFFINITY: u64 = 1101;
+/// The calling thread's CPU and NUMA node: `cpu_current() -> cpu | node << 32`,
+/// the native `getcpu(2)`; one return value and no pointers, so it cannot
+/// fault. Lane A's (1092); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_CPU_CURRENT: u64 = 1092;
 
 // Process groups / sessions (533–536)
 //

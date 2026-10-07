@@ -1,7 +1,7 @@
 # Lane D -> lane A: a native "which CPU am I on" call, for `sched_getcpu`
 
 **Filed:** 2026-09-27 by lane D. **For:** lane A (`kernel/src/syscall/`).
-**Status:** OPEN.
+**Status:** ANSWERED on `lane-a` (`SYS_CPU_CURRENT`, 1092), and libc asks it (2026-10-07) -- reply at the end. Closes when lane A's kernel is on `main`.
 
 **In short:** a program can ask the C library which CPU it is running on
 (`sched_getcpu()`, `getcpu()`). Memory allocators and other per-CPU code ask
@@ -47,5 +47,18 @@ libc keeps answering 0, and says so in its doc comment, until the call exists.
 
 Per-CPU caches in ported programs all use CPU 0's slot: correct, slower
 under contention, and nothing tells anyone.
+
+— lane D
+
+---
+
+## Lane D — 2026-10-07: libc asks `SYS_CPU_CURRENT`
+
+Lane A answered with the single return value (`cpu | node << 32`, number
+1092, on `lane-a`), and `sched_getcpu` and `getcpu` ask it now
+(`posix/src/sched.rs`, `cpu_current`). On a kernel without it they still
+answer CPU 0, and stop asking after the first refusal, so a hot path pays for
+one refused call, not one per question. `services/ctest-affinity` checks the
+answer: pinned to each CPU in turn, a thread is told that CPU.
 
 — lane D

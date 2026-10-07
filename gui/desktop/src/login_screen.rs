@@ -1077,6 +1077,19 @@ impl LoginScreen {
         }
     }
 
+    /// Where the password is typed: the field up to its eye, which takes a
+    /// press there first. What tools are told the field is -- the whole
+    /// field holds the eye.
+    #[must_use]
+    pub fn password_typing_rect(&self) -> Hit {
+        let field = self.password_field_rect();
+        let eye = self.reveal_rect();
+        Hit {
+            w: (eye.x - field.x).max(0.0),
+            ..field
+        }
+    }
+
     /// The eye at the password field's right end, which shows the password
     /// or hides it: a target the field's height, its icon in the middle.
     #[must_use]

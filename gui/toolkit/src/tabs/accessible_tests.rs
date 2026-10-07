@@ -12,6 +12,21 @@
 use super::*;
 use crate::tabs::{Tab, TabPosition, TabWidth};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// A bar of `n` tabs, 100 pixels each, the last unsaved and the first not
 /// closeable.
 fn bar(n: u64) -> TabView {
@@ -28,7 +43,7 @@ fn bar(n: u64) -> TabView {
 
 /// The node of `part`, for a bar `width` wide.
 fn node(view: &TabView, part: TabPart, width: f32) -> Node<TabPart> {
-    view.automation(width, 0.0)
+    apart(view.automation(width, 0.0))
         .walk()
         .find(|node| node.id == part)
         .unwrap_or_else(|| panic!("no {part:?}"))
@@ -41,7 +56,7 @@ fn node(view: &TabView, part: TabPart, width: f32) -> Node<TabPart> {
 #[test]
 fn a_tab_bar_shows_tools_its_tabs() {
     let mut view = bar(3);
-    let root = view.automation(1000.0, 0.0);
+    let root = apart(view.automation(1000.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::TabList, "Tabs"));
     let tabs: Vec<(&str, Option<Value>)> = root
         .children

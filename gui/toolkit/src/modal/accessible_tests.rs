@@ -14,6 +14,21 @@ use super::*;
 use crate::palette::Palette;
 use crate::render::RenderTree;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// The size of what the dialogs are drawn over.
 const W: f32 = 1024.0;
 const H: f32 = 768.0;
@@ -59,7 +74,7 @@ fn erase() -> AlertDialog {
 #[test]
 fn a_message_box_is_answered_by_its_buttons() {
     let mut dialog = erase();
-    let root = dialog.automation(W, H);
+    let root = apart(dialog.automation(W, H));
     assert_eq!(
         (root.role, root.name.as_str()),
         (Role::Dialog, "Erase disk")
@@ -96,7 +111,7 @@ fn a_message_box_is_answered_by_its_buttons() {
     );
     assert_eq!(dialog.result(), Some(&DialogResult::Cancel));
     assert!(dialog.is_active(), "fading");
-    assert!(!dialog.automation(W, H).shown, "on its way out");
+    assert!(!apart(dialog.automation(W, H)).shown, "on its way out");
     assert_eq!(
         act(&mut dialog, ModalPart::Button(0), Action::Press),
         Err(Refusal::Hidden)
@@ -175,14 +190,14 @@ fn a_message_box_refuses_what_its_user_could_not_do() {
     );
 
     let mut unseen = AlertDialog::confirm("Quit", "Quit now?");
-    assert!(!unseen.automation(W, H).shown);
+    assert!(!apart(unseen.automation(W, H)).shown);
     assert_eq!(
         act(&mut unseen, ModalPart::Button(0), Action::Press),
         Err(Refusal::Hidden),
         "never shown"
     );
     unseen.show();
-    assert!(!unseen.automation(W, H).shown, "not drawn yet");
+    assert!(!apart(unseen.automation(W, H)).shown, "not drawn yet");
     assert_eq!(
         act(&mut unseen, ModalPart::Button(0), Action::Press),
         Err(Refusal::Hidden),
@@ -197,7 +212,7 @@ fn a_message_box_refuses_what_its_user_could_not_do() {
 fn an_input_dialogs_field_is_typed_over_and_confirmed() {
     let mut dialog =
         prompt(InputDialog::prompt("Rename", "New name:", "Untitled").with_initial_text("old.txt"));
-    let root = dialog.automation(W, H);
+    let root = apart(dialog.automation(W, H));
     assert_eq!(root.name, "Rename");
     let names: Vec<(ModalPart, &str)> = root
         .children
@@ -219,7 +234,7 @@ fn an_input_dialogs_field_is_typed_over_and_confirmed() {
 
     // From Cancel, so the field is clicked into first.
     act(&mut dialog, ModalPart::Button(1), Action::Focus).unwrap();
-    assert!(dialog.automation(W, H).children[2].focused);
+    assert!(apart(dialog.automation(W, H)).children[2].focused);
     assert_eq!(
         act(
             &mut dialog,
@@ -232,7 +247,9 @@ fn an_input_dialogs_field_is_typed_over_and_confirmed() {
     dialog.set_validation_error(Some("That name is taken."));
     redraw(&mut dialog);
     assert_eq!(
-        dialog.automation(W, H).children[0].description.as_deref(),
+        apart(dialog.automation(W, H)).children[0]
+            .description
+            .as_deref(),
         Some("That name is taken.")
     );
     assert_eq!(
@@ -240,7 +257,7 @@ fn an_input_dialogs_field_is_typed_over_and_confirmed() {
         Ok(None),
         "OK does not take a name said to be wrong"
     );
-    assert!(dialog.automation(W, H).shown);
+    assert!(apart(dialog.automation(W, H)).shown);
     act(
         &mut dialog,
         ModalPart::Field,
@@ -276,7 +293,7 @@ fn a_password_is_never_shown() {
     )
     .unwrap();
     assert_eq!(dialog.input_text(), "hunter2");
-    let field = dialog.automation(W, H).children[0].clone();
+    let field = apart(dialog.automation(W, H)).children[0].clone();
     assert_eq!(field.value, None);
     assert_eq!(field.description, None);
     assert_eq!(
@@ -296,7 +313,7 @@ fn a_progress_dialog_shows_its_progress_and_is_cancelled() {
     dialog.show();
     dialog.set_progress(0.25);
     dialog.render(&Palette::for_mode(false), W, H, &mut RenderTree::new());
-    let root = dialog.automation(W, H);
+    let root = apart(dialog.automation(W, H));
     assert_eq!(root.description.as_deref(), Some("Copying 3 files\na.txt"));
     let bar = &root.children[0];
     assert_eq!(
@@ -326,7 +343,7 @@ fn a_progress_dialog_shows_its_progress_and_is_cancelled() {
     let mut working = ProgressDialog::indeterminate("Scanning", "Looking for files");
     working.show();
     working.render(&Palette::for_mode(false), W, H, &mut RenderTree::new());
-    let root = working.automation(W, H);
+    let root = apart(working.automation(W, H));
     assert_eq!(root.children.len(), 1, "no Cancel");
     assert_eq!(root.children[0].value, None, "how far is not known");
     assert_eq!(
@@ -339,13 +356,13 @@ fn a_progress_dialog_shows_its_progress_and_is_cancelled() {
 #[test]
 fn a_floating_dialog_is_closed() {
     let mut dialog = NonModalDialog::new("Find").with_position(50.0, 60.0);
-    assert!(!dialog.automation(W, H).shown);
+    assert!(!apart(dialog.automation(W, H)).shown);
     assert_eq!(
         act(&mut dialog, ModalPart::Close, Action::Press),
         Err(Refusal::Hidden)
     );
     dialog.show();
-    let root = dialog.automation(W, H);
+    let root = apart(dialog.automation(W, H));
     assert_eq!(
         (root.name.as_str(), root.bounds.x, root.bounds.y),
         ("Find", 50.0, 60.0)

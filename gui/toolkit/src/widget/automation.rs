@@ -316,6 +316,75 @@ impl<Id> Node<Id> {
             Some(node)
         })
     }
+
+    /// Every two siblings under it drawn over each other: parts a person
+    /// presses or reads -- not the groups, lists and dialogs that hold
+    /// others -- shown, whose boxes overlap by more than half a unit each
+    /// way. A press there lands on two parts, or text is drawn over text:
+    /// what no layout may do. For a component's tests, over each state it
+    /// can be put in; the desktop shell's whole tree is held to it
+    /// (`desktop::layout_lint_tests`).
+    ///
+    /// Siblings only: a part and what it holds -- a card and its cross --
+    /// are meant to overlap, and so are two parts under different holders,
+    /// one of which is drawn over the other (a menu over a list). And two
+    /// sliders over the very same box are one control's two axes -- a colour
+    /// square's saturation across and brightness down, both set by the one
+    /// press -- not two parts over each other.
+    #[must_use]
+    pub fn overlapping_siblings(&self) -> Vec<(&Self, &Self)> {
+        let mut found = Vec::new();
+        for parent in self.walk() {
+            let drawn: Vec<&Self> = parent
+                .children
+                .iter()
+                // One of no size overlaps nothing: `Rect::intersect` finds
+                // no box in common with it.
+                .filter(|n| n.shown && drawn_on_its_own(n.role))
+                .collect();
+            for (i, a) in drawn.iter().enumerate() {
+                for b in drawn.iter().skip(i.saturating_add(1)) {
+                    let axes =
+                        a.role == Role::Slider && b.role == Role::Slider && a.bounds == b.bounds;
+                    if !axes
+                        && a.bounds
+                            .intersect(b.bounds)
+                            .is_some_and(|both| both.w > 0.5 && both.h > 0.5)
+                    {
+                        found.push((*a, *b));
+                    }
+                }
+            }
+        }
+        found
+    }
+}
+
+/// Whether a part of `role` is drawn as one thing a person presses or
+/// reads, rather than as a holder of others drawn under them: what
+/// [`Node::overlapping_siblings`] compares.
+const fn drawn_on_its_own(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Button
+            | Role::CheckBox
+            | Role::RadioButton
+            | Role::TextField
+            | Role::TextArea
+            | Role::Slider
+            | Role::ListItem
+            | Role::MenuItem
+            | Role::Tab
+            | Role::TreeItem
+            | Role::ComboBox
+            | Role::Link
+            | Role::GridCell
+            | Role::Label
+            | Role::ProgressBar
+            | Role::Image
+            | Role::Heading
+            | Role::Paragraph
+    )
 }
 
 /// What a tool asks of a widget.
@@ -377,6 +446,11 @@ pub enum Refusal {
     },
     /// The value asked for is no number.
     NotANumber,
+    /// The text asked for names no keys: a field taking keys -- a shortcut
+    /// being recorded -- is given them as the user presses them, and a
+    /// name that is no key is nothing to press. Keys are named as a
+    /// shortcut is written, `Ctrl+Alt+T`.
+    NotAKey,
 }
 
 impl std::fmt::Display for Refusal {
@@ -389,6 +463,7 @@ impl std::fmt::Display for Refusal {
                 write!(f, "cannot {action} a {}", role.name())
             }
             Self::NotANumber => f.write_str("the value is not a number"),
+            Self::NotAKey => f.write_str("the value names no keys"),
         }
     }
 }

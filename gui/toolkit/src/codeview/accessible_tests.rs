@@ -15,6 +15,21 @@
 use super::*;
 use crate::event::{Key, KeyEvent, Modifiers};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const BOUNDS: Rect = Rect {
     x: 10.0,
     y: 20.0,
@@ -34,7 +49,7 @@ fn act(v: &mut CodeView, part: CodePart, action: Action) -> Result<Option<CodeVi
 }
 
 fn node(v: &CodeView, part: CodePart) -> Option<Node<CodePart>> {
-    v.automation(0.0, 0.0)
+    apart(v.automation(0.0, 0.0))
         .walk()
         .find(|n| n.id == part)
         .cloned()
@@ -54,7 +69,7 @@ fn matches_said(v: &CodeView) -> Option<String> {
 #[test]
 fn the_code_is_a_text_area_holding_all_of_it() {
     let mut v = view("fn main() {}\n");
-    let root = v.automation(0.0, 0.0);
+    let root = apart(v.automation(0.0, 0.0));
     assert_eq!(
         (root.role, root.name.as_str(), root.bounds),
         (Role::Group, "Code editor", BOUNDS)

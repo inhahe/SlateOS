@@ -13,6 +13,21 @@
 use super::*;
 use crate::richinput::{Format, RichDoc};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const BOLD: RichInputPart = RichInputPart::Tool(Tool::Switch(Toggle::Bold));
 const ITALIC: RichInputPart = RichInputPart::Tool(Tool::Switch(Toggle::Italic));
 
@@ -51,7 +66,7 @@ fn act(
 }
 
 fn node(tool: &RichInputAccess<'_>, part: RichInputPart) -> Option<Node<RichInputPart>> {
-    tool.automation(0.0, 0.0)
+    apart(tool.automation(0.0, 0.0))
         .walk()
         .find(|n| n.id == part)
         .cloned()
@@ -65,7 +80,7 @@ fn a_rich_field_is_a_text_area_under_its_toolbar() {
     let palette = Palette::for_mode(false);
     let mut input = field("hello");
     let tool = access(&mut input, &palette, true, true);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::Group, "Message"));
     let bar = &root.children[0];
     assert_eq!((bar.id, bar.role), (RichInputPart::Toolbar, Role::Group));
@@ -122,7 +137,7 @@ fn a_field_without_a_toolbar_is_the_field_alone() {
     let mut input = field("");
     let mut tool = access(&mut input, &palette, false, true);
     tool.name = "";
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert_eq!(root.children.len(), 1);
     assert_eq!(root.children[0].name, "Write here");
     assert_eq!(root.bounds, root.children[0].bounds);
@@ -251,7 +266,7 @@ fn a_disabled_field_refuses() {
     let palette = Palette::for_mode(false);
     let mut input = field("fixed");
     let mut tool = access(&mut input, &palette, true, false);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert!(root.walk().all(|n| !n.enabled), "{root:?}");
     assert!(!node(&tool, RichInputPart::Field).unwrap().focusable);
     assert_eq!(

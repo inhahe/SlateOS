@@ -112,8 +112,12 @@ POWER = "gui/desktop/src/power.rs"
 LOGIN = "gui/desktop/src/login_screen.rs"
 TB = "gui/desktop/src/taskbar.rs"
 LANG = "gui/desktop/src/language_settings.rs"
-RESMON = "gui/desktop/src/resmon.rs"
+MON = "gui/desktop/src/widgets/monitor.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
+# The shortcut card's editor: its action list, and the card's foot -- the
+# line saying what the last edit did and the buttons that are its keys --
+# held by `shortcut_card_tests::everything_the_card_draws_is_the_users_theme`.
+SHORTCUT_ED = "gui/desktop/src/shortcut_editor.rs"
 SCRCAP = "gui/desktop/src/screen_capture.rs"
 SNAP = "gui/desktop/src/snap.rs"
 FOCUS = "gui/desktop/src/focus_assist.rs"
@@ -3434,11 +3438,12 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRR: the meters' labels keep Mocha's subtext0",
         WID,
         [
-            ('                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
-             '                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),\n'),
+            ('            text: heading,\n            font_size: 10.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '            text: heading,\n            font_size: 10.0,\n            color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The three meters are drawn in one loop now: one label site, one fill site.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
@@ -3449,11 +3454,12 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSS: the CPU meter's track steps up a surface",
         WID,
         [
-            ('                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
-             '                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n'),
+            ('            y: y + METER_TROUGH_TOP,\n            width,\n            height: METER_TROUGH_HEIGHT,\n            color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '            y: y + METER_TROUGH_TOP,\n            width,\n            height: METER_TROUGH_HEIGHT,\n            color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
             # trough now, so this steps all three up.
             # Re-derived 2026-10-06: the trough's place is named (`METER_TROUGH_TOP`), as tools are told it.
@@ -3464,11 +3470,12 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTT: the CPU meter follows the accent",
         WID,
         [
-            ('                        Meter::Cpu => p.blue,\n',
-             '                        Meter::Cpu => p.accent,\n'),
+            ('            Meter::Cpu => p.blue,\n',
+             '            Meter::Cpu => p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-10-06: the loop walks `Meter::ALL`, each meter's role chosen by a match.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
@@ -3481,11 +3488,12 @@ DEFECTS = [
         "UUUUUUUUUUUUUUUUU: the meters are drawn opaque over a translucent panel",
         WID,
         [
-            ('                            color: Color::rgba(role.r, role.g, role.b, alpha),\n',
-             '                            color: Color::rgba(role.r, role.g, role.b, 255),\n'),
+            ('                color: Color::rgba(role.r, role.g, role.b, alpha),\n',
+             '                color: Color::rgba(role.r, role.g, role.b, 255),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The three meters are drawn in one loop now: one label site, one fill site.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
@@ -3498,11 +3506,12 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWW: the Memory meter's track keeps Mocha's surface1",
         WID,
         [
-            ('                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
-             '                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(0x45, 0x47, 0x5A, alpha),\n'),
+            ('            y: y + METER_TROUGH_TOP,\n            width,\n            height: METER_TROUGH_HEIGHT,\n            color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '            y: y + METER_TROUGH_TOP,\n            width,\n            height: METER_TROUGH_HEIGHT,\n            color: Color::rgba(0x45, 0x47, 0x5A, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
             # trough now, so this is every meter's track.
             # Re-derived 2026-10-06: the trough's place is named (`METER_TROUGH_TOP`), as tools are told it.
@@ -3514,11 +3523,12 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXX: the Memory meter is the same colour as the CPU meter",
         WID,
         [
-            ('                        Meter::Memory => p.green,\n',
-             '                        Meter::Memory => p.blue,\n'),
+            ('            Meter::Memory => p.green,\n',
+             '            Meter::Memory => p.blue,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-10-06: the loop walks `Meter::ALL`, each meter's role chosen by a match.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
@@ -3530,11 +3540,12 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYY: the meters' labels are promoted to body text",
         WID,
         [
-            ('                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
-             '                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
+            ('            text: heading,\n            font_size: 10.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '            text: heading,\n            font_size: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The three meters are drawn in one loop now: one label site, one fill site.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
@@ -3547,11 +3558,12 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAA: the Disk meter follows the accent",
         WID,
         [
-            ('                        Meter::Disk => p.peach,\n',
-             '                        Meter::Disk => p.accent,\n'),
+            ('            Meter::Disk => p.peach,\n',
+             '            Meter::Disk => p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-07: one meter a call now (`render_meter`), placed by the monitor's layout.
             # Re-derived 2026-10-06: the loop walks `Meter::ALL`, each meter's role chosen by a match.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
@@ -8915,504 +8927,16 @@ DEFECTS = [
             'the_active_tabs_label_is_computed_from_the_accent_under_it',
         ],
     ),
-    # ------------------------------------------------------------------
-    # Module 31: default_apps.rs. Eleven constants over 33 colour sites
-    # and three tabs.
-    #
-    # Four judgements are written into the module docs and each has a test
-    # that can refute it. These defects break every one of them, in the two
-    # shapes that matter: a role frozen to the Mocha value it used to be
-    # (which only the *light* render can see) and a role swapped for a
-    # neighbouring role (which no membership sweep can see at all, because
-    # both values are legal members).
-    #
-    # Two sites deserve naming. The chip ink used to read `CRUST`, and
-    # `readable_on` answers exactly `CRUST` for the *stock* accent -- so a
-    # frozen value and the correct call are the same pixel until the accent
-    # moves, and the sweep allows both endpoints outright. Only the accent
-    # sweep in `the_current_chips_ink_is_computed_from_the_accent_under_it`
-    # separates them. And the "None set" case is a real defect this
-    # conversion found rather than an invented one: accenting a category
-    # with no handler accents twelve of twelve cards and so marks nothing.
-    # ------------------------------------------------------------------
-    (
-        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the CPU hue is frozen to its Mocha value, so a light theme still draws the dark one',
-        RESMON,
-        [
-            ('            Self::Cpu => p.blue,',
-             '            Self::Cpu => guitk::color::Color::from_hex(0x89B4FA),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'each_measurement_is_pinned_to_the_role_it_names',
-        ],
-    ),
-    (
-        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the CPU graph is accented, which makes the monitor say "you are here" about a quantity',
-        RESMON,
-        [
-            ('            Self::Cpu => p.blue,',
-             '            Self::Cpu => p.accent,'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'each_measurement_is_pinned_to_the_role_it_names',
-            'test_render_expanded_has_resource_labels',
-        ],
-    ),
-    (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the four graphed hues are rotated by one -- still four distinct colours, every graph in its neighbour's",
-        RESMON,
-        [
-            ('            Self::Cpu => p.blue,',
-             '            Self::Cpu => p.green,'),
-            ('            Self::Memory => p.green,',
-             '            Self::Memory => p.peach,'),
-            ('            Self::Disk => p.peach,',
-             '            Self::Disk => p.mauve,'),
-            ('            Self::Network => p.mauve,',
-             '            Self::Network => p.blue,'),
-        ],
-        ["desktop"],
-        [
-            'each_measurement_is_pinned_to_the_role_it_names',
-        ],
-    ),
-    (
-        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: all six hues rotate, so the GPU takes the temperature colour and the CPU takes memory's",
-        RESMON,
-        [
-            ('            Self::Cpu => p.blue,',
-             '            Self::Cpu => p.green,'),
-            ('            Self::Memory => p.green,',
-             '            Self::Memory => p.peach,'),
-            ('            Self::Disk => p.peach,',
-             '            Self::Disk => p.mauve,'),
-            ('            Self::Network => p.mauve,',
-             '            Self::Network => p.lavender,'),
-            ('            Self::Gpu => p.lavender,',
-             '            Self::Gpu => p.red,'),
-            ('            Self::Temperature => p.red,',
-             '            Self::Temperature => p.blue,'),
-        ],
-        ["desktop"],
-        [
-            'each_measurement_is_pinned_to_the_role_it_names',
-            'test_render_expanded_has_resource_labels',
-        ],
-    ),
-    (
-        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the GPU and the CPU are the same hue, so two graphs would be indistinguishable',
-        RESMON,
-        [
-            ('            Self::Gpu => p.lavender,',
-             '            Self::Gpu => p.blue,'),
-        ],
-        ["desktop"],
-        [
-            'each_measurement_is_pinned_to_the_role_it_names',
-            'test_resource_type_colors_distinct',
-        ],
-    ),
-    (
-        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the temperature hue is frozen to Mocha red -- and temperature is never plotted, so nothing that looks at the screen can see it',
-        RESMON,
-        [
-            ('            Self::Temperature => p.red,',
-             '            Self::Temperature => guitk::color::Color::from_hex(0xF38BA8),'),
-        ],
-        ["desktop"],
-        [
-            'each_measurement_is_pinned_to_the_role_it_names',
-        ],
-    ),
-    (
-        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the compact strip's background is frozen to Mocha base",
-        RESMON,
-        [
-            ('            color: p.base,\n            corner_radii: CornerRadii::all(4.0),',
-             '            color: guitk::color::Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(4.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the compact strip sits a rung above the desktop instead of on the base',
-        RESMON,
-        [
-            ('            color: p.base,\n            corner_radii: CornerRadii::all(4.0),',
-             '            color: p.mantle,\n            corner_radii: CornerRadii::all(4.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'test_render_compact_empty_produces_background',
-        ],
-    ),
-    (
-        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the compact strip's border is frozen to Mocha surface0",
-        RESMON,
-        [
-            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),',
-             '            color: guitk::color::Color::from_hex(0x313244),\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the compact strip's border is a rung too bright for furniture",
-        RESMON,
-        [
-            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),',
-             '            color: p.surface2,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the compact sparklines are all accented rather than each drawn in its metric's hue",
-        RESMON,
-        [
-            ('            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));',
-             '            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, p.accent);'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'a_metric_is_one_colour_wherever_it_appears',
-        ],
-    ),
-    (
-        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: every compact sparkline is drawn in the CPU hue, so the strip reads as one metric plotted four times',
-        RESMON,
-        [
-            ('            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));',
-             '            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, ResourceType::Cpu.color(p));'),
-        ],
-        ["desktop"],
-        [
-            'a_metric_is_one_colour_wherever_it_appears',
-        ],
-    ),
-    (
-        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the compact sparklines are drawn in ink rather than in metric hues',
-        RESMON,
-        [
-            ('            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));',
-             '            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, p.subtext0);'),
-        ],
-        ["desktop"],
-        [
-            'a_metric_is_one_colour_wherever_it_appears',
-        ],
-    ),
-    (
-        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the expanded widget's background is frozen to Mocha base",
-        RESMON,
-        [
-            ('            color: p.base,\n            corner_radii: CornerRadii::all(6.0),',
-             '            color: guitk::color::Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(6.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the expanded widget's background is the crust, so the widget reads as a hole rather than a surface",
-        RESMON,
-        [
-            ('            color: p.base,\n            corner_radii: CornerRadii::all(6.0),',
-             '            color: p.crust,\n            corner_radii: CornerRadii::all(6.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the expanded widget's border is frozen to Mocha surface0",
-        RESMON,
-        [
-            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),',
-             '            color: guitk::color::Color::from_hex(0x313244),\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the expanded widget's border is its own background, so the widget has no edge",
-        RESMON,
-        [
-            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),',
-             '            color: p.base,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the widget's title is frozen to Mocha text",
-        RESMON,
-        [
-            ('            color: p.text,\n            font_size: 13.0,',
-             '            color: guitk::color::Color::from_hex(0xCDD6F4),\n            font_size: 13.0,'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the widget's title is dimmer than the readings underneath it",
-        RESMON,
-        [
-            ('            color: p.text,\n            font_size: 13.0,',
-             '            color: p.subtext0,\n            font_size: 13.0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the widget's title is accented, which is the one colour this module never draws",
-        RESMON,
-        [
-            ('            color: p.text,\n            font_size: 13.0,',
-             '            color: p.accent,\n            font_size: 13.0,'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a panel's label and graph are accented rather than drawn in the metric's hue",
-        RESMON,
-        [
-            ('        let color = resource.color(p);',
-             '        let color = p.accent;'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'every_site_draws_the_role_it_claims',
-            'each_measurement_is_pinned_to_the_role_it_names',
-            'a_metric_is_one_colour_wherever_it_appears',
-            'test_render_expanded_has_resource_labels',
-        ],
-    ),
-    (
-        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: every panel is drawn in the CPU hue, so all four graphs claim to be the processor',
-        RESMON,
-        [
-            ('        let color = resource.color(p);',
-             '        let color = ResourceType::Cpu.color(p);'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'each_measurement_is_pinned_to_the_role_it_names',
-            'a_metric_is_one_colour_wherever_it_appears',
-        ],
-    ),
-    (
-        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a panel's background is the widget's own, so the stack has no depth",
-        RESMON,
-        [
-            ('            color: p.surface0,\n            corner_radii: CornerRadii::all(4.0),',
-             '            color: p.base,\n            corner_radii: CornerRadii::all(4.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-            'test_render_expanded_has_panel_backgrounds',
-        ],
-    ),
-    (
-        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a panel's background is frozen to Mocha surface0",
-        RESMON,
-        [
-            ('            color: p.surface0,\n            corner_radii: CornerRadii::all(4.0),',
-             '            color: guitk::color::Color::from_hex(0x313244),\n            corner_radii: CornerRadii::all(4.0),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the current reading is frozen to Mocha text',
-        RESMON,
-        [
-            ('            color: p.text,\n            font_size: 11.0,',
-             '            color: guitk::color::Color::from_hex(0xCDD6F4),\n            font_size: 11.0,'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the current reading is as dim as the peak beneath it',
-        RESMON,
-        [
-            ('            color: p.text,\n            font_size: 11.0,',
-             '            color: p.subtext0,\n            font_size: 11.0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the peak reading is frozen to Mocha subtext',
-        RESMON,
-        [
-            ('            color: p.subtext0,\n            font_size: 9.0,',
-             '            color: guitk::color::Color::from_hex(0xA6ADC8),\n            font_size: 9.0,'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the peak reading is as bright as the current one, so the two cannot be told apart',
-        RESMON,
-        [
-            ('            color: p.subtext0,\n            font_size: 9.0,',
-             '            color: p.text,\n            font_size: 9.0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the peak reading is accented',
-        RESMON,
-        [
-            ('            color: p.subtext0,\n            font_size: 9.0,',
-             '            color: p.accent,\n            font_size: 9.0,'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the grid is frozen to Mocha surface1',
-        RESMON,
-        [
-            ('        let grid_color = p.surface1;',
-             '        let grid_color = guitk::color::Color::from_hex(0x45475A);'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_this_monitor_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a gridline is the colour of the CPU graph, so furniture reads as a reading nobody took',
-        RESMON,
-        [
-            ('        let grid_color = p.surface1;',
-             '        let grid_color = p.blue;'),
-        ],
-        ["desktop"],
-        [
-            'no_gridline_can_be_mistaken_for_a_reading',
-            'every_site_draws_the_role_it_claims',
-            'test_render_expanded_has_grid_lines',
-        ],
-    ),
-    (
-        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the grid is as bright as the readings drawn over it',
-        RESMON,
-        [
-            ('        let grid_color = p.surface1;',
-             '        let grid_color = p.text;'),
-        ],
-        ["desktop"],
-        [
-            'no_gridline_can_be_mistaken_for_a_reading',
-            'every_site_draws_the_role_it_claims',
-            'test_render_expanded_has_grid_lines',
-        ],
-    ),
-    (
-        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the grid is accented',
-        RESMON,
-        [
-            ('        let grid_color = p.surface1;',
-             '        let grid_color = p.accent;'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'every_site_draws_the_role_it_claims',
-            'test_render_expanded_has_grid_lines',
-        ],
-    ),
-    (
-        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a panel's graph is detached from its label, so the label names a hue nothing on the screen uses",
-        RESMON,
-        [
-            ('            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, color);',
-             '            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, p.subtext0);'),
-        ],
-        ["desktop"],
-        [
-            'a_metric_is_one_colour_wherever_it_appears',
-        ],
-    ),
-    (
-        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a panel's graph is accented while its label keeps the metric's hue",
-        RESMON,
-        [
-            ('            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, color);',
-             '            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, p.accent);'),
-        ],
-        ["desktop"],
-        [
-            'no_colour_in_this_module_marks_a_position',
-            'a_metric_is_one_colour_wherever_it_appears',
-        ],
-    ),
+    # RETIRED 2026-10-07: resmon.rs's 35 defects, and the header above them,
+    # which was module 31's (default_apps.rs, whose own defects went with that
+    # module). The resource monitor nothing showed was merged into the system
+    # monitor widget and deleted (design-decisions 1423, 1496). What its
+    # defects held that still has a drawing -- each graph pinned to the role
+    # it names, none the accent, the guides as furniture, a heading's label
+    # dimmer than its reading, everything under the widget's veil -- is held
+    # by defects against gui/desktop/src/widgets/monitor.rs now (MON, at the
+    # end). The GPU and temperature graphs it kept were never drawn, and the
+    # compact strip and expanded panel's own surfaces went with the panel.
     # RETIRED by the control-module refactor: the switch knob keeps Mocha text.
     # The call site no longer names this colour -- switch.rs/slider.rs
     # does -- so the defect is unreachable here by construction. Its
@@ -19211,6 +18735,202 @@ DEFECTS = [
         ["desktop"],
         [
             'desktop_navigation_stops_at_both_ends',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the shortcut card's foot says what the last edit did in Mocha's own subtext0",
+        SHORTCUT_ED,
+        [
+            ('                color: p.subtext0,\n                font_size,\n',
+             '                color: guitk::color::Color::from_hex(0xA6ADC8),\n                font_size,\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the shortcut card's buttons are blended against Mocha's panel, whatever the card is drawn on",
+        SHORTCUT_ED,
+        [
+            ('                p.panel_bg(),\n                focus_ring,\n',
+             '                guitk::color::Color::rgba(30, 30, 46, 240),\n                focus_ring,\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the action list's chosen entry is lit in Mocha's own surface0",
+        SHORTCUT_ED,
+        [
+            ('                        height: hotkeys::ROW_HEIGHT - 4.0,\n                        color: p.surface0,\n',
+             '                        height: hotkeys::ROW_HEIGHT - 4.0,\n                        color: guitk::color::Color::from_hex(0x313244),\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a program's heading in the notification pane is named in Mocha's own text",
+        NOTIF_PANE,
+        [
+            ('            text: app.to_string(),\n            color: p.text,\n',
+             '            text: app.to_string(),\n            color: guitk::color::Color::from_hex(0xCDD6F4),\n'),
+        ],
+        ["desktop"],
+        [
+            'a_programs_heading_is_drawn_where_it_is_pressed',
+            # Its fixture, one notification from Mail, is grouped by
+            # program: a heading.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: \"Show N more\" in the notification pane is Mocha's own blue",
+        NOTIF_PANE,
+        [
+            ('                        text: more_label(*hidden),\n                        color: p.ink(p.accent),\n',
+             '                        text: more_label(*hidden),\n                        color: guitk::color::Color::from_hex(0x89B4FA),\n'),
+        ],
+        ["desktop"],
+        [
+            # The sweep's fixtures have one notification each: no "more" row.
+            'a_programs_heading_is_drawn_where_it_is_pressed',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the action list's other entries are named in Mocha's own subtext1",
+        SHORTCUT_ED,
+        [
+            ('                    color: if picked { p.text } else { p.subtext1 },\n',
+             '                    color: if picked { p.text } else { guitk::color::Color::from_hex(0xBAC2DE) },\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # The system monitor's graphs (gui/desktop/src/widgets/monitor.rs,
+    # design-decisions 1496): resmon.rs's judgements, carried over with its
+    # graphs. A hue names a measurement and is pinned to it; none is the
+    # accent; the guide lines are furniture, never a reading's colour; a
+    # heading's label is dimmer than its reading; all of it is under the
+    # widget's veil. Frozen values show only in the light render, a swapped
+    # role only to a test that checks each line where it lies.
+    # ------------------------------------------------------------------
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the CPU graph is drawn in Mocha's own blue, so a light theme still draws the dark one",
+        MON,
+        [
+            ('            Self::Cpu => p.blue,\n',
+             '            Self::Cpu => guitk::color::Color::from_hex(0x89B4FA),\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_graphs_draw_comes_from_the_palette',
+            'each_graph_is_its_own_role_and_none_follows_the_accent',
+            'every_colour_a_roomy_monitor_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the CPU graph follows the accent, which makes a measurement say what the user chose",
+        MON,
+        [
+            ('            Self::Cpu => p.blue,\n',
+             '            Self::Cpu => p.accent,\n'),
+        ],
+        ["desktop"],
+        [
+            # The stock accent is blue, so every test drawn in the default
+            # palette sees the right pixel; only the sweep over other accents
+            # can tell.
+            'each_graph_is_its_own_role_and_none_follows_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the four graphs' hues are rotated by one -- still four distinct colours, each graph in its neighbour's",
+        MON,
+        [
+            ('            Self::Cpu => p.blue,\n            Self::Memory => p.green,\n            Self::DiskActivity => p.teal,\n            Self::Network => p.mauve,\n',
+             '            Self::Cpu => p.green,\n            Self::Memory => p.teal,\n            Self::DiskActivity => p.mauve,\n            Self::Network => p.blue,\n'),
+        ],
+        ["desktop"],
+        [
+            # The widget's own count -- one line in each hue -- is blind to a
+            # rotation: four lines, four hues, each once.
+            'each_graph_is_its_own_role_and_none_follows_the_accent',
+            'each_graph_is_drawn_in_its_hue_newest_at_the_right',
+            'the_network_is_plotted_on_its_minutes_peak',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the guide lines are the CPU graph's colour, so furniture reads as a reading nobody took",
+        MON,
+        [
+            ('    let grid = Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha);\n',
+             '    let grid = Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha);\n'),
+        ],
+        ["desktop"],
+        [
+            'the_guide_lines_are_furniture',
+            'each_graph_is_drawn_in_its_hue_newest_at_the_right',
+            'a_roomy_monitor_draws_its_graphs_and_the_disks_meter',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the guide lines keep Mocha's own surface1",
+        MON,
+        [
+            ('    let grid = Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha);\n',
+             '    let grid = Color::rgba(0x45, 0x47, 0x5A, alpha);\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_graphs_draw_comes_from_the_palette',
+            'the_guide_lines_are_furniture',
+            'every_colour_a_roomy_monitor_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a graph's reading is as dim as its label, so the news reads as furniture",
+        MON,
+        [
+            ('            .map_or((NOT_MEASURED.to_owned(), p.subtext0), |r| (r, p.text));\n',
+             '            .map_or((NOT_MEASURED.to_owned(), p.subtext0), |r| (r, p.subtext0));\n'),
+        ],
+        ["desktop"],
+        [
+            'a_heading_names_its_graph_dim_and_its_reading_bright',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a graph's label keeps Mocha's own subtext0",
+        MON,
+        [
+            ('            color: wash(p.subtext0),\n            font_weight: weight,\n',
+             '            color: wash(Color::from_hex(0xA6ADC8)),\n            font_weight: weight,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_graphs_draw_comes_from_the_palette',
+            'a_heading_names_its_graph_dim_and_its_reading_bright',
+            'every_colour_a_roomy_monitor_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the graphs' lines are drawn opaque over a translucent widget",
+        MON,
+        [
+            ('    let ink = Color::rgba(hue.r, hue.g, hue.b, alpha);\n',
+             '    let ink = Color::rgba(hue.r, hue.g, hue.b, 255);\n'),
+        ],
+        ["desktop"],
+        [
+            'the_graphs_are_drawn_under_the_widgets_veil',
         ],
     ),
 ]

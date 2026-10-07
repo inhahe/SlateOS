@@ -11,6 +11,21 @@
 
 use super::*;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const OPTIONS: [(&str, Rect); 3] = [
     (
         "Small",
@@ -65,7 +80,7 @@ fn act(
 fn an_option_is_chosen_as_clicked() {
     let mut group = RadioGroup::new(3, Some(0));
     let mut tool = access(&mut group, true);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::Group, "Size"));
     assert_eq!(
         root.bounds,
@@ -138,7 +153,7 @@ fn a_deselectable_groups_choice_is_cleared_by_a_press() {
 fn a_disabled_group_refuses() {
     let mut group = RadioGroup::new(3, None);
     let mut tool = access(&mut group, false);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert!(!root.enabled && root.children.iter().all(|n| !n.enabled));
     assert_eq!(
         act(&mut tool, RadioPart::Option(0), Action::Choose),

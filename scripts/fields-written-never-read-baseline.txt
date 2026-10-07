@@ -382,7 +382,8 @@ apps/torrent/src/main.rs:completed_time
 gui/desktop/src/bluetooth.rs:trusted
 gui/desktop/src/file_drop.rs:ctrl_held
 gui/desktop/src/power.rs:low_battery_warned
-gui/desktop/src/resmon.rs:last_snapshot
+# gui/desktop/src/resmon.rs:last_snapshot -- DELETED 2026-10-07 with the module,
+#   whose graphs the system monitor widget took (design-decisions 1496).
 gui/desktop/src/window_peek.rs:last_tick_ms
 
 # gui/syntax -- NOT DEAD: read across the FFI boundary (2026-09-28, lane C).

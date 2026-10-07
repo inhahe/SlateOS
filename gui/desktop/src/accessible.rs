@@ -44,7 +44,11 @@
 //! each the component's own parts, where the shell draws it. And, only to be
 //! read, the on-screen display while it is up (`osd::OsdPart`) -- a level, a
 //! lock key, a track, each saying what it says -- and the card saying how to
-//! move the wallpaper while it is being moved.
+//! move the wallpaper while it is being moved. And the card of keyboard
+//! shortcuts (`shortcut_editor::CardPart`): its rows, chosen and pressed as
+//! clicked; its action list, walked with the keys; its field, typed into;
+//! its foot's line -- while it records keys, a field the keys are given to,
+//! as they are pressed -- and its buttons, each its key.
 //!
 //! # As the user would
 //!
@@ -62,15 +66,18 @@
 //! brightness are set as typing and the controls set them.
 
 use guitk::dialog::DialogTarget;
+use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::menu::{ContextMenu, MenuPart};
 use guitk::widget::CheckState;
 use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 
 use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
+use crate::hotkeys::Hotkey;
 use crate::notif_pane::PanePart;
 use crate::osd::OsdPart;
 use crate::overview::{self, OverviewPart};
 use crate::run_dialog::RunPart;
+use crate::shortcut_editor::{self, CardPart};
 use crate::snap::{SnapLayoutPreset, ZoneId};
 use crate::widgets::{NoteKey, WidgetInstanceId, WidgetPart};
 use crate::{
@@ -170,6 +177,9 @@ pub enum ShellPart {
     /// The card saying how to move the wallpaper, while it is being moved:
     /// the keys and the pointer move it, Enter keeps it, Escape puts it back.
     WallpaperMove,
+    /// A part of the card of keyboard shortcuts, while it is up: its rows,
+    /// its action list and field, its foot's line and buttons.
+    Shortcuts(CardPart),
 }
 
 /// A menu the shell opens over everything.
@@ -627,7 +637,7 @@ impl DesktopShell {
             Hit::StartMenuShortcut(which) if self.start_menu_open => {
                 Some(self.start_shortcut_rect(which))
             }
-            Hit::PowerButton if self.start_menu_open => Some(self.power_button_rect()),
+            Hit::PowerButton if self.start_menu_open => Some(self.power_shut_down_rect()),
             Hit::PowerCaret if self.start_menu_open => Some(self.power_caret_rect()),
             Hit::PowerMenuEntry(row) if self.power_menu_open => {
                 (row < self.power_menu_visible_rows()).then(|| self.power_menu_row_rect(row))
@@ -873,6 +883,153 @@ impl DesktopShell {
             kind: MouseEventKind::Release(MouseButton::Left),
         });
         answered(released).or_else(|| answered(pressed))
+    }
+
+    /// A double click's second press, and its release, at `(x, y)`: after a
+    /// click there ([`click_at`](Self::click_at)), what makes it a double.
+    fn second_click_at(&mut self, x: f32, y: f32) -> Option<ShellAction> {
+        let pressed = self.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        });
+        let released = self.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        answered(released).or_else(|| answered(pressed))
+    }
+
+    /// `key` pressed with `modifiers` held, typing `text`, as the keyboard
+    /// hands the shell a key -- on the card of shortcuts, which owns them
+    /// while it takes them. The card's keys start no program, so what the
+    /// shell made of it is no answer for a tool.
+    fn card_key_press(&mut self, key: Key, modifiers: Modifiers, text: &str) {
+        let _outcome = self.handle_hotkey(&KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        });
+    }
+
+    /// `action` on `part` of the card of keyboard shortcuts, as its user does
+    /// it. A row or a button clicked at its middle -- a row pressed clicked
+    /// twice, a double click, which is new keys for it. An entry of the
+    /// action list walked to with Up and Down, which scroll it into sight,
+    /// and pressed with Enter. The field's text set as a paste over all of
+    /// it -- Ctrl+A, then the text as one keystroke, as an input method
+    /// commits what it composed -- and the field pressed as Enter. Keys given
+    /// to the card while it records them as the user presses them, named as
+    /// a shortcut is written, `Ctrl+Alt+T`.
+    ///
+    /// A click is refused where what a press reaches first takes it -- a
+    /// menu, the character picker, a drag; the card's keys reach it before
+    /// anything else -- and where it would do nothing: on a greyed button, on
+    /// a row while the card waits for keys or an answer.
+    fn invoke_shortcut_card(
+        &mut self,
+        part: CardPart,
+        action: Action,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        let node = self
+            .shortcut_card_layout()
+            .and_then(|layout| {
+                self.shortcut_editor
+                    .automation(&self.hotkeys, self.shortcut_context(), &layout)
+                    .walk()
+                    .find(|node| node.id == part)
+                    .cloned()
+            })
+            .ok_or(Refusal::NoSuchWidget)?;
+        let refused = Refusal::NotApplicable {
+            role: node.role,
+            action: action.name(),
+        };
+        // A press reaches the card after these, which take every one; its
+        // keys reach it before anything else (`handle_hotkey_inner`).
+        let pressed_first = self.ahead_of_chooser();
+        match (part, action) {
+            (CardPart::Binding(_), action @ (Action::Choose | Action::Focus | Action::Press)) => {
+                if pressed_first {
+                    return Err(Refusal::Hidden);
+                }
+                if !node.enabled {
+                    return Err(Refusal::Disabled);
+                }
+                let (x, y) = node.bounds.centre();
+                let chosen = self.click_at(x, y);
+                if action == Action::Press {
+                    return Ok(self.second_click_at(x, y).or(chosen));
+                }
+                Ok(chosen)
+            }
+            (CardPart::Button(_), Action::Press) => {
+                if pressed_first {
+                    return Err(Refusal::Hidden);
+                }
+                if !node.enabled {
+                    return Err(Refusal::Disabled);
+                }
+                let (x, y) = node.bounds.centre();
+                Ok(self.click_at(x, y))
+            }
+            (CardPart::Entry(id), action @ (Action::Choose | Action::Focus | Action::Press)) => {
+                self.walk_to_entry(id)?;
+                if action == Action::Press {
+                    self.card_key_press(Key::Enter, Modifiers::NONE, "");
+                }
+                Ok(None)
+            }
+            (CardPart::Field, Action::SetText(text)) => {
+                self.card_key_press(Key::A, Modifiers::ctrl(), "");
+                if text.is_empty() {
+                    self.card_key_press(Key::Backspace, Modifiers::NONE, "");
+                } else {
+                    self.card_key_press(Key::Unknown(0), Modifiers::NONE, &text);
+                }
+                Ok(None)
+            }
+            (CardPart::Field, Action::Press) => {
+                self.card_key_press(Key::Enter, Modifiers::NONE, "");
+                Ok(None)
+            }
+            // The field has the keyboard whenever it is shown, and so does
+            // the line taking keys while the card records them.
+            (CardPart::Field, Action::Focus) => Ok(None),
+            (CardPart::Message, Action::Focus) if node.role == Role::TextField => Ok(None),
+            (CardPart::Message, Action::SetText(name)) if node.role == Role::TextField => {
+                let keys = Hotkey::parse(&name).map_err(|_| Refusal::NotAKey)?;
+                self.card_key_press(keys.key, keys.modifiers(), "");
+                Ok(None)
+            }
+            _ => Err(refused),
+        }
+    }
+
+    /// Walk the action list's choice to entry `id` -- its place among every
+    /// entry -- with Up and Down, as the user would with the keys, the list
+    /// scrolling to keep it in sight.
+    fn walk_to_entry(&mut self, id: usize) -> Result<(), Refusal> {
+        let cx = self.shortcut_context();
+        // Each step moves the choice one entry nearer; there are no more
+        // steps to take than entries.
+        for _ in 0..=shortcut_editor::choices(cx.desktops).len() {
+            let (wanted, chosen) = self
+                .shortcut_editor
+                .entry_place(id, cx)
+                .ok_or(Refusal::NoSuchWidget)?;
+            let key = match chosen {
+                Some(at) if at == wanted => return Ok(()),
+                Some(at) if at > wanted => Key::Up,
+                _ => Key::Down,
+            };
+            self.card_key_press(key, Modifiers::NONE, "");
+        }
+        // The list did not move as the keys move it: whatever stopped it is
+        // between the tool and the entry.
+        Err(Refusal::Hidden)
     }
 
     /// The desktop's icons, each named by its label and said to be what it
@@ -1176,7 +1333,7 @@ impl DesktopShell {
         menu.children.push(button(
             Hit::PowerButton,
             power::PowerChoice::ShutDown.label(),
-            self.power_button_rect(),
+            self.power_shut_down_rect(),
         ));
         let mut caret = button(Hit::PowerCaret, "Power options", self.power_caret_rect());
         caret.value = Some(Value::Chosen(self.power_menu_open));
@@ -1316,7 +1473,9 @@ impl DesktopShell {
                 | PanePart::Back
                 | PanePart::FullSettings
                 | PanePart::Card(_)
-                | PanePart::Dismiss(_),
+                | PanePart::Dismiss(_)
+                | PanePart::GroupClear(_)
+                | PanePart::GroupMore(_),
                 Action::Press,
             ) => None,
             _ => {
@@ -1508,6 +1667,16 @@ impl Accessible for DesktopShell {
                     .join(" "),
             );
             root.children.push(card);
+        }
+        // The card of keyboard shortcuts, kept up over the desktop while it
+        // is used: a press reaches it after the menus, before the desktop's
+        // own things under it.
+        if let Some(layout) = self.shortcut_card_layout() {
+            root.children.push(
+                self.shortcut_editor
+                    .automation(&self.hotkeys, self.shortcut_context(), &layout)
+                    .map(&ShellPart::Shortcuts),
+            );
         }
         // The menus last, as they are drawn over everything else -- the one
         // a press reaches first last of all.
@@ -1703,6 +1872,7 @@ impl Accessible for DesktopShell {
                 }
                 Err(not_for(Role::Dialog))
             }
+            (ShellPart::Shortcuts(part), action) => self.invoke_shortcut_card(part, action),
             (ShellPart::StartList | ShellPart::PowerMenu | ShellPart::Toasts, _) => {
                 Err(not_for(Role::List))
             }

@@ -1703,7 +1703,10 @@ live.
   binds any program; taken keys are offered for moving rather than
   refused. `gui/desktop/src/shortcut_editor.rs`; the text fields use the new
   `guitk::textinput::TextInput::edit_key`. What stays open is C-Q24 (how few
-  shortcuts to ship) and the emoji/Unicode hotkey action.
+  shortcuts to ship) and the emoji/Unicode hotkey action. Since 2026-10-07
+  the card answers the pointer too (`design-decisions.md` §1494): each key
+  is a button along its foot, a click chooses a row or an action and a
+  double click takes it, and tools see and use it as its user does.
 
 - `[C]` **One character picker: every emoji and the symbols a keyboard
   lacks** -- done 2026-10-06 (`design.txt` line 711's emoji input;
@@ -2264,6 +2267,18 @@ live.
   moment it is saved. **Next:** a control for it on the Settings
   application's Notifications page, asked of lane E
   (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+
+- `[x]` `[C]` **The notification pane groups by program**
+  (`design-decisions.md` §1495) -- done 2026-10-07. Each program's
+  notifications under its name, the program heard from last first: its
+  newest three shown, "Show N more" for the rest and "Show fewer" to put
+  them away, and a cross on the heading that clears the program's at once;
+  a right-click on the heading offers the program's menu, as on a card.
+  Grouping by time (Today, Yesterday, This Week, Older) stays as a choice,
+  `pane.grouping` in `notifications.yaml`, followed the moment it is saved;
+  tools see each program's group, its cross and its "more" row. **Next:**
+  the choice on the Settings application's Notifications page, asked of
+  lane E (`requests/c-e-a-choice-of-how-the-notification-pane-groups.md`).
 
 - `[x]` `[C]` **A theme is checked before it is installed or shared**
   (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated

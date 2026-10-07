@@ -103,6 +103,7 @@ pub mod draw_check;
 pub mod event_sounds;
 pub mod file_drop;
 pub mod focus_assist;
+pub mod fs_space;
 pub mod hotkeys;
 pub mod icons;
 pub mod idle_lock;
@@ -121,7 +122,6 @@ mod pictures;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
-pub mod resmon;
 pub mod run_dialog;
 pub mod screen_capture;
 pub mod security_dialog;
@@ -147,6 +147,8 @@ pub mod window_rules;
 #[cfg(test)]
 mod field_menu_tests;
 #[cfg(test)]
+mod layout_lint_tests;
+#[cfg(test)]
 mod note_tests;
 #[cfg(test)]
 mod notification_menu_tests;
@@ -162,6 +164,8 @@ mod pointer_tests;
 mod quick_settings_tests;
 #[cfg(test)]
 mod service_menu_tests;
+#[cfg(test)]
+mod shortcut_card_tests;
 #[cfg(test)]
 mod tray_window_tests;
 #[cfg(test)]
@@ -335,6 +339,17 @@ pub fn launch_failure_reason(error: &std::io::Error) -> String {
 fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
     let rows = acc.rows(dy);
     i32::try_from(rows).unwrap_or(if rows < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// `key` pressed with nothing held: what a button on the shortcut card hands
+/// the card, being that key (`shortcut_editor::CardButton`).
+fn card_key(key: Key) -> KeyEvent {
+    KeyEvent {
+        key,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+        text: String::new(),
+    }
 }
 
 // --- Taskbar ---------------------------------------------------------------
@@ -622,13 +637,6 @@ struct TrayDrag {
 /// is, and a ghost they cannot recognise is worse than none.
 const GHOST_ALPHA: u8 = 110;
 
-/// How far the shortcut card's outcome line sits from its left and bottom
-/// edges.
-///
-/// One constant for both, so the message is inset by the same amount it is
-/// lifted and cannot drift into a corner as the card resizes.
-const SHORTCUT_MESSAGE_INSET: f32 = 20.0;
-
 /// How far the shortcut card stays from the top and bottom of the screen.
 ///
 /// A card that reaches the display's edges reads as a mode the desktop has
@@ -636,11 +644,6 @@ const SHORTCUT_MESSAGE_INSET: f32 = 20.0;
 /// nowhere to fall. One constant, because the card's layout, its placement and
 /// the editor's page size all derive from the room it leaves.
 const SHORTCUT_CARD_MARGIN: f32 = 48.0;
-
-/// What the card's bottom line says when nothing has happened yet: the keys it
-/// answers. Without it the editor's keys are discoverable only by reading the
-/// source, which is the fate of every keyboard feature nobody is told about.
-const SHORTCUT_CARD_HINT: &str = "Enter: new keys \u{b7} F2: change action \u{b7} Insert: add \u{b7} Delete: remove \u{b7} Esc: close";
 
 /// The bell the tray draws when nothing is being silenced.
 ///
@@ -2033,6 +2036,9 @@ pub struct DesktopShell {
     prev_cpu: Option<procinfo::CpuTimes>,
     /// Processor and memory as of the last widget-due tick.
     sampled: crate::widgets::SystemSample,
+    /// The system monitor's graphs: the last minute of each, and the
+    /// counters last read to difference the next against.
+    monitor: crate::widgets::monitor::Sampler,
     /// All managed windows.
     pub windows: BTreeMap<WindowId, ManagedWindow>,
     /// Currently focused window.
@@ -2076,11 +2082,12 @@ pub struct DesktopShell {
     pub power_menu_open: bool,
     /// Whether the card listing every keyboard shortcut is showing.
     ///
-    /// A plain `bool` rather than a widget with state of its own, because the
-    /// card has none: [`hotkeys::render_settings_panel`] draws it from
-    /// [`hotkeys`](Self::hotkeys) every frame, so what it shows is whatever the
-    /// registry says right now — a shortcut rebound while the card is up is
-    /// redrawn under its new chord without anyone telling the card.
+    /// A plain `bool` rather than a widget holding its rows, because the rows
+    /// are the registry's: [`hotkeys::render_settings_panel`] draws them from
+    /// [`hotkeys`](Self::hotkeys) every frame, so what the card shows is
+    /// whatever the registry says right now — a shortcut rebound while the
+    /// card is up is redrawn under its new chord without anyone telling the
+    /// card. What the card is doing is its editor's (`shortcut_editor`).
     pub shortcut_card_open: bool,
     /// The shortcut card's editor: which row the keyboard is on, what it is in
     /// the middle of -- recording keys, choosing an action, typing a command,
@@ -2093,6 +2100,15 @@ pub struct DesktopShell {
     /// menu opening, the notification pane -- must not leave a recording
     /// behind that swallows the next keystroke on a desktop showing no card.
     pub(crate) shortcut_editor: shortcut_editor::ShortcutEditor,
+    /// The shortcut card's button the pointer is over, lit where it can be
+    /// pressed.
+    shortcut_hover: Option<shortcut_editor::CardButton>,
+    /// Why the card's greyed button under the pointer cannot be pressed,
+    /// said after the tooltip's delay (`design-decisions.md` §1473).
+    shortcut_why: guitk::disabled::WhyDisabled,
+    /// The wheel's part-notches over the card's action list, kept until they
+    /// make a row, as a trackpad sends them.
+    shortcut_wheel: wheel::Accumulator,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -2941,6 +2957,7 @@ impl DesktopShell {
         let mut shell = Self {
             prev_cpu: None,
             sampled: crate::widgets::SystemSample::default(),
+            monitor: crate::widgets::monitor::Sampler::new(),
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -2956,6 +2973,9 @@ impl DesktopShell {
             power_menu_open: false,
             shortcut_card_open: false,
             shortcut_editor: shortcut_editor::ShortcutEditor::new(),
+            shortcut_hover: None,
+            shortcut_why: guitk::disabled::WhyDisabled::new(),
+            shortcut_wheel: wheel::Accumulator::default(),
             apps: launcher::builtin_app_database(),
             // The layouts this machine has, from `keylayout`'s built-in set.
             // Which one is *active* is corrected from `input.yaml` by
@@ -3281,6 +3301,8 @@ impl DesktopShell {
             self.focus.set_quiet_hours(&self.notif.settings.quiet_hours);
             self.notifications
                 .adopt_app_rules(&self.notif.settings.apps);
+            self.notifications
+                .set_grouping(self.notif.settings.grouping);
         }
     }
 
@@ -3358,7 +3380,12 @@ impl DesktopShell {
         if file.settings.history != self.notif.settings.history {
             self.notif_history_saved = None;
         }
-        let changed = apps_changed || quiet_changed;
+        // The pane, open or not, groups as the file says from now on.
+        let grouping_changed = file.settings.grouping != self.notif.settings.grouping;
+        if grouping_changed {
+            self.notifications.set_grouping(file.settings.grouping);
+        }
+        let changed = apps_changed || quiet_changed || grouping_changed;
         // Adopted either way: the document is what a later save splices into,
         // so keeping the old one would write back a file stripped of whatever
         // comment or unknown key this read just brought in.
@@ -4302,6 +4329,17 @@ impl DesktopShell {
         let button = self.power_button_rect();
         let w = self.scale(POWER_CARET_WIDTH).min(button.w);
         Rect::new(button.x + button.w - w, button.y, w, button.h)
+    }
+
+    /// Where a press on the power button means "Shut down": all of it but
+    /// its caret -- the gap before the caret included, which
+    /// [`hit_test`](Self::hit_test) gives the button. What tools are told the
+    /// button is: the whole button holds the caret, and a press there is the
+    /// caret's.
+    pub(crate) fn power_shut_down_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let caret = self.power_caret_rect();
+        Rect::new(button.x, button.y, (caret.x - button.x).max(0.0), button.h)
     }
 
     /// The part of the power button drawn as "Shut down": all of it but the
@@ -5516,6 +5554,17 @@ impl DesktopShell {
                 _ => return ShellAction::Consumed,
             }
         }
+        // The card of shortcuts takes the presses and the wheel that land on
+        // it -- a row chosen, a button pressed, its action list scrolled --
+        // ahead of the desktop's own things it is drawn over, and lets
+        // everything else through to them, as nothing were over them: it is
+        // kept up to be read while the desktop is used, and a drag begun off
+        // it goes on under it.
+        if self.shortcut_card_open
+            && let Some(action) = self.mouse_on_shortcut_card(event)
+        {
+            return action;
+        }
         // A left press on a note's writing area opens it for writing, and a
         // double click there selects a word. Before the widget drag below,
         // which would otherwise take hold of the note: its title bar is still
@@ -5523,9 +5572,9 @@ impl DesktopShell {
         //
         // These presses on the desktop's own things wait only on a popup the
         // press is spent on (`popup_takes_press`). Not on the card of
-        // shortcuts, which lets a press through: asked whether *any* popup
-        // was open, a press on a widget with the card up passed it by and
-        // reached the icon layer, which chose the icon under the widget.
+        // shortcuts, which lets a press off it through: asked whether *any*
+        // popup was open, a press on a widget with the card up passed it by
+        // and reached the icon layer, which chose the icon under the widget.
         if let MouseEventKind::Press(MouseButton::Left)
         | MouseEventKind::DoubleClick(MouseButton::Left) = event.kind
             && !self.popup_takes_press()
@@ -5983,10 +6032,11 @@ impl DesktopShell {
             .field_menu
             .as_ref()
             .and_then(|(menu, _)| menu.due_in(self.osd_clock_ms));
-        match (tile, reason) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let greyed = self
+            .shortcut_card_open
+            .then(|| self.shortcut_why.due_in(self.osd_clock_ms))
+            .flatten();
+        [tile, reason, greyed].into_iter().flatten().min()
     }
 
     /// Whether what the pointer rests on has changed since this was last
@@ -7601,21 +7651,10 @@ impl DesktopShell {
         // are typing. Either way the editor owns them, and only on the plain
         // list does it hand back what is not its own, so a shortcut still works
         // with the card open.
-        if self.shortcut_card_open {
-            let cx = self.shortcut_context();
-            match self.shortcut_editor.handle_key(key, &mut self.hotkeys, cx) {
-                shortcut_editor::Outcome::NotMine => {}
-                shortcut_editor::Outcome::Handled => return HotkeyOutcome::ignored(),
-                shortcut_editor::Outcome::Changed => {
-                    self.save_edited_shortcuts();
-                    return HotkeyOutcome::ignored();
-                }
-                shortcut_editor::Outcome::Close => {
-                    self.shortcut_card_open = false;
-                    self.shortcut_editor.reset();
-                    return HotkeyOutcome::ignored();
-                }
-            }
+        if self.shortcut_card_open
+            && let Some(outcome) = self.key_on_shortcut_card(key)
+        {
+            return outcome;
         }
 
         // The character picker, ahead of the field it is over -- the Run box's
@@ -13205,14 +13244,168 @@ impl DesktopShell {
 
     /// What the shortcut editor needs to know about this desktop.
     fn shortcut_context(&self) -> shortcut_editor::Context {
+        let style = self.shortcut_button_style();
         shortcut_editor::Context {
             // Saturated rather than truncated: a desktop count past 255 is
             // absurd, and 255 "Switch to Desktop" entries is the honest
             // answer to it where `as u8` would offer a handful.
             desktops: u8::try_from(self.num_desktops).unwrap_or(u8::MAX),
-            picker_rows: shortcut_editor::picker_rows(self.shortcut_card_budget()),
-            list_rows: hotkeys::rows_per_column(&self.hotkeys, self.shortcut_card_budget()),
+            picker_rows: shortcut_editor::picker_rows(
+                self.shortcut_card_budget(),
+                shortcut_editor::picker_foot_height(&style),
+            ),
+            list_rows: hotkeys::rows_per_column(
+                &self.hotkeys,
+                self.shortcut_card_budget(),
+                shortcut_editor::list_foot_height(&style),
+            ),
         }
+    }
+
+    /// The shape the theme gives buttons, which the shortcut card's foot is
+    /// laid out in: a theme's wider padding is a wider button, and the foot
+    /// must hold it.
+    fn shortcut_button_style(&self) -> guitk::widget_style::ButtonStyle {
+        guitk::palette::PaletteSource::widget_style(&self.appearance).button
+    }
+
+    /// Where everything on the shortcut card is, while it is open: one answer
+    /// for its drawing, a press on it and tools (`shortcut_editor::ShortcutEditor::layout`).
+    pub(crate) fn shortcut_card_layout(&self) -> Option<shortcut_editor::CardLayout> {
+        if !self.shortcut_card_open {
+            return None;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "screen dimensions are far inside f32's exact-integer range"
+        )]
+        let screen = (self.screen_width as f32, self.screen_height as f32);
+        Some(self.shortcut_editor.layout(
+            &self.hotkeys,
+            self.shortcut_context(),
+            screen,
+            self.shortcut_card_budget(),
+            &self.shortcut_button_style(),
+        ))
+    }
+
+    /// Hand `key` to the shortcut card, as the keyboard does -- or as a
+    /// button on the card does, which *is* its key: what the editor did,
+    /// saved where it changed the bindings, the card closed where it said
+    /// so. `None` when the key is not the card's, on the plain list, so a
+    /// shortcut still works with the card up.
+    fn key_on_shortcut_card(&mut self, key: &KeyEvent) -> Option<HotkeyOutcome> {
+        let cx = self.shortcut_context();
+        match self.shortcut_editor.handle_key(key, &mut self.hotkeys, cx) {
+            shortcut_editor::Outcome::NotMine => None,
+            shortcut_editor::Outcome::Handled => Some(HotkeyOutcome::ignored()),
+            shortcut_editor::Outcome::Changed => {
+                self.save_edited_shortcuts();
+                Some(HotkeyOutcome::ignored())
+            }
+            shortcut_editor::Outcome::Close => {
+                self.shortcut_card_open = false;
+                self.shortcut_editor.reset();
+                Some(HotkeyOutcome::ignored())
+            }
+        }
+    }
+
+    /// The pointer on the shortcut card, which takes the presses and the
+    /// wheel that land on it and lets the rest through: `None` for what goes
+    /// on to whatever is under it, as nothing were over it -- a press off
+    /// the card, and any motion or release, on it or off, which belong to
+    /// whatever gesture began them -- and what the shell answers otherwise.
+    ///
+    /// A button pressed is its key, handed on ([`key_on_shortcut_card`](Self::key_on_shortcut_card));
+    /// a greyed one is nothing. A row of the list, or an entry of the action
+    /// list, is chosen as Up and Down choose one, and a double click is that
+    /// and Enter -- new keys for the row, the entry chosen. The wheel scrolls
+    /// the action list. The pointer resting on a button lights it, and on a
+    /// greyed one, after the tooltip's delay, says why it is greyed.
+    fn mouse_on_shortcut_card(&mut self, event: &MouseEvent) -> Option<ShellAction> {
+        let layout = self.shortcut_card_layout()?;
+        let spot = layout.at(event.x, event.y);
+        if let MouseEventKind::Move | MouseEventKind::Enter | MouseEventKind::Leave = event.kind {
+            let hovered = match spot {
+                Some(shortcut_editor::CardSpot::Button(which, true)) => Some(which),
+                _ => None,
+            };
+            if hovered != self.shortcut_hover {
+                self.shortcut_hover = hovered;
+                self.hover_changed = true;
+            }
+            let greyed: Vec<guitk::disabled::Disabled<'_>> = layout
+                .buttons
+                .iter()
+                .filter(|(_, enabled, _)| !enabled)
+                .map(|(which, _, at)| ((at.x, at.y, at.w, at.h), which.why_disabled()))
+                .collect();
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "screen dimensions are far inside f32's exact-integer range"
+            )]
+            let viewport = (self.screen_width as f32, self.screen_height as f32);
+            self.hover_changed |= self.shortcut_why.pointer_at(
+                (event.x, event.y),
+                self.osd_clock_ms,
+                viewport,
+                &greyed,
+            );
+            // A reason waiting out the tooltip's delay is a deadline the
+            // session must be told of, to wake for.
+            self.hover_changed |= self.shortcut_why.due_in(self.osd_clock_ms).is_some();
+            // Motion is not taken, over the card or off it: a drag begun off
+            // the card -- an icon carried across it, a band drawn over the
+            // desktop -- goes on under it, and the card has nothing to drag.
+            return None;
+        }
+        // Nor is a release: it ends whatever press began it. Taken here, an
+        // icon carried onto the card was never put down.
+        if let MouseEventKind::Release(_) = event.kind {
+            return None;
+        }
+        let spot = spot?;
+        let double = matches!(event.kind, MouseEventKind::DoubleClick(MouseButton::Left));
+        // What the card did with a key is nothing to answer the press with:
+        // its keys start no program, and a change is saved as it is made.
+        match (&event.kind, spot) {
+            (
+                MouseEventKind::Press(MouseButton::Left)
+                | MouseEventKind::DoubleClick(MouseButton::Left),
+                shortcut_editor::CardSpot::Button(which, true),
+            ) => {
+                let _done = self.key_on_shortcut_card(&card_key(which.key()));
+            }
+            (
+                MouseEventKind::Press(MouseButton::Left)
+                | MouseEventKind::DoubleClick(MouseButton::Left),
+                shortcut_editor::CardSpot::Row(keys),
+            ) => {
+                if self.shortcut_editor.choose_row(&self.hotkeys, keys) && double {
+                    let _done = self.key_on_shortcut_card(&card_key(Key::Enter));
+                }
+            }
+            (
+                MouseEventKind::Press(MouseButton::Left)
+                | MouseEventKind::DoubleClick(MouseButton::Left),
+                shortcut_editor::CardSpot::Entry(index),
+            ) => {
+                let cx = self.shortcut_context();
+                if self.shortcut_editor.choose_entry(index, cx) && double {
+                    let _done = self.key_on_shortcut_card(&card_key(Key::Enter));
+                }
+            }
+            (MouseEventKind::Scroll { dy, .. }, _) => {
+                let rows = self.shortcut_wheel.rows(*dy);
+                let cx = self.shortcut_context();
+                // Whether the list moved changes nothing here: a repaint
+                // follows every event the shell takes.
+                let _moved = self.shortcut_editor.scroll_entries(rows, cx);
+            }
+            _ => {}
+        }
+        Some(ShellAction::Consumed)
     }
 
     /// How tall the shortcut card may be: the screen less a margin top and
@@ -13266,8 +13459,12 @@ impl DesktopShell {
         self.calendar.set_visible(false);
         self.notifications.hide();
         // Whatever the editor was in the middle of when the card last went
-        // away is not what the user is opening it for.
+        // away is not what the user is opening it for -- nor is the button
+        // the pointer was on, or why it was greyed.
         self.shortcut_editor.reset();
+        self.shortcut_hover = None;
+        let _was_showing = self.shortcut_why.pointer_left();
+        self.shortcut_wheel.reset();
         self.shortcut_card_open = true;
     }
 
@@ -14321,19 +14518,26 @@ impl DesktopShell {
         core::mem::take(&mut self.icons_dirty)
     }
 
-    /// Read processor and memory from `/proc`, for the next frame to report.
+    /// Read processor, memory and the disks and network from `/proc`, at
+    /// `now_ms` on the session's clock, for the next frame to report -- while
+    /// a system monitor is out to report them, and no sooner after the last
+    /// sample than [`MIN_SAMPLE_SPACING_MS`](crate::widgets::monitor::MIN_SAMPLE_SPACING_MS).
     ///
-    /// Called from the widget-due tick, which fires at the monitor widget's own
-    /// interval, rather than from `live_readings` -- that runs once a frame,
-    /// and sixty reads of `/proc/stat` a second to answer a question asked once
-    /// a second is its own small defect.
+    /// Called from the widget-due tick, which fires when a widget falls due
+    /// -- the monitor's once a second -- rather than from `live_readings`:
+    /// that runs once a frame, and sixty reads of `/proc/stat` a second to
+    /// answer a question asked once a second is its own small defect. With
+    /// no monitor out, nothing is read at all.
     ///
     /// **The first call after start-up measures nothing**, and that is correct
     /// rather than a gap: a processor fraction is a ratio over an interval, and
     /// at the first sample there is no interval yet. `None` until the second
     /// tick is the honest answer, and the meter says "CPU (not measured)" for
     /// that one second.
-    pub fn sample_system(&mut self) {
+    pub fn sample_system(&mut self, now_ms: u64) {
+        if !self.widgets.draws(&WidgetKind::SystemMonitor) || !self.monitor.due(now_ms) {
+            return;
+        }
         let fs = procinfo::ProcFs::new();
         self.sampled.memory_fraction = fs
             .memory()
@@ -14348,6 +14552,31 @@ impl DesktopShell {
         if let Some(now) = now {
             self.prev_cpu = Some(now);
         }
+        // The file system the system runs from. Refused -- no right to read
+        // metadata, or no such call off SlateOS -- the meter says it is not
+        // measured rather than show a share it does not have.
+        self.sampled.disk_fraction = fs_space::of(b"/")
+            .ok()
+            .and_then(|space| space.used_fraction());
+        // The counters the graphs difference. A file that will not read is a
+        // reading not taken, and its graph says it is not measured rather
+        // than hold the line where it stopped -- the error has nowhere more
+        // useful to go than that. SlateOS's own `/proc/diskstats` carries no
+        // counters, and it has no `/proc/net/dev`; read as on any Linux, the
+        // two graphs measure the day the kernel serves Linux's.
+        let disks = fs
+            .read_optional("diskstats")
+            .ok()
+            .flatten()
+            .map(|text| procinfo::DiskStats::parse_all(&text));
+        let nets = fs.net_devices().ok().flatten();
+        self.monitor.record(
+            now_ms,
+            self.sampled.cpu_fraction,
+            self.sampled.memory_fraction,
+            disks,
+            nets,
+        );
     }
 
     /// The readings the widget layer cannot derive for itself.
@@ -14376,12 +14605,10 @@ impl DesktopShell {
             // answer. `sample_system` is called from the widget-due tick.
             cpu_fraction: self.sampled.cpu_fraction,
             memory_fraction: self.sampled.memory_fraction,
-            // **No source anywhere in this tree.**
-            // `/sys/devices/block/<name>/{sector_count,sector_size}` gives a
-            // disk's CAPACITY; nothing reports how much of it is in use, and
-            // `procinfo` has no `statfs`. The meter says so rather than
-            // showing a plausible fraction of a number we do have.
-            disk_fraction: None,
+            // From the kernel's own account of the root file system
+            // (`fs_space`, `SYS_FS_STATVFS`) -- not `/sys/devices/block`,
+            // which gives a disk's capacity and nothing of what is in use.
+            disk_fraction: self.sampled.disk_fraction,
             // `Default`, which is `present: false, state: NoBattery` -- and
             // that is the true answer, not a placeholder. `/proc/battery`
             // reports zero sources because `kernel/src/fs/battery.rs` starts
@@ -14397,6 +14624,13 @@ impl DesktopShell {
                 self.calendar.month_glance(secs, &zone, &self.events)
             } else {
                 calendar::MonthGlance::default()
+            },
+            // The minute `sample_system` kept, copied only while a monitor
+            // is out to draw it.
+            graphs: if self.widgets.draws(&WidgetKind::SystemMonitor) {
+                self.monitor.graphs()
+            } else {
+                crate::widgets::monitor::Graphs::default()
             },
         }
     }
@@ -15254,9 +15488,9 @@ impl DesktopShell {
     /// Whether a surface of the shell's is open that a press on the desktop
     /// is spent on -- taken by it, or spent closing it: every one
     /// [`any_popup_open`](Self::any_popup_open) counts but the card of
-    /// shortcuts, which is read rather than used, answers no press, and lets
-    /// one through to what is under it -- an icon, a widget, the desktop's
-    /// menu -- as nothing were over it.
+    /// shortcuts, which takes only what lands on it and lets a press off it
+    /// through to what is under it -- an icon, a widget, the desktop's menu --
+    /// as nothing were over it.
     fn popup_takes_press(&self) -> bool {
         self.desktop_menu.is_visible()
             || self.tray_overflow_menu.is_some()
@@ -15426,6 +15660,11 @@ impl DesktopShell {
         if let Some((menu, _)) = self.field_menu.as_mut() {
             self.hover_changed |= menu.tick(self.osd_clock_ms);
         }
+        // And why a greyed button of the shortcut card is greyed, the same --
+        // while the card is up to say it on.
+        if self.shortcut_card_open {
+            self.hover_changed |= self.shortcut_why.tick(self.osd_clock_ms);
+        }
     }
 
     /// Re-seed the overlay manager's idea of how big the display is.
@@ -15536,119 +15775,71 @@ impl DesktopShell {
 
     /// Render the card listing every shortcut, if it is open.
     ///
-    /// Centred on the display rather than anchored to the taskbar: it is a
-    /// reference the user reads, not a control they act on, and the taskbar
-    /// corner is a long way from where their eyes are.
+    /// Centred on the display rather than anchored to the taskbar: it is read
+    /// first and changed second, and the taskbar corner is a long way from
+    /// where the reader's eyes are.
     ///
-    /// The size comes from [`hotkeys::settings_panel_size`] — the same function
-    /// the renderer itself uses, given the same height budget — so the card is
-    /// centred on its real size however many bindings the user has added, and
-    /// folds into a second column rather than off the bottom of the screen.
+    /// Where everything goes is [`shortcut_editor::ShortcutEditor::layout`]'s
+    /// answer -- its size from [`hotkeys::settings_panel_size`], the same
+    /// function the renderer itself uses, given the same height budget and
+    /// foot -- so the card is centred on its real size however many bindings
+    /// the user has added, folds into a second column rather than off the
+    /// bottom of the screen, and is pressed where it is drawn.
     #[must_use]
     pub fn render_shortcut_card(&self) -> Option<RenderTree> {
-        if !self.shortcut_card_open {
-            return None;
-        }
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "screen dimensions are far inside f32's exact-integer range"
-        )]
-        let (screen_w, screen_h) = (self.screen_width as f32, self.screen_height as f32);
-        // Bound once and handed to every call below, because the size, the
-        // drawing and the editor's paging only agree if they are given the
-        // same budget -- the functions say so in their own docs.
-        let budget = self.shortcut_card_budget();
+        // Where everything is, worked out once and drawn from: a press and
+        // tools go by the same answer (`shortcut_card_layout`).
+        let layout = self.shortcut_card_layout()?;
         let p = Palette::from_settings(&self.appearance);
         let mut tree = RenderTree::new();
 
         // Choosing an action, or typing a command: the card shows the action
         // list instead of the bindings, at the same place a card is centred.
         if self.shortcut_editor.is_picking() {
-            let (width, height) = self.shortcut_editor.picker_size(budget);
-            let x = ((screen_w - width) / 2.0).max(0.0);
-            let y = ((screen_h - height) / 2.0).max(0.0);
             self.shortcut_editor.render_picker(
                 &mut tree,
                 &self.hotkeys,
                 &p,
-                x,
-                y,
-                budget,
+                &layout,
                 self.shortcut_context(),
                 self.appearance.caret_width(),
                 self.appearance.focus_ring_width(),
             );
-            self.push_shortcut_message(&mut tree, &p, x, y, width, height);
-            return Some(tree);
+        } else {
+            tree.commands.extend(hotkeys::render_settings_panel(
+                &self.hotkeys,
+                &p,
+                layout.card.x,
+                layout.card.y,
+                // The row the keyboard is on. Clamped rather than trusted: the
+                // registry can shrink under a stored index if an action is
+                // unregistered while the card is shut, and a highlight drawn
+                // past the last row is a highlight on nothing.
+                Some(
+                    self.shortcut_editor
+                        .selected()
+                        .min(self.hotkeys.len().saturating_sub(1)),
+                ),
+                self.shortcut_card_budget(),
+                layout.foot,
+            ));
         }
-
-        let (width, height) = hotkeys::settings_panel_size(&self.hotkeys, budget);
-        // Clamped at zero so a display narrower or shorter than the card puts
-        // its top-left corner on screen rather than off it: a card that
-        // overflows is one the user can still read the start of, whereas one
-        // centred at a negative origin is one whose header is gone.
-        let x = ((screen_w - width) / 2.0).max(0.0);
-        let y = ((screen_h - height) / 2.0).max(0.0);
-        tree.commands.extend(hotkeys::render_settings_panel(
-            &self.hotkeys,
+        // The foot: what the last edit did -- composed on every edit since
+        // the editor was written, "Press the new keys", "Unchanged", "Ctrl+
+        // Alt+T is now Terminal" and "...but could not be saved", and drawn
+        // since 2026-09-14 -- and the buttons that are the card's keys.
+        self.shortcut_editor.render_foot(
+            &mut tree,
             &p,
-            x,
-            y,
-            // The row the keyboard is on. Clamped rather than trusted: the
-            // registry can shrink under a stored index if an action is
-            // unregistered while the card is shut, and a highlight drawn past
-            // the last row is a highlight on nothing.
-            Some(
-                self.shortcut_editor
-                    .selected()
-                    .min(self.hotkeys.len().saturating_sub(1)),
-            ),
-            budget,
-        ));
-        self.push_shortcut_message(&mut tree, &p, x, y, width, height);
+            &layout,
+            self.font_size(TextRole::Body),
+            self.shortcut_hover,
+            self.appearance.focus_ring_width(),
+        );
+        // Over everything on the card: why a greyed button is greyed, while
+        // the pointer rests on it.
+        tree.commands.extend(self.shortcut_why.render(&p));
         Some(tree)
-    }
-
-    /// The card's bottom line: what the last edit did, or -- on the plain list
-    /// with nothing to report -- the keys the card answers.
-    ///
-    /// The outcome has been composed on every edit since the editor was written
-    /// -- "Press the new keys", "Unchanged", "Ctrl+Alt+T is now Terminal", and
-    /// the one that matters most, "...but could not be saved" -- and until
-    /// 2026-09-14 nothing drew any of it, so a rebind was silent whether it
-    /// worked, was refused, or worked and failed to persist.
-    ///
-    /// Drawn here rather than by the card renderers: the message is the
-    /// *shell's* record of what its editor just did, not a fact about the
-    /// registry or the action list.
-    fn push_shortcut_message(
-        &self,
-        tree: &mut RenderTree,
-        p: &Palette,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        let (text, color) = match self.shortcut_editor.message() {
-            // `subtext0` and not the accent: an outcome, not an invitation, and
-            // the accent is what the card already uses for where the keyboard is.
-            Some(message) => (message.to_string(), p.subtext0),
-            None if !self.shortcut_editor.owns_keyboard() => {
-                (SHORTCUT_CARD_HINT.to_string(), p.subtext0)
-            }
-            None => return,
-        };
-        tree.push(guitk::render::RenderCommand::Text {
-            x: x + SHORTCUT_MESSAGE_INSET,
-            y: y + height - SHORTCUT_MESSAGE_INSET,
-            text,
-            color,
-            font_size: self.font_size(TextRole::Body),
-            font_weight: guitk::render::FontWeightHint::Regular,
-            max_width: Some((width - SHORTCUT_MESSAGE_INSET * 2.0).max(0.0)),
-            overflow: guitk::render::TextOverflow::Ellipsis,
-        });
     }
 
     /// Render the zone-tiling overlay, if it is open.
@@ -20270,6 +20461,9 @@ mod overview_wiring_tests {
     #[test]
     fn the_keyboard_reaches_the_last_notification_on_a_short_screen() {
         let mut s = DesktopShell::new(1024, 768);
+        // A long list: by time, one program's every card is in it.
+        s.notifications
+            .set_grouping(notifsettings::Grouping::ByTime);
         for i in 0..40u64 {
             let _ = s.notify(notif_pane::Notification {
                 id: i,
@@ -20304,6 +20498,45 @@ mod overview_wiring_tests {
             drawn(&s, "Notice 0"),
             "the keyboard could not reach the last notification"
         );
+    }
+
+    /// **The pane groups as the settings file says**: by program with no
+    /// file, by time once the file says so, and back -- picked up as a rule
+    /// is, and said to be a change worth drawing.
+    #[test]
+    fn the_pane_groups_as_the_settings_file_says() {
+        appearance::config::testing::with_scratch_config("shell-notif-grouping", |_root| {
+            let mut s = shell();
+            s.load_notification_rules();
+            assert_eq!(
+                s.notifications.grouping(),
+                notifsettings::Grouping::ByProgram,
+                "with no file"
+            );
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.grouping = notifsettings::Grouping::ByTime;
+            file.save().expect("save the grouping");
+            // Read at start, too: a desktop starting with the file as it is.
+            let mut started = shell();
+            started.load_notification_rules();
+            assert_eq!(
+                started.notifications.grouping(),
+                notifsettings::Grouping::ByTime,
+                "the file's grouping was not read at start"
+            );
+            assert!(
+                s.poll_notification_rules(),
+                "the grouping was not picked up"
+            );
+            assert_eq!(s.notifications.grouping(), notifsettings::Grouping::ByTime);
+            file.settings.grouping = notifsettings::Grouping::ByProgram;
+            file.save().expect("save the grouping");
+            assert!(s.poll_notification_rules());
+            assert_eq!(
+                s.notifications.grouping(),
+                notifsettings::Grouping::ByProgram
+            );
+        });
     }
 
     /// A rule saved on disk reaches the decision that suppresses a

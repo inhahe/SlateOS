@@ -13,6 +13,21 @@ use std::path::PathBuf;
 use super::*;
 use crate::pathbar::CompletionItem;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const WIDTH: f32 = 600.0;
 const HEIGHT: f32 = 28.0;
 
@@ -32,16 +47,18 @@ fn act(
 }
 
 fn tree(bar: &PathBar) -> Node<PathBarPart> {
-    bar.automation(WIDTH, HEIGHT)
+    apart(bar.automation(WIDTH, HEIGHT))
 }
 
-/// **Showing a path, the bar shows tools its address and its crumbs**, each
-/// crumb named by its folder; a crumb pressed asks to go there.
+/// **Showing a path, the bar shows tools its address holding its crumbs**,
+/// each crumb named by its folder and drawn inside the address; a crumb
+/// pressed asks to go there.
 #[test]
 fn a_crumb_pressed_goes_to_its_folder() {
     let mut bar = bar();
     let root = tree(&bar);
     assert_eq!(root.role, Role::Group);
+    assert_eq!(root.children.len(), 1, "the address, and nothing beside it");
     let field = &root.children[0];
     assert_eq!(
         (field.role, field.name.as_str()),
@@ -49,7 +66,16 @@ fn a_crumb_pressed_goes_to_its_folder() {
     );
     assert_eq!(field.value, Some(Value::Text("/home/user/docs".to_owned())));
     assert!(!field.focused);
-    let crumbs: Vec<(PathBarPart, &str)> = root.children[1..]
+    for crumb in &field.children {
+        assert_eq!(
+            field.bounds.union(crumb.bounds),
+            field.bounds,
+            "{:?} inside the address",
+            crumb.id
+        );
+    }
+    let crumbs: Vec<(PathBarPart, &str)> = field
+        .children
         .iter()
         .map(|n| (n.id, n.name.as_str()))
         .collect();

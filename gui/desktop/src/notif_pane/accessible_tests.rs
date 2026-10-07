@@ -14,11 +14,27 @@
 
 use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
 use guitk::palette::Palette;
+use notifsettings::Grouping;
 
 use super::*;
 use crate::notif_pane::{
     AppSettingKind, NotifPaneEvent, NotifPriority, Notification, PaneState, SettingValue,
 };
+
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: guitk::widget::automation::Node<Id>,
+) -> guitk::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
 
 const SCREEN_W: f32 = 1920.0;
 const SCREEN_H: f32 = 800.0;
@@ -38,9 +54,11 @@ fn notif(app: &str, title: &str, body: &str) -> Notification {
     }
 }
 
-/// An open pane holding `n` notifications, from `apps` programs in turn.
+/// An open pane holding `n` notifications, from `apps` programs in turn --
+/// grouped by time, so every card is in the list, newest first.
 fn pane(n: usize, apps: usize) -> NotificationPane {
     let mut pane = NotificationPane::new();
+    pane.set_grouping(Grouping::ByTime);
     pane.show();
     pane.state = PaneState::Visible;
     for i in 0..n {
@@ -57,7 +75,7 @@ fn pane(n: usize, apps: usize) -> NotificationPane {
 
 /// The pane as tools see it.
 fn tree(pane: &NotificationPane) -> Node<PanePart> {
-    pane.automation(SCREEN_W, SCREEN_H)
+    apart(pane.automation(SCREEN_W, SCREEN_H))
 }
 
 /// The node of `part`.
@@ -307,7 +325,7 @@ fn a_card_out_of_sight_is_scrolled_into_the_list_first() {
     // heading, which it need not show.
     let first = pane.notifications()[0].id;
     pane.reveal(PanePart::Dismiss(first), SCREEN_H);
-    assert_eq!(pane.scroll_offset, pane.card_tops()[0]);
+    assert_eq!(Some(pane.scroll_offset), pane.card_top(0));
     assert_eq!(
         press(&mut pane, PanePart::Dismiss(first)),
         [NotifPaneEvent::NotificationDismissed(first)]
@@ -445,4 +463,78 @@ fn what_the_pane_does_not_show_has_no_press_point() {
     }
     pane.hide();
     assert_eq!(pane.press_point(PanePart::Back, SCREEN_W, SCREEN_H), None);
+}
+
+/// **Grouped by program, tools see each program's group**: named by the
+/// program and said how many it has, holding the cross that clears them,
+/// its cards shown and the row that shows the rest -- each where the pane
+/// draws it and takes a press on it. A card put away under them is not
+/// there to be seen; "Show 2 more" brings it, and the cross clears the
+/// program.
+#[test]
+fn grouped_by_program_tools_see_each_programs_group() {
+    let mut pane = NotificationPane::new();
+    assert_eq!(pane.grouping(), Grouping::ByProgram);
+    pane.show();
+    pane.state = PaneState::Visible;
+    pane.current_time = 1000;
+    pane.set_screen_height(SCREEN_H);
+    let mut mail = Vec::new();
+    for i in 0..5 {
+        mail.push(pane.push_notification(notif("Mail", &format!("M{i}"), "Hi")));
+    }
+    let chat = pane.push_notification(notif("Chat", "C", "Yo"));
+    mail.reverse();
+
+    let list = node(&pane, PanePart::Notifications);
+    let names: Vec<(PanePart, String)> = list
+        .children
+        .iter()
+        .map(|n| (n.id, n.name.clone()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (PanePart::Group(0), "Chat".to_owned()),
+            (PanePart::Group(1), "Mail".to_owned())
+        ],
+        "the program heard from last first"
+    );
+    let group = node(&pane, PanePart::Group(1));
+    assert_eq!(
+        (group.role, group.description.as_deref()),
+        (Role::Group, Some("5 notifications"))
+    );
+    let held: Vec<PanePart> = group.children.iter().map(|n| n.id).collect();
+    assert_eq!(
+        held,
+        [
+            PanePart::GroupClear(1),
+            PanePart::Card(mail[0]),
+            PanePart::Card(mail[1]),
+            PanePart::Card(mail[2]),
+            PanePart::GroupMore(1)
+        ]
+    );
+    assert_eq!(node(&pane, PanePart::GroupMore(1)).name, "Show 2 more");
+    assert!(
+        tree(&pane).walk().all(|n| n.id != PanePart::Card(mail[4])),
+        "a card put away is seen"
+    );
+    // Every box is where the pane paints a part.
+    let drawn = painted(&pane);
+    let clear = node(&pane, PanePart::GroupClear(1)).bounds;
+    assert!(drawn.contains(&clear), "{clear:?} is not painted");
+
+    // Brought into the list first, as a tool's press is.
+    pane.reveal(PanePart::GroupMore(1), SCREEN_H);
+    assert!(press(&mut pane, PanePart::GroupMore(1)).is_empty());
+    assert_eq!(node(&pane, PanePart::GroupMore(1)).name, "Show fewer");
+    node(&pane, PanePart::Card(mail[4]));
+
+    pane.reveal(PanePart::GroupClear(0), SCREEN_H);
+    let cleared = press(&mut pane, PanePart::GroupClear(0));
+    assert_eq!(cleared, [NotifPaneEvent::NotificationDismissed(chat)]);
+    assert!(pane.notifications().iter().all(|n| n.app_name == "Mail"));
+    assert_eq!(node(&pane, PanePart::Group(0)).name, "Mail");
 }

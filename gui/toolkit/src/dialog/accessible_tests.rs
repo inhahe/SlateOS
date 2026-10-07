@@ -14,6 +14,21 @@ use crate::dialog::DirEntry;
 use crate::event::{MouseButton, MouseEvent, MouseEventKind};
 use crate::widget::automation::Query;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const W: f32 = 600.0;
 const H: f32 = 400.0;
 
@@ -59,7 +74,7 @@ fn node(dialog: &FileDialog, part: DialogTarget) -> Node<DialogTarget> {
 fn the_dialog_shows_tools_every_part() {
     let mut dialog = FileDialog::save().with_initial_path("/docs");
     dialog.set_entries(vec![folder("pics"), file("a.txt")]);
-    let tree = dialog.automation(W, H);
+    let tree = apart(dialog.automation(W, H));
     assert_eq!((tree.role, tree.name.as_str()), (Role::Dialog, "Save"));
     assert_eq!(tree.description.as_deref(), Some("/docs"));
     let parts: Vec<(Role, &str, bool)> = tree

@@ -46,6 +46,8 @@
 //!     banner: true
 //! history:
 //!   days: 7
+//! pane:
+//!   grouping: program   # or time
 //! ```
 //!
 //! An app with no entry uses [`AppRule::new`], so a fresh install has an
@@ -368,6 +370,38 @@ impl Default for HistoryRetention {
     }
 }
 
+/// How the desktop's notification pane groups what it keeps: `pane.grouping`
+/// in the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Grouping {
+    /// Each program's notifications together under its name, the program
+    /// heard from last first -- as the pane `design.txt` points at, Windows',
+    /// has them -- its newest few shown and the rest a press away.
+    #[default]
+    ByProgram,
+    /// By when they came: today, yesterday, this week, older.
+    ByTime,
+}
+
+yaml_enum!(Grouping {
+    ByProgram => "program",
+    ByTime => "time",
+});
+
+impl Grouping {
+    /// Every grouping, in the order a list of them is shown.
+    pub const ALL: [Self; 2] = [Self::ByProgram, Self::ByTime];
+
+    /// What it is called where a person chooses it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ByProgram => "By program",
+            Self::ByTime => "By time",
+        }
+    }
+}
+
 /// Every program-specific rule the user has set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotifSettings {
@@ -381,6 +415,8 @@ pub struct NotifSettings {
     pub apps: Vec<AppRule>,
     /// How long a notification is kept across the desktop restarting.
     pub history: HistoryRetention,
+    /// How the pane groups the notifications it keeps.
+    pub grouping: Grouping,
 }
 
 impl NotifSettings {
@@ -479,10 +515,17 @@ impl NotifSettings {
             history.days = u16::try_from(days.clamp(0, i64::from(HistoryRetention::MAX_DAYS)))
                 .unwrap_or(HistoryRetention::MAX_DAYS);
         }
+        // A spelling this build does not know -- a newer desktop's grouping --
+        // is the default, as every field here degrades.
+        let grouping = doc
+            .get_str(&["pane", "grouping"])
+            .and_then(|s| Grouping::from_yaml_name(&s))
+            .unwrap_or_default();
         Self {
             quiet_hours,
             apps,
             history,
+            grouping,
         }
     }
 
@@ -521,6 +564,7 @@ impl NotifSettings {
             doc.set_bool(&["apps", name, "banner"], rule.banner);
         }
         doc.set_i64(&["history", "days"], i64::from(self.history.days));
+        doc.set_str(&["pane", "grouping"], self.grouping.yaml_name());
     }
 }
 
@@ -1077,5 +1121,40 @@ mod tests {
             365 * 86_400
         );
         assert_eq!(HistoryRetention::default(), HistoryRetention { days: 7 });
+    }
+
+    /// **The pane's grouping is read and written as `pane.grouping`**: by
+    /// program unless the file says otherwise, a spelling this build does
+    /// not know read as that default, and a save keeps what was beside it.
+    #[test]
+    fn the_panes_grouping_reads_and_writes() {
+        let grouping = |text: &str| NotifSettings::read_from(&Document::parse(text)).grouping;
+        assert_eq!(grouping(""), Grouping::ByProgram, "nothing written");
+        assert_eq!(grouping("pane:\n  grouping: time\n"), Grouping::ByTime);
+        assert_eq!(
+            grouping("pane:\n  grouping: program\n"),
+            Grouping::ByProgram
+        );
+        assert_eq!(
+            grouping("pane:\n  grouping: by-mood\n"),
+            Grouping::ByProgram,
+            "a newer desktop's grouping"
+        );
+
+        let before = NotifSettings {
+            grouping: Grouping::ByTime,
+            ..NotifSettings::default()
+        };
+        let mut doc = Document::parse("# mine\npane:\n  grouping: program  # Windows' way\n");
+        before.write_into(&mut doc);
+        let text = doc.to_text();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(text.contains("grouping: time"), "{text}");
+        assert_eq!(NotifSettings::read_from(&Document::parse(&text)), before);
+        // Each is told apart, by the file and by a person.
+        for g in Grouping::ALL {
+            assert_eq!(Grouping::from_yaml_name(g.yaml_name()), Some(g));
+        }
+        assert_ne!(Grouping::ByProgram.label(), Grouping::ByTime.label());
     }
 }

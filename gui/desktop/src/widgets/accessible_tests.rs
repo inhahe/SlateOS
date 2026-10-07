@@ -20,9 +20,10 @@ use guitk::widget::automation::{Node, Role, Value};
 use super::WidgetPart;
 use crate::Rect;
 use crate::power::{BatteryInfo, BatteryState};
+use crate::widgets::monitor::{Graph, Graphs};
 use crate::widgets::{
     DesktopWidgetManager, FramePicture, GridPos, LiveReadings, Meter, NoteKey, WidgetInstanceId,
-    WidgetKind,
+    WidgetKind, WidgetSize,
 };
 
 /// Readings no widget would draw by accident.
@@ -35,6 +36,11 @@ fn readings() -> LiveReadings {
         disk_fraction: None,
         battery: BatteryInfo::default(),
         month: crate::calendar::MonthGlance::default(),
+        graphs: Graphs {
+            cpu: vec![0.3, 0.11],
+            memory: vec![0.73],
+            ..Graphs::default()
+        },
     }
 }
 
@@ -178,6 +184,52 @@ fn the_meters_say_what_was_measured() {
             .children
             .iter()
             .all(|meter| within(meter.bounds, monitor.bounds))
+    );
+}
+
+/// **Given two rows, a monitor shows tools its graphs and then the disk's
+/// meter**: each graph a picture named by what it plots and described by
+/// what it reads now and at most -- or that nothing measures it -- top to
+/// bottom, apart, inside the widget.
+#[test]
+fn a_roomy_monitor_shows_its_graphs_and_the_disks_meter() {
+    let (mut layer, id) = one(WidgetKind::SystemMonitor);
+    assert!(layer.resize_widget(id, WidgetSize::LARGE), "room for it");
+    let live = readings();
+    let monitor = node_of(&layer, &live, WidgetPart::Widget(id)).expect("seen");
+    let parts: Vec<WidgetPart> = monitor.children.iter().map(|node| node.id).collect();
+    let mut want: Vec<WidgetPart> = Graph::ALL
+        .iter()
+        .map(|&graph| WidgetPart::Graph(id, graph))
+        .collect();
+    want.push(WidgetPart::Meter(id, Meter::Disk));
+    assert_eq!(parts, want);
+    let cpu = &monitor.children[0];
+    assert_eq!((cpu.role, cpu.name.as_str()), (Role::Image, "CPU"));
+    assert_eq!(
+        cpu.description.as_deref(),
+        Some("11% now, at most 30% in the last minute")
+    );
+    let network = &monitor.children[3];
+    assert_eq!(network.description.as_deref(), Some("not measured"));
+    let disk = &monitor.children[4];
+    assert_eq!(
+        (disk.role, disk.description.as_deref()),
+        (Role::ProgressBar, Some("not measured"))
+    );
+    for pair in monitor.children.windows(2) {
+        assert!(
+            pair[0].bounds.bottom() <= pair[1].bounds.y,
+            "{:?} above {:?}",
+            pair[0].id,
+            pair[1].id
+        );
+    }
+    assert!(
+        monitor
+            .children
+            .iter()
+            .all(|part| within(part.bounds, monitor.bounds))
     );
 }
 

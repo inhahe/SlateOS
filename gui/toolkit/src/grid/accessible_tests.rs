@@ -13,6 +13,21 @@
 use super::super::GridItem;
 use super::*;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// Twenty items, ids 100 on, in a grid 400 by 300: more rows than it shows.
 fn grid() -> GridView {
     let mut grid = GridView::new();
@@ -46,7 +61,7 @@ fn act(
 #[test]
 fn an_item_is_chosen_as_clicked() {
     let mut grid = grid();
-    let root = grid.automation(0.0, 0.0);
+    let root = apart(grid.automation(0.0, 0.0));
     assert_eq!(root.role, Role::List);
     assert_eq!(root.children.len(), 20, "every item");
     assert_eq!(root.children[3].name, "item 3");
@@ -68,7 +83,7 @@ fn an_item_is_chosen_as_clicked() {
         said.contains(&GridEvent::SelectionChanged(vec![19])),
         "{said:?}"
     );
-    let after = grid.automation(0.0, 0.0);
+    let after = apart(grid.automation(0.0, 0.0));
     let chosen = after.children[19].clone();
     assert_eq!(chosen.value, Some(Value::Chosen(true)));
     assert!(chosen.focused, "the keyboard on the item clicked");

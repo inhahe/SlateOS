@@ -687,3 +687,90 @@ fn a_walk_visits_every_node_in_order() {
     let save = ids.iter().position(|&id| id == f.save).unwrap();
     assert!(label < save, "the tree's order");
 }
+
+/// **Two siblings drawn over each other are found; what is meant to overlap
+/// is not**: a part over its sibling, by more than half a unit each way --
+/// but not a part and what it holds, not a holder (a group, a list), not a
+/// hidden part, not one with no size, not two that only touch or overlap by
+/// half a unit or less one way, and not two sliders over one box, one
+/// control's two axes. Two a whole unit over each other are found; so are
+/// two sliders over each other in boxes not the same, and a slider over a
+/// button in its very box.
+#[test]
+fn siblings_drawn_over_each_other_are_found() {
+    use crate::frame::Rect;
+    let part = |id: u32, role: Role, bounds: Rect| Node::new(id, role, format!("p{id}"), bounds);
+    let mut root = part(0, Role::Dialog, Rect::new(0.0, 0.0, 400.0, 400.0));
+    // Two buttons over each other: found.
+    root.children
+        .push(part(1, Role::Button, Rect::new(10.0, 10.0, 100.0, 30.0)));
+    root.children
+        .push(part(2, Role::Button, Rect::new(60.0, 20.0, 100.0, 30.0)));
+    // Touching only: not.
+    root.children
+        .push(part(3, Role::Label, Rect::new(160.0, 20.0, 50.0, 30.0)));
+    // A list over the buttons is a holder: not.
+    let mut list = part(4, Role::List, Rect::new(0.0, 0.0, 300.0, 300.0));
+    // ... but two of its items over each other are.
+    list.children
+        .push(part(5, Role::ListItem, Rect::new(0.0, 100.0, 300.0, 40.0)));
+    list.children
+        .push(part(6, Role::ListItem, Rect::new(0.0, 130.0, 300.0, 40.0)));
+    // An item and its own cross: not -- a holder and what it holds.
+    list.children[0]
+        .children
+        .push(part(7, Role::Button, Rect::new(270.0, 105.0, 20.0, 20.0)));
+    root.children.push(list);
+    // Hidden, and of no size: not.
+    let mut hidden = part(8, Role::Button, Rect::new(10.0, 10.0, 100.0, 30.0));
+    hidden.shown = false;
+    root.children.push(hidden);
+    root.children
+        .push(part(9, Role::Button, Rect::new(10.0, 10.0, 0.0, 30.0)));
+    // A square's two axes, sliders over the one box: not.
+    let mut square = part(10, Role::Group, Rect::new(0.0, 320.0, 60.0, 60.0));
+    for id in [11, 12] {
+        square
+            .children
+            .push(part(id, Role::Slider, Rect::new(0.0, 320.0, 60.0, 60.0)));
+    }
+    root.children.push(square);
+    // Two sliders over each other, their boxes not the same: found.
+    let mut sliders = part(13, Role::Group, Rect::new(100.0, 320.0, 80.0, 60.0));
+    sliders
+        .children
+        .push(part(14, Role::Slider, Rect::new(100.0, 320.0, 60.0, 60.0)));
+    sliders
+        .children
+        .push(part(15, Role::Slider, Rect::new(120.0, 320.0, 60.0, 60.0)));
+    root.children.push(sliders);
+    // A slider and a button in the very same box: found -- a button is no
+    // axis of the slider's.
+    let mut odd = part(16, Role::Group, Rect::new(200.0, 320.0, 60.0, 60.0));
+    odd.children
+        .push(part(17, Role::Slider, Rect::new(200.0, 320.0, 60.0, 60.0)));
+    odd.children
+        .push(part(18, Role::Button, Rect::new(200.0, 320.0, 60.0, 60.0)));
+    root.children.push(odd);
+    // Within half a unit across, and down -- a float's rounding: not.
+    root.children
+        .push(part(19, Role::Button, Rect::new(300.0, 10.0, 40.0, 30.0)));
+    root.children
+        .push(part(20, Role::Button, Rect::new(339.75, 10.0, 40.0, 30.0)));
+    root.children
+        .push(part(21, Role::Button, Rect::new(300.0, 100.0, 40.0, 30.0)));
+    root.children
+        .push(part(22, Role::Button, Rect::new(300.0, 129.75, 40.0, 30.0)));
+    // A whole unit over: found.
+    root.children
+        .push(part(23, Role::Button, Rect::new(300.0, 200.0, 40.0, 30.0)));
+    root.children
+        .push(part(24, Role::Button, Rect::new(339.0, 200.0, 40.0, 30.0)));
+
+    let found: Vec<(u32, u32)> = root
+        .overlapping_siblings()
+        .into_iter()
+        .map(|(a, b)| (a.id, b.id))
+        .collect();
+    assert_eq!(found, [(1, 2), (23, 24), (5, 6), (14, 15), (17, 18)]);
+}

@@ -4324,7 +4324,7 @@ impl<T: Transport> ShellSession<T> {
             // its own small defect. `tick` already reports whether anything
             // became due, so the interval is the widget's own and not a second
             // timer free to disagree with it.
-            self.shell.sample_system();
+            self.shell.sample_system(self.clock_ms);
             self.dirty = true;
         }
         if self.autohide.tick(self.clock_ms) {

@@ -1,5 +1,9 @@
 ## TD-C-FOUR-NOTIFICATION-BEHAVIOURS-HAVE-A-SETTINGS-MODEL-AND-NO-IMPLEMENTATION
 
+**Status:** OPEN until grouping has had a boot test on `main` -- all four
+behaviours exist now, the last, grouping by program, on lane C on
+2026-10-07 (below); then this moves to `known-issues-resolved/`.
+
 **In short:** when this was written, the desktop could show you a
 notification and let you dismiss it, and that was all. Since then its
 notifications pop up and go by themselves, and are kept across a restart for
@@ -34,6 +38,19 @@ behaviour first, then the field -- `notifsettings::HistoryRetention`,
 of lane E (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
 So of the four concepts below only grouping several notifications from one
 program together has neither behaviour nor setting.
+
+**Narrowed 2026-10-07 -- all four exist; grouping was the last.** The pane
+groups each program's notifications under its name, the program heard from
+last first, its newest three shown and "Show N more" for the rest, with a
+cross on the heading that clears them (design-decisions §1495,
+`gui/desktop/src/notif_pane.rs` `rows`): the behaviour first, then the
+field -- `notifsettings::Grouping`, `pane.grouping` in
+`notifications.yaml`, `program` (the default) or `time` -- and the control
+is asked of lane E
+(`requests/c-e-a-choice-of-how-the-notification-pane-groups.md`). The
+deleted module's third grouping, by category, is not built: a notification
+carries no category to group by (`design.txt`'s "maybe have applications
+register different notifications" is not yet a thing a program can do).
 
 **What was deleted.** `gui/desktop/src/notification_settings.rs` -- an island
 under `scripts/orphan-modules-baseline.txt`, referenced by nothing but its own

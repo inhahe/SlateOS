@@ -322,7 +322,7 @@ impl Accessible for LoginScreen {
                 LoginPart::Password,
                 Role::TextField,
                 name,
-                self.password_field_rect().into(),
+                self.password_typing_rect().into(),
             );
             field.focused = !menu_up && self.focus == LoginFocus::Main;
             field.focusable = true;

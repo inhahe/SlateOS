@@ -10,6 +10,21 @@ use super::*;
 use crate::colorpicker::PRESET_COLORS;
 use crate::widget::automation::Query;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const W: f32 = 400.0;
 const H: f32 = 600.0;
 
@@ -38,7 +53,7 @@ fn range(node: &Node<ColorPart>) -> (f64, f64, f64) {
 #[test]
 fn the_dialog_shows_tools_every_part() {
     let dialog = ColorPickerDialog::new(Color::rgb(255, 0, 0));
-    let tree = dialog.automation(W, H);
+    let tree = apart(dialog.automation(W, H));
     assert_eq!(tree.role, Role::Dialog);
     assert_eq!(tree.name, DIALOG_TITLE);
     let names: Vec<(Role, String)> = tree
@@ -252,7 +267,7 @@ fn while_the_eyedropper_picks_it_alone_is_in_use() {
         dialog.invoke(&ColorPart::Eyedropper, Action::Press, W, H),
         Ok(Some(ColorPickerEvent::EyedropperActivated))
     );
-    let tree = dialog.automation(W, H);
+    let tree = apart(dialog.automation(W, H));
     assert!(
         tree.enabled,
         "the dialog itself, which holds the eyedropper"

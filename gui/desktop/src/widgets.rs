@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 mod accessible;
+pub mod monitor;
 
 pub use accessible::WidgetPart;
 
@@ -430,14 +431,14 @@ impl WidgetKind {
     ///
     /// A calendar is not offered less than two cells by two: six weeks in
     /// one cell's height would be drawn smaller than text is read at. A
-    /// clock, the meters and the battery are a line or three, which a wider
-    /// box only pads.
+    /// clock and the battery are a line or three, which a wider box only
+    /// pads. A system monitor is its three meters, or -- given two rows --
+    /// its graphs of the last minute (`monitor`).
     #[must_use]
     pub const fn sizes(&self) -> &'static [WidgetSize] {
         match self {
-            Self::Clock | Self::SystemMonitor | Self::BatteryStatus => {
-                &[WidgetSize::SMALL, WidgetSize::WIDE]
-            }
+            Self::Clock | Self::BatteryStatus => &[WidgetSize::SMALL, WidgetSize::WIDE],
+            Self::SystemMonitor => &[WidgetSize::SMALL, WidgetSize::WIDE, WidgetSize::LARGE],
             Self::Calendar => &[WidgetSize::LARGE, WidgetSize::EXTRA_LARGE],
             Self::Notes | Self::PhotoFrame => &WidgetSize::ALL,
             _ => &[],
@@ -582,6 +583,9 @@ pub struct SystemSample {
     pub cpu_fraction: Option<f32>,
     /// Memory in use, 0.0 to 1.0.
     pub memory_fraction: Option<f32>,
+    /// The file system the system runs from in use, 0.0 to 1.0
+    /// (`crate::fs_space`).
+    pub disk_fraction: Option<f32>,
 }
 
 impl SystemSample {
@@ -716,6 +720,39 @@ const METER_PITCH: f32 = 32.0;
 const METER_TROUGH_TOP: f32 = 14.0;
 /// How tall a meter's trough is.
 const METER_TROUGH_HEIGHT: f32 = 8.0;
+/// How tall a meter is: its heading's line, and its trough below.
+const METER_HEIGHT: f32 = METER_TROUGH_TOP + METER_TROUGH_HEIGHT;
+
+/// Where a system monitor draws what it shows, in its content -- one answer
+/// for the drawing and for what tools are told.
+struct MonitorLayout {
+    /// Its meters, each by where its heading's line begins.
+    meters: Vec<(Meter, f32)>,
+    /// Its graphs; none while it has no room for them.
+    panels: Vec<monitor::Panel>,
+}
+
+/// Where a system monitor `size` big draws in its content `(x, y, width,
+/// height)`: its three meters, a pitch apart; or, given two rows of the
+/// grid, the four graphs of the last minute, and at the foot the disk's
+/// space -- the one meter no graph reads.
+fn monitor_layout(size: WidgetSize, (x, y, width, height): (f32, f32, f32, f32)) -> MonitorLayout {
+    if size.rows >= 2 {
+        MonitorLayout {
+            meters: vec![(Meter::Disk, y + height - METER_HEIGHT)],
+            panels: monitor::panels(crate::Rect::new(x, y, width, height), METER_HEIGHT),
+        }
+    } else {
+        MonitorLayout {
+            meters: Meter::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(row, meter)| (meter, y + count_f32(row) * METER_PITCH))
+                .collect(),
+            panels: Vec::new(),
+        }
+    }
+}
 
 /// A line of text in a widget's content: how far below the content's top it
 /// is drawn, how big and how heavy -- one answer for the drawing and for
@@ -885,9 +922,11 @@ pub struct LiveReadings {
     /// Processor and memory are measured: the shell reads `/proc/stat` and
     /// `/proc/meminfo` once a second (`DesktopShell::sample_system`, through
     /// `procinfo`), and the first second reports `None` -- a fraction is a
-    /// ratio over an interval, and there is no interval yet. Disk has no
-    /// source anywhere in the tree (`DesktopShell::live_readings` says why),
-    /// so it stays `None` and the meter says it is not measuring.
+    /// ratio over an interval, and there is no interval yet. The disk is the
+    /// root file system's share in use, as the kernel accounts it
+    /// (`crate::fs_space`); where the kernel will not say -- off SlateOS, or
+    /// without the right to read metadata -- it stays `None` and the meter
+    /// says it is not measuring.
     pub cpu_fraction: Option<f32>,
     /// Memory in use, 0.0 to 1.0. `None` when nothing has measured it.
     pub memory_fraction: Option<f32>,
@@ -911,6 +950,9 @@ pub struct LiveReadings {
     /// formatted by the shell, so the widget and the taskbar's popup cannot
     /// disagree about what day it is. Empty while no calendar is drawn.
     pub month: crate::calendar::MonthGlance,
+    /// The last minute of what a system monitor graphs, as the shell sampled
+    /// it (`monitor::Sampler`); empty while no monitor is drawn.
+    pub graphs: monitor::Graphs,
 }
 
 /// Manages all desktop widgets.
@@ -2127,57 +2169,11 @@ impl DesktopWidgetManager {
                 });
             }
             WidgetKind::SystemMonitor => {
-                let mut row = y;
-                // Each meter keeps its own role colour. Collapsing the three
-                // into one blue was caught by `the_three_meters_never_look_alike`
-                // and `nothing_that_reports_a_measurement_follows_the_accent`,
-                // which are there because a reader tells the meters apart by
-                // colour and because a measurement must not wear the accent --
-                // the accent marks what the user CHOSE, not what was measured.
-                for meter in Meter::ALL {
-                    let (label, reading) = (meter.label(), meter.reading(live));
-                    let role = match meter {
-                        Meter::Cpu => p.blue,
-                        Meter::Memory => p.green,
-                        Meter::Disk => p.peach,
-                    };
-                    let heading = if reading.is_some() {
-                        label.to_string()
-                    } else {
-                        format!("{label} ({NOT_MEASURED})")
-                    };
-                    commands.push(RenderCommand::Text {
-                        x,
-                        y: row,
-                        text: heading,
-                        font_size: 10.0,
-                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                        font_weight: FontWeightHint::Bold,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                    // The trough is drawn either way: an empty trough is the
-                    // shape of a gauge with no needle, which is what this is.
-                    commands.push(RenderCommand::FillRect {
-                        x,
-                        y: row + METER_TROUGH_TOP,
-                        width,
-                        height: METER_TROUGH_HEIGHT,
-                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
-                        corner_radii: CornerRadii::all(4.0),
-                    });
-                    if let Some(f) = reading {
-                        commands.push(RenderCommand::FillRect {
-                            x,
-                            y: row + METER_TROUGH_TOP,
-                            width: width * f.clamp(0.0, 1.0),
-                            height: METER_TROUGH_HEIGHT,
-                            color: Color::rgba(role.r, role.g, role.b, alpha),
-                            corner_radii: CornerRadii::all(4.0),
-                        });
-                    }
-                    row += METER_PITCH;
+                let layout = monitor_layout(w.size, (x, y, width, height));
+                for &(meter, top) in &layout.meters {
+                    Self::render_meter(meter, live, p, (x, top, width), alpha, commands);
                 }
+                monitor::render(&layout.panels, &live.graphs, p, alpha, commands);
             }
             WidgetKind::Notes => {
                 // The open note draws its own field -- caret, selection and
@@ -2341,6 +2337,67 @@ impl DesktopWidgetManager {
         }
     }
 
+    /// A system monitor's `meter`, its heading's line at `(x, y)`, `width`
+    /// wide: the heading -- saying so where nothing measures it -- and the
+    /// trough, filled as far as the reading in `live`.
+    ///
+    /// Each meter keeps its own role colour. Collapsing the three into one
+    /// blue was caught by `the_three_meters_never_look_alike` and
+    /// `nothing_that_reports_a_measurement_follows_the_accent`, which are
+    /// there because a reader tells the meters apart by colour and because a
+    /// measurement must not wear the accent -- the accent marks what the user
+    /// CHOSE, not what was measured.
+    fn render_meter(
+        meter: Meter,
+        live: &LiveReadings,
+        p: &Palette,
+        (x, y, width): (f32, f32, f32),
+        alpha: u8,
+        commands: &mut Vec<RenderCommand>,
+    ) {
+        let (label, reading) = (meter.label(), meter.reading(live));
+        let role = match meter {
+            Meter::Cpu => p.blue,
+            Meter::Memory => p.green,
+            Meter::Disk => p.peach,
+        };
+        let heading = if reading.is_some() {
+            label.to_string()
+        } else {
+            format!("{label} ({NOT_MEASURED})")
+        };
+        commands.push(RenderCommand::Text {
+            x,
+            y,
+            text: heading,
+            font_size: 10.0,
+            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        // The trough is drawn either way: an empty trough is the shape of a
+        // gauge with no needle, which is what this is.
+        commands.push(RenderCommand::FillRect {
+            x,
+            y: y + METER_TROUGH_TOP,
+            width,
+            height: METER_TROUGH_HEIGHT,
+            color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
+            corner_radii: CornerRadii::all(4.0),
+        });
+        if let Some(f) = reading {
+            commands.push(RenderCommand::FillRect {
+                x,
+                y: y + METER_TROUGH_TOP,
+                width: width * f.clamp(0.0, 1.0),
+                height: METER_TROUGH_HEIGHT,
+                color: Color::rgba(role.r, role.g, role.b, alpha),
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
+    }
+
     /// A calendar's month, `month`, in its content `(x, y, width, height)`:
     /// the month and year, the weekdays, and six weeks of days -- today on
     /// the accent's disc, as the clock's popup marks it, the days of the
@@ -2499,6 +2556,17 @@ mod tests {
             },
             // A real month, so a calendar the fixture shows draws one.
             month: october_glance(),
+            // Every graph measured, so a monitor given room draws each.
+            graphs: monitor::Graphs {
+                cpu: vec![0.3, 0.11],
+                memory: vec![0.7, 0.73],
+                disk_activity: vec![0.05, 0.4],
+                network: vec![2_000.0, 8_000.0],
+                network_now: Some(monitor::NetRate {
+                    down: 6_000,
+                    up: 2_000,
+                }),
+            },
         }
     }
 
@@ -3342,6 +3410,87 @@ mod tests {
         assert!(cmds.len() > 5);
     }
 
+    /// The lines drawn in `color`'s hue, whatever their veil.
+    fn lines_in_hue(cmds: &[RenderCommand], color: Color) -> usize {
+        cmds.iter()
+            .filter(
+                |c| matches!(c, RenderCommand::Line { color: ink, .. } if rgb(*ink) == rgb(color)),
+            )
+            .count()
+    }
+
+    /// **A system monitor is offered two rows, and given them draws its
+    /// graphs of the last minute** -- each in its own hue -- with the disk's
+    /// space, the one meter no graph reads, at its foot; the meters it draws
+    /// small are not drawn twice.
+    #[test]
+    fn a_roomy_monitor_draws_its_graphs_and_the_disks_meter() {
+        assert!(
+            WidgetKind::SystemMonitor
+                .sizes()
+                .contains(&WidgetSize::LARGE)
+        );
+        let p = Palette::for_mode(false);
+        let mut mgr = make_mgr();
+        let id = mgr
+            .add_widget(WidgetKind::SystemMonitor, GridPos::new(0, 0))
+            .unwrap();
+        let small = mgr.render(&p, &sample_readings());
+        assert_eq!(lines_in_hue(&small, p.blue), 0, "no graphs while small");
+        assert_eq!(meter_rects(&small).len(), 6, "three meters while small");
+
+        assert!(mgr.resize_widget(id, WidgetSize::LARGE));
+        let large = mgr.render(&p, &sample_readings());
+        for (hue, graph) in [
+            (p.blue, "CPU"),
+            (p.green, "Memory"),
+            (p.teal, "disk activity"),
+            (p.mauve, "Network"),
+        ] {
+            assert_eq!(lines_in_hue(&large, hue), 1, "{graph}'s line");
+        }
+        assert_eq!(
+            meter_rects(&large).len(),
+            2,
+            "the disk's meter, a track and a fill, and no other"
+        );
+        let (x, y, w, h) = mgr.content_rect(id).unwrap();
+        let inside = |px: f32, py: f32| {
+            px >= x - 0.01 && px <= x + w + 0.01 && py >= y - 0.01 && py <= y + h + 0.01
+        };
+        for c in &large {
+            if let RenderCommand::Line { x1, y1, x2, y2, .. } = c {
+                assert!(
+                    inside(*x1, *y1) && inside(*x2, *y2),
+                    "a line outside the content: ({x1}, {y1}) to ({x2}, {y2})"
+                );
+            }
+        }
+    }
+
+    /// Every colour a roomy monitor draws -- its graphs among the rest of the
+    /// widget -- is its palette's, in both modes, whatever the accent.
+    #[test]
+    fn every_colour_a_roomy_monitor_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let mut mgr = make_mgr();
+                let id = mgr
+                    .add_widget(WidgetKind::SystemMonitor, GridPos::new(0, 0))
+                    .unwrap();
+                assert!(mgr.resize_widget(id, WidgetSize::LARGE));
+                assert_drawn_from(
+                    &p,
+                    &mgr.render(&p, &sample_readings()),
+                    &[],
+                    &format!("a roomy monitor (light={light})"),
+                );
+            }
+        }
+    }
+
     #[test]
     fn render_notes_empty() {
         let mut mgr = make_mgr();
@@ -4007,6 +4156,7 @@ mod tests {
             disk_fraction: None,
             battery: crate::power::BatteryInfo::default(),
             month: crate::calendar::MonthGlance::default(),
+            graphs: monitor::Graphs::default(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -4067,6 +4217,7 @@ mod tests {
             disk_fraction: None,
             battery: crate::power::BatteryInfo::default(),
             month: crate::calendar::MonthGlance::default(),
+            graphs: monitor::Graphs::default(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds

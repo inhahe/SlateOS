@@ -13,6 +13,21 @@
 use super::*;
 use crate::calendar::{CalendarConfig, CalendarEvent, date_to_timestamp};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: guitk::widget::automation::Node<Id>,
+) -> guitk::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// Where the popup is drawn, and at what scaling.
 const X: f32 = 1500.0;
 const Y: f32 = 400.0;
@@ -43,7 +58,7 @@ fn event(title: &str, day: u32, hour: u32, minute: u32) -> CalendarEvent {
 
 /// The popup as tools see it.
 fn tree(view: &CalendarView, store: &EventStore) -> Node<CalendarPart> {
-    view.automation(X, Y, SCALE, store)
+    apart(view.automation(X, Y, SCALE, store))
 }
 
 /// The node of `part`.

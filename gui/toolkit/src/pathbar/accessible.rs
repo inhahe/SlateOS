@@ -1,6 +1,6 @@
 //! A path bar as tools see it ([`Accessible`]): the bar, its address -- the
-//! path shown, or the one being typed -- and, showing the path, its crumbs,
-//! each named by its folder; typing, the suggestions under it.
+//! path shown, or the one being typed -- holding, showing the path, its
+//! crumbs, each named by its folder; typing, the suggestions under it.
 //!
 //! Its boxes are in the bar's own space, as [`PathBar::handle_mouse_event`]
 //! takes a click, and are where the bar was last laid out
@@ -128,6 +128,22 @@ impl Accessible for PathBar {
         }));
         field.focused = editing;
         field.focusable = true;
+        // Not being typed into, the address is drawn as its crumbs: the
+        // field holds them, as a card holds its cross -- each drawn inside
+        // the field's box, where a press is the crumb's.
+        if !editing {
+            for hit in &self.crumb_hits {
+                let Some(segment) = self.segments.get(hit.segment) else {
+                    continue;
+                };
+                field.children.push(Node::new(
+                    PathBarPart::Crumb(hit.segment),
+                    Role::Button,
+                    segment.label.clone(),
+                    rect_of(hit.rect),
+                ));
+            }
+        }
         bar.children.push(field);
         if editing {
             if let Some(list) = self.completions_rect(self.last_size.0, self.last_size.1) {
@@ -152,18 +168,6 @@ impl Accessible for PathBar {
                     suggestions.children.push(node);
                 }
                 bar.children.push(suggestions);
-            }
-        } else {
-            for hit in &self.crumb_hits {
-                let Some(segment) = self.segments.get(hit.segment) else {
-                    continue;
-                };
-                bar.children.push(Node::new(
-                    PathBarPart::Crumb(hit.segment),
-                    Role::Button,
-                    segment.label.clone(),
-                    rect_of(hit.rect),
-                ));
             }
         }
         bar

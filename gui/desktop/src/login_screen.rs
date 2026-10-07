@@ -274,6 +274,19 @@ impl LoginPowerAction {
     }
 }
 
+/// What the keyboard is on, besides a menu: the screen's middle -- the
+/// accounts, or the password field -- or one of the bottom bar's buttons,
+/// which Tab walks to (`design-decisions.md` §1493).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginFocus {
+    /// The accounts, or the password field.
+    Main,
+    /// The accessibility button.
+    Accessibility,
+    /// The power button.
+    Power,
+}
+
 /// An accessibility setting the login screen's accessibility menu
 /// switches.
 ///
@@ -672,6 +685,10 @@ pub struct LoginScreen {
     high_contrast: bool,
     /// The accessibility menu's row the keyboard is on.
     access_row: usize,
+    /// What the keyboard is on, besides a menu.
+    pub focus: LoginFocus,
+    /// The power menu's row the keyboard is on.
+    power_row: usize,
 }
 
 impl LoginScreen {
@@ -801,6 +818,8 @@ impl LoginScreen {
             focus_ring: guitk::style::FOCUS_RING_WIDTH,
             high_contrast: false,
             access_row: 0,
+            focus: LoginFocus::Main,
+            power_row: 0,
         }
     }
 
@@ -1208,6 +1227,18 @@ impl LoginScreen {
         if self.a11y_menu_open {
             return self.key_a11y_menu(event);
         }
+        if self.power_menu_open && self.focus == LoginFocus::Power {
+            return self.key_power_menu(event);
+        }
+        if !self.power_menu_open {
+            if event.key == Key::Tab {
+                self.step_focus(event.modifiers.shift);
+                return LoginAction::Redraw;
+            }
+            if self.focus != LoginFocus::Main {
+                return self.key_bar(event);
+            }
+        }
         // A menu is modal over the phase beneath it. Checked first so that
         // Escape closes the menu rather than walking back a phase, and so that
         // the arrow keys below cannot move a selection hidden behind it.
@@ -1235,6 +1266,89 @@ impl LoginScreen {
             // Nothing to type into: the machine is busy answering the last
             // attempt, or already letting the user in.
             LoginPhase::Authenticating | LoginPhase::LoggingIn => LoginAction::Ignored,
+        }
+    }
+
+    /// The places Tab walks, in order: the middle, then each of the bar's
+    /// buttons the screen shows.
+    fn tab_stops(&self) -> Vec<LoginFocus> {
+        let mut stops = vec![LoginFocus::Main];
+        if self.config.show_accessibility {
+            stops.push(LoginFocus::Accessibility);
+        }
+        if self.config.show_power {
+            stops.push(LoginFocus::Power);
+        }
+        stops
+    }
+
+    /// Tab: the keyboard to the next place, or with Shift the one before,
+    /// round from the last to the first.
+    fn step_focus(&mut self, back: bool) {
+        let stops = self.tab_stops();
+        let at = stops.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let next = if back {
+            guitk::step::wrapping_before(stops.len(), at)
+        } else {
+            guitk::step::wrapping_after(stops.len(), at)
+        };
+        self.focus = stops.get(next).copied().unwrap_or(LoginFocus::Main);
+    }
+
+    /// A key while the keyboard is on one of the bar's buttons: Enter or
+    /// Space presses it, opening its menu; Escape goes back to the middle;
+    /// and typing goes back to the middle and types there -- a password
+    /// begun with the keyboard on a button is not lost.
+    fn key_bar(&mut self, event: &KeyEvent) -> LoginAction {
+        match (event.key, self.focus) {
+            (Key::Enter | Key::Space, LoginFocus::Accessibility) => {
+                self.toggle_a11y_menu();
+                LoginAction::Redraw
+            }
+            (Key::Enter | Key::Space, LoginFocus::Power) => {
+                self.toggle_power_menu();
+                self.power_row = 0;
+                LoginAction::Redraw
+            }
+            (Key::Escape, _) => {
+                self.focus = LoginFocus::Main;
+                LoginAction::Redraw
+            }
+            _ if event.text.chars().any(|c| !c.is_control()) => {
+                self.focus = LoginFocus::Main;
+                self.handle_key(event)
+            }
+            _ => LoginAction::Ignored,
+        }
+    }
+
+    /// A key while the power menu is up from the keyboard: Up and Down walk
+    /// its choices, Enter or Space chooses the one the keyboard is on,
+    /// Escape closes it.
+    fn key_power_menu(&mut self, event: &KeyEvent) -> LoginAction {
+        let last = POWER_MENU_ACTIONS.len().saturating_sub(1);
+        match event.key {
+            Key::Escape => {
+                self.power_menu_open = false;
+                LoginAction::Redraw
+            }
+            Key::Up => {
+                self.power_row = self.power_row.saturating_sub(1);
+                LoginAction::Redraw
+            }
+            Key::Down => {
+                self.power_row = self.power_row.saturating_add(1).min(last);
+                LoginAction::Redraw
+            }
+            Key::Enter | Key::Space => {
+                POWER_MENU_ACTIONS
+                    .get(self.power_row)
+                    .map_or(LoginAction::Ignored, |choice| {
+                        self.power_menu_open = false;
+                        LoginAction::Power(*choice)
+                    })
+            }
+            _ => LoginAction::Ignored,
         }
     }
 
@@ -1447,11 +1561,13 @@ impl LoginScreen {
         // back arrow were each a press that did nothing, Enter and Escape
         // the only ways through.
         if let Some(action) = self.press_password_view(x, y) {
+            self.focus = LoginFocus::Main;
             return action;
         }
         if self.phase == LoginPhase::UserSelect {
             for i in 0..self.users.len() {
                 if self.user_row_rect(i).contains(x, y) {
+                    self.focus = LoginFocus::Main;
                     self.select_user(i);
                     return LoginAction::Redraw;
                 }
@@ -1501,6 +1617,8 @@ impl LoginScreen {
 
         // Bottom bar (power, accessibility, keyboard layout).
         self.render_bottom_bar(p, &mut commands);
+
+        self.render_bar_focus(p, &mut commands);
 
         // Power menu overlay.
         if self.power_menu_open {
@@ -1794,7 +1912,7 @@ impl LoginScreen {
                 p,
                 guitk::frame::Rect::new(field_x, field_y, field_w, field_h),
                 guitk::field::State {
-                    focused: true,
+                    focused: self.focus == LoginFocus::Main,
                     invalid: self.error_message.is_some(),
                     ..guitk::field::State::default()
                 },
@@ -2077,6 +2195,28 @@ impl LoginScreen {
         }
     }
 
+    /// The keyboard's ring round the bar's button it is on, while it is on
+    /// one and no menu is up over it.
+    fn render_bar_focus(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
+        if self.power_menu_open || self.a11y_menu_open {
+            return;
+        }
+        let button = match self.focus {
+            LoginFocus::Main => return,
+            LoginFocus::Accessibility => self.a11y_button_rect(),
+            LoginFocus::Power => self.power_button_rect(),
+        };
+        commands.push(RenderCommand::StrokeRect {
+            x: button.x,
+            y: button.y + 4.0,
+            width: button.w,
+            height: button.h - 8.0,
+            color: p.accent,
+            line_width: self.focus_ring,
+            corner_radii: CornerRadii::all(6.0),
+        });
+    }
+
     fn render_power_menu(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
         let menu_w = 160.0;
         let menu_h = 140.0;
@@ -2090,7 +2230,18 @@ impl LoginScreen {
         p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);
 
         for (i, (icon, label)) in POWER_MENU_LABELS.iter().enumerate() {
-            let iy = self.power_menu_row_rect(i).y;
+            let row = self.power_menu_row_rect(i);
+            if self.focus == LoginFocus::Power && i == self.power_row {
+                commands.push(RenderCommand::FillRect {
+                    x: row.x + 4.0,
+                    y: row.y,
+                    width: row.w - 8.0,
+                    height: row.h,
+                    color: p.surface1,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
+            let iy = row.y;
             self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, p.subtext0);
             commands.push(RenderCommand::Text {
                 x: mx + 36.0,
@@ -2812,6 +2963,15 @@ mod tests {
         s.power_menu_open = true;
         v.push(("power menu".to_string(), s));
 
+        // The keyboard on the bar, and the power menu opened from it.
+        let mut s = base();
+        s.focus = LoginFocus::Power;
+        v.push(("keyboard on the power button".to_string(), s));
+        let mut s = base();
+        s.focus = LoginFocus::Power;
+        s.power_menu_open = true;
+        v.push(("power menu from the keyboard".to_string(), s));
+
         // The accessibility menu, its switch off and on.
         let mut s = base();
         s.a11y_menu_open = true;
@@ -3076,7 +3236,7 @@ mod tests {
         /// fixture.
         type Branch = (&'static str, fn(&LoginScreen) -> bool);
 
-        let both_ways: [Branch; 13] = [
+        let both_ways: [Branch; 14] = [
             ("show_clock", |s| s.config.show_clock),
             ("show_date", |s| s.config.show_date),
             ("show_keyboard_layout", |s| s.config.show_keyboard_layout),
@@ -3085,6 +3245,7 @@ mod tests {
             ("show_osk_button", |s| s.config.show_osk_button),
             ("power_menu_open", |s| s.power_menu_open),
             ("a11y_menu_open", |s| s.a11y_menu_open),
+            ("keyboard on the bar", |s| s.focus != LoginFocus::Main),
             ("high contrast", |s| s.access(LoginAccess::HighContrast)),
             ("locked_out", |s| s.locked_out),
             ("error_message", |s| s.error_message.is_some()),
@@ -4156,6 +4317,81 @@ mod tests {
         assert!(drawn(&s).iter().any(|t| t == "bob"), "over the field");
         s.phase = LoginPhase::LoggingIn;
         assert!(drawn(&s).iter().any(|t| t == "Welcome, bob!"));
+    }
+
+    /// **Tab walks the middle and the bar's buttons, round again; Enter on a
+    /// button opens its menu, and the power menu's keys walk it and choose**
+    /// -- the bar was the pointer's alone, so the keyboard's user could not
+    /// shut the machine down or restart it from here. Escape on a button
+    /// goes back to the middle, and is no step back.
+    #[test]
+    fn tab_reaches_the_bar_and_the_power_menu_is_chosen_from_the_keyboard() {
+        let mut s = make_screen();
+        let tab = press(Key::Tab);
+        let back = KeyEvent {
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            ..press(Key::Tab)
+        };
+        assert_eq!(s.handle_key(&tab), LoginAction::Redraw);
+        assert_eq!(s.focus, LoginFocus::Accessibility);
+        let _ = s.handle_key(&tab);
+        assert_eq!(s.focus, LoginFocus::Power);
+        let _ = s.handle_key(&tab);
+        assert_eq!(s.focus, LoginFocus::Main, "round again");
+        let _ = s.handle_key(&back);
+        assert_eq!(s.focus, LoginFocus::Power, "Shift+Tab, backwards");
+
+        assert_eq!(s.handle_key(&press(Key::Enter)), LoginAction::Redraw);
+        assert!(s.power_menu_open);
+        assert_eq!(s.handle_key(&press(Key::Down)), LoginAction::Redraw);
+        assert_eq!(
+            s.handle_key(&press(Key::Enter)),
+            LoginAction::Power(LoginPowerAction::Reboot)
+        );
+        assert!(!s.power_menu_open, "a choice closes it");
+        assert_eq!(s.handle_key(&press(Key::Escape)), LoginAction::Redraw);
+        assert_eq!(s.focus, LoginFocus::Main);
+        assert_eq!(s.phase, LoginPhase::UserSelect, "no step back");
+
+        s.config.show_accessibility = false;
+        let _ = s.handle_key(&tab);
+        assert_eq!(s.focus, LoginFocus::Power, "a button not shown is no stop");
+    }
+
+    /// **Typing with the keyboard on a bar button types into the password
+    /// field**: a password begun there is not lost.
+    #[test]
+    fn typing_on_a_bar_button_types_into_the_field() {
+        let mut s = make_screen();
+        s.select_user(0);
+        s.focus = LoginFocus::Power;
+        assert_eq!(s.handle_key(&typed("p")), LoginAction::Redraw);
+        assert_eq!(s.focus, LoginFocus::Main);
+        assert_eq!(s.password(), "p");
+    }
+
+    /// **The keyboard's ring is round the bar's button it is on**, and only
+    /// while no menu is up over it.
+    #[test]
+    fn the_keyboards_ring_is_round_the_bars_button() {
+        let p = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let ring = |s: &LoginScreen| {
+            s.render(&p).iter().find_map(|c| match c {
+                RenderCommand::StrokeRect { x, color, .. } if *color == p.accent => Some(*x),
+                _ => None,
+            })
+        };
+        let mut s = make_screen();
+        assert_eq!(ring(&s), None, "on the accounts");
+        s.focus = LoginFocus::Power;
+        assert_eq!(ring(&s), Some(s.power_button_rect().x));
+        s.focus = LoginFocus::Accessibility;
+        assert_eq!(ring(&s), Some(s.a11y_button_rect().x));
+        s.a11y_menu_open = true;
+        assert_eq!(ring(&s), None, "under its menu");
     }
 
     /// A press at the middle of `rect`.

@@ -25,7 +25,8 @@
 //! types them -- after a refusal, starting again first, as any key does.
 
 use super::{
-    ACCESS_MENU, Hit, LoginAccess, LoginAction, LoginPhase, LoginScreen, POWER_MENU_LABELS,
+    ACCESS_MENU, Hit, LoginAccess, LoginAction, LoginFocus, LoginPhase, LoginScreen,
+    POWER_MENU_LABELS,
 };
 use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -121,15 +122,20 @@ impl LoginScreen {
                 self.a11y_button_rect().into(),
             );
             button.description = Some("Super+U".to_owned());
+            button.focused = !self.menu_up() && self.focus == LoginFocus::Accessibility;
+            button.focusable = true;
             nodes.push(button);
         }
         if self.config.show_power {
-            nodes.push(Node::new(
+            let mut button = Node::new(
                 LoginPart::Power,
                 Role::Button,
                 "Power",
                 self.power_button_rect().into(),
-            ));
+            );
+            button.focused = !self.menu_up() && self.focus == LoginFocus::Power;
+            button.focusable = true;
+            nodes.push(button);
         }
         if self.a11y_menu_open {
             let mut menu = Node::new(
@@ -164,16 +170,25 @@ impl LoginScreen {
                 self.power_menu_rect().into(),
             );
             for (i, (_, label)) in POWER_MENU_LABELS.iter().enumerate() {
-                menu.children.push(Node::new(
+                let mut choice = Node::new(
                     LoginPart::PowerChoice(i),
                     Role::MenuItem,
                     *label,
                     self.power_menu_row_rect(i).into(),
-                ));
+                );
+                // The keyboard walks it when it opened from the keyboard.
+                choice.focused = self.focus == LoginFocus::Power && i == self.power_row;
+                choice.focusable = true;
+                menu.children.push(choice);
             }
             nodes.push(menu);
         }
         nodes
+    }
+
+    /// Whether a menu is up over the screen, taking its keys and presses.
+    const fn menu_up(&self) -> bool {
+        self.power_menu_open || self.a11y_menu_open
     }
 
     /// Where `part` is pressed, or why it is not there to press.
@@ -292,7 +307,7 @@ impl Accessible for LoginScreen {
                 );
                 row.description = Some(user.account_type.clone());
                 row.value = Some(Value::Chosen(i == self.selected_user));
-                row.focused = !menu_up && i == self.selected_user;
+                row.focused = !menu_up && self.focus == LoginFocus::Main && i == self.selected_user;
                 row.focusable = true;
                 list.children.push(row);
             }
@@ -309,7 +324,7 @@ impl Accessible for LoginScreen {
                 name,
                 self.password_field_rect().into(),
             );
-            field.focused = !menu_up;
+            field.focused = !menu_up && self.focus == LoginFocus::Main;
             field.focusable = true;
             field.enabled = !self.locked_out;
             screen.children.push(field);

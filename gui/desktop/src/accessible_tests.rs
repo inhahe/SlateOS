@@ -12,6 +12,7 @@ use super::*;
 use crate::notif_pane::QuickSetting;
 use crate::volume::Output;
 use crate::volume::volume_tests::card;
+use crate::widgets::WidgetKind;
 use crate::{WindowId, WindowInfo, WindowList};
 
 fn shell() -> DesktopShell {
@@ -1450,4 +1451,207 @@ fn a_popped_up_notification_a_click_cannot_reach_is_refused() {
             })
         );
     });
+}
+
+/// A shell with a clock and a note out on its desktop, added as the user
+/// adds them -- the desktop menu's rows -- and their ids, its layout saved.
+fn with_widgets() -> (DesktopShell, WidgetInstanceId, WidgetInstanceId) {
+    let mut s = shell();
+    for row in [DesktopShell::MENU_ADD_CLOCK, DesktopShell::MENU_ADD_NOTE] {
+        s.open_desktop_menu(900.0, 500.0);
+        assert!(s.activate_desktop_menu_item(row).changed(), "not added");
+    }
+    s.dismiss_popups();
+    let of = |kind: WidgetKind| {
+        s.widgets
+            .all_widgets()
+            .iter()
+            .find(|w| w.kind == kind)
+            .map(|w| w.id)
+            .expect("added")
+    };
+    let (clock, note) = (of(WidgetKind::Clock), of(WidgetKind::Notes));
+    let _saved = s.take_widgets_dirty();
+    (s, clock, note)
+}
+
+/// A key typing `text`.
+fn typing(text: &str) -> crate::KeyEvent {
+    crate::KeyEvent {
+        key: crate::Key::A,
+        pressed: true,
+        modifiers: crate::Modifiers::NONE,
+        text: text.to_owned(),
+    }
+}
+
+/// **The widgets out on the desktop are seen, over its icons** -- between
+/// the icons and the taskbar, as they are drawn -- each named by its title,
+/// a clock reading what the taskbar's clock reads.
+#[test]
+fn the_desktops_widgets_are_seen_over_its_icons() {
+    let (s, clock, note) = with_widgets();
+    let root = tree(&s);
+    let order: Vec<ShellPart> = root.children.iter().map(|n| n.id).collect();
+    assert_eq!(
+        order[..3],
+        [
+            ShellPart::Icons,
+            ShellPart::Widget(WidgetPart::Layer),
+            ShellPart::Taskbar
+        ]
+    );
+    // Either side of a minute turning over between the two.
+    let before = s.live_readings().clock_time;
+    let time = node(&s, ShellPart::Widget(WidgetPart::Time(clock)));
+    let after = s.live_readings().clock_time;
+    assert!(time.name == before || time.name == after, "{:?}", time.name);
+    let written = node(&s, ShellPart::Widget(WidgetPart::Note(note)));
+    assert_eq!(
+        (written.role, written.name.as_str()),
+        (Role::TextArea, "Quick Notes")
+    );
+    assert!(!written.focused);
+}
+
+/// **A note's text is set as the user would set it**: the note opened with
+/// a click on it, which gives it the keyboard, and the text pasted over all
+/// of it -- its layout to be saved, as after typing -- and what is typed next
+/// follows it. Set again while open, it is not clicked again, which would
+/// put the caret where the click landed.
+#[test]
+fn a_notes_text_is_set_as_the_user_would() {
+    let (mut s, _, note) = with_widgets();
+    let part = ShellPart::Widget(WidgetPart::Note(note));
+    let words = |s: &DesktopShell| s.widgets.get(note).expect("placed").state_text.clone();
+    assert_eq!(
+        s.invoke(&part, Action::SetText("milk".to_owned()), 0.0, 0.0),
+        Ok(None)
+    );
+    assert_eq!(words(&s), "milk");
+    assert_eq!(s.widgets.writing_note(), Some(note), "not opened");
+    assert!(node(&s, part).focused);
+    assert!(s.take_widgets_dirty(), "the words are not saved");
+    let _typed = s.handle_desktop_key(&typing("!"));
+    assert_eq!(words(&s), "milk!");
+
+    // Lines enough that a click on the note's middle lands among them.
+    let long = (1..=40)
+        .map(|n| format!("line {n}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    assert_eq!(
+        s.invoke(&part, Action::SetText(long.clone()), 0.0, 0.0),
+        Ok(None)
+    );
+    assert_eq!(s.invoke(&part, Action::Focus, 0.0, 0.0), Ok(None));
+    let _typed = s.handle_desktop_key(&typing("END"));
+    assert_eq!(words(&s), format!("{long}END"), "clicked again");
+}
+
+/// **A note given the keyboard is opened as clicked**, and opening it
+/// changes no words, so nothing is saved.
+#[test]
+fn a_note_given_the_keyboard_is_opened() {
+    let (mut s, _, note) = with_widgets();
+    let part = ShellPart::Widget(WidgetPart::Note(note));
+    assert_eq!(s.invoke(&part, Action::Focus, 0.0, 0.0), Ok(None));
+    assert_eq!(s.widgets.writing_note(), Some(note));
+    assert!(!s.take_widgets_dirty(), "opening a note saved the layout");
+}
+
+/// **A note a click could not reach is refused, and nothing changes**:
+/// under the start menu -- a click there only closes it -- and under the
+/// pop-ups in the corner, which take every press in their stack. And only a
+/// note is written in: a clock's time is not, nor is a note pressed.
+#[test]
+fn a_note_a_click_cannot_reach_is_refused() {
+    appearance::config::testing::with_scratch_config("acc-note-refused", |_root| {
+        let (mut s, clock, note) = with_widgets();
+        let part = ShellPart::Widget(WidgetPart::Note(note));
+        let set = |s: &mut DesktopShell| s.invoke(&part, Action::SetText("x".to_owned()), 0.0, 0.0);
+        s.toggle_start_menu();
+        assert_eq!(set(&mut s), Err(Refusal::Hidden), "under the start menu");
+        assert!(s.start_menu_open, "the refusal closed the menu");
+        assert_eq!(s.widgets.writing_note(), None);
+        s.toggle_start_menu();
+
+        // The grid moved so that the note's middle is under the stack.
+        s.notify(notif("Chat", "Lunch?"));
+        s.advance_toasts(1_000);
+        let stack = s.toasts.extent().expect("one is up");
+        let (sx, sy) = stack.centre();
+        let (x, y, w, h) = s.widgets.content_rect(note).expect("placed");
+        s.widgets.grid.origin_x += sx - (x + w / 2.0);
+        s.widgets.grid.origin_y += sy - (y + h / 2.0);
+        let (x, y, w, h) = s.widgets.content_rect(note).expect("placed");
+        assert!(stack.contains(x + w / 2.0, y + h / 2.0));
+        assert_eq!(set(&mut s), Err(Refusal::Hidden), "under the pop-ups");
+        assert_eq!(s.widgets.writing_note(), None);
+        assert_eq!(s.widgets.get(note).expect("placed").state_text, "");
+
+        assert_eq!(
+            s.invoke(
+                &ShellPart::Widget(WidgetPart::Time(clock)),
+                Action::SetText("12:00".to_owned()),
+                0.0,
+                0.0
+            ),
+            Err(Refusal::NotApplicable {
+                role: Role::Label,
+                action: "set the text of"
+            })
+        );
+        assert_eq!(
+            press(&mut s, part),
+            Err(Refusal::NotApplicable {
+                role: Role::TextArea,
+                action: "press"
+            })
+        );
+        assert_eq!(
+            s.invoke(
+                &ShellPart::Widget(WidgetPart::Note(u64::MAX)),
+                Action::Focus,
+                0.0,
+                0.0
+            ),
+            Err(Refusal::NoSuchWidget)
+        );
+    });
+}
+
+/// **An icon under a widget is refused**: the widget is drawn over it and
+/// takes the click, so the icon is neither chosen nor opened -- and the
+/// refusal presses nothing.
+#[test]
+fn an_icon_under_a_widget_is_refused() {
+    let mut s = shell();
+    s.icons.populate_defaults();
+    let pc = s
+        .icons
+        .icon_ids()
+        .into_iter()
+        .find(|&id| s.icons.get_icon(id).is_some_and(|i| i.label == "This PC"))
+        .expect("This PC");
+    let (x, y) = s.icons.icon_rect(pc).expect("placed").centre();
+    let cell = s.widgets.pixel_to_grid(x, y).expect("on the grid");
+    s.widgets
+        .add_widget(WidgetKind::Clock, cell)
+        .expect("the grid is empty");
+    assert!(
+        s.widgets.hit_test(x, y).is_some(),
+        "the clock is not over it"
+    );
+    let icon = ShellPart::Icon(pc);
+    assert_eq!(
+        s.invoke(&icon, Action::Choose, 0.0, 0.0),
+        Err(Refusal::Hidden)
+    );
+    assert_eq!(press(&mut s, icon), Err(Refusal::Hidden));
+    assert!(s.icons.selected_ids().is_empty());
+    assert!(
+        s.widget_drag.is_none(),
+        "the refusal took hold of the clock"
+    );
 }

@@ -4,7 +4,12 @@
 //!
 //! The icons are a list, each named by its label and said to be what it is
 //! -- a folder, a program, the recycle bin -- the chosen ones marked; one
-//! chosen is clicked, one pressed is double-clicked, so it opens.
+//! chosen is clicked, one pressed is double-clicked, so it opens. The
+//! widgets over them (`widgets::accessible`) are each a group named by its
+//! title, holding what it shows -- a clock's time and date, a meter's
+//! reading, a note's text, a frame's picture, the battery's charge; a note
+//! given the keyboard is clicked, which opens it for writing, and its text
+//! set is pasted over all of it.
 //!
 //! The taskbar holds the start button, a tile for each pinned program and
 //! each window -- named by the program and by the window's title, the window
@@ -45,9 +50,9 @@
 //! user's would -- a program started, a window raised, a menu opened -- and
 //! answers the [`ShellAction`] the host carries out. A part the click would
 //! not reach refuses: one covered by something drawn over it -- a menu, the
-//! Run box, the notification pane's scrim -- and one a click would be spent
-//! closing something else for, as a press away from an open menu or flyout
-//! is. A row of the start menu or a notification scrolled out of sight is
+//! Run box, the notification pane's scrim, the pop-ups in the corner, a
+//! widget over an icon -- and one a click would be spent closing something
+//! else for, as a press away from an open menu or flyout is. A row of the start menu or a notification scrolled out of sight is
 //! scrolled into it first, as the user would; a notification's cross,
 //! shown while the pointer is on its card, is pointed at before it is
 //! pressed. The search's text, the volume's level, its mute and the
@@ -63,6 +68,7 @@ use crate::notif_pane::PanePart;
 use crate::overview::{self, OverviewPart};
 use crate::run_dialog::RunPart;
 use crate::snap::{SnapLayoutPreset, ZoneId};
+use crate::widgets::{NoteKey, WidgetInstanceId, WidgetPart};
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
     StartShortcut, SwitchView, TaskbarSlot, TextRole, WindowId, click, icons, power, volume_flyout,
@@ -78,6 +84,9 @@ pub enum ShellPart {
     /// A desktop icon: chosen as a click chooses it, opened as a double
     /// click opens it.
     Icon(icons::IconId),
+    /// A part of the widgets out on the desktop (`widgets::accessible`): a
+    /// note's text set as typed into it, after a click on it.
+    Widget(WidgetPart),
     /// The taskbar.
     Taskbar,
     /// The start menu, while it is open.
@@ -493,15 +502,7 @@ impl DesktopShell {
     /// leaving, and is left out.
     fn toasts_node(&self) -> Option<Node<ShellPart>> {
         let placed = self.toasts.placed();
-        let bounds = placed.iter().map(|p| p.rect).reduce(|a, b| {
-            let (left, top) = (a.x.min(b.x), a.y.min(b.y));
-            Rect::new(
-                left,
-                top,
-                a.right().max(b.right()) - left,
-                a.bottom().max(b.bottom()) - top,
-            )
-        })?;
+        let bounds = placed.iter().map(|p| p.rect).reduce(Rect::union)?;
         let mut list = Node::new(ShellPart::Toasts, Role::List, "New notifications", bounds);
         let filed = self.notifications.notifications();
         for toast in placed {
@@ -907,9 +908,22 @@ impl DesktopShell {
         list
     }
 
+    /// Whether a press at `(x, y)` on the desktop itself would reach what is
+    /// there -- an icon, a widget: nothing the shell draws over the desktop
+    /// takes it ([`reaches`](Self::reaches)), and the pop-ups' surface, which
+    /// takes every press inside it (`handle_toast_mouse`), is not over it.
+    fn desktop_reaches(&self, x: f32, y: f32) -> bool {
+        self.reaches(x, y, Hit::Desktop)
+            && !self
+                .toasts
+                .extent()
+                .is_some_and(|stack| stack.contains(x, y))
+    }
+
     /// Click the desktop icon `id` -- and, where `open`, click it again as a
     /// double click: the shell's own presses, releases and double click at
-    /// the middle of its cell. Refused where something is drawn over it.
+    /// the middle of its cell. Refused where something is drawn over it -- a
+    /// widget among them, which takes a press on it.
     fn click_icon(
         &mut self,
         id: icons::IconId,
@@ -917,7 +931,10 @@ impl DesktopShell {
     ) -> Result<Option<ShellAction>, Refusal> {
         let rect = self.icons.icon_rect(id).ok_or(Refusal::NoSuchWidget)?;
         let (x, y) = rect.centre();
-        if !self.reaches(x, y, Hit::Desktop) || self.icons.icon_at(x, y) != Some(id) {
+        if !self.desktop_reaches(x, y)
+            || self.widgets.hit_test(x, y).is_some()
+            || self.icons.icon_at(x, y) != Some(id)
+        {
             return Err(Refusal::Hidden);
         }
         let release = MouseEvent {
@@ -937,6 +954,72 @@ impl DesktopShell {
             said = answered(self.handle_mouse(&release)).or(said);
         }
         Ok(said)
+    }
+
+    /// Do `action` to `part` of the widgets, as the user would: a note given
+    /// the keyboard with a click on it, which opens it for writing, and its
+    /// text set as a paste over all of it, the note opened so first -- one
+    /// already open is not clicked again, which would move its caret.
+    /// Nothing else on a widget is used.
+    fn invoke_widget(
+        &mut self,
+        part: WidgetPart,
+        action: Action,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        let role = self
+            .widgets
+            .automation(&self.live_readings())
+            .and_then(|tree| {
+                tree.walk()
+                    .find(|node| node.id == part)
+                    .map(|node| node.role)
+            })
+            .ok_or(Refusal::NoSuchWidget)?;
+        let not_for = |action: &Action| Refusal::NotApplicable {
+            role,
+            action: action.name(),
+        };
+        let WidgetPart::Note(id) = part else {
+            return Err(not_for(&action));
+        };
+        let text = match action {
+            Action::Focus => None,
+            Action::SetText(text) => Some(text),
+            other => return Err(not_for(&other)),
+        };
+        self.open_note(id)?;
+        if let Some(text) = text
+            && self.widgets.note_set_text(&text) == NoteKey::Changed
+        {
+            // A note's words are saved at every change, as typing's are.
+            self.widgets_dirty = true;
+        }
+        Ok(None)
+    }
+
+    /// Open the note `id` for writing as the user does, with a click on the
+    /// middle of its writing area -- unless it is open already. Refused
+    /// where the click would not reach it: under something drawn over it, or
+    /// spent closing something open elsewhere.
+    fn open_note(&mut self, id: WidgetInstanceId) -> Result<(), Refusal> {
+        let (x, y, width, height) = self.widgets.content_rect(id).ok_or(Refusal::NoSuchWidget)?;
+        let (cx, cy) = (x + width / 2.0, y + height / 2.0);
+        if !self.desktop_reaches(cx, cy) || self.widgets.note_body_at(cx, cy) != Some(id) {
+            return Err(Refusal::Hidden);
+        }
+        if self.widgets.writing_note() == Some(id) {
+            return Ok(());
+        }
+        // A press on a note asks the host for nothing.
+        let _asked = self.click_at(cx, cy);
+        // Should the shell ever hand the press to something the checks above
+        // do not see, the note is not open, and that is not hidden from the
+        // tool that asked.
+        if self.widgets.writing_note() == Some(id) {
+            Ok(())
+        } else {
+            Err(Refusal::Hidden)
+        }
     }
 
     /// The taskbar's parts, left to right.
@@ -1334,6 +1417,10 @@ impl Accessible for DesktopShell {
             Rect::new(0.0, 0.0, width, height),
         );
         root.children.push(self.icons_node());
+        // Drawn over the icons, as they are drawn.
+        if let Some(widgets) = self.widgets.automation(&self.live_readings()) {
+            root.children.push(widgets.map(&ShellPart::Widget));
+        }
         root.children.push(self.taskbar_node());
         if self.start_menu_open {
             root.children.push(self.start_menu_node());
@@ -1424,6 +1511,7 @@ impl Accessible for DesktopShell {
             (ShellPart::Icon(id), Action::Press) => self.click_icon(id, true),
             (ShellPart::Icon(_), _) => Err(not_for(Role::ListItem)),
             (ShellPart::Icons, _) => Err(not_for(Role::List)),
+            (ShellPart::Widget(part), action) => self.invoke_widget(part, action),
             // The tiling overlay's and the shut-down list's parts are the
             // surfaces' own, asked for a press before the shell's others.
             (ShellPart::Control(Hit::SnapZone(zone)), Action::Press) => self.press_zone(zone),

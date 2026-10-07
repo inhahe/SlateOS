@@ -5295,7 +5295,11 @@ impl DesktopShell {
         if self.icons.renaming().is_some()
             && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
         {
-            if self.icons.rename_field_contains(event.x, event.y) {
+            // Not where a widget is drawn over the field: the press is the
+            // widget's, and a click away from the name.
+            if self.icons.rename_field_contains(event.x, event.y)
+                && self.widgets.hit_test(event.x, event.y).is_none()
+            {
                 if let MouseEventKind::Press(MouseButton::Right) = event.kind {
                     self.open_field_menu(MenuField::Rename, event.x, event.y);
                 } else {
@@ -5513,9 +5517,15 @@ impl DesktopShell {
         // double click there selects a word. Before the widget drag below,
         // which would otherwise take hold of the note: its title bar is still
         // where it is moved from.
+        //
+        // These presses on the desktop's own things wait only on a popup the
+        // press is spent on (`popup_takes_press`). Not on the card of
+        // shortcuts, which lets a press through: asked whether *any* popup
+        // was open, a press on a widget with the card up passed it by and
+        // reached the icon layer, which chose the icon under the widget.
         if let MouseEventKind::Press(MouseButton::Left)
         | MouseEventKind::DoubleClick(MouseButton::Left) = event.kind
-            && !self.any_popup_open()
+            && !self.popup_takes_press()
             && !self.taskbar_rect().contains(event.x, event.y)
         {
             let clicks = if matches!(event.kind, MouseEventKind::DoubleClick(_)) {
@@ -5531,8 +5541,15 @@ impl DesktopShell {
         // A left press on a widget takes hold of it. Before the right-click
         // below only in source order; the two cannot both match, since a press
         // carries one button.
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind
-            && !self.any_popup_open()
+        //
+        // So does a double click's second press, which is a press on the
+        // widget as the first was. Past here it reached the icon layer, which
+        // opened whatever icon lay under the widget -- and the first widget
+        // the desktop menu adds goes to the grid's first cell, over the first
+        // column of icons.
+        if let MouseEventKind::Press(MouseButton::Left)
+        | MouseEventKind::DoubleClick(MouseButton::Left) = event.kind
+            && !self.popup_takes_press()
             && !self.taskbar_rect().contains(event.x, event.y)
             && self.begin_widget_drag(event.x, event.y)
         {
@@ -5545,7 +5562,7 @@ impl DesktopShell {
         // selection, which are what the rows act on. Its title bar is still
         // the widget's, and offers the widget menu below.
         if let MouseEventKind::Press(MouseButton::Right) = event.kind
-            && !self.any_popup_open()
+            && !self.popup_takes_press()
             && !self.taskbar_rect().contains(event.x, event.y)
             && let Some(note) = self.widgets.note_body_at(event.x, event.y)
         {
@@ -5561,7 +5578,7 @@ impl DesktopShell {
         // window, and everything below this point has already claimed its own
         // rectangle.
         if let MouseEventKind::Press(MouseButton::Right) = event.kind
-            && !self.any_popup_open()
+            && !self.popup_takes_press()
             && !self.taskbar_rect().contains(event.x, event.y)
         {
             self.open_desktop_menu(event.x, event.y);
@@ -6703,8 +6720,9 @@ impl DesktopShell {
             return self.act_on_overview(action);
         }
         // The open note scrolls its own text; the wheel over a closed one is
-        // the desktop's.
-        if !self.any_popup_open() && self.widgets.note_scroll(x, y, dy) {
+        // the desktop's. The card of shortcuts lets the wheel through, as it
+        // does a press.
+        if !self.popup_takes_press() && self.widgets.note_scroll(x, y, dy) {
             return ShellAction::Consumed;
         }
         // Asked of the hit test rather than of `start_menu_rect` directly, so
@@ -15127,6 +15145,16 @@ impl DesktopShell {
     /// One expression, so they cannot drift apart.
     #[must_use]
     pub fn any_popup_open(&self) -> bool {
+        self.popup_takes_press() || self.shortcut_card_open
+    }
+
+    /// Whether a surface of the shell's is open that a press on the desktop
+    /// is spent on -- taken by it, or spent closing it: every one
+    /// [`any_popup_open`](Self::any_popup_open) counts but the card of
+    /// shortcuts, which is read rather than used, answers no press, and lets
+    /// one through to what is under it -- an icon, a widget, the desktop's
+    /// menu -- as nothing were over it.
+    fn popup_takes_press(&self) -> bool {
         self.desktop_menu.is_visible()
             || self.tray_overflow_menu.is_some()
             || self.pin_menu.is_some()
@@ -15147,7 +15175,6 @@ impl DesktopShell {
             // The chooser on its own, when a photo frame put it up rather
             // than the Run box: Escape must still reach it.
             || self.chooser.is_some()
-            || self.shortcut_card_open
     }
 
     /// Close whatever popup is open. Returns whether anything was.

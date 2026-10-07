@@ -2697,7 +2697,12 @@ authors never wrote a single automation handler.
   what it is -- the name of a Save dialog, its button and Cancel. And the
   shell (`desktop::accessible::ShellPart`): the desktop's icons -- each
   named and said to be what it is, chosen as a click chooses it and opened
-  as a double click opens it -- the taskbar -- Start, each
+  as a double click opens it -- the widgets over them
+  (`desktop::widgets::WidgetPart`: each named by its title, holding a
+  clock's time and date, the meters' readings or "not measured", a note's
+  text -- given the keyboard and written in as a click and a paste do -- a
+  frame's picture or what it says instead, the battery's charge) -- the
+  taskbar -- Start, each
   pinned program and window, the tray's icons, the speaker, the bell, the
   clock, Show desktop -- and, while open, the start menu (its search, every
   row of its list, its places, the power button and caret), the power

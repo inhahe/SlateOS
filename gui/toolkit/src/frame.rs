@@ -172,6 +172,19 @@ impl Rect {
     pub fn centre(self) -> (f32, f32) {
         (self.x + self.w / 2.0, self.y + self.h / 2.0)
     }
+
+    /// The smallest rectangle holding both: the box round several things
+    /// drawn apart -- a stack of pop-ups, the widgets on a desktop.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        let (x, y) = (self.x.min(other.x), self.y.min(other.y));
+        Self::new(
+            x,
+            y,
+            self.right().max(other.right()) - x,
+            self.bottom().max(other.bottom()) - y,
+        )
+    }
 }
 
 /// A frame being drawn: the commands to paint, and the clickable boxes that
@@ -575,6 +588,20 @@ mod tests {
         let rect = Rect::new(3.0, 7.0, 11.0, 5.0);
         let (x, y) = rect.centre();
         assert!(rect.contains(x, y));
+    }
+
+    /// The union holds both, apart or overlapping, and nothing past the two
+    /// on any side; either way round.
+    #[test]
+    fn a_union_is_the_box_round_both() {
+        let a = Rect::new(2.0, 3.0, 10.0, 4.0);
+        let b = Rect::new(20.0, 1.0, 5.0, 30.0);
+        assert_eq!(a.union(b), Rect::new(2.0, 1.0, 23.0, 30.0));
+        assert_eq!(b.union(a), a.union(b));
+        let inside = Rect::new(3.0, 4.0, 1.0, 1.0);
+        assert_eq!(a.union(inside), a, "a box inside adds nothing");
+        let overlapping = Rect::new(8.0, 5.0, 10.0, 10.0);
+        assert_eq!(a.union(overlapping), Rect::new(2.0, 3.0, 16.0, 12.0));
     }
 
     // ---- Frame: the basics -------------------------------------------------

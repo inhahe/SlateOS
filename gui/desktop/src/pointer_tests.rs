@@ -2635,6 +2635,189 @@ fn double_clicking_a_folder_icon_opens_it_in_the_file_manager() {
     });
 }
 
+/// **A double-click on a widget opens no icon beneath it.**
+///
+/// Widgets are drawn over the icons, and the first one the desktop menu adds
+/// goes to the grid's first cell -- over the first column of icons. A press
+/// on a widget is the widget's, and so is a double click's second press.
+/// Until 2026-10-06 that one fell past the widget to the icon layer, and a
+/// double click on a clock opened "This PC" under it.
+#[test]
+fn a_double_click_on_a_widget_opens_no_icon_beneath_it() {
+    settingsfile::testing::with_scratch_config("widget-double-click", |_root| {
+        let mut shell = shell_with_icons();
+        let (pc, (x, y), clock) = clock_over_this_pc(&mut shell);
+        let cell = shell.widgets.get(clock).expect("placed").position;
+        assert_eq!(shell.icons.icon_at(x, y), Some(pc));
+        let release = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        };
+
+        assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+        assert_eq!(shell.handle_mouse(&release), ShellAction::Consumed);
+        let doubled = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        };
+        assert_eq!(
+            shell.handle_mouse(&doubled),
+            ShellAction::Consumed,
+            "the double click reached the icon under the clock"
+        );
+        assert!(
+            shell.widget_drag.is_some(),
+            "the second press did not take hold of the clock"
+        );
+        assert_eq!(shell.handle_mouse(&release), ShellAction::Consumed);
+        assert!(shell.widget_drag.is_none());
+        assert_eq!(
+            shell.widgets.get(clock).map(|w| w.position),
+            Some(cell),
+            "a double click moved the clock"
+        );
+        assert!(
+            shell.icons.selected_ids().is_empty(),
+            "a press on the clock chose the icon under it"
+        );
+    });
+}
+
+/// "This PC", always among the default icons, and the middle of it -- with
+/// a clock added over that middle, and the clock's id.
+fn clock_over_this_pc(shell: &mut DesktopShell) -> (icons::IconId, (f32, f32), u64) {
+    use crate::widgets::WidgetKind;
+    let pc = shell
+        .icons
+        .icon_ids()
+        .into_iter()
+        .find(|&id| {
+            shell
+                .icons
+                .get_icon(id)
+                .is_some_and(|i| i.label == "This PC")
+        })
+        .expect("This PC");
+    let (x, y) = shell.icons.icon_rect(pc).expect("placed").centre();
+    let cell = shell.widgets.pixel_to_grid(x, y).expect("on the grid");
+    let clock = shell
+        .widgets
+        .add_widget(WidgetKind::Clock, cell)
+        .expect("the grid is empty");
+    assert_eq!(shell.widgets.hit_test(x, y), Some(clock), "not over it");
+    (pc, (x, y), clock)
+}
+
+/// **With the card of shortcuts up, a press on a widget is still the
+/// widget's.** The card answers no press and lets one through to what is
+/// under it, as a press on an icon goes through to the icon -- but the
+/// widgets asked whether *any* popup was open, passed the press by, and the
+/// icon under the widget was chosen.
+#[test]
+fn the_shortcut_card_lets_a_press_through_to_a_widget() {
+    settingsfile::testing::with_scratch_config("card-widget-press", |_root| {
+        let mut shell = shell_with_icons();
+        let (_, (x, y), _) = clock_over_this_pc(&mut shell);
+        shell.toggle_shortcut_card();
+        assert!(shell.shortcut_card_open);
+        assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+        assert!(
+            shell.widget_drag.is_some(),
+            "the clock was not taken hold of"
+        );
+        let _ = shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        assert!(
+            shell.icons.selected_ids().is_empty(),
+            "the icon under the clock was chosen"
+        );
+        assert!(shell.shortcut_card_open, "and the card stays up");
+
+        // A note opens for writing under a press, as without the card, and
+        // the wheel over it is its own.
+        let note = shell
+            .widgets
+            .add_widget(
+                crate::widgets::WidgetKind::Notes,
+                crate::widgets::GridPos::new(3, 0),
+            )
+            .expect("free");
+        let (nx, ny, nw, nh) = shell.widgets.content_rect(note).expect("placed");
+        let (nx, ny) = (nx + nw / 2.0, ny + nh / 2.0);
+        assert_eq!(shell.handle_mouse(&click(nx, ny)), ShellAction::Consumed);
+        assert_eq!(shell.widgets.writing_note(), Some(note), "not opened");
+        let _ = shell.handle_mouse(&MouseEvent {
+            x: nx,
+            y: ny,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        assert_eq!(
+            shell.handle_mouse(&scroll(nx, ny, -1.0)),
+            ShellAction::Consumed,
+            "the wheel passed the note by"
+        );
+
+        // A right-click on the desktop opens its menu, which puts the card
+        // away, as anything opened does.
+        let (bare_x, bare_y) = (900.0_f32, 600.0_f32);
+        assert!(shell.widgets.hit_test(bare_x, bare_y).is_none());
+        let _ = shell.handle_mouse(&MouseEvent {
+            x: bare_x,
+            y: bare_y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        assert!(shell.desktop_menu.is_visible(), "no menu");
+        assert!(!shell.shortcut_card_open);
+    });
+}
+
+/// **A press on a widget over an icon's name being edited is the widget's**
+/// -- and a click away from the name, which keeps it -- not a press in the
+/// name's field, drawn under the widget.
+#[test]
+fn a_press_on_a_widget_over_a_name_being_edited_is_the_widgets() {
+    settingsfile::testing::with_scratch_config("rename-under-widget", |_root| {
+        let mut shell = shell_with_icons();
+        let pc = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|&id| {
+                shell
+                    .icons
+                    .get_icon(id)
+                    .is_some_and(|i| i.label == "This PC")
+            })
+            .expect("This PC");
+        assert!(shell.icons.begin_rename(pc));
+        let (fx, fy, fw, fh) = shell.icons.rename_field().expect("being edited");
+        let (x, y) = (fx + fw / 2.0, fy + fh / 2.0);
+        let cell = shell.widgets.pixel_to_grid(x, y).expect("on the grid");
+        let clock = shell
+            .widgets
+            .add_widget(crate::widgets::WidgetKind::Clock, cell)
+            .expect("the grid is empty");
+        assert_eq!(
+            shell.widgets.hit_test(x, y),
+            Some(clock),
+            "not over the field"
+        );
+        assert!(shell.icons.rename_field_contains(x, y));
+
+        assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+        assert!(shell.icons.renaming().is_none(), "the name is still edited");
+        assert!(
+            shell.widget_drag.is_some(),
+            "the clock was not taken hold of"
+        );
+    });
+}
+
 /// Double-click the icon `id`, through the route a real pointer takes.
 fn double_click_icon(shell: &mut DesktopShell, id: icons::IconId) -> ShellAction {
     let (x, y) = {

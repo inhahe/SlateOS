@@ -21,6 +21,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
+mod accessible;
+
+pub use accessible::WidgetPart;
+
 // ============================================================================
 // Colour
 // ============================================================================
@@ -625,7 +629,153 @@ const NO_BATTERY: &str = "No battery";
 /// `procinfo` gives CPU and memory and cannot give disk, because nothing in
 /// this tree reports free space. No test could reach the mixed state before
 /// that, so nothing was going to catch it.
-const NOT_MEASURED_SUFFIX: &str = " (not measured)";
+///
+/// Drawn after the meter's name in brackets; tools are told it as the
+/// meter's description, beside a meter with no value.
+const NOT_MEASURED: &str = "not measured";
+
+/// One of a system monitor's meters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Meter {
+    /// Processor use.
+    Cpu,
+    /// Memory in use.
+    Memory,
+    /// Disk in use.
+    Disk,
+}
+
+impl Meter {
+    /// Every meter, top to bottom, as the widget draws them.
+    pub const ALL: [Self; 3] = [Self::Cpu, Self::Memory, Self::Disk];
+
+    /// What its heading says.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Memory => "Memory",
+            Self::Disk => "Disk",
+        }
+    }
+
+    /// Its reading among `live`'s, 0.0 to 1.0: `None` while nothing has
+    /// measured it.
+    #[must_use]
+    pub const fn reading(self, live: &LiveReadings) -> Option<f32> {
+        match self {
+            Self::Cpu => live.cpu_fraction,
+            Self::Memory => live.memory_fraction,
+            Self::Disk => live.disk_fraction,
+        }
+    }
+}
+
+/// How far apart a system monitor's meters are, top to bottom.
+const METER_PITCH: f32 = 32.0;
+/// How far below a meter's heading its trough is.
+const METER_TROUGH_TOP: f32 = 14.0;
+/// How tall a meter's trough is.
+const METER_TROUGH_HEIGHT: f32 = 8.0;
+
+/// A line of text in a widget's content: how far below the content's top it
+/// is drawn, how big and how heavy -- one answer for the drawing and for
+/// where tools are told it is.
+#[derive(Clone, Copy)]
+struct TextLine {
+    top: f32,
+    size: f32,
+    weight: FontWeightHint,
+}
+
+impl TextLine {
+    /// How tall its line is: the font's line, at its size and weight.
+    fn height(self) -> f32 {
+        guitk::text::line_height(self.size, self.weight)
+    }
+
+    /// A line of `size` and `weight` straight below it: where its own line
+    /// ends, whatever the font makes of that, so the two never overlap.
+    ///
+    /// The clock's date and the battery's estimate were placed by number --
+    /// 45 and 22 pixels below the lines above them -- and both lines above
+    /// are taller than that in the font the desktop draws with, so each
+    /// lower line began inside the one above it.
+    fn below(self, size: f32, weight: FontWeightHint) -> Self {
+        Self {
+            top: self.top + self.height(),
+            size,
+            weight,
+        }
+    }
+
+    /// Its box in content at `(x, y)`, `width` wide: the width, a line high.
+    fn bounds(self, x: f32, y: f32, width: f32) -> crate::Rect {
+        crate::Rect::new(x, y + self.top, width, self.height())
+    }
+}
+
+/// A clock's time.
+const CLOCK_TIME: TextLine = TextLine {
+    top: 10.0,
+    size: 36.0,
+    weight: FontWeightHint::Bold,
+};
+
+/// A clock's date, below its time.
+fn clock_date() -> TextLine {
+    CLOCK_TIME.below(12.0, FontWeightHint::Regular)
+}
+
+/// How big the battery's icon is, at the top of its content.
+const BATTERY_ICON: f32 = 28.0;
+/// The battery's charge, below its icon.
+const BATTERY_CHARGE: TextLine = TextLine {
+    top: 34.0,
+    size: 20.0,
+    weight: FontWeightHint::Bold,
+};
+
+/// The time a battery has left, when something says, below its charge.
+fn battery_estimate() -> TextLine {
+    BATTERY_CHARGE.below(11.0, FontWeightHint::Regular)
+}
+
+/// How a battery's time left reads: "2h 05m remaining".
+fn estimate_text(secs: u32) -> String {
+    format!("{}h {:02}m remaining", secs / 3600, (secs % 3600) / 60)
+}
+
+/// What the battery widget says of the charge: its percentage, or that there
+/// is no battery -- `present`, not a charge of zero: "no battery" and "a flat
+/// battery" are different facts and a desktop reader acts on them
+/// differently.
+fn charge_text(b: &crate::power::BatteryInfo) -> String {
+    if b.present {
+        format!("{}%", b.charge_pct)
+    } else {
+        String::from(NO_BATTERY)
+    }
+}
+
+/// Where a photo frame's problem -- no pictures, one that would not open --
+/// is written in its content `(x, y, width, height)`: `(x, y, width)`, a
+/// line of it across the middle, inset from the sides.
+fn problem_line(x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32) {
+    (x + 8.0, y + height / 2.0 - 7.0, (width - 16.0).max(0.0))
+}
+
+/// The size a photo frame's problem is written at.
+const PROBLEM_SIZE: f32 = 12.0;
+
+/// Where the name of a widget with no content of its own yet is written in
+/// its content `(x, y, width, height)`, beside its icon: `(x, y, width)`.
+fn placeholder_line(x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32) {
+    (x + 40.0, y + height / 2.0 - 4.0, width - 44.0)
+}
+
+/// The size that name is written at.
+const PLACEHOLDER_SIZE: f32 = 13.0;
 
 /// The readings a widget shows that the widget layer cannot derive.
 ///
@@ -1100,6 +1250,36 @@ impl DesktopWidgetManager {
         NoteKey::Changed
     }
 
+    /// Make the open note's text `text`, as a paste over a selection of all
+    /// of it does -- one edit, which Ctrl+Z takes back, the caret after it
+    /// and in view -- and the widget's at once: `Changed` when the text
+    /// changed, the layout needing saving, else `Handled`; `NotWriting` with
+    /// no note open, and `Closed` if its widget has gone.
+    pub fn note_set_text(&mut self, text: &str) -> NoteKey {
+        let Some(id) = self.writing_note() else {
+            return NoteKey::NotWriting;
+        };
+        let Some((_, _, m)) = self.note_box(id) else {
+            // The widget has gone: nothing is open any more.
+            self.note = None;
+            return NoteKey::Closed;
+        };
+        let Some(note) = self.note.as_mut() else {
+            return NoteKey::NotWriting;
+        };
+        if note.area.text() == text {
+            return NoteKey::Handled;
+        }
+        note.area.select_all();
+        note.area.insert_str(text);
+        note.area.reveal_caret(&m);
+        let text = note.area.text().to_string();
+        if let Some(w) = self.get_mut(id) {
+            w.state_text = text;
+        }
+        NoteKey::Changed
+    }
+
     /// Add a widget. Returns the instance ID, or None if rejected.
     pub fn add_widget(&mut self, kind: WidgetKind, position: GridPos) -> Option<WidgetInstanceId> {
         if self.widgets.len() >= self.max_widgets {
@@ -1396,8 +1576,12 @@ impl DesktopWidgetManager {
         self.widgets.len()
     }
 
-    /// Hit-test: which widget (if any) is at a pixel coordinate?
+    /// Hit-test: which widget (if any) is at a pixel coordinate? None while
+    /// the layer is hidden: a widget not drawn takes no press.
     pub fn hit_test(&self, px: f32, py: f32) -> Option<WidgetInstanceId> {
+        if !self.layer_visible {
+            return None;
+        }
         for w in self.widgets.iter().rev() {
             if !w.visible {
                 continue;
@@ -1806,27 +1990,27 @@ impl DesktopWidgetManager {
                 // Large time display.
                 commands.push(RenderCommand::Text {
                     x,
-                    y: y + 10.0,
+                    y: y + CLOCK_TIME.top,
                     text: live.clock_time.clone(),
-                    font_size: 36.0,
+                    font_size: CLOCK_TIME.size,
                     color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),
-                    font_weight: FontWeightHint::Bold,
+                    font_weight: CLOCK_TIME.weight,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
                 });
+                let date = clock_date();
                 commands.push(RenderCommand::Text {
                     x,
-                    y: y + 55.0,
+                    y: y + date.top,
                     text: live.clock_date.clone(),
-                    font_size: 12.0,
+                    font_size: date.size,
                     color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                    font_weight: FontWeightHint::Regular,
+                    font_weight: date.weight,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
             WidgetKind::SystemMonitor => {
-                let bar_h = 8.0;
                 let mut row = y;
                 // Each meter keeps its own role colour. Collapsing the three
                 // into one blue was caught by `the_three_meters_never_look_alike`
@@ -1834,15 +2018,17 @@ impl DesktopWidgetManager {
                 // which are there because a reader tells the meters apart by
                 // colour and because a measurement must not wear the accent --
                 // the accent marks what the user CHOSE, not what was measured.
-                for (label, reading, role) in [
-                    ("CPU", live.cpu_fraction, p.blue),
-                    ("Memory", live.memory_fraction, p.green),
-                    ("Disk", live.disk_fraction, p.peach),
-                ] {
+                for meter in Meter::ALL {
+                    let (label, reading) = (meter.label(), meter.reading(live));
+                    let role = match meter {
+                        Meter::Cpu => p.blue,
+                        Meter::Memory => p.green,
+                        Meter::Disk => p.peach,
+                    };
                     let heading = if reading.is_some() {
                         label.to_string()
                     } else {
-                        format!("{label}{NOT_MEASURED_SUFFIX}")
+                        format!("{label} ({NOT_MEASURED})")
                     };
                     commands.push(RenderCommand::Text {
                         x,
@@ -1858,23 +2044,23 @@ impl DesktopWidgetManager {
                     // shape of a gauge with no needle, which is what this is.
                     commands.push(RenderCommand::FillRect {
                         x,
-                        y: row + 14.0,
+                        y: row + METER_TROUGH_TOP,
                         width,
-                        height: bar_h,
+                        height: METER_TROUGH_HEIGHT,
                         color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
                         corner_radii: CornerRadii::all(4.0),
                     });
                     if let Some(f) = reading {
                         commands.push(RenderCommand::FillRect {
                             x,
-                            y: row + 14.0,
+                            y: row + METER_TROUGH_TOP,
                             width: width * f.clamp(0.0, 1.0),
-                            height: bar_h,
+                            height: METER_TROUGH_HEIGHT,
                             color: Color::rgba(role.r, role.g, role.b, alpha),
                             corner_radii: CornerRadii::all(4.0),
                         });
                     }
-                    row += 32.0;
+                    row += METER_PITCH;
                 }
             }
             WidgetKind::Notes => {
@@ -1939,14 +2125,15 @@ impl DesktopWidgetManager {
                         image_id: picture.image_id,
                     });
                 } else if let Some(problem) = state.and_then(|s| s.problem.as_ref()) {
+                    let (tx, ty, max_width) = problem_line(x, y, width, height);
                     commands.push(RenderCommand::Text {
-                        x: x + 8.0,
-                        y: y + height / 2.0 - 7.0,
+                        x: tx,
+                        y: ty,
                         text: problem.clone(),
-                        font_size: 12.0,
+                        font_size: PROBLEM_SIZE,
                         color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some((width - 16.0).max(0.0)),
+                        max_width: Some(max_width),
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
@@ -1968,7 +2155,7 @@ impl DesktopWidgetManager {
                     commands,
                     x,
                     y,
-                    28.0,
+                    BATTERY_ICON,
                     name,
                     // Green when there is a battery, neutral when there is
                     // not. A green battery over "No battery" is a small claim
@@ -1981,21 +2168,13 @@ impl DesktopWidgetManager {
                         Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha)
                     },
                 );
-                // `present`, not a charge of zero: "no battery" and "a flat
-                // battery" are different facts and a desktop reader acts on
-                // them differently.
-                let headline = if b.present {
-                    format!("{}%", b.charge_pct)
-                } else {
-                    String::from(NO_BATTERY)
-                };
                 commands.push(RenderCommand::Text {
                     x,
-                    y: y + 34.0,
-                    text: headline,
-                    font_size: 20.0,
+                    y: y + BATTERY_CHARGE.top,
+                    text: charge_text(b),
+                    font_size: BATTERY_CHARGE.size,
                     color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),
-                    font_weight: FontWeightHint::Bold,
+                    font_weight: BATTERY_CHARGE.weight,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
                 });
@@ -2005,13 +2184,14 @@ impl DesktopWidgetManager {
                 // so this stays absent rather than becoming a second
                 // invented line.
                 if let Some(secs) = b.time_remaining_secs {
+                    let estimate = battery_estimate();
                     commands.push(RenderCommand::Text {
                         x,
-                        y: y + 56.0,
-                        text: format!("{}h {:02}m remaining", secs / 3600, (secs % 3600) / 60),
-                        font_size: 11.0,
+                        y: y + estimate.top,
+                        text: estimate_text(secs),
+                        font_size: estimate.size,
                         color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                        font_weight: FontWeightHint::Regular,
+                        font_weight: estimate.weight,
                         max_width: Some(width),
                         overflow: TextOverflow::Ellipsis,
                     });
@@ -2027,14 +2207,15 @@ impl DesktopWidgetManager {
                     w.kind.icon_name(),
                     Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),
                 );
+                let (tx, ty, max_width) = placeholder_line(x, y, width, height);
                 commands.push(RenderCommand::Text {
-                    x: x + 40.0,
-                    y: y + height / 2.0 - 4.0,
+                    x: tx,
+                    y: ty,
                     text: w.kind.label().to_string(),
-                    font_size: 13.0,
+                    font_size: PLACEHOLDER_SIZE,
                     color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 44.0),
+                    max_width: Some(max_width),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -2638,6 +2819,60 @@ mod tests {
         mgr.layer_visible = false;
         let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(cmds.is_empty());
+    }
+
+    /// A line drawn under another starts where the other's line ends: the
+    /// clock's date under its time, the battery's estimate under its charge.
+    /// They were placed 45 and 22 pixels down, inside the lines above them.
+    #[test]
+    fn a_lower_line_starts_where_the_line_above_ends() {
+        let mut mgr = make_mgr();
+        mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
+        mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(1, 0))
+            .unwrap();
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
+        let top_of = |want: &str| {
+            cmds.iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, y, .. } if text == want => Some(*y),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{want:?} is not drawn"))
+        };
+        let readings = sample_readings();
+        let pairs = [
+            (
+                readings.clock_time.as_str(),
+                readings.clock_date.as_str(),
+                36.0,
+            ),
+            ("37%", "2h 30m remaining", 20.0),
+        ];
+        for (upper, lower, size) in pairs {
+            let line = guitk::text::line_height(size, FontWeightHint::Bold);
+            assert!(
+                top_of(lower) >= top_of(upper) + line - 0.01,
+                "{lower:?} begins inside {upper:?}'s line"
+            );
+        }
+    }
+
+    /// A widget not drawn takes no press: with the layer hidden, nothing is
+    /// hit, and no note opens.
+    #[test]
+    fn a_hidden_layer_takes_no_press() {
+        let mut mgr = make_mgr();
+        let id = mgr
+            .add_widget(WidgetKind::Notes, GridPos::new(0, 0))
+            .unwrap();
+        let (x, y, w, h) = mgr.content_rect(id).unwrap();
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        assert_eq!(mgr.hit_test(cx, cy), Some(id));
+        mgr.layer_visible = false;
+        assert_eq!(mgr.hit_test(cx, cy), None);
+        assert_eq!(mgr.note_body_at(cx, cy), None);
+        assert!(!mgr.note_press(cx, cy, 1), "a note not drawn was opened");
     }
 
     #[test]

@@ -42,6 +42,51 @@
 //! seconds" with it. Both sentences are false here: this implementation always
 //! polls, so `--max-unchanged-stats` is always in play and `--pid` is checked
 //! exactly once per iteration. The clauses are dropped rather than copied.
+//!
+//! # Which route reads a file, and what its failures say
+//!
+//! `tail_lines` and `tail_bytes` are upstream's, decision for decision,
+//! because the routes do not merely read differently -- they fail
+//! differently. Both begin with `fstat` (`cannot fstat 'standard input'` is
+//! a closed descriptor 0). A regular file is read backwards from the end it
+//! had then, unless it will not seek to that end, and anything else is read
+//! forwards with the last lines kept: `/proc/cpuinfo` is regular, says it is
+//! empty and refuses `SEEK_END`, and is printed correctly only because of
+//! that fallback. A failed read while still looking for the start says
+//! `error reading` and goes on to the next operand; one while copying, and
+//! any failed seek of a regular file, end the run there, as upstream's do.
+//!
+//! # Standard output
+//!
+//! Output goes through glibc's stdio buffer as upstream's does
+//! ([`StdioFile`]), written two ways that fail differently: file data through
+//! `xwrite_stdout`, which ends the run at its first failure with `error
+//! writing 'standard output'`, and the `==> name <==` banners through
+//! `printf`, whose failure stays in the stream for `close_stdout` to report
+//! at the end as `write error`. So which sentence a full disk produces
+//! depends on whether the buffer filled before the end, as upstream's does:
+//! `tail -n1 f >/dev/full` is `write error: No space left on device`, and
+//! `tail -n100000 big >/dev/full` is `error writing 'standard output': No
+//! space left on device`.
+//!
+//! Every diagnostic flushes standard output first, because glibc's `error()`
+//! does, and that decides a sentence too: after a failed flush there, the
+//! close at the end finds nothing left to write and says only `write error`,
+//! with no reason, as upstream's says.
+//!
+//! # `-f`, pipes and the reader that goes away
+//!
+//! A `-` that is a pipe is printed and then not followed, which POSIX
+//! requires when it is the only operand; `printf x | tail -f` ends.
+//!
+//! A standard output that is a pipe is watched: once its reader has gone,
+//! `tail` raises `SIGPIPE` on itself and, where that is ignored, exits 1 with
+//! nothing said -- upstream's `check_output_alive`. Without it, `tail -f log |
+//! head -1` would wait for the log to grow before it noticed. The loop puts
+//! the files it polls into non-blocking mode, as upstream's does, so that a
+//! FIFO among several files cannot stall the others; a single non-regular
+//! file followed by descriptor is read blocking instead, a buffer at a time,
+//! with the output flushed after each.
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -50,11 +95,37 @@ use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
 use coreutils::stdfd;
+use coreutils::stdio::StdioFile;
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{File, Metadata};
-use std::io::{self, ErrorKind, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::io::{self, ErrorKind, IsTerminal, Read, Seek, SeekFrom};
+use std::mem::ManuallyDrop;
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees the descriptors `tail`
+// was given: a closed standard input is `cannot fstat 'standard input'` and a
+// closed standard output a write error, as they are upstream, not the
+// `/dev/null` Rust's runtime would put on each.
+coreutils::guard_std_fds!();
+
+/// glibc's `error (0, ...)`: standard output flushed first, as `error()` opens
+/// with `fflush (stdout)`, then the message, and the run goes on. Every
+/// diagnostic that can follow output leaves through this or [`die!`].
+macro_rules! complain {
+    ($out:expr, $($arg:tt)*) => {{
+        $out.flush_before_diagnostic();
+        diag!($($arg)*);
+    }};
+}
+
+/// `error (EXIT_FAILURE, ...)`: as [`complain!`], and then the run ends --
+/// through `close_stdout`, as upstream's `exit` runs it. See [`Out::die`].
+macro_rules! die {
+    ($out:expr, $($arg:tt)*) => {
+        $out.die(format_args!($($arg)*))
+    };
+}
 
 /// Measured: `tail --zzz; echo $?` is 1.
 const TAIL: Program = Program::new("tail", 1);
@@ -204,28 +275,164 @@ enum Request {
 /// (close_stdout)` does on every exit path at once. See
 /// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args, getopt::posixly_correct(), posixver::posix2_version()) {
+    let mut out = Out::stdout();
+    let earned = match parse_args(&args, getopt::posixly_correct(), posixver::posix2_version()) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            out.print(&[help_text().as_bytes()]);
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("tail (SlateOS coreutils) 0.1.0");
+            out.print(&[b"tail (SlateOS coreutils) 0.1.0\n"]);
             ExitCode::SUCCESS
         }
         Ok(Request::Run(options, files)) => {
             warn_about_unused(&options);
-            run(&options, &files)
+            run(&options, &files, &mut out)
         }
         Err(e) => {
             diag!("tail: {e}");
             ExitCode::from(u8::try_from(e.status).unwrap_or(1))
         }
+    };
+    // `atexit (close_stdout)`.
+    if out.close() {
+        earned
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Standard output as upstream's `tail` uses it.
+///
+/// It is glibc's buffer ([`StdioFile`]), written two ways that fail
+/// differently. File data goes through `xwrite_stdout`, whose failure ends the
+/// run at once with `error writing 'standard output'`; the banners go through
+/// `printf`, whose failure stays in the stream for `close_stdout` to report as
+/// `write error` at the end. Which of the two a full disk meets therefore
+/// depends on whether the buffer filled before the end, as it does upstream.
+struct Out {
+    file: StdioFile,
+}
+
+/// `EBADF`, as glibc and SlateOS's POSIX layer number it.
+const EBADF: i32 = 9;
+
+impl Out {
+    fn stdout() -> Self {
+        Self {
+            file: StdioFile::stdout(),
+        }
+    }
+
+    /// `xwrite_stdout`: every byte written, or the run ends with `error writing
+    /// 'standard output'`.
+    fn xwrite(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        if let Err(e) = self.file.write(data) {
+            // "clearerr (stdout); /* To avoid redundant close_stdout
+            // diagnostic. */"
+            self.file.clear_error();
+            die!(
+                self,
+                "tail: error writing {}: {}",
+                quoteaf(b"standard output"),
+                strerror(&e)
+            );
+        }
+    }
+
+    /// `printf` and `fputs`, in the pieces `vfprintf` writes a format in: a
+    /// failure is the stream's, for [`Out::close`] to report at the end.
+    fn print(&mut self, pieces: &[&[u8]]) {
+        for piece in pieces {
+            // `vfprintf` stops at the first piece that fails. The failure is
+            // not lost: it is the stream's error flag, which `close` reads.
+            if self.file.write(piece).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// The `fflush (stdout)` that glibc's `error()` opens with.
+    ///
+    /// Not merely a matter of order. A flush that fails here sets the stream's
+    /// error flag and empties its buffer, so the close at the end finds nothing
+    /// left to write: after `tail big nosuch >/dev/full`, upstream's last word
+    /// is `write error` with no reason, because the reason was spent here.
+    fn flush_before_diagnostic(&mut self) {
+        // `error()` does not look at the result either; what a failure changes
+        // is the stream's state, which `close` reads.
+        let _ = self.file.flush();
+    }
+
+    /// The follow loop's `fflush (stdout)`, whose failure is gnulib's
+    /// `write_error`: `write error: REASON`, and the run ends.
+    fn flush_or_die(&mut self) {
+        if let Err(e) = self.file.flush() {
+            // `fpurge` and `clearerr`, "to avoid extraneous diagnostic from
+            // close_stdout": the failed flush has already emptied the buffer.
+            self.file.clear_error();
+            die!(self, "tail: write error: {}", strerror(&e));
+        }
+    }
+
+    /// `error (EXIT_FAILURE, ...)`: standard output flushed, the message, and
+    /// `exit (EXIT_FAILURE)` -- which runs `close_stdout`, as upstream's
+    /// `atexit` does on every way out.
+    fn die(&mut self, message: std::fmt::Arguments<'_>) -> ! {
+        self.flush_before_diagnostic();
+        stdfd::diag_line(&message.to_string());
+        self.exit(1)
+    }
+
+    /// `die_pipe`: "Ensure exit, either with SIGPIPE or EXIT_FAILURE status."
+    fn die_pipe(&mut self) -> ! {
+        raise_sigpipe();
+        self.exit(1)
+    }
+
+    /// `exit (status)`: `close_stdout`, then the status -- or `exit_failure`
+    /// where either standard stream failed on the way.
+    fn exit(&mut self, status: u8) -> ! {
+        let status = if self.close() { status } else { 1 };
+        stdfd::exit_now(status, 1)
+    }
+
+    /// gnulib's `close_stdout`, for standard output: flush and close it, and
+    /// say if that or anything earlier failed. `true` when nothing did.
+    ///
+    /// A stream that failed earlier and then closed cleanly is `write error`
+    /// with no reason, since `close_stream` zeroes `errno` then; a descriptor
+    /// that was never open is no failure when nothing was written to it.
+    fn close(&mut self) -> bool {
+        let prev_fail = self.file.has_error();
+        let pending = self.file.pending() > 0;
+        match self.file.close() {
+            Ok(()) if !prev_fail => true,
+            Ok(()) => {
+                diag!("tail: write error");
+                false
+            }
+            Err(e) if !prev_fail && !pending && e.raw_os_error() == Some(EBADF) => true,
+            Err(e) => {
+                diag!("tail: write error: {}", strerror(&e));
+                false
+            }
+        }
+    }
+}
+
+impl Sink for Out {
+    fn xwrite(&mut self, data: &[u8]) {
+        Out::xwrite(self, data);
     }
 }
 
@@ -943,50 +1150,123 @@ fn warn_about_unused(options: &Options) {
 
 // --------------------------------------------------------------- printing ---
 
-/// How much is read at a time, and the block size the backwards scan walks the
-/// file in. Only a performance choice — every routine below is correct for any
-/// chunking, including a pipe that dribbles one byte at a time.
-const CHUNK: usize = 64 * 1024;
+/// glibc's `BUFSIZ`: what upstream reads at a time, the block its backwards
+/// scan walks a file in, and the most one read of the follow loop's blocking
+/// mode takes before the output is flushed.
+const BUFSIZ: usize = 8192;
 
-/// Why a name is not currently being read, in the three grades upstream's
-/// `f->errnum` distinguishes.
+/// gnulib's fallback for `ST_BLKSIZE`, for a file that reports no usable
+/// block size.
+const DEV_BSIZE: u64 = 512;
+
+/// `OFF_T_MAX`: a count above it cannot be a seek.
+const OFF_T_MAX: u64 = i64::MAX.unsigned_abs();
+
+/// `EPERM` and `ENOENT`, as glibc and SlateOS's POSIX layer number them.
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+
+/// `O_NONBLOCK`, which is the same number on Linux and here.
+#[cfg(unix)]
+const O_NONBLOCK: i32 = 0o4000;
+
+/// Why a name is not currently being read: upstream's `f->errnum`, which is
+/// `0` while the file is open and well, `-1` for a trouble that is not an
+/// `errno` -- a file whose type cannot be followed, or one whose first read
+/// failed -- and otherwise the `errno` of the failure.
 ///
-/// It is compared against the previous iteration's value to decide whether a
-/// diagnostic would be a repeat, so `Io` carries the kind rather than the
-/// message: two failures of the same kind are the same failure as far as the
-/// follow loop is concerned, which is the granularity `errno` has.
+/// The follow loop compares it with the last iteration's to decide whether a
+/// diagnostic would be a repeat, which is why it is the number and not a
+/// kind: two failures are the same failure when their `errno` is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Trouble {
-    /// `errnum == 0` — the file is open and well.
     None,
-    /// `errnum == -1` — something wrong that is not an `errno`, which here
-    /// means a file whose type cannot be followed.
     NotAnErrno,
-    Io(io::ErrorKind),
+    Errno(i32),
+}
+
+/// A failure's `errno`. Every call whose failure is recorded here reports
+/// one; a failure that somehow has none is given a number no `errno` is, so
+/// that it compares equal only to itself.
+fn errnum(e: &io::Error) -> i32 {
+    e.raw_os_error().unwrap_or(i32::MIN)
+}
+
+/// An operand's open file.
+///
+/// Standard input is descriptor 0 itself, read in place as upstream reads it,
+/// and so never closed by being dropped: it is closed once, at the end of the
+/// run, where upstream checks that close (`have_read_stdin`). A duplicate
+/// would share the position and so read the same bytes, but dropping one is
+/// not the close upstream reports, and when descriptor 0 is closed there is
+/// nothing to duplicate -- the reads must fail as they do upstream, with
+/// `EBADF`.
+enum Handle {
+    /// A file `tail` opened, and closes.
+    Opened(File),
+    /// Descriptor 0, borrowed.
+    Stdin(ManuallyDrop<File>),
+}
+
+impl std::ops::Deref for Handle {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        match self {
+            Handle::Opened(file) => file,
+            Handle::Stdin(file) => file,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Handle {
+    fn deref_mut(&mut self) -> &mut File {
+        match self {
+            Handle::Opened(file) => file,
+            Handle::Stdin(file) => file,
+        }
+    }
+}
+
+/// Descriptor 0, read in place: see [`Handle`].
+fn stdin_handle() -> io::Result<Handle> {
+    filekind::borrowed_stdin()
+        .map(Handle::Stdin)
+        // Only on a platform that is neither Unix nor Windows, where there is
+        // no descriptor 0 to name: as if it were closed.
+        .ok_or_else(|| io::Error::from_raw_os_error(EBADF))
 }
 
 /// One operand, plus everything the follow loop has to remember between
-/// iterations.
+/// iterations -- upstream's `struct File_spec`.
 struct Watched {
     /// The operand as typed, which is what gets reopened.
     name: OsString,
     /// What diagnostics and banners call it: `standard input` for `-`.
     label: Vec<u8>,
     is_stdin: bool,
-    /// `None` once the file has been closed or could never be opened.
-    file: Option<File>,
+    /// `None` once the file has been closed or could never be opened:
+    /// upstream's `f->fd == -1`.
+    file: Option<Handle>,
     trouble: Trouble,
     /// Set when there is no point looking at this name again.
     ignore: bool,
     /// Whether the last look found something that could be followed. Only used
     /// to decide whether a *change* is worth reporting.
     tailable: bool,
-    /// How much of the file has been printed, and what its last look was, so
-    /// that growth, truncation and replacement can be told apart.
+    /// How far the file has been read, and what its last `fstat` said, so
+    /// that growth, truncation and replacement can be told apart -- what
+    /// upstream's `record_open_fd` keeps.
     size: u64,
     modified: Option<std::time::SystemTime>,
     regular: bool,
+    /// `S_ISFIFO`, for `ignore_fifo_and_pipe`.
+    fifo: bool,
     id: Option<FileId>,
+    /// Upstream's `f->blocking`: `None` for standard input, whose mode nobody
+    /// has looked at yet (`-1`), and otherwise whether the descriptor is in
+    /// blocking mode. `None` counts as blocking, as `-1` is true in C.
+    blocking: Option<bool>,
     /// Consecutive iterations in which nothing about the file changed. Only
     /// `--follow=name` uses it, to decide when to look at the *name* again.
     unchanged: u64,
@@ -1011,14 +1291,49 @@ impl Watched {
             size: 0,
             modified: None,
             regular: false,
+            fifo: false,
             id: None,
+            blocking: None,
             unchanged: 0,
         }
     }
+
+    /// Whether reads of this file wait for data: upstream's `f->blocking`
+    /// taken as a C truth value.
+    fn reads_block(&self) -> bool {
+        self.blocking != Some(false)
+    }
 }
 
-/// Run over every operand, returning the exit status.
-fn run(options: &Options, files: &[OsString]) -> ExitCode {
+/// Upstream's `record_open_fd`: keep the open file and what its `fstat` said.
+fn record_open(
+    w: &mut Watched,
+    handle: Handle,
+    stats: &Metadata,
+    size: u64,
+    blocking: Option<bool>,
+) {
+    w.regular = is_regular_file(&handle, stats);
+    w.fifo = is_fifo(&handle, stats);
+    w.size = size;
+    w.modified = modification_time(stats);
+    w.id = Some(file_id(stats));
+    w.blocking = blocking;
+    w.unchanged = 0;
+    w.ignore = false;
+    w.file = Some(handle);
+}
+
+/// `st_mtime`. A file system that keeps no modification time gives `None`
+/// every time it is asked, which compares as a time that never changes --
+/// the only thing the follow loop asks of it.
+fn modification_time(stats: &Metadata) -> Option<std::time::SystemTime> {
+    stats.modified().ok()
+}
+
+/// Run over every operand, returning the exit status -- the part of upstream's
+/// `main` after the options are parsed.
+fn run(options: &Options, files: &[OsString], out: &mut Out) -> ExitCode {
     let mut options = *options;
     // "To start printing with item N_UNITS from the start of the file, skip
     // N_UNITS - 1 items." `+0` and `+1` therefore mean the same thing, which is
@@ -1045,14 +1360,14 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
         let blocking = options.pid.is_none()
             && options.follow == Follow::Descriptor
             && operands.len() == 1
-            && !stdin_is_regular();
+            && stdin_is_unregular();
         if !blocking && io::stdin().is_terminal() {
             diag!("tail: warning: following standard input indefinitely is ineffective");
         }
     }
 
     // Nothing will ever be printed, so nothing is opened and no banner appears
-    // — `tail -v -n0 file` prints nothing at all, not even the header.
+    // -- `tail -v -n0 file` prints nothing at all, not even the header.
     if options.n_units == 0 && !options.forever && !options.from_start {
         return ExitCode::SUCCESS;
     }
@@ -1063,28 +1378,37 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
         Headers::Multiple => operands.len() > 1,
     };
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut watched: Vec<Watched> = operands.iter().map(Watched::new).collect();
     let mut ok = true;
     let mut first_header = true;
 
     for w in &mut watched {
-        ok &= start_file(w, &mut out, &options, print_headers, &mut first_header);
+        ok &= start_file(w, out, &options, print_headers, &mut first_header);
     }
 
-    if options.forever {
+    if options.forever && ignore_fifo_and_pipe(&mut watched) > 0 {
+        // "If stdout is a fifo or pipe, then monitor it so that we exit if the
+        // reader goes away."
+        let monitor_output = match stdfd::metadata(1) {
+            Ok(m) => is_fifo_metadata(&m),
+            // The host, where no descriptor can be asked: unmonitored.
+            Err(e) if e.kind() == ErrorKind::Unsupported => false,
+            Err(e) => die!(out, "tail: standard output: {}", strerror(&e)),
+        };
         follow(
             &mut watched,
-            &mut out,
+            out,
             &options,
             print_headers,
-            &mut first_header,
+            first_header,
+            monitor_output,
         );
     }
 
-    if out.flush().is_err() {
-        return ExitCode::from(1);
+    // `have_read_stdin`: every operand was reached, so a `-` among them was
+    // read, and descriptor 0 is closed and the close checked.
+    if has_stdin && let Err(e) = stdfd::close_stdin() {
+        die!(out, "tail: -: {}", strerror(&e));
     }
     if ok {
         ExitCode::SUCCESS
@@ -1093,33 +1417,47 @@ fn run(options: &Options, files: &[OsString]) -> ExitCode {
     }
 }
 
-/// Open one operand and print the part of it that was asked for — upstream's
+/// Whether standard input is something other than a regular file -- which
+/// decides whether a plain `read` on it would block. Not when it cannot be
+/// asked: upstream's `! fstat (STDIN_FILENO, &in_stat) && ! S_ISREG (...)`.
+fn stdin_is_unregular() -> bool {
+    filekind::borrowed_stdin().and_then(|stdin| filekind::regular(&stdin)) == Some(false)
+}
+
+/// Open one operand and print the part of it that was asked for -- upstream's
 /// `tail_file`.
 ///
 /// Returns whether it succeeded. A failure is not fatal: the remaining operands
 /// are still processed, and with `-f` the name may still be worth watching.
 fn start_file(
     w: &mut Watched,
-    out: &mut impl Write,
+    out: &mut Out,
     options: &Options,
     print_headers: bool,
     first_header: &mut bool,
 ) -> bool {
     let opened = if w.is_stdin {
-        Ok(stdin_as_file())
+        stdin_handle()
     } else {
+        // `open_safer`, as upstream's `fcntl--.h` makes every `open`: with
+        // standard output closed, the file must not become descriptor 1, or
+        // the `fstat` that decides whether to watch standard output finds
+        // the file instead of saying `standard output: Bad file descriptor`.
         File::open(&w.name)
+            .and_then(stdfd::fd_safer)
+            .map(Handle::Opened)
     };
-    let mut file = match opened {
-        Ok(f) => f,
+    // `--retry` is what makes an unopenable name worth keeping.
+    w.tailable = !(options.retry && opened.is_err());
+    let mut handle = match opened {
+        Ok(handle) => handle,
         Err(e) => {
-            // `--retry` is what makes an unopenable name worth keeping.
-            w.tailable = !options.retry;
             if options.forever {
-                w.trouble = Trouble::Io(e.kind());
+                w.trouble = Trouble::Errno(errnum(&e));
                 w.ignore = !options.retry;
             }
-            diag!(
+            complain!(
+                out,
                 "tail: cannot open {} for reading: {}",
                 quoteaf(&w.label),
                 strerror(&e)
@@ -1131,44 +1469,39 @@ fn start_file(
     if print_headers {
         write_header(out, &w.label, first_header);
     }
-    let mut ok = match emit(&mut file, out, options) {
+    let mut ok = match emit(&mut handle, out, options) {
         Ok(()) => true,
-        Err(e) if stdfd::reader_gone(&e) => {
-            // Nothing downstream is listening. Upstream notices this through
-            // `check_output_alive`; either way there is nothing to report.
-            // (`stdfd::reader_gone`: quiet only where `SIGPIPE`, which would
-            // have ended upstream, was not put back.)
-            w.file = None;
-            return true;
-        }
-        Err(e) => {
-            diag!(
-                "tail: error reading {}: {}",
-                quoteaf(&w.label),
-                strerror(&e)
-            );
+        Err(failure) => {
+            report(out, &w.label, failure);
             false
         }
     };
 
     if options.forever {
-        match file.metadata() {
-            Ok(m) => {
-                if tailable(&m) {
-                    w.trouble = if ok {
-                        Trouble::None
-                    } else {
-                        Trouble::NotAnErrno
-                    };
-                    remember(w, &m, &mut file);
-                    w.file = Some(file);
-                    return ok;
-                }
-                ok = false;
+        // `f->errnum = ok - 1`: a read that failed is a trouble, though not
+        // an `errno` one. Every way out of this block but the one that keeps
+        // the file is a failure, so `ok` is only read, never reset, below.
+        w.trouble = if ok {
+            Trouble::None
+        } else {
+            Trouble::NotAnErrno
+        };
+        match handle.metadata() {
+            Err(e) => {
+                w.trouble = Trouble::Errno(errnum(&e));
+                complain!(
+                    out,
+                    "tail: error reading {}: {}",
+                    quoteaf(&w.label),
+                    strerror(&e)
+                );
+            }
+            Ok(m) if !tailable(&m) => {
                 w.trouble = Trouble::NotAnErrno;
                 w.tailable = false;
                 w.ignore = !options.retry;
-                diag!(
+                complain!(
+                    out,
                     "tail: {}: cannot follow end of this type of file{}",
                     quotef(&w.label),
                     if w.ignore {
@@ -1178,267 +1511,540 @@ fn start_file(
                     }
                 );
             }
-            Err(e) => {
-                ok = false;
-                w.trouble = Trouble::Io(e.kind());
-                diag!(
-                    "tail: error reading {}: {}",
-                    quoteaf(&w.label),
-                    strerror(&e)
-                );
+            Ok(m) => {
+                if ok {
+                    // Where reading actually stopped, which is not the same as
+                    // the length: the file may have grown between the last
+                    // read and this `fstat`, and those bytes must not be
+                    // skipped. A pipe has no position, and its length is never
+                    // consulted.
+                    let read_pos = handle.stream_position().unwrap_or(m.len());
+                    let blocking = if w.is_stdin { None } else { Some(true) };
+                    record_open(w, handle, &m, read_pos, blocking);
+                    return true;
+                }
             }
         }
+        // A file whose first read failed is not followed either, unless
+        // `--retry` says to keep looking at the name.
+        w.ignore = !options.retry;
+        w.file = None;
+        return false;
     }
-    w.file = None;
+
+    // "if (!is_stdin && close (fd))": standard input is closed once, at the end.
+    if let Handle::Opened(file) = handle
+        && let Err(e) = stdfd::close(file)
+    {
+        complain!(
+            out,
+            "tail: error reading {}: {}",
+            quoteaf(&w.label),
+            strerror(&e)
+        );
+        ok = false;
+    }
     ok
 }
 
-/// Note the file's identity and length, so that the next look can tell growth
-/// from truncation from replacement.
-fn remember(w: &mut Watched, m: &Metadata, file: &mut File) {
-    // Not `m.is_file()`: the follow loop compares sizes only for a regular
-    // file, and on the host build a pipe would claim to be one and report its
-    // buffer contents as a length. See `filekind`.
-    w.regular = filekind::is_regular(file);
-    w.modified = m.modified().ok();
-    w.id = Some(file_id(m));
-    // Where reading actually stopped, which is not the same as the length: the
-    // file may have grown between the last read and this `stat`, and those
-    // bytes must not be skipped.
-    w.size = file.stream_position().unwrap_or(m.len());
-}
-
-/// `==> name <==`, with a blank line before every one but the first.
+/// `==> name <==`, with a blank line before every one but the first --
+/// upstream's `printf`, whose failure is the stream's (see [`Out::print`]).
 ///
 /// The flag counts banners *printed*, not files seen: a file that fails to open
 /// never gets one, so the next file that succeeds is still the first and gets
 /// no leading blank line.
-fn write_header(out: &mut impl Write, label: &[u8], first: &mut bool) {
+fn write_header(out: &mut Out, label: &[u8], first: &mut bool) {
     let sep: &[u8] = if *first { b"" } else { b"\n" };
-    let _ = out.write_all(sep);
-    let _ = out.write_all(b"==> ");
-    let _ = out.write_all(label);
-    let _ = out.write_all(b" <==\n");
+    out.print(&[sep, b"==> ", label, b" <==\n"]);
     *first = false;
 }
 
-/// Print the requested part of `file`, leaving the read position at the end of
-/// what was printed so that `-f` can carry on from there.
-fn emit(file: &mut File, out: &mut impl Write, options: &Options) -> io::Result<()> {
-    // Whether the seeking paths are available. A pipe is not seekable, and
-    // `---presume-input-pipe` pretends nothing is.
-    //
-    // `filekind::is_seekable`, not `metadata().is_file()`: on the harness's
-    // Windows build an MSYS pipe answers yes to the latter, reports the number
-    // of bytes buffered in it as a length, and accepts a seek that moves
-    // nothing — which sent `printf 'a\nb\nc\n' | tail -n3` down the backwards
-    // block scan, where it read the pipe dry looking for a fourth line and then
-    // printed nothing at all. See `filekind`'s module documentation.
-    let seekable = !options.presume_input_pipe && filekind::is_seekable(file);
+/// How reading an operand went wrong.
+///
+/// Upstream decides what to say, and whether to carry on, by *where* it went
+/// wrong, so the paths below report the place and [`report`] says the
+/// sentence.
+#[derive(Debug)]
+enum Failure {
+    /// The `fstat` that `tail_lines` and `tail_bytes` begin with: `cannot
+    /// fstat %s`, and on to the next operand.
+    Fstat(io::Error),
+    /// A read while still looking for where to start -- `pipe_lines`,
+    /// `pipe_bytes`, `start_lines`, `start_bytes`, and `file_lines`'s own
+    /// reads: `error reading %s`, and on to the next operand.
+    Read(io::Error),
+    /// A read while copying, in `dump_remainder`: `error reading %s`, and the
+    /// run ends there.
+    Copy(io::Error),
+    /// `xlseek`: `%s: cannot seek to ...`, and the run ends there.
+    Seek(Whence, io::Error),
+}
 
-    match (options.unit, options.from_start, seekable) {
-        (Unit::Bytes, true, true) => {
-            let at = file.stream_position()?;
-            // Seeking past the end is legal and leaves nothing to print, which
-            // is what skipping more bytes than the file holds should do.
-            file.seek(SeekFrom::Start(at.saturating_add(options.n_units)))?;
-            dump(file, out)
-        }
-        (Unit::Bytes, true, false) => skip_bytes(file, out, options.n_units),
-        (Unit::Lines, true, _) => skip_lines(file, out, options.n_units, options.line_end),
-        (Unit::Bytes, false, true) => last_bytes_seek(file, out, options.n_units),
-        (Unit::Bytes, false, false) => last_bytes_stream(file, out, options.n_units),
-        (Unit::Lines, false, true) => last_lines_seek(file, out, options.n_units, options.line_end),
-        (Unit::Lines, false, false) => {
-            last_lines_stream(file, out, options.n_units, options.line_end)
+/// A seek `xlseek` was asked to make, for the sentence that reports its
+/// failure. Upstream never asks it for a seek relative to the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whence {
+    /// `SEEK_SET`.
+    Set(u64),
+    /// `SEEK_CUR`.
+    Current(i64),
+}
+
+impl Whence {
+    /// The middle of upstream's sentence, offset and all.
+    fn sentence(self) -> String {
+        match self {
+            Whence::Set(offset) => format!("cannot seek to offset {offset}"),
+            Whence::Current(offset) => format!("cannot seek to relative offset {offset}"),
         }
     }
 }
 
-/// Everything from the current position to end of file.
-fn dump(source: &mut impl Read, out: &mut impl Write) -> io::Result<()> {
-    io::copy(source, out).map(|_| ())
+/// Say what went wrong reading an operand, as upstream says it where it went
+/// wrong: the failures it recovers from are reported and the run goes on to
+/// the next operand; a failed copy or seek ends the run.
+fn report(out: &mut Out, label: &[u8], failure: Failure) {
+    match failure {
+        Failure::Fstat(e) => {
+            complain!(
+                out,
+                "tail: cannot fstat {}: {}",
+                quoteaf(label),
+                strerror(&e)
+            );
+        }
+        Failure::Read(e) => {
+            complain!(
+                out,
+                "tail: error reading {}: {}",
+                quoteaf(label),
+                strerror(&e)
+            );
+        }
+        Failure::Copy(e) => die!(
+            out,
+            "tail: error reading {}: {}",
+            quoteaf(label),
+            strerror(&e)
+        ),
+        Failure::Seek(to, e) => {
+            die!(
+                out,
+                "tail: {}: {}: {}",
+                quotef(label),
+                to.sentence(),
+                strerror(&e)
+            );
+        }
+    }
 }
 
-/// Skip `n` bytes of a stream that cannot be seeked.
-fn skip_bytes(source: &mut impl Read, out: &mut impl Write, n: u64) -> io::Result<()> {
-    let mut left = n;
-    let mut buf = vec![0u8; CHUNK];
-    while left > 0 {
-        let want = usize::try_from(left.min(CHUNK as u64)).unwrap_or(CHUNK);
-        let got = source.read(buf.get_mut(..want).unwrap_or_default())?;
-        if got == 0 {
-            // End of input before the skip finished: there is nothing to print
-            // and that is not an error.
+/// Where the data paths write: upstream's `xwrite_stdout`, which writes all of
+/// what it is given or ends the run. [`Out`] is the real one; the tests
+/// collect into a `Vec<u8>`.
+trait Sink {
+    fn xwrite(&mut self, data: &[u8]);
+}
+
+impl Sink for Vec<u8> {
+    fn xwrite(&mut self, data: &[u8]) {
+        self.extend_from_slice(data);
+    }
+}
+
+/// What the `fstat` at the start of `tail_lines` and `tail_bytes` said, as far
+/// as the paths below need it.
+#[derive(Debug, Clone, Copy)]
+struct Facts {
+    /// `S_ISREG`, and so also `usable_st_size`.
+    regular: bool,
+    /// `st_size`.
+    size: u64,
+    /// gnulib's `ST_BLKSIZE`.
+    blksize: u64,
+}
+
+impl Facts {
+    fn of(file: &File, stats: &Metadata) -> Self {
+        Facts {
+            regular: is_regular_file(file, stats),
+            size: stats.len(),
+            blksize: st_blksize(stats),
+        }
+    }
+}
+
+/// `S_ISREG`, of an open file. On Unix its metadata answers that; on the host
+/// a pipe claims to be a regular file there, so the handle is asked instead
+/// (see `filekind`).
+fn is_regular_file(file: &File, stats: &Metadata) -> bool {
+    if cfg!(unix) {
+        stats.is_file()
+    } else {
+        filekind::is_regular(file)
+    }
+}
+
+/// `S_ISFIFO`, of an open file: a pipe, or a FIFO by name.
+fn is_fifo(file: &File, stats: &Metadata) -> bool {
+    if cfg!(unix) {
+        is_fifo_metadata(stats)
+    } else {
+        filekind::is_pipe(file)
+    }
+}
+
+/// `S_ISFIFO`, of what `fstat` said.
+#[cfg(unix)]
+fn is_fifo_metadata(stats: &Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    stats.file_type().is_fifo()
+}
+
+#[cfg(not(unix))]
+fn is_fifo_metadata(_stats: &Metadata) -> bool {
+    // The host's metadata has no such type; [`is_fifo`] asks the handle.
+    false
+}
+
+/// gnulib's `ST_BLKSIZE`: the file's block size when it is a sane one --
+/// positive, and no more than `SIZE_MAX / 8 + 1` -- and `DEV_BSIZE` otherwise.
+#[cfg(unix)]
+fn st_blksize(stats: &Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let size = stats.blksize();
+    match size.checked_sub(1) {
+        Some(below) if below <= (usize::MAX / 8) as u64 => size,
+        _ => DEV_BSIZE,
+    }
+}
+
+#[cfg(not(unix))]
+fn st_blksize(_stats: &Metadata) -> u64 {
+    // The host reports no block size, which is gnulib's own fallback case.
+    DEV_BSIZE
+}
+
+/// A count that has been checked against [`OFF_T_MAX`], as an offset.
+fn signed(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// Upstream's `tail`: `tail_lines` or `tail_bytes`, both of which begin with
+/// the `fstat` whose failure is `cannot fstat`.
+fn emit(file: &mut File, out: &mut impl Sink, options: &Options) -> Result<(), Failure> {
+    let stats = file.metadata().map_err(Failure::Fstat)?;
+    let facts = Facts::of(file, &stats);
+    let n = options.n_units;
+    match options.unit {
+        Unit::Lines => tail_lines(file, out, n, options, facts),
+        Unit::Bytes => tail_bytes(file, out, n, options, facts),
+    }
+}
+
+/// Upstream's `tail_bytes`, after its `fstat`: the last `n` bytes, or with `+`
+/// everything after the first `n`.
+///
+/// Which of upstream's routes is taken is decided as upstream decides it,
+/// because the routes fail differently and read differently: a regular file
+/// is seeked, and a seek that fails ends the run; anything else is asked to
+/// seek and read instead when it will not; and an input no larger than one
+/// block is read from where it stands rather than seeked in at all -- which is
+/// what makes `tail -c5 /proc/self/status` work, a file that says it is empty
+/// and cannot seek to its end.
+fn tail_bytes(
+    file: &mut (impl Read + Seek),
+    out: &mut impl Sink,
+    n: u64,
+    options: &Options,
+    facts: Facts,
+) -> Result<(), Failure> {
+    if options.from_start {
+        let skipped = if options.presume_input_pipe || n > OFF_T_MAX {
+            false
+        } else if facts.regular {
+            xlseek(file, Whence::Current(signed(n)))?;
+            true
+        } else {
+            seek_unregular(file, SeekFrom::Current(signed(n))).is_some()
+        };
+        if !skipped && start_bytes(file, out, n)? == Start::AtEof {
             return Ok(());
         }
-        left = left.saturating_sub(got as u64);
+        return dump(file, out, Amount::ToEof).map(|_| ());
     }
-    dump(source, out)
+
+    let mut end_pos: Option<u64> = None;
+    let mut current_pos: Option<u64> = None;
+    if !options.presume_input_pipe && n <= OFF_T_MAX {
+        if facts.regular {
+            end_pos = Some(facts.size);
+        } else if let Some(at) = seek_unregular(file, SeekFrom::End(signed(n).saturating_neg())) {
+            current_pos = Some(at);
+            end_pos = Some(at.saturating_add(n));
+        }
+    }
+    // `end_pos <= ST_BLKSIZE (stats)`, where an end that could not be found
+    // is `-1`, below every size.
+    let end = match end_pos {
+        Some(end) if end > facts.blksize => end,
+        _ => return pipe_bytes(file, out, n),
+    };
+    let mut current = match current_pos {
+        Some(at) => at,
+        None => xlseek(file, Whence::Current(0))?,
+    };
+    if current < end && n < end.saturating_sub(current) {
+        current = end.saturating_sub(n);
+        xlseek(file, Whence::Set(current))?;
+    }
+    dump(file, out, Amount::AtMost(n)).map(|_| ())
 }
 
-/// Everything from the `n`th line terminator onwards — `tail -n +N`, after the
-/// `N - 1` adjustment.
+/// Upstream's `tail_lines`, after its `fstat`: the last `n` lines, or with `+`
+/// everything after the first `n`.
+///
+/// "Use `file_lines` only if FD refers to a regular file for which `lseek (...
+/// SEEK_END)` works" -- anything else, `/proc/cpuinfo` included, is read
+/// forwards and the last lines kept.
+fn tail_lines(
+    file: &mut (impl Read + Seek),
+    out: &mut impl Sink,
+    n: u64,
+    options: &Options,
+    facts: Facts,
+) -> Result<(), Failure> {
+    let line_end = options.line_end;
+    if options.from_start {
+        if start_lines(file, out, n, line_end)? == Start::AtEof {
+            return Ok(());
+        }
+        return dump(file, out, Amount::ToEof).map(|_| ());
+    }
+
+    let mut start_pos = None;
+    if !options.presume_input_pipe && facts.regular {
+        // Two bare `lseek`s, whose failure is an answer -- read forwards
+        // instead -- rather than an error.
+        start_pos = file.stream_position().ok();
+        if let Some(start) = start_pos
+            && let Some(end) = file.seek(SeekFrom::End(0)).ok().filter(|&end| start < end)
+        {
+            return file_lines(file, out, n, start, end, line_end);
+        }
+    }
+    // "Under very unlikely circumstances, it is possible to reach this point
+    // after positioning the file pointer to end of file via the 'lseek
+    // (...SEEK_END)' above. In that case, reposition the file pointer back to
+    // start_pos before calling pipe_lines."
+    if let Some(start) = start_pos {
+        xlseek(file, Whence::Set(start))?;
+    }
+    pipe_lines(file, out, n, line_end)
+}
+
+/// Upstream's `xlseek`: the seek, or a [`Failure::Seek`], which ends the run.
+fn xlseek(file: &mut impl Seek, to: Whence) -> Result<u64, Failure> {
+    let target = match to {
+        Whence::Set(offset) => SeekFrom::Start(offset),
+        Whence::Current(offset) => SeekFrom::Current(offset),
+    };
+    file.seek(target).map_err(|e| Failure::Seek(to, e))
+}
+
+/// A bare `lseek` on a file that is not regular, whose failure upstream takes
+/// as "this cannot seek" and reads instead: the new position, or `None`.
+///
+/// On the host the answer is always `None`. An MSYS pipe there accepts a seek
+/// and moves nothing (see `filekind`), and a pipe that cannot seek is what
+/// every POSIX system reports.
+fn seek_unregular(file: &mut impl Seek, to: SeekFrom) -> Option<u64> {
+    if !cfg!(unix) {
+        return None;
+    }
+    // The failure *is* the answer: upstream tests `lseek (...) != -1` and
+    // takes the reading path otherwise, saying nothing.
+    file.seek(to).ok()
+}
+
+/// How much `dump_remainder` copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Amount {
+    /// `COPY_TO_EOF`.
+    ToEof,
+    /// `COPY_A_BUFFER`: one read's worth, for the follow loop's blocking mode.
+    ABuffer,
+    /// At most this many bytes.
+    AtMost(u64),
+}
+
+/// gnulib's `safe_read`: one `read`, repeated if a signal interrupted it.
+fn safe_read(source: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match source.read(buf) {
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            done => return done,
+        }
+    }
+}
+
+/// Upstream's `dump_remainder`: copy from the current position, a buffer at a
+/// time, to end of file or until `amount` is reached, and return how much was
+/// copied.
+///
+/// A failed read is [`Failure::Copy`], which ends the run -- except `EAGAIN`,
+/// a non-blocking descriptor with nothing more to give yet, which ends the
+/// copy quietly. That is how the follow loop's reads of a pipe stop.
+fn dump(source: &mut impl Read, out: &mut impl Sink, amount: Amount) -> Result<u64, Failure> {
+    let mut buf = vec![0u8; BUFSIZ];
+    let mut copied: u64 = 0;
+    let mut remaining = match amount {
+        Amount::AtMost(n) => n,
+        Amount::ToEof | Amount::ABuffer => u64::MAX,
+    };
+    loop {
+        let want = usize::try_from(remaining).map_or(BUFSIZ, |left| left.min(BUFSIZ));
+        let got = match safe_read(source, buf.get_mut(..want).unwrap_or_default()) {
+            Ok(got) => got,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(e) => return Err(Failure::Copy(e)),
+        };
+        if got == 0 {
+            break;
+        }
+        out.xwrite(buf.get(..got).unwrap_or_default());
+        copied = copied.saturating_add(got as u64);
+        if amount != Amount::ToEof {
+            remaining = remaining.saturating_sub(got as u64);
+            if remaining == 0 || amount == Amount::ABuffer {
+                break;
+            }
+        }
+    }
+    Ok(copied)
+}
+
+/// What skipping the start of an input found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// The skip ended inside the input. What followed it in the same read has
+    /// been printed, and the rest is for `dump_remainder`.
+    Ready,
+    /// The input ended first, so there is nothing to print.
+    AtEof,
+}
+
+/// Upstream's `start_bytes`: read past the first `n` bytes of an input that
+/// cannot be seeked, printing whatever the last read brought beyond them.
+fn start_bytes(source: &mut impl Read, out: &mut impl Sink, n: u64) -> Result<Start, Failure> {
+    let mut left = n;
+    let mut buf = vec![0u8; BUFSIZ];
+    while left > 0 {
+        let got = safe_read(source, &mut buf).map_err(Failure::Read)?;
+        if got == 0 {
+            return Ok(Start::AtEof);
+        }
+        match usize::try_from(left) {
+            // "Print extra characters if there are any."
+            Ok(skip) if skip < got => {
+                out.xwrite(buf.get(skip..got).unwrap_or_default());
+                break;
+            }
+            _ => left = left.saturating_sub(got as u64),
+        }
+    }
+    Ok(Start::Ready)
+}
+
+/// Upstream's `start_lines`: read past the first `n` line terminators, printing
+/// whatever the read that found the last of them brought after it.
 ///
 /// Works on any input, seekable or not: unlike counting from the end, counting
 /// from the start needs no lookahead.
-fn skip_lines(
+fn start_lines(
     source: &mut impl Read,
-    out: &mut impl Write,
+    out: &mut impl Sink,
     n: u64,
     line_end: u8,
-) -> io::Result<()> {
+) -> Result<Start, Failure> {
+    if n == 0 {
+        return Ok(Start::Ready);
+    }
     let mut left = n;
-    let mut buf = vec![0u8; CHUNK];
-    while left > 0 {
-        let got = source.read(&mut buf)?;
+    let mut buf = vec![0u8; BUFSIZ];
+    loop {
+        let got = safe_read(source, &mut buf).map_err(Failure::Read)?;
         if got == 0 {
-            return Ok(());
+            return Ok(Start::AtEof);
         }
         let chunk = buf.get(..got).unwrap_or_default();
         let mut at = 0usize;
-        while left > 0 {
-            match chunk
-                .get(at..)
-                .and_then(|t| t.iter().position(|&b| b == line_end))
-            {
-                Some(rel) => {
-                    at = at.saturating_add(rel).saturating_add(1);
-                    left = left.saturating_sub(1);
-                }
-                None => break,
+        while let Some(rel) = chunk
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|&b| b == line_end))
+        {
+            at = at.saturating_add(rel).saturating_add(1);
+            left = left.saturating_sub(1);
+            if left == 0 {
+                out.xwrite(chunk.get(at..).unwrap_or_default());
+                return Ok(Start::Ready);
             }
         }
-        if left == 0 {
-            out.write_all(chunk.get(at..).unwrap_or_default())?;
-        }
     }
-    dump(source, out)
 }
 
-/// The last `n` bytes of a seekable file.
-fn last_bytes_seek(file: &mut File, out: &mut impl Write, n: u64) -> io::Result<()> {
-    let start = file.stream_position()?;
-    let end = file.seek(SeekFrom::End(0))?;
-    let from = end.saturating_sub(n).max(start);
-    file.seek(SeekFrom::Start(from))?;
-    dump(file, out)
-}
-
-/// The last `n` bytes of a stream that cannot be seeked.
+/// Upstream's `pipe_bytes`: the last `n` bytes of an input that is read
+/// forwards to its end.
 ///
 /// Held bytes never exceed `n`: a byte is dropped as soon as `n` later ones
 /// exist to displace it, so this costs the size of the answer and not the size
-/// of the input.
-fn last_bytes_stream(source: &mut impl Read, out: &mut impl Write, n: u64) -> io::Result<()> {
-    let Ok(keep) = usize::try_from(n) else {
-        // More bytes than this machine can address: the answer is the whole
-        // input, whatever its length.
-        return dump(source, out);
-    };
-    if keep == 0 {
-        return drain(source);
-    }
-    let mut held: Vec<u8> = Vec::new();
-    let mut buf = vec![0u8; CHUNK];
+/// of the input. A failed read prints nothing at all, as upstream's does.
+fn pipe_bytes(source: &mut impl Read, out: &mut impl Sink, n: u64) -> Result<(), Failure> {
+    let keep = usize::try_from(n).unwrap_or(usize::MAX);
+    let mut held: VecDeque<u8> = VecDeque::new();
+    let mut buf = vec![0u8; BUFSIZ];
     loop {
-        let got = source.read(&mut buf)?;
-        if got == 0 {
-            return out.write_all(&held);
-        }
-        held.extend_from_slice(buf.get(..got).unwrap_or_default());
-        if let Some(drop) = held.len().checked_sub(keep) {
-            held.drain(..drop);
-        }
-    }
-}
-
-/// The last `n` lines of a seekable file — upstream's `file_lines`, which walks
-/// the file backwards a block at a time rather than reading it forwards.
-///
-/// The one rule that is not obvious: **a final line with no terminator counts
-/// as one of the `n`**, which is why the last block is examined for that before
-/// the scan begins. `printf 'a\nb' | tail -n1` is `b`, not `a\nb`.
-fn last_lines_seek(file: &mut File, out: &mut impl Write, n: u64, line_end: u8) -> io::Result<()> {
-    let start = file.stream_position()?;
-    let end = file.seek(SeekFrom::End(0))?;
-    if end <= start {
-        file.seek(SeekFrom::Start(start))?;
-        return Ok(());
-    }
-
-    let mut want = n;
-    let mut pos = end;
-    let mut buf = vec![0u8; CHUNK];
-    let mut last_block = true;
-    while pos > start {
-        // The first block read is the *ragged* one, so that every subsequent
-        // seek is block-aligned.
-        let span = match pos
-            .saturating_sub(start)
-            .checked_rem(CHUNK as u64)
-            .unwrap_or(0)
-        {
-            0 => CHUNK as u64,
-            rest => rest,
-        };
-        pos = pos.saturating_sub(span);
-        let span = usize::try_from(span).unwrap_or(CHUNK);
-        file.seek(SeekFrom::Start(pos))?;
-        let block = buf.get_mut(..span).unwrap_or_default();
-        file.read_exact(block)?;
-
-        if last_block {
-            last_block = false;
-            if block.last().is_some_and(|&b| b != line_end) {
-                want = want.saturating_sub(1);
-            }
-        }
-
-        let mut scan = span;
-        while let Some(at) = block
-            .get(..scan)
-            .and_then(|t| t.iter().rposition(|&b| b == line_end))
-        {
-            scan = at;
-            if want == 0 {
-                // Everything after this terminator, then the rest of the file —
-                // the read position is already at the end of this block.
-                out.write_all(block.get(at.saturating_add(1)..).unwrap_or_default())?;
-                return dump(file, out);
-            }
-            want = want.saturating_sub(1);
-        }
-    }
-    // Fewer lines in the file than were asked for: all of it.
-    file.seek(SeekFrom::Start(start))?;
-    dump(file, out)
-}
-
-/// The last `n` lines of a stream that cannot be seeked.
-///
-/// Holds at most `n` complete lines plus the one being read, which is the least
-/// that can answer the question — the last line cannot be known until the
-/// input ends.
-fn last_lines_stream(
-    source: &mut impl Read,
-    out: &mut impl Write,
-    n: u64,
-    line_end: u8,
-) -> io::Result<()> {
-    let Ok(keep) = usize::try_from(n) else {
-        return dump(source, out);
-    };
-    if keep == 0 {
-        return drain(source);
-    }
-    let mut lines: VecDeque<Vec<u8>> = VecDeque::new();
-    let mut partial: Vec<u8> = Vec::new();
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let got = source.read(&mut buf)?;
+        let got = safe_read(source, &mut buf).map_err(Failure::Read)?;
         if got == 0 {
             break;
+        }
+        held.extend(buf.get(..got).unwrap_or_default());
+        if let Some(excess) = held.len().checked_sub(keep) {
+            held.drain(..excess);
+        }
+    }
+    let (front, back) = held.as_slices();
+    out.xwrite(front);
+    out.xwrite(back);
+    Ok(())
+}
+
+/// Upstream's `pipe_lines`: the last `n` lines of an input that is read
+/// forwards to its end.
+///
+/// Holds at most `n` complete lines plus the one being read, which is the least
+/// that can answer the question -- the last line cannot be known until the
+/// input ends. A final line with no terminator is a line, and a failed read
+/// prints nothing at all, as upstream's does.
+fn pipe_lines(
+    source: &mut impl Read,
+    out: &mut impl Sink,
+    n: u64,
+    line_end: u8,
+) -> Result<(), Failure> {
+    let keep = usize::try_from(n).unwrap_or(usize::MAX);
+    let mut lines: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut partial: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; BUFSIZ];
+    loop {
+        let got = safe_read(source, &mut buf).map_err(Failure::Read)?;
+        if got == 0 {
+            break;
+        }
+        if keep == 0 {
+            // "This prevents a core dump when the pipe contains no newlines":
+            // nothing is kept, but the input is still read to its end.
+            continue;
         }
         let mut chunk = buf.get(..got).unwrap_or_default();
         while let Some(at) = chunk.iter().position(|&b| b == line_end) {
@@ -1451,7 +2057,7 @@ fn last_lines_stream(
         }
         partial.extend_from_slice(chunk);
     }
-    // The unterminated remainder is a line as well.
+    // "Count the incomplete line on files that don't end with a newline."
     if !partial.is_empty() {
         lines.push_back(partial);
         if lines.len() > keep {
@@ -1459,72 +2065,193 @@ fn last_lines_stream(
         }
     }
     for line in &lines {
-        out.write_all(line)?;
+        out.xwrite(line);
     }
     Ok(())
 }
 
-/// Consume the input without printing any of it, so that a pipe's writer is not
-/// left blocked on a reader that never reads.
-fn drain(source: &mut impl Read) -> io::Result<()> {
-    let mut buf = vec![0u8; CHUNK];
-    while source.read(&mut buf)? != 0 {}
-    Ok(())
+/// Upstream's `file_lines`: the last `n` lines of a regular file, found by
+/// reading it backwards a block at a time from `end_pos` towards `start_pos`,
+/// then copied forwards.
+///
+/// The blocks are aligned to `BUFSIZ` from `start_pos`, so the first one read
+/// -- the last in the file -- is the ragged one. A final line with no
+/// terminator counts as one of the `n`, which is why that block is looked at
+/// before the scan begins: `printf 'a\nb' | tail -n1` is `b`, not `a\nb`. The
+/// copy is bounded by `end_pos`, so a file that grows meanwhile does not
+/// lengthen the answer, and `n` of zero is nothing at all -- not the
+/// unterminated last line, which is what `tail -n0 -f` would otherwise begin
+/// by printing.
+fn file_lines(
+    file: &mut (impl Read + Seek),
+    out: &mut impl Sink,
+    n: u64,
+    start_pos: u64,
+    end_pos: u64,
+    line_end: u8,
+) -> Result<(), Failure> {
+    if n == 0 {
+        return Ok(());
+    }
+    let mut want = n;
+    let mut buf = vec![0u8; BUFSIZ];
+    // "Set 'bytes_read' to the size of the last, probably partial, buffer;
+    // 0 < 'bytes_read' <= 'BUFSIZ'."
+    let ragged = end_pos
+        .saturating_sub(start_pos)
+        .checked_rem(BUFSIZ as u64)
+        .and_then(|r| usize::try_from(r).ok())
+        .unwrap_or(0);
+    let mut bytes_read = if ragged == 0 { BUFSIZ } else { ragged };
+    let mut pos = end_pos.saturating_sub(bytes_read as u64);
+    xlseek(file, Whence::Set(pos))?;
+    bytes_read =
+        safe_read(file, buf.get_mut(..bytes_read).unwrap_or_default()).map_err(Failure::Read)?;
+    if bytes_read
+        .checked_sub(1)
+        .and_then(|last| buf.get(last))
+        .is_some_and(|&b| b != line_end)
+    {
+        want = want.saturating_sub(1);
+    }
+    loop {
+        // "Scan backward, counting the newlines in this bufferfull."
+        let mut scan = bytes_read;
+        while scan > 0 {
+            let Some(nl) = buf
+                .get(..scan)
+                .and_then(|block| block.iter().rposition(|&b| b == line_end))
+            else {
+                break;
+            };
+            scan = nl;
+            if want == 0 {
+                // "If this newline isn't the last character in the buffer,
+                // output the part that is after it."
+                out.xwrite(
+                    buf.get(nl.saturating_add(1)..bytes_read)
+                        .unwrap_or_default(),
+                );
+                let rest = end_pos.saturating_sub(pos.saturating_add(bytes_read as u64));
+                dump(file, out, Amount::AtMost(rest))?;
+                return Ok(());
+            }
+            want = want.saturating_sub(1);
+        }
+        // "Not enough newlines in that bufferfull."
+        if pos == start_pos {
+            // "Not enough lines in the file; print everything from start_pos
+            // to the end." Bounded by `end_pos` itself, as upstream bounds it.
+            xlseek(file, Whence::Set(start_pos))?;
+            dump(file, out, Amount::AtMost(end_pos))?;
+            return Ok(());
+        }
+        pos = pos.saturating_sub(BUFSIZ as u64);
+        xlseek(file, Whence::Set(pos))?;
+        bytes_read = safe_read(file, &mut buf).map_err(Failure::Read)?;
+        if bytes_read == 0 {
+            return Ok(());
+        }
+    }
 }
 
 // --------------------------------------------------------------- following ---
 
-/// Poll the watched files until there is nothing left to watch — upstream's
+/// Upstream's `ignore_fifo_and_pipe`: under `-f`, a `-` that is a pipe or a
+/// FIFO is not followed. POSIX requires it when there is no operand, and
+/// upstream extends it to every `-`. Returns how many operands are left to
+/// follow; with none, `-f` ends the run as soon as the files are printed.
+fn ignore_fifo_and_pipe(watched: &mut [Watched]) -> usize {
+    let mut viable = 0usize;
+    for w in watched {
+        if w.is_stdin && !w.ignore && w.file.is_some() && w.fifo {
+            w.file = None;
+            w.ignore = true;
+        } else {
+            viable = viable.saturating_add(1);
+        }
+    }
+    viable
+}
+
+/// What [`follow`] carries from one file and one iteration to the next.
+struct Following<'a> {
+    options: &'a Options,
+    print_headers: bool,
+    /// Whether no banner has been printed yet: upstream's `first_file`.
+    first_header: bool,
+    /// The file the last banner named: upstream's `last`.
+    last: usize,
+    /// "Use blocking I/O as an optimization, when it's easy": one file,
+    /// followed by descriptor, no `--pid`, and not a regular file.
+    blocking: bool,
+    /// `1 < n_files`.
+    several: bool,
+}
+
+/// Poll the watched files until there is nothing left to watch -- upstream's
 /// `tail_forever`.
 ///
 /// This is the polling loop and only the polling loop. Upstream has a second,
 /// `inotify`-driven implementation that it prefers where the kernel offers it;
 /// we have no such interface, so the `---disable-inotify` switch is already the
-/// permanent state of affairs. That is not merely a missing optimisation — it
+/// permanent state of affairs. That is not merely a missing optimisation -- it
 /// changes what the help text can honestly say, which is why `--help` here is
 /// two clauses shorter than GNU's.
 fn follow(
     watched: &mut [Watched],
-    out: &mut impl Write,
+    out: &mut Out,
     options: &Options,
     print_headers: bool,
-    first_header: &mut bool,
+    first_header: bool,
+    monitor_output: bool,
 ) {
-    // Which file the last banner named. A new banner is only needed when the
-    // output moves to a different one.
-    let mut last = watched.len().saturating_sub(1);
+    let blocking = options.pid.is_none()
+        && options.follow == Follow::Descriptor
+        && watched.len() == 1
+        && watched
+            .first()
+            .is_some_and(|w| w.file.is_some() && !w.regular);
+    let mut st = Following {
+        options,
+        print_headers,
+        first_header,
+        last: watched.len().saturating_sub(1),
+        blocking,
+        several: watched.len() > 1,
+    };
     let mut writer_is_dead = false;
 
     loop {
         let mut any_input = false;
-        for i in 0..watched.len() {
-            let Some(w) = watched.get_mut(i) else {
-                continue;
-            };
+        for (index, w) in watched.iter_mut().enumerate() {
             if w.ignore {
                 continue;
             }
             if w.file.is_none() {
-                recheck(w, options);
+                recheck(w, out, options, blocking);
                 continue;
             }
-            any_input |= poll_one(w, out, options, print_headers, first_header, i, &mut last);
+            any_input |= poll_one(w, index, out, &mut st);
         }
 
         if !any_live(watched, options) {
-            diag!("tail: no files remaining");
+            complain!(out, "tail: no files remaining");
             return;
         }
-        if !any_input && out.flush().is_err() {
-            return;
+        if !any_input || blocking {
+            out.flush_or_die();
         }
+        if monitor_output {
+            check_output_alive(out);
+        }
+        // If nothing was read, sleep and/or check for dead writers.
         if !any_input {
             if writer_is_dead {
                 return;
             }
-            // Once the writer is known dead, go round once more before
-            // stopping: it may have written something between the last read and
-            // its death.
+            // "Once the writer is dead, read the files once more to avoid a
+            // race condition."
             writer_is_dead = options.pid.is_some_and(|p| !process_alive(p));
             if !writer_is_dead {
                 sleep(options.sleep_interval);
@@ -1533,137 +2260,168 @@ fn follow(
     }
 }
 
-/// One file, one iteration. `true` when something was read.
-fn poll_one(
-    w: &mut Watched,
-    out: &mut impl Write,
-    options: &Options,
-    print_headers: bool,
-    first_header: &mut bool,
-    index: usize,
-    last: &mut usize,
-) -> bool {
-    let stats = match w.file.as_ref().map(File::metadata) {
-        Some(Ok(m)) => m,
-        Some(Err(e)) => {
-            w.trouble = Trouble::Io(e.kind());
-            diag!("tail: {}: {}", quotef(&w.label), strerror(&e));
-            w.file = None;
-            return false;
-        }
-        None => return false,
-    };
-
-    // Asked once, of the handle rather than of the metadata: on the host build
-    // `Metadata::is_file` calls a pipe a regular file and gives it the length of
-    // whatever is buffered in it, which would make every poll of a pipe look
-    // like a file that keeps changing size. See `filekind`.
-    let regular = w.file.as_ref().is_some_and(filekind::is_regular);
-
-    let unchanged = w.regular == regular
-        && (!regular || w.size == stats.len())
-        && w.modified == stats.modified().ok();
-    let mut read_unchanged = false;
-    if unchanged {
-        w.unchanged = w.unchanged.saturating_add(1);
-        if options.max_unchanged < w.unchanged && options.follow == Follow::Name {
-            // The file has not moved for a while; the *name* may have. This is
-            // the log-rotation case, and the only thing `--max-unchanged-stats`
-            // controls.
-            recheck(w, options);
-            w.unchanged = 0;
-            return false;
-        }
-        if regular || *last != index {
-            return false;
-        }
-        // A pipe or terminal whose `mtime` never moves: reading is the only way
-        // to find out whether anything arrived.
-        read_unchanged = true;
-    }
-
-    w.modified = stats.modified().ok();
-    w.regular = regular;
-    if !read_unchanged {
-        w.unchanged = 0;
-    }
-
-    if regular && stats.len() < w.size {
-        diag!("tail: {}: file truncated", quotef(&w.label));
-        if let Some(f) = w.file.as_mut() {
-            let _ = f.seek(SeekFrom::Start(0));
-        }
-        w.size = 0;
-    }
-
-    if !read_unchanged && index != *last {
-        if print_headers {
-            write_header(out, &w.label, first_header);
-        }
-        *last = index;
-    }
-
-    let Some(file) = w.file.as_mut() else {
+/// One file, one iteration of [`follow`] -- the body of upstream's loop.
+/// Whether anything was read.
+fn poll_one(w: &mut Watched, index: usize, out: &mut Out, st: &mut Following<'_>) -> bool {
+    let options = st.options;
+    let Some(handle) = w.file.as_ref() else {
         return false;
     };
-    let before = w.size;
-    match io::copy(file, out) {
-        Ok(read) => {
-            w.size = before.saturating_add(read);
-            if read_unchanged && read != 0 {
-                w.unchanged = 0;
-            }
-            read != 0
-        }
-        Err(e) => {
-            diag!(
-                "tail: error reading {}: {}",
-                quoteaf(&w.label),
+
+    if w.blocking != Some(st.blocking) {
+        match add_nonblocking(handle, !st.blocking) {
+            Ok(()) => w.blocking = Some(st.blocking),
+            // "This happens when using tail -f on a file with the
+            // append-only attribute." The mode stays as it was, and is asked
+            // for again next time.
+            Err(e) if w.regular && e.raw_os_error() == Some(EPERM) => {}
+            Err(e) => die!(
+                out,
+                "tail: {}: cannot change nonblocking mode: {}",
+                quotef(&w.label),
                 strerror(&e)
-            );
-            false
+            ),
         }
     }
+
+    let mut read_unchanged = false;
+    if !w.reads_block() {
+        let stats = match w.file.as_ref().map(|h| h.metadata()) {
+            Some(Ok(stats)) => stats,
+            Some(Err(e)) => {
+                w.trouble = Trouble::Errno(errnum(&e));
+                complain!(out, "tail: {}: {}", quotef(&w.label), strerror(&e));
+                w.file = None;
+                return false;
+            }
+            None => return false,
+        };
+        let regular = w.file.as_ref().is_some_and(|h| is_regular_file(h, &stats));
+        // `mode`, as it was before this look.
+        let was_regular = w.regular;
+        let modified = modification_time(&stats);
+
+        if w.regular == regular && (!regular || w.size == stats.len()) && w.modified == modified {
+            let seen = w.unchanged;
+            w.unchanged = w.unchanged.saturating_add(1);
+            let mut moved = false;
+            if options.max_unchanged <= seen && options.follow == Follow::Name {
+                // The file has not moved for a while; the *name* may have.
+                // This is the log-rotation case, and the only thing
+                // `--max-unchanged-stats` controls.
+                moved = recheck(w, out, options, false);
+                w.unchanged = 0;
+            }
+            if moved || regular || st.several {
+                return false;
+            }
+            // A pipe or terminal whose `mtime` never moves: reading is the
+            // only way to find out whether anything arrived.
+            read_unchanged = true;
+        }
+
+        // "This file has changed. Print out what we can, and then keep
+        // looping."
+        w.modified = modified;
+        w.regular = regular;
+        if !read_unchanged {
+            w.unchanged = 0;
+        }
+
+        // "XXX: This is only a heuristic, as the file may have also been
+        // truncated and written to if st_size >= size (in which case we ignore
+        // new data <= size)."
+        if was_regular && stats.len() < w.size {
+            complain!(out, "tail: {}: file truncated", quotef(&w.label));
+            // "Assume the file was truncated to 0, and therefore output all
+            // "new" data."
+            if let Some(handle) = w.file.as_mut()
+                && let Err(failure) = xlseek(&mut **handle, Whence::Set(0))
+            {
+                report(out, &w.label, failure);
+            }
+            w.size = 0;
+        }
+
+        if index != st.last {
+            if st.print_headers {
+                write_header(out, &w.label, &mut st.first_header);
+            }
+            st.last = index;
+        }
+    }
+
+    // There are no remote file systems here to bound a read by `st_size`, so
+    // a non-blocking read goes to the end and a blocking one takes a buffer.
+    let amount = if w.reads_block() {
+        Amount::ABuffer
+    } else {
+        Amount::ToEof
+    };
+    let Some(handle) = w.file.as_mut() else {
+        return false;
+    };
+    let read = match dump(&mut **handle, out, amount) {
+        Ok(read) => read,
+        Err(failure) => {
+            report(out, &w.label, failure);
+            0
+        }
+    };
+    if read_unchanged && read != 0 {
+        w.unchanged = 0;
+    }
+    w.size = w.size.saturating_add(read);
+    read != 0
 }
 
-/// Look at the *name* again and report what became of it — upstream's
-/// `recheck`, less the branches that only fire when `inotify` is in use.
+/// Look at the *name* again and report what became of it -- upstream's
+/// `recheck`. Returns whether the file being read changed: closed, or replaced
+/// by a new one.
 ///
 /// Two of upstream's diagnostics are unreachable here and are absent rather
 /// than dead: `has been replaced with an untailable symbolic link` and `has
 /// been replaced with an untailable remote file` are both guarded by
 /// `! disable_inotify`, and inotify is permanently disabled in this
 /// implementation.
-fn recheck(w: &mut Watched, options: &Options) {
+fn recheck(w: &mut Watched, out: &mut Out, options: &Options, blocking: bool) -> bool {
     let was_tailable = w.tailable;
     let previous = w.trouble;
 
     let opened = if w.is_stdin {
-        Ok(stdin_as_file())
+        stdin_handle()
     } else {
-        File::open(&w.name)
+        open_to_follow(&w.name, blocking)
     };
+    // "If the open fails because the file doesn't exist, then mark the file
+    // as not tailable."
     w.tailable = !(options.retry && opened.is_err());
 
-    let (mut file, stats) = match opened.and_then(|f| f.metadata().map(|m| (f, m))) {
+    let looked = opened.and_then(|handle| {
+        let stats = handle.metadata()?;
+        Ok((handle, stats))
+    });
+    let (mut handle, stats) = match looked {
         Ok(pair) => pair,
         Err(e) => {
-            w.trouble = Trouble::Io(e.kind());
-            if w.tailable {
+            let errno = errnum(&e);
+            w.trouble = Trouble::Errno(errno);
+            if !w.tailable {
+                if was_tailable {
+                    complain!(
+                        out,
+                        "tail: {} has become inaccessible: {}",
+                        quoteaf(&w.label),
+                        strerror(&e)
+                    );
+                }
+                // "say nothing... it's still not tailable"
+            } else if previous != Trouble::Errno(errno) {
                 // A different failure from last time is news; the same one
                 // again is not.
-                if previous != w.trouble {
-                    diag!("tail: {}: {}", quotef(&w.label), strerror(&e));
-                }
-            } else if was_tailable {
-                diag!(
-                    "tail: {} has become inaccessible: {}",
-                    quoteaf(&w.label),
-                    strerror(&e)
-                );
+                complain!(out, "tail: {}: {}", quotef(&w.label), strerror(&e));
             }
-            w.file = None;
-            return;
+            return w.file.take().is_some();
         }
     };
 
@@ -1672,7 +2430,8 @@ fn recheck(w: &mut Watched, options: &Options) {
         w.tailable = false;
         w.ignore = !(options.retry && options.follow == Follow::Name);
         if was_tailable || previous != Trouble::NotAnErrno {
-            diag!(
+            complain!(
+                out,
                 "tail: {} has been replaced with an untailable file{}",
                 quoteaf(&w.label),
                 if w.ignore {
@@ -1682,24 +2441,29 @@ fn recheck(w: &mut Watched, options: &Options) {
                 }
             );
         }
-        w.file = None;
-        return;
+        return w.file.take().is_some();
     }
 
-    let id = Some(file_id(&stats));
-    let fresh = if previous != Trouble::None && previous != Trouble::Io(ErrorKind::NotFound) {
-        diag!("tail: {} has become accessible", quoteaf(&w.label));
+    w.trouble = Trouble::None;
+    let id = file_id(&stats);
+    let new_file = if previous != Trouble::None && previous != Trouble::Errno(ENOENT) {
+        complain!(out, "tail: {} has become accessible", quoteaf(&w.label));
         true
     } else if w.file.is_none() {
-        // A name that was missing and is here again is a new file even when the
-        // identity matches, because identities get reused.
-        diag!(
+        // "A new file even when inodes haven't changed as <dev,inode> pairs
+        // can be reused, and we know the file was missing on the previous
+        // iteration."
+        complain!(
+            out,
             "tail: {} has appeared;  following new file",
             quoteaf(&w.label)
         );
         true
-    } else if w.id != id {
-        diag!(
+    } else if w.id != Some(id) {
+        // "File has been replaced (e.g., via log rotation) -- tail the new
+        // one."
+        complain!(
+            out,
             "tail: {} has been replaced;  following new file",
             quoteaf(&w.label)
         );
@@ -1707,31 +2471,170 @@ fn recheck(w: &mut Watched, options: &Options) {
     } else {
         false
     };
-    w.trouble = Trouble::None;
+    if !new_file {
+        // "No changes detected, so close new fd."
+        return false;
+    }
 
-    if fresh {
-        // A new file is read from its start, not from where the old one
-        // stopped.
-        w.size = 0;
-        w.regular = filekind::is_regular(&file);
-        w.modified = stats.modified().ok();
-        w.id = id;
-        w.file = Some(file);
-    } else {
-        // Nothing changed; keep the handle already open and drop the new one.
-        remember(w, &stats, &mut file);
+    // "Start at the beginning of the file."
+    if is_regular_file(&handle, &stats)
+        && let Err(failure) = xlseek(&mut *handle, Whence::Set(0))
+    {
+        report(out, &w.label, failure);
+    }
+    let blocking = if w.is_stdin { None } else { Some(blocking) };
+    record_open(w, handle, &stats, 0, blocking);
+    true
+}
+
+/// `open (name, O_RDONLY | (blocking ? 0 : O_NONBLOCK))`: the follow loop's
+/// reopen, which must not wait for a FIFO's writer when its reads may not.
+fn open_to_follow(name: &OsString, blocking: bool) -> io::Result<Handle> {
+    let mut how = std::fs::OpenOptions::new();
+    how.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if !blocking {
+            how.custom_flags(O_NONBLOCK);
+        }
+    }
+    // The host has no non-blocking open; its reads of a pipe wait.
+    #[cfg(not(unix))]
+    let _: bool = blocking;
+    // `open_safer`: see `start_file`.
+    how.open(name).and_then(stdfd::fd_safer).map(Handle::Opened)
+}
+
+/// Upstream's switch into the follow loop's reading mode: `O_NONBLOCK` added
+/// when `nonblocking`, and otherwise the flags left as they are -- upstream
+/// never takes the flag away again.
+#[cfg(unix)]
+fn add_nonblocking(file: &File, nonblocking: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+    unsafe extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is open for as long as `file` is borrowed, and `F_GETFL`
+    // only reads its flags. The variable argument is an `i64`, so that a
+    // callee reading a word reads a defined one.
+    let old = unsafe { fcntl(fd, F_GETFL, 0i64) };
+    if old < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let new = if nonblocking { old | O_NONBLOCK } else { old };
+    // SAFETY: as above; `F_SETFL` changes only the descriptor's status flags.
+    if new != old && unsafe { fcntl(fd, F_SETFL, i64::from(new)) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+// The signature is the Unix version's, whose `fcntl` can fail; this one
+// cannot, and says so by always succeeding.
+#[allow(clippy::unnecessary_wraps)]
+fn add_nonblocking(_file: &File, _nonblocking: bool) -> io::Result<()> {
+    // The host has no `O_NONBLOCK`. Taking the switch as made keeps the loop
+    // from asking again; its reads of a pipe wait, which only the host sees.
+    Ok(())
+}
+
+/// Upstream's `check_output_alive`: when standard output is a pipe whose
+/// reader has gone, end the run as a write to it would have -- by `SIGPIPE`,
+/// or where that is ignored, status 1 and no message.
+fn check_output_alive(out: &mut Out) {
+    if output_broken() {
+        out.die_pipe();
     }
 }
 
-/// Whether anything is still worth watching.
+/// gnulib's `iopoll (-1, STDOUT_FILENO, false) == IOPOLL_BROKEN_OUTPUT`: a
+/// `poll` of descriptor 1 that does not wait, broken when it reports
+/// `POLLERR`, `POLLHUP` or `POLLNVAL`.
+///
+/// Upstream polls again when the answer has none of those, which on Linux
+/// cannot happen for a pipe -- `POLLRDBAND`, the one event asked for, is never
+/// raised on the writing end. Here such an answer is taken as "alive", the
+/// conclusion upstream's next poll would reach, rather than looped on.
+#[cfg(unix)]
+fn output_broken() -> bool {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    const POLLERR: i16 = 0x008;
+    const POLLHUP: i16 = 0x010;
+    const POLLNVAL: i16 = 0x020;
+    const POLLRDBAND: i16 = 0x080;
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+    }
+
+    let mut pfd = PollFd {
+        fd: 1,
+        events: POLLRDBAND,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: `pfd` is one valid, writable `struct pollfd` for the whole
+        // call, and `nfds` says so; a zero timeout returns at once.
+        let ready = unsafe { poll(&raw mut pfd, 1, 0) };
+        if ready < 0 {
+            if io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            // `IOPOLL_ERROR`, which is not `IOPOLL_BROKEN_OUTPUT`.
+            return false;
+        }
+        return ready > 0 && pfd.revents & (POLLERR | POLLHUP | POLLNVAL) != 0;
+    }
+}
+
+#[cfg(not(unix))]
+fn output_broken() -> bool {
+    // Never asked: standard output is monitored only where `fstat` said it is
+    // a FIFO, which the host cannot say.
+    false
+}
+
+/// `raise (SIGPIPE)`: at its default disposition the signal ends the process,
+/// as the write to a gone reader would have; ignored, it returns.
+#[cfg(unix)]
+fn raise_sigpipe() {
+    const SIGPIPE: i32 = 13;
+    unsafe extern "C" {
+        fn raise(sig: i32) -> i32;
+    }
+    // SAFETY: `raise` takes a signal number and touches no memory of ours.
+    // Its result is that of sending the signal; upstream ignores it as well,
+    // since `exit` follows whatever happened.
+    unsafe { raise(SIGPIPE) };
+}
+
+#[cfg(not(unix))]
+fn raise_sigpipe() {}
+
+/// Whether anything is still worth watching -- upstream's `any_live_files`.
 ///
 /// `--retry --follow=name` is always worth watching: the whole point of the
-/// combination is to wait for a file that does not exist yet.
+/// combination is to wait for a file that does not exist yet. Otherwise a file
+/// is live while it is open, or while `--retry` keeps a name that has not been
+/// given up on.
 fn any_live(watched: &[Watched], options: &Options) -> bool {
     if options.retry && options.follow == Follow::Name {
         return true;
     }
-    watched.iter().any(|w| w.file.is_some())
+    watched
+        .iter()
+        .any(|w| w.file.is_some() || (!w.ignore && options.retry))
 }
 
 /// Whether a file of this type can be followed at all: upstream's
@@ -1849,53 +2752,6 @@ fn process_alive(_pid: u64) -> bool {
     true
 }
 
-/// Standard input as a [`File`], so that the seeking paths and `metadata` work
-/// on it exactly as they do on an opened file.
-///
-/// The returned handle does **not** own the descriptor — dropping it must not
-/// close standard input, which the rest of the program and the caller's shell
-/// still have opinions about.
-fn stdin_as_file() -> File {
-    #[cfg(unix)]
-    {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        // SAFETY: descriptor 0 is open for the life of the process, and the
-        // `File` is leaked rather than dropped, so it is never closed here.
-        let borrowed = unsafe { File::from_raw_fd(io::stdin().as_raw_fd()) };
-        clone_or_leak(borrowed)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle};
-        // SAFETY: as above, for the equivalent handle.
-        let borrowed = unsafe { File::from_raw_handle(io::stdin().as_raw_handle()) };
-        clone_or_leak(borrowed)
-    }
-}
-
-/// Turn a borrowed handle into an owned one by duplicating it, falling back to
-/// leaking the borrow if the duplicate fails.
-///
-/// Either way the original descriptor survives: `try_clone` makes a second one,
-/// and `ManuallyDrop::into_inner` of a leaked handle is never reached because
-/// the leak is what is returned.
-fn clone_or_leak(borrowed: File) -> File {
-    let borrowed = std::mem::ManuallyDrop::new(borrowed);
-    borrowed.try_clone().unwrap_or_else(|_| {
-        // SAFETY: the handle inside is still open and is never dropped, because
-        // `borrowed` is a `ManuallyDrop` that goes out of scope without running
-        // a destructor. The copy handed out aliases it for the rest of the
-        // process, which is exactly what a borrowed standard input is.
-        unsafe { std::ptr::read(&raw const *borrowed) }
-    })
-}
-
-/// Whether standard input is a regular file, which decides whether a plain
-/// `read` on it would block.
-fn stdin_is_regular() -> bool {
-    filekind::is_regular(&stdin_as_file())
-}
-
 // -------------------------------------------------------------- byte paths ---
 
 fn arg_bytes(a: &OsString) -> Vec<u8> {
@@ -1993,32 +2849,63 @@ mod tests {
         e.sentence.clone()
     }
 
-    /// Run the streaming half of [`emit`] — the paths that take any `Read`, and
-    /// so the ones that can be exercised without a file on disk. This is exactly
-    /// what `---presume-input-pipe` selects, which is why it is set here.
-    fn stream(input: &[u8], items: &[&str]) -> Vec<u8> {
+    /// The request's options as `run` hands them on: a `+N` already turned
+    /// into the `N - 1` items to skip.
+    fn as_run_sees(items: &[&str]) -> Options {
         let mut options = parse(items);
-        options.presume_input_pipe = true;
-        let mut source = input;
-        let mut out: Vec<u8> = Vec::new();
-        let n = options.n_units;
-        match (options.unit, options.from_start) {
-            // The `N - 1` that `run` applies before calling `emit`; repeated
-            // here because this helper stands in for `run`.
-            (Unit::Bytes, true) => skip_bytes(&mut source, &mut out, n.saturating_sub(1)),
-            (Unit::Lines, true) => {
-                skip_lines(&mut source, &mut out, n.saturating_sub(1), options.line_end)
-            }
-            (Unit::Bytes, false) => last_bytes_stream(&mut source, &mut out, n),
-            (Unit::Lines, false) => last_lines_stream(&mut source, &mut out, n, options.line_end),
+        if options.from_start {
+            options.n_units = options.n_units.saturating_sub(1);
         }
-        .unwrap();
+        options
+    }
+
+    /// `tail_lines` or `tail_bytes`, as [`emit`] chooses between them.
+    fn routes(
+        source: &mut (impl Read + Seek),
+        out: &mut Vec<u8>,
+        options: &Options,
+        facts: Facts,
+    ) -> Result<(), Failure> {
+        let n = options.n_units;
+        match options.unit {
+            Unit::Lines => tail_lines(source, out, n, options, facts),
+            Unit::Bytes => tail_bytes(source, out, n, options, facts),
+        }
+    }
+
+    /// Run a request through the routes a pipe takes -- the ones that read
+    /// forwards and never seek, which is what `---presume-input-pipe` selects
+    /// -- over bytes in memory.
+    fn stream(input: &[u8], items: &[&str]) -> Vec<u8> {
+        let mut options = as_run_sees(items);
+        options.presume_input_pipe = true;
+        let pipe = Facts {
+            regular: false,
+            size: 0,
+            blksize: DEV_BSIZE,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        routes(&mut io::Cursor::new(input), &mut out, &options, pipe).unwrap();
         out
     }
 
-    /// The same request against a real file, so the seeking paths run. Both
-    /// halves must agree — that they are separate code is the reason to check.
+    /// The same request against a regular file in memory whose block size is
+    /// zero, so that every route that seeks is taken however small the input.
     fn seeking(input: &[u8], items: &[&str]) -> Vec<u8> {
+        let options = as_run_sees(items);
+        let regular = Facts {
+            regular: true,
+            size: input.len() as u64,
+            blksize: 0,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        routes(&mut io::Cursor::new(input), &mut out, &options, regular).unwrap();
+        out
+    }
+
+    /// The same request against a real file, through [`emit`]: the `fstat`,
+    /// and the routes it chooses, are the real ones.
+    fn on_disk(input: &[u8], items: &[&str]) -> Vec<u8> {
         let mut path = std::env::temp_dir();
         path.push(format!(
             "slateos-tail-test-{}-{:?}",
@@ -2026,37 +2913,87 @@ mod tests {
             std::thread::current().id()
         ));
         std::fs::write(&path, input).unwrap();
-        let options = parse(items);
+        let options = as_run_sees(items);
         let mut file = File::open(&path).unwrap();
         let mut out: Vec<u8> = Vec::new();
-        let n = options.n_units;
-        let result = match (options.unit, options.from_start) {
-            (Unit::Bytes, true) => {
-                file.seek(SeekFrom::Start(n.saturating_sub(1))).unwrap();
-                dump(&mut file, &mut out)
-            }
-            (Unit::Lines, true) => {
-                skip_lines(&mut file, &mut out, n.saturating_sub(1), options.line_end)
-            }
-            (Unit::Bytes, false) => last_bytes_seek(&mut file, &mut out, n),
-            (Unit::Lines, false) => last_lines_seek(&mut file, &mut out, n, options.line_end),
-        };
+        let result = emit(&mut file, &mut out, &options);
         drop(file);
         let _ = std::fs::remove_file(&path);
         result.unwrap();
         out
     }
 
-    /// Both halves at once: they are required to be indistinguishable.
+    /// All three at once: they are required to be indistinguishable.
     fn both(input: &[u8], items: &[&str]) -> Vec<u8> {
         let streamed = stream(input, items);
-        let sought = seeking(input, items);
-        assert_eq!(
-            String::from_utf8_lossy(&streamed),
-            String::from_utf8_lossy(&sought),
-            "the seeking and streaming paths disagree for {items:?}"
-        );
+        for (route, got) in [
+            ("seeking", seeking(input, items)),
+            ("on-disk", on_disk(input, items)),
+        ] {
+            assert_eq!(
+                String::from_utf8_lossy(&streamed),
+                String::from_utf8_lossy(&got),
+                "the streaming and {route} routes disagree for {items:?}"
+            );
+        }
         streamed
+    }
+
+    /// An input that serves `data`, then fails every read once `fail_at`
+    /// bytes have been read -- with `EAGAIN`'s kind when `would_block`, and an
+    /// I/O error otherwise -- and that refuses every seek when `seek_fails`.
+    struct Faulty {
+        data: Vec<u8>,
+        pos: u64,
+        fail_at: u64,
+        would_block: bool,
+        seek_fails: bool,
+    }
+
+    impl Faulty {
+        fn new(data: &[u8], fail_at: u64) -> Self {
+            Faulty {
+                data: data.to_vec(),
+                pos: 0,
+                fail_at,
+                would_block: false,
+                seek_fails: false,
+            }
+        }
+    }
+
+    impl Read for Faulty {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.fail_at {
+                return Err(if self.would_block {
+                    io::Error::from(ErrorKind::WouldBlock)
+                } else {
+                    io::Error::other("injected read failure")
+                });
+            }
+            let start = usize::try_from(self.pos).unwrap().min(self.data.len());
+            let room = usize::try_from(self.fail_at - self.pos).unwrap_or(usize::MAX);
+            let n = buf.len().min(self.data.len() - start).min(room);
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl Seek for Faulty {
+        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+            if self.seek_fails {
+                return Err(io::Error::other("injected seek failure"));
+            }
+            let len = i64::try_from(self.data.len()).unwrap();
+            let at = match to {
+                SeekFrom::Start(offset) => i64::try_from(offset).unwrap(),
+                SeekFrom::Current(delta) => i64::try_from(self.pos).unwrap() + delta,
+                SeekFrom::End(delta) => len + delta,
+            };
+            self.pos = u64::try_from(at).map_err(|_| io::Error::other("before the start"))?;
+            Ok(self.pos)
+        }
     }
 
     // ------------------------------------------------------------ options ---
@@ -2498,11 +3435,219 @@ mod tests {
     /// terminator it is looking for is nowhere in the block it just read.
     #[test]
     fn a_line_longer_than_a_block_is_still_one_line() {
-        let mut input: Vec<u8> = vec![b'x'; CHUNK * 3 + 7];
+        let mut input: Vec<u8> = vec![b'x'; BUFSIZ * 3 + 7];
         input.push(b'\n');
         input.extend_from_slice(b"last\n");
         assert_eq!(both(&input, &["-n", "1"]), b"last\n");
         assert_eq!(both(&input, &["-n", "2"]).len(), input.len());
+    }
+
+    // ------------------------------------------------------------ routes ---
+
+    /// `-n0` from the end prints nothing at all -- not even an unterminated
+    /// last line, which would otherwise be the one line the count is spent
+    /// on. `run` stops before reading for a plain `-n0`, but `-f -n0` reads,
+    /// and `tail -n0 -f log` must begin silent.
+    #[test]
+    fn no_lines_from_the_end_is_nothing_even_unterminated() {
+        assert_eq!(both(b"abc\ndef", &["-n", "0"]), b"");
+        assert_eq!(both(b"abc\ndef\n", &["-n", "0"]), b"");
+        assert_eq!(both(b"abc", &["-c", "0"]), b"");
+    }
+
+    /// The copy after the backwards scan stops at the end the file had when
+    /// its end was measured, so lines written meanwhile are left for `-f`.
+    #[test]
+    fn the_backwards_scan_copies_no_further_than_the_end_it_measured() {
+        let mut input = io::Cursor::new(&b"1\n2\n3\n4\n"[..]);
+        let mut out = Vec::new();
+        file_lines(&mut input, &mut out, 1, 0, 4, b'\n').unwrap();
+        assert_eq!(out, b"2\n");
+        let mut out = Vec::new();
+        file_lines(&mut input, &mut out, 5, 0, 4, b'\n').unwrap();
+        assert_eq!(out, b"1\n2\n");
+    }
+
+    /// "Use file_lines only if FD refers to a regular file for which lseek
+    /// (... SEEK_END) works": a regular file that will not seek -- as
+    /// `/proc/cpuinfo` will not seek to its end -- is read forwards instead.
+    /// And a byte count from the end of a regular file that says it is empty,
+    /// as every file in `/proc` says, is no more than a block, so it too is
+    /// read rather than sought.
+    #[test]
+    fn a_regular_file_that_will_not_seek_is_read_forwards() {
+        let options = as_run_sees(&["-n", "2"]);
+        let mut input = Faulty::new(b"a\nb\nc\n", u64::MAX);
+        input.seek_fails = true;
+        let regular = Facts {
+            regular: true,
+            size: 6,
+            blksize: 0,
+        };
+        let mut out = Vec::new();
+        tail_lines(&mut input, &mut out, 2, &options, regular).unwrap();
+        assert_eq!(out, b"b\nc\n");
+
+        let options = as_run_sees(&["-c", "3"]);
+        let mut input = Faulty::new(b"a\nb\nc\n", u64::MAX);
+        input.seek_fails = true;
+        let proc_file = Facts {
+            regular: true,
+            size: 0,
+            blksize: 4096,
+        };
+        let mut out = Vec::new();
+        tail_bytes(&mut input, &mut out, 3, &options, proc_file).unwrap();
+        assert_eq!(out, b"\nc\n");
+    }
+
+    /// Where a read fails decides what upstream says and whether it goes on:
+    /// while still looking for the start it is `Read`, and the run moves on to
+    /// the next operand; while copying it is `Copy`, and the run ends.
+    #[test]
+    fn a_failed_read_is_told_apart_by_where_it_happened() {
+        let pipe = Facts {
+            regular: false,
+            size: 0,
+            blksize: DEV_BSIZE,
+        };
+        let mut options = as_run_sees(&["-n", "2"]);
+        options.presume_input_pipe = true;
+        let mut out = Vec::new();
+        // Counting from the end reads everything first, so a failure prints
+        // nothing at all.
+        let got = tail_lines(
+            &mut Faulty::new(b"a\nb\nc\n", 3),
+            &mut out,
+            2,
+            &options,
+            pipe,
+        );
+        assert!(matches!(got, Err(Failure::Read(_))), "{got:?}");
+        let got = tail_bytes(&mut Faulty::new(b"abcdef", 3), &mut out, 2, &options, pipe);
+        assert!(matches!(got, Err(Failure::Read(_))), "{got:?}");
+        assert!(out.is_empty());
+
+        // From the start: a failure while skipping is `Read`...
+        let plus = as_run_sees(&["-n", "+3"]);
+        let got = tail_lines(
+            &mut Faulty::new(b"a\nb\nc\nd\n", 1),
+            &mut out,
+            plus.n_units,
+            &plus,
+            pipe,
+        );
+        assert!(matches!(got, Err(Failure::Read(_))), "{got:?}");
+        assert!(out.is_empty());
+        // ...and one after it, while copying, is `Copy`, with what the skip's
+        // last read brought already written.
+        let got = tail_lines(
+            &mut Faulty::new(b"a\nb\nc\nd\n", 6),
+            &mut out,
+            plus.n_units,
+            &plus,
+            pipe,
+        );
+        assert!(matches!(got, Err(Failure::Copy(_))), "{got:?}");
+        assert_eq!(out, b"c\n");
+    }
+
+    /// A regular file that will not seek where it must ends the run, and the
+    /// sentence names the seek it wanted.
+    #[test]
+    fn a_failed_seek_names_the_offset_it_wanted() {
+        let regular = Facts {
+            regular: true,
+            size: 10_000,
+            blksize: 0,
+        };
+        let mut input = Faulty::new(&[b'x'; 10_000], u64::MAX);
+        input.seek_fails = true;
+        let options = as_run_sees(&["-c", "+5"]);
+        let mut out = Vec::new();
+        let got = tail_bytes(&mut input, &mut out, options.n_units, &options, regular);
+        assert!(
+            matches!(got, Err(Failure::Seek(Whence::Current(4), _))),
+            "{got:?}"
+        );
+        assert_eq!(
+            Whence::Current(4).sentence(),
+            "cannot seek to relative offset 4"
+        );
+        assert_eq!(Whence::Set(8192).sentence(), "cannot seek to offset 8192");
+    }
+
+    /// `dump_remainder`'s bounds -- a count, one buffer, or the end -- and a
+    /// non-blocking input with nothing more to give, which ends a copy
+    /// quietly rather than failing it.
+    #[test]
+    fn a_copy_stops_at_its_bound() {
+        let data = vec![b'z'; BUFSIZ * 2 + 5];
+        let mut out = Vec::new();
+        assert_eq!(
+            dump(&mut &data[..], &mut out, Amount::AtMost(3)).unwrap(),
+            3
+        );
+        assert_eq!(
+            dump(&mut &data[..], &mut out, Amount::AtMost(0)).unwrap(),
+            0
+        );
+        let mut out = Vec::new();
+        assert_eq!(
+            dump(&mut &data[..], &mut out, Amount::ABuffer).unwrap(),
+            BUFSIZ as u64
+        );
+        let mut out = Vec::new();
+        assert_eq!(
+            dump(&mut &data[..], &mut out, Amount::ToEof).unwrap(),
+            data.len() as u64
+        );
+        assert_eq!(out, data);
+
+        let mut out = Vec::new();
+        let mut drained = Faulty::new(b"abc", 2);
+        drained.would_block = true;
+        assert_eq!(dump(&mut drained, &mut out, Amount::ToEof).unwrap(), 2);
+        assert_eq!(out, b"ab");
+    }
+
+    /// Under `-f`, a `-` that is a pipe is not followed -- `printf x | tail
+    /// -f` ends once it has printed -- and nothing else is dropped. An operand
+    /// already given up on still counts, as upstream counts it: the loop then
+    /// finds nothing live, and says so.
+    #[test]
+    fn a_piped_standard_input_is_not_followed() {
+        let open = |name: &str, fifo: bool| {
+            let mut w = Watched::new(&OsString::from(name));
+            w.file = Some(Handle::Opened(
+                File::open(std::env::current_exe().unwrap()).unwrap(),
+            ));
+            w.fifo = fifo;
+            w
+        };
+        let mut ws = vec![open("-", true), open("log", true), open("-", false)];
+        assert_eq!(ignore_fifo_and_pipe(&mut ws), 2);
+        assert!(ws[0].ignore && ws[0].file.is_none());
+        assert!(!ws[1].ignore && ws[1].file.is_some());
+        assert!(!ws[2].ignore && ws[2].file.is_some());
+        assert_eq!(ignore_fifo_and_pipe(&mut ws[..1]), 1);
+    }
+
+    /// Upstream's `any_live_files`: an open file is live; so is a name
+    /// `--retry` has not given up on, and with `--follow=name` everything is.
+    #[test]
+    fn what_counts_as_still_worth_following() {
+        let mut gone = Watched::new(&OsString::from("log"));
+        gone.ignore = true;
+        let waiting = Watched::new(&OsString::from("log"));
+        let plain = parse(&["-f"]);
+        let retry = parse(&["-f", "--retry"]);
+        let by_name = parse(&["-F"]);
+        assert!(!any_live(std::slice::from_ref(&gone), &plain));
+        assert!(!any_live(std::slice::from_ref(&waiting), &plain));
+        assert!(any_live(std::slice::from_ref(&waiting), &retry));
+        assert!(!any_live(std::slice::from_ref(&gone), &retry));
+        assert!(any_live(std::slice::from_ref(&gone), &by_name));
     }
 
     // ----------------------------------------------------------- warnings ---

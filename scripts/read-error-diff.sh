@@ -45,7 +45,7 @@ DIFF_NO_REF=1
 DIFF_NEED="timeout"
 DIFF_BINS="b2sum base32 base64 cat cksum comm cut dircolors expand factor fold
            head join md5sum nl numfmt od paste sha1sum sha256sum sha512sum sort
-           sum tee tr tsort unexpand uniq wc"
+           sum tail tee tr tsort unexpand uniq wc"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -176,6 +176,18 @@ sweep head
 sweep head      -c 3
 sweep head      -n 1 -
 sweep head      f -
+# `tail` finds a closed standard input with the `fstat` both its routes begin
+# with -- `cannot fstat` -- and its close at the end says `-`. A directory
+# opens, and fails where it is read: counting from the end reads it forwards,
+# where a failed read is reported and the run goes on; `-c +2` seeks past the
+# start and then copies, where a failed read ends the run before the close.
+sweep tail
+sweep tail      -c 3
+sweep tail      -n +2
+sweep tail      -c +2
+sweep tail      -n 1 -
+sweep tail      f -
+sweep tail      - f
 # A read error that ends the run: no close is reached.
 sweep join      - f
 sweep join      f -
@@ -223,6 +235,7 @@ sweep md5sum    f
 sweep sum       f
 sweep cat       f
 sweep head      f
+sweep tail      f
 sweep od        f
 sweep uniq      f
 sweep sort      f

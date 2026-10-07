@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// one or is added, and a converted binary fails here until it is taken off.
 const NOT_YET_GUARDED: &[&str] = &[
     "awk", "bc", "chmod", "csplit", "date", "df", "dir", "du", "ed", "find", "hostname", "install",
-    "kill", "ls", "more", "patch", "stat", "tail", "vdir",
+    "kill", "ls", "more", "patch", "stat", "vdir",
 ];
 
 fn crate_dir() -> PathBuf {

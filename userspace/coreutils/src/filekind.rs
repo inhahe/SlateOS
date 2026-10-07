@@ -96,6 +96,42 @@ pub fn is_regular(file: &File) -> bool {
     regular(file) == Some(true)
 }
 
+/// Whether `file` is a pipe or a FIFO -- POSIX's `S_ISFIFO`.
+///
+/// `tail -f` asks it of standard input, which it does not follow when it is a
+/// pipe. On the host a pipe is `FILE_TYPE_PIPE` to `GetFileType`, as an MSYS
+/// pipe is, and `Metadata` has no way to say so; on Unix the metadata answers.
+/// A failure to ask is "no", which leaves a caller treating the file as it
+/// would anything else that is not regular.
+#[must_use]
+pub fn is_pipe(file: &File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        file.metadata().is_ok_and(|m| m.file_type().is_fifo())
+    }
+    #[cfg(all(not(unix), windows))]
+    {
+        use std::os::windows::io::AsRawHandle;
+
+        const FILE_TYPE_PIPE: u32 = 3;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileType(handle: *mut core::ffi::c_void) -> u32;
+        }
+
+        // SAFETY: as in [`regular`] -- a handle valid while `file` is
+        // borrowed, of which `GetFileType` only reads the type.
+        unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_PIPE }
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = file;
+        false
+    }
+}
+
 /// Whether `md` describes a **device** in the sense POSIX utilities mean when
 /// they offer to skip one: a character device, a block device, a socket or a
 /// FIFO.
@@ -232,7 +268,7 @@ pub fn borrowed(fd: i32) -> Option<ManuallyDrop<File>> {
     clippy::arithmetic_side_effects
 )]
 mod tests {
-    use super::{is_regular, is_seekable, regular};
+    use super::{is_pipe, is_regular, is_seekable, regular};
     use std::fs::File;
     use std::io::{Seek, SeekFrom};
 
@@ -273,6 +309,28 @@ mod tests {
         let file = File::open(NULL_DEVICE).expect("open null device");
         assert_eq!(regular(&file), Some(false));
         assert!(!is_regular(&file));
+    }
+
+    /// A pipe is a pipe on either platform, and neither a file nor a device is
+    /// one. On Windows the pipe is the case `Metadata` cannot describe at all.
+    #[test]
+    fn only_a_pipe_is_a_pipe() {
+        let path = scratch(b"x");
+        let file = File::open(&path).expect("open");
+        assert!(!is_pipe(&file));
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        assert!(!is_pipe(
+            &File::open(NULL_DEVICE).expect("open null device")
+        ));
+
+        let (reader, _writer) = std::io::pipe().expect("pipe");
+        #[cfg(unix)]
+        let reader = File::from(std::os::fd::OwnedFd::from(reader));
+        #[cfg(windows)]
+        let reader = File::from(std::os::windows::io::OwnedHandle::from(reader));
+        assert!(is_pipe(&reader));
+        assert_eq!(regular(&reader), Some(false));
     }
 
     /// A directory is not a regular file either, and on Windows it is the case

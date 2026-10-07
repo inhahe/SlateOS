@@ -1,6 +1,6 @@
 ## B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY (lane B, 2026-10-03)
 
-**Status:** OPEN (lane B). Fixed in 31 programs so far and in the `-i`/`-ok`
+**Status:** OPEN (lane B). Fixed in 33 programs so far and in the `-i`/`-ok`
 prompts of `rm`, `cp`, `mv`, `ln` and `find`; "Where, measured" lists them,
 and the rest with GNU's wording.
 
@@ -75,10 +75,11 @@ carries on. `wc-diff.sh` gained 24 cases for all of this (`run_closed`,
 `scripts/read-error-diff.sh` is the regression net: every converted program,
 with standard input closed and with a directory as standard input, against a
 built coreutils 9.4. Converted so far: `base32 base64 cat comm cut dircolors
-expand factor fold head join nl numfmt od paste sort tee tr tsort unexpand uniq
-wc` and the digests (`md5sum sha*sum b2sum cksum sum`); also `sed`, `tac`,
-`shuf`, the prompts, and three whose references are not coreutils, so their own
-harnesses carry the cases: `grep` (3.11: `(standard input)` unquoted, and an
+expand factor fold head join nl numfmt od paste sort tail tee tr tsort unexpand
+uniq wc` and the digests (`md5sum sha*sum b2sum cksum sum`); also `sed`, `tac`,
+`shuf`, the prompts, and four whose references are not coreutils, so their own
+harnesses carry the cases: `cmp` (diffutils 3.10: `xstdopen` first, then
+`cmp: -: Bad file descriptor` with status 2), `grep` (3.11: `(standard input)` unquoted, and an
 `fstat` failure skips `-c`'s count where a read failure does not), `xargs`
 (findutils 4.9: a read error ends the input, and gnulib's `close_stdin` reports
 it at exit, giving a seekable standard input back its read-ahead) and `strings`
@@ -106,10 +107,8 @@ noted:
 
 | program | GNU (each line a separate message, then status) |
 |---|---|
-| `tail` | `tail: cannot fstat 'standard input': Bad file descriptor`, `tail: -: Bad file descriptor`, 1 |
 | `du --files0-from=-` | `du: -: read error: Bad file descriptor`, 1 |
 | `date -f -` | `date: 'standard input': read error: Bad file descriptor`, 1 (a directory: ours drops the quotes) |
-| `cmp - f` | `cmp: -: Bad file descriptor`, 2 |
 | `csplit - 1` | `csplit: read error: Bad file descriptor`, then `0` on stdout, 1 (a directory: ours omits the `0`) |
 | `awk 1` | `awk: fatal: error reading input file `-': Bad file descriptor`, 2 (a directory: gawk warns `command line argument `-' is a directory: skipped` and exits 0) |
 

@@ -6,8 +6,9 @@
 //! named by its date, chosen while its events are the ones shown, and said
 //! to be today, to have events, or to be another month's; below them, the
 //! card of the chosen day's events, each named by its title and described by
-//! its time. In the year: its arrows, its title -- which shows the month
-//! again -- and its twelve months.
+//! its time, and pressed to open it in the calendar program. In the year: its
+//! arrows, its title -- which shows the month again -- and its twelve
+//! months.
 //!
 //! Every box is the one the popup is drawn in and takes its press in
 //! ([`MonthLayout`], [`YearLayout`]), so a press at the middle of a part's
@@ -18,9 +19,8 @@ use guitk::widget::automation::{Node, Role, Value};
 use crate::Rect;
 
 use super::{
-    Agenda, CalendarHit, CalendarView, CalendarViewMode, EVENT_HEADER_HEIGHT, EVENT_ROW_HEIGHT,
-    GRID_CELLS, MAX_VISIBLE_EVENTS, MonthLayout, YearLayout, day_description, day_name,
-    event_time_label, month_name,
+    Agenda, CalendarHit, CalendarView, CalendarViewMode, GRID_CELLS, MAX_VISIBLE_EVENTS,
+    MonthLayout, YearLayout, day_description, day_name, event_time_label, month_name,
 };
 
 /// A part of the calendar popup, as tools name it.
@@ -32,20 +32,26 @@ pub enum CalendarPart {
     Grid,
     /// The card of the chosen day's events.
     Events,
-    /// One of them, by its place on the card.
-    Event(usize),
     /// A control the popup's hit test names: an arrow, the title, "Today",
-    /// a day, a month.
+    /// a day, a month, an event on the card.
     Control(CalendarHit),
 }
 
 impl CalendarView {
     /// Where the control `hit` is drawn and takes a press, for a popup whose
-    /// top-left corner is at `(x, y)` drawn at `scale` -- `None` for one it
-    /// does not show now: "Today" on today's month, a day in the year's
-    /// overview, a month in the month's, any while the popup is closed.
+    /// top-left corner is at `(x, y)` drawn at `scale`, its days' events from
+    /// `agenda` -- `None` for one it does not show now: "Today" on today's
+    /// month, a day in the year's overview, a month in the month's, an event
+    /// the card does not show, any while the popup is closed.
     #[must_use]
-    pub fn control_rect(&self, hit: CalendarHit, x: f32, y: f32, scale: f32) -> Option<Rect> {
+    pub fn control_rect(
+        &self,
+        hit: CalendarHit,
+        x: f32,
+        y: f32,
+        scale: f32,
+        agenda: &Agenda,
+    ) -> Option<Rect> {
         if !self.visible {
             return None;
         }
@@ -59,6 +65,10 @@ impl CalendarView {
                     CalendarHit::Today => layout.today_button(),
                     CalendarHit::Day(index) => (index < GRID_CELLS).then(|| layout.cell(index)),
                     CalendarHit::Month(_) => None,
+                    CalendarHit::Event(index) => {
+                        let (card, shown) = self.detail_card(&layout, agenda)?;
+                        (index < shown).then(|| layout.event_row(card, index))
+                    }
                     CalendarHit::Panel => Some(layout.frame),
                 }
             }
@@ -72,7 +82,10 @@ impl CalendarView {
                         let index = usize::try_from(month.saturating_sub(1)).ok()?;
                         Some(layout.month(index))
                     }
-                    CalendarHit::Month(_) | CalendarHit::Today | CalendarHit::Day(_) => None,
+                    CalendarHit::Month(_)
+                    | CalendarHit::Today
+                    | CalendarHit::Day(_)
+                    | CalendarHit::Event(_) => None,
                     CalendarHit::Panel => Some(layout.frame),
                 }
             }
@@ -85,7 +98,7 @@ impl CalendarView {
     pub fn automation(&self, x: f32, y: f32, scale: f32, agenda: &Agenda) -> Node<CalendarPart> {
         let control = |hit: CalendarHit, role: Role, name: String| {
             let bounds = self
-                .control_rect(hit, x, y, scale)
+                .control_rect(hit, x, y, scale, agenda)
                 .unwrap_or(Rect::new(x, y, 0.0, 0.0));
             Node::new(CalendarPart::Control(hit), role, name, bounds)
         };
@@ -186,7 +199,8 @@ impl CalendarView {
     }
 
     /// The card of the chosen day's events, while it is shown: the events it
-    /// shows, each named by its title and described by its time.
+    /// shows, each named by its title and described by its time, each pressed
+    /// to open it in the calendar program.
     fn events_node(&self, layout: &MonthLayout, agenda: &Agenda) -> Option<Node<CalendarPart>> {
         let (year, month, day) = self.selected_date?;
         let events = agenda.on(year, month, day);
@@ -201,19 +215,16 @@ impl CalendarView {
             let more = events.len().saturating_sub(MAX_VISIBLE_EVENTS);
             node.description = Some(format!("{more} more not shown"));
         }
-        let row_h = layout.px(EVENT_ROW_HEIGHT);
-        let mut top = card.y + layout.px(EVENT_HEADER_HEIGHT);
         for (index, event) in events.iter().take(MAX_VISIBLE_EVENTS).enumerate() {
             let mut row = Node::new(
-                CalendarPart::Event(index),
+                CalendarPart::Control(CalendarHit::Event(index)),
                 Role::ListItem,
                 event.title.clone(),
-                Rect::new(card.x, top, card.w, row_h),
+                layout.event_row(card, index),
             );
             // As the card says it.
             row.description = Some(event_time_label(event));
             node.children.push(row);
-            top += row_h;
         }
         Some(node)
     }

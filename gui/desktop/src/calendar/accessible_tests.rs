@@ -182,12 +182,26 @@ fn a_chosen_days_events_are_listed() {
             ("Call Mum", Some("18:00"))
         ]
     );
-    // The card takes a press as the popup's own, wherever on it.
+    // A row takes a press as its event's, to open it; the card's heading
+    // is the popup's own.
     let (x, y) = card.children[1].bounds.centre();
     assert_eq!(
         view.hit_test(X, Y, SCALE, x, y, &agenda),
+        Some(CalendarHit::Event(1))
+    );
+    assert_eq!(
+        view.hit_test(
+            X,
+            Y,
+            SCALE,
+            card.bounds.x + 4.0,
+            card.bounds.y + 2.0,
+            &agenda
+        ),
         Some(CalendarHit::Panel)
     );
+    // Opening one is the host's to do: the view stays as it is.
+    assert!(!view.apply(CalendarHit::Event(1)));
     controls_answer_where_they_are(&view, &agenda);
 }
 
@@ -196,7 +210,10 @@ fn a_chosen_days_events_are_listed() {
 fn today_is_shown_away_from_todays_month() {
     let mut view = calendar();
     let agenda = Agenda::default();
-    assert_eq!(view.control_rect(CalendarHit::Today, X, Y, SCALE), None);
+    assert_eq!(
+        view.control_rect(CalendarHit::Today, X, Y, SCALE, &agenda),
+        None
+    );
     view.apply(CalendarHit::NextPage);
     let names: Vec<String> = tree(&view, &agenda)
         .children
@@ -228,27 +245,53 @@ fn the_year_shows_its_months() {
 }
 
 /// **What the popup does not show has no box**: a month in the month's
-/// view, a day or "Today" in the year's, a day past the grid, anything of a
-/// closed popup.
+/// view, a day or "Today" in the year's, a day past the grid, an event with
+/// no card or past the card's rows, anything of a closed popup.
 #[test]
 fn what_the_popup_does_not_show_has_no_box() {
     let mut view = calendar();
+    let agenda = Agenda::of(vec![event("Dentist", 10, 9, 30)]);
     for hit in [
         CalendarHit::Month(3),
         CalendarHit::Today,
         CalendarHit::Day(GRID_CELLS),
+        // No day chosen, so no card.
+        CalendarHit::Event(0),
     ] {
-        assert_eq!(view.control_rect(hit, X, Y, SCALE), None, "{hit:?}");
+        assert_eq!(
+            view.control_rect(hit, X, Y, SCALE, &agenda),
+            None,
+            "{hit:?}"
+        );
     }
+    assert!(view.apply(CalendarHit::Day(day_index(&view, 10))));
+    assert!(
+        view.control_rect(CalendarHit::Event(0), X, Y, SCALE, &agenda)
+            .is_some(),
+        "the card's one row has no box"
+    );
+    assert_eq!(
+        view.control_rect(CalendarHit::Event(1), X, Y, SCALE, &agenda),
+        None,
+        "a row past the card's"
+    );
     view.apply(CalendarHit::Title);
     for hit in [
         CalendarHit::Day(0),
         CalendarHit::Today,
         CalendarHit::Month(0),
         CalendarHit::Month(13),
+        CalendarHit::Event(0),
     ] {
-        assert_eq!(view.control_rect(hit, X, Y, SCALE), None, "{hit:?}");
+        assert_eq!(
+            view.control_rect(hit, X, Y, SCALE, &agenda),
+            None,
+            "{hit:?}"
+        );
     }
     view.set_visible(false);
-    assert_eq!(view.control_rect(CalendarHit::Title, X, Y, SCALE), None);
+    assert_eq!(
+        view.control_rect(CalendarHit::Title, X, Y, SCALE, &agenda),
+        None
+    );
 }

@@ -645,7 +645,7 @@ impl DesktopShell {
             Hit::CalendarControl(control) => {
                 let (x, y) = self.calendar_origin();
                 self.calendar
-                    .control_rect(control, x, y, self.calendar_scale())
+                    .control_rect(control, x, y, self.calendar_scale(), &self.agenda)
             }
             _ => None,
         }
@@ -1762,6 +1762,9 @@ impl Accessible for DesktopShell {
             | (ShellPart::Control(hit), Action::Press) => self.click_part(hit),
             (ShellPart::Control(Hit::PowerMenuEntry(_)), _) => Err(not_for(Role::ListItem)),
             (ShellPart::Control(Hit::StartMenuEntry(_)), _) => Err(not_for(Role::ListItem)),
+            (ShellPart::Control(Hit::CalendarControl(CalendarHit::Event(_))), _) => {
+                Err(not_for(Role::ListItem))
+            }
             (
                 ShellPart::Control(Hit::CalendarControl(
                     CalendarHit::Day(_) | CalendarHit::Month(_),
@@ -1778,7 +1781,6 @@ impl Accessible for DesktopShell {
                 CalendarPart::Popup => Role::Dialog,
                 CalendarPart::Grid => Role::Grid,
                 CalendarPart::Events => Role::List,
-                CalendarPart::Event(_) => Role::ListItem,
                 CalendarPart::Control(_) => Role::Button,
             })),
             (ShellPart::StartSearch, Action::SetText(text)) => {

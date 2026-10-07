@@ -1898,6 +1898,59 @@ fn the_popup_shows_the_calendar_programs_events() {
     });
 }
 
+/// **An event on the popup's card opens the calendar program**, and the
+/// popup goes, as a program started from the start menu closes it.
+#[test]
+fn an_event_on_the_popups_card_opens_the_calendar() {
+    appearance::config::testing::with_scratch_config("popup-open-event", |root| {
+        let dir = root.join("slateos").join("calendar");
+        std::fs::create_dir_all(&dir).unwrap();
+        let daily = crate::calendar::testing::event(
+            "Standup",
+            (2020, 1, 1),
+            9,
+            calendarstore::RecurrenceRule::Daily,
+            None,
+        );
+        std::fs::write(
+            dir.join("events.txt"),
+            calendarstore::calendar_text(&[daily]),
+        )
+        .unwrap();
+        let mut s = shell();
+        s.toggle_calendar();
+        let today = tree(&s)
+            .walk()
+            .find(|n| {
+                n.description
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with("today"))
+            })
+            .map(|n| n.id)
+            .expect("today is shown");
+        s.invoke(&today, Action::Choose, 0.0, 0.0)
+            .expect("today chosen");
+        let row = tree(&s)
+            .walk()
+            .find(|n| n.name == "Standup")
+            .map(|n| n.id)
+            .expect("the event is on the card");
+        assert_eq!(
+            row,
+            ShellPart::Control(Hit::CalendarControl(crate::calendar::CalendarHit::Event(0)))
+        );
+
+        let opened = press(&mut s, row).expect("refused");
+        assert_eq!(
+            opened,
+            Some(ShellAction::Launch(crate::hotkeys::Launch::program(
+                std::path::PathBuf::from(crate::launcher::CALENDAR)
+            )))
+        );
+        assert!(!s.calendar.visible, "the popup stayed");
+    });
+}
+
 /// **A calendar widget shows the month today is in**, made by the shell's
 /// own calendar, the popup's -- and the month is made only while a calendar
 /// is out.

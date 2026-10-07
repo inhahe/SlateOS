@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 31 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 25 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -302,7 +302,6 @@ gui/desktop/src/clipboard_viewer.rs
 gui/desktop/src/device_settings.rs
 gui/desktop/src/file_drop.rs
 gui/desktop/src/language_settings.rs
-gui/desktop/src/multimon.rs
 gui/desktop/src/network_indicator.rs
 gui/desktop/src/network_settings.rs
 gui/desktop/src/power_settings.rs

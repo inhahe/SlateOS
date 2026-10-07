@@ -288,3 +288,39 @@ fn a_calendar_read_anew_is_looked_at_again() {
         assert!(next <= Duration::from_mins(45), "{next:?}");
     });
 }
+
+/// **A reminder is put off from the keyboard too**: Down to "Remind me
+/// again", Right to its times, Down to the first, Enter -- as a menu's rows
+/// are chosen everywhere on the desktop.
+#[test]
+fn a_reminder_is_put_off_from_the_keyboard() {
+    use guitk::event::{Key, KeyEvent, Modifiers};
+    let key = |k: Key| KeyEvent {
+        key: k,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+        text: String::new(),
+    };
+    appearance::config::testing::with_scratch_config("reminder-keys", |_root| {
+        let mut s = DesktopShell::new(1920, 1080);
+        let now = DesktopShell::unix_now();
+        let zone = s.local_zone();
+        s.agenda = calendar::Agenda::of(vec![event_ahead("Dentist", now, 10, 15, &zone)]);
+        assert_eq!(s.raise_due_reminders(now), 1);
+        s.advance_toasts(1_000);
+        let id = reminders_raised(&s)[0].id;
+        s.open_notification_menu(reminders::APP_NAME.to_owned(), Some(id), 900.0, 500.0, true);
+
+        for k in [Key::Down, Key::Right, Key::Down, Key::Enter] {
+            drop(s.handle_hotkey(&key(k)));
+        }
+        assert!(s.notification_menu.is_none(), "the menu stayed");
+        let later = DesktopShell::unix_now();
+        assert_eq!(s.raise_due_reminders(later), 0);
+        let wait = s.next_reminder_in(later).expect("nothing to wake for");
+        assert!(
+            (Duration::from_mins(4)..=Duration::from_mins(5)).contains(&wait),
+            "put off for {wait:?}, not five minutes"
+        );
+    });
+}

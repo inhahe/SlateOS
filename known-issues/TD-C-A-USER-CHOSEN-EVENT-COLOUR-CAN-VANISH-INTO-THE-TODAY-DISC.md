@@ -15,20 +15,23 @@ as a filled disc in your accent colour. If you give an event a colour close to
 your accent — or exactly it — the dot lands on the disc and disappears. The
 event is still there; the mark saying so is not visible.
 
-**Where:** `gui/desktop/src/calendar.rs`, `render_day_cell`. The dot's colour is
+**Where:** `gui/desktop/src/calendar.rs`, `EventMark::on_disc` -- which the
+popup's day cell (`render_day_cell`) and the calendar widget's dot both call
+for today's day. Since 2026-10-07 the events are the calendar program's
+(`design-decisions.md` §1497), and the rule is the one this entry was filed
+against:
 
 ```rust
-let dot_color = match (first.color, is_today) {
-    (Some(chosen), _) => chosen,          // <-- no contrast check
-    (None, true) => readable_on(today_disc),
-    (None, false) => p.lavender,
-};
+pub fn on_disc(self, disc: Color) -> Color {
+    self.chosen.unwrap_or_else(|| readable_on(disc))  // <-- no contrast check
+}
 ```
 
-The `None` branches are safe by construction: `readable_on` derives the ink from
-the disc's own brightness, and `p.lavender` is only ever drawn on the card. The
-`Some` branch honours the user's colour unconditionally, which is the correct
-*default* instinct and the wrong *only* rule.
+An event with no colour of its own is drawn in its category's colour off
+today, and on today's disc in `readable_on(disc)`, safe by construction:
+`readable_on` derives the ink from the disc's own brightness. A chosen colour
+is honoured unconditionally, which is the correct *default* instinct and the
+wrong *only* rule.
 
 **Why it is filed rather than fixed:** the three available answers are each
 defensible and each visible to the user, so this is a design choice, not an

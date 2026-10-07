@@ -41,3 +41,12 @@ history file is the same file for both, so clearing it would erase the first
 person's notifications and keeping it would show them at the next start.
 The fix is the same session manager: a desktop started per signed-in user,
 in that user's environment, so each has their own folders.
+
+**Widened again 2026-10-07: the calendar.** The clock's popup and the
+calendar widget show the calendar program's events, read from
+`<config>/calendar/events.txt` of the account the desktop runs as
+(design-decisions §1497), and the desktop raises their reminders, keeping
+which it raised in `<data>/reminders` (§1498). So the second person to sign
+in sees the first one's appointments on the clock and is reminded of them.
+The same fix covers it: the desktop's folders become the signed-in user's
+when the desktop is started per user.

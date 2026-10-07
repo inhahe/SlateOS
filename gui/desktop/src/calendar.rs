@@ -1,8 +1,11 @@
 //! Calendar & Scheduling Widget — system tray popup.
 //!
-//! Provides a calendar popup for the taskbar clock area, a digital clock
-//! display, basic event/reminder management, and rendering to
-//! [`RenderCommand`]s that any compositor backend can consume.
+//! Provides a calendar popup for the taskbar clock area -- the month, the
+//! days the user's calendar has events on, and a chosen day's events, each of
+//! which opens the calendar program -- a digital clock display, and rendering
+//! to [`RenderCommand`]s that any compositor backend can consume. The events
+//! are the calendar program's ([`Agenda`]); their reminders are raised by
+//! `crate::reminders`.
 //!
 //! # Components
 //!
@@ -40,6 +43,8 @@
 //! // A click anywhere while it is open, tested against the same layout the
 //! // render came from:
 //! match cal.hit_test(x, y, scale, click_x, click_y, &agenda) {
+//!     // An event on the chosen day's card: the calendar program's to open.
+//!     Some(CalendarHit::Event(_)) => launch(CALENDAR),
 //!     Some(hit) => { cal.apply(hit); }
 //!     None => cal.set_visible(false), // outside the popup: dismiss
 //! }
@@ -1169,6 +1174,10 @@ pub enum CalendarHit {
     Day(usize),
     /// A mini month of the year overview, 1-12.
     Month(u32),
+    /// An event on the chosen day's card, by its place there: opened in the
+    /// calendar program, which is the host's to start -- the view itself
+    /// does not change ([`CalendarView::apply`]).
+    Event(usize),
     /// The popup, but none of its controls. A host uses this to know the click
     /// was *on* the popup and so must not dismiss it.
     Panel,
@@ -1392,6 +1401,24 @@ impl MonthLayout {
             self.frame.y + self.frame.h + self.px(DETAIL_GAP),
             self.frame.w,
             height,
+        )
+    }
+
+    /// Row `index` of the event card `card` ([`detail`](Self::detail)): where
+    /// the event is drawn, takes a press, and is shown to tools -- one answer
+    /// for the three.
+    #[must_use]
+    pub fn event_row(&self, card: Rect, index: usize) -> Rect {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a row of a card showing at most MAX_VISIBLE_EVENTS"
+        )]
+        let above = index as f32 * self.px(EVENT_ROW_HEIGHT);
+        Rect::new(
+            card.x,
+            card.y + self.px(EVENT_HEADER_HEIGHT) + above,
+            card.w,
+            self.px(EVENT_ROW_HEIGHT),
         )
     }
 }
@@ -1690,11 +1717,13 @@ impl CalendarView {
         // The event card is tested first because it is drawn last and hangs
         // *below* the frame: a point inside it is not inside `frame`, and
         // falling through to `None` would dismiss the popup on a click aimed at
-        // the very list the click before it opened.
-        if let Some(card) = self.detail_rect(layout, agenda)
+        // the very list the click before it opened. Its rows are events to
+        // open; the rest of it, its heading and margins, the popup's own.
+        if let Some((card, shown)) = self.detail_card(layout, agenda)
             && card.contains(px, py)
         {
-            return Some(CalendarHit::Panel);
+            let row = (0..shown).find(|&i| layout.event_row(card, i).contains(px, py));
+            return Some(row.map_or(CalendarHit::Panel, CalendarHit::Event));
         }
         if !layout.frame.contains(px, py) {
             return None;
@@ -1739,12 +1768,22 @@ impl CalendarView {
 
     /// Where the event card is, if one is showing.
     fn detail_rect(&self, layout: &MonthLayout, agenda: &Agenda) -> Option<Rect> {
+        self.detail_card(layout, agenda).map(|(card, _)| card)
+    }
+
+    /// Where the event card is, if one is showing, and how many events it
+    /// shows a row for.
+    pub(crate) fn detail_card(
+        &self,
+        layout: &MonthLayout,
+        agenda: &Agenda,
+    ) -> Option<(Rect, usize)> {
         let (year, month, day) = self.selected_date?;
         let count = agenda.on(year, month, day).len();
         if count == 0 {
             return None;
         }
-        Some(layout.detail(count))
+        Some((layout.detail(count), count.min(MAX_VISIBLE_EVENTS)))
     }
 
     /// Act on a hit. Returns whether anything about the view changed.
@@ -1781,7 +1820,8 @@ impl CalendarView {
                 self.show_month_view();
                 true
             }
-            CalendarHit::Panel => false,
+            // Opening an event is the host's: it starts the calendar program.
+            CalendarHit::Event(_) | CalendarHit::Panel => false,
         }
     }
 
@@ -2248,7 +2288,6 @@ impl CalendarView {
     ) {
         let pad = layout.px(PADDING);
         let row_h = layout.px(EVENT_ROW_HEIGHT);
-        let header_h = layout.px(EVENT_HEADER_HEIGHT);
         let visible_count = events.len().min(MAX_VISIBLE_EVENTS);
         // The card was `surface0` with `subtext0` on it, which is 3.40:1 in
         // Latte. No quiet role clears 4.5:1 against `surface0` there —
@@ -2285,7 +2324,7 @@ impl CalendarView {
         });
 
         for (i, event) in events.iter().take(MAX_VISIBLE_EVENTS).enumerate() {
-            let ey = card.y + header_h + i as f32 * row_h;
+            let ey = layout.event_row(card, i).y;
 
             // Colour bar.
             cmds.push(RenderCommand::FillRect {
@@ -2327,7 +2366,8 @@ impl CalendarView {
             let more = events.len().saturating_sub(MAX_VISIBLE_EVENTS);
             cmds.push(RenderCommand::Text {
                 x: card.x + pad + layout.px(10.0),
-                y: card.y + header_h + visible_count as f32 * row_h,
+                // Where a next row would start.
+                y: layout.event_row(card, visible_count).y,
                 text: format!("{more} more..."),
                 color: more_ink,
                 font_size: layout.px(TODAY_FONT),
@@ -3975,16 +4015,25 @@ mod tests {
             "the card overlaps the grid it describes"
         );
 
-        let (px, py) = centre(card);
+        // Its one row is the event, to open; its heading the popup's own.
+        // Either is a press on the popup, which the host does not dismiss.
+        let (px, py) = centre(layout.event_row(card, 0));
         assert_eq!(
             cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda),
+            Some(CalendarHit::Event(0))
+        );
+        let (hx, hy) = (card.x + 4.0, card.y + 2.0);
+        assert_eq!(
+            cal.hit_test(0.0, 0.0, 1.0, hx, hy, &agenda),
             Some(CalendarHit::Panel)
         );
 
-        // With nothing selected there is no card, and that same point is off
-        // the popup — so the host dismisses rather than swallowing the click.
+        // With nothing selected there is no card, and those same points are
+        // off the popup — so the host dismisses rather than swallowing the
+        // click.
         cal.selected_date = None;
         assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda), None);
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, hx, hy, &agenda), None);
     }
 
     /// The popup is measured in the shell's pixels, not its own.

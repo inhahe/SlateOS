@@ -2245,8 +2245,8 @@ live.
 - `[-]` `[C]` **Notifications pop up** (`design-decisions.md` §1447,
   open question C-Q32) -- the shell's half done 2026-09-29: every
   notification the desktop files pops up at the bottom-right corner above
-  the taskbar for a few seconds (low 4, normal 6, high 10; urgent until
-  closed), the pointer holding them, at most three stacked with the newest
+  the taskbar for a few seconds (low 4, normal 6, high 10; urgent, and a
+  calendar's reminder, until closed -- §1498), the pointer holding them, at most three stacked with the newest
   nearest the bell; a press opens it (read, its program started), its close
   button leaves it unread in the pane; nothing while Do Not Disturb silences
   it, while the pane is open, or at the login screen. They slide along the
@@ -2295,11 +2295,13 @@ live.
   -- done 2026-10-07. Read from the calendar program's own file, so a day
   with an event has a dot in the event's colour, or its category's, and
   choosing the day lists its events, all-day ones first and then by time --
-  the days and the events the program shows. Read again, when it has
-  changed, as the popup opens, as a calendar widget turns its minute and at
-  sign-in; a file that will not read keeps what was read before and says so
-  in a notification. The desktop's own event store, which nothing ever
-  filled, is deleted (§1423).
+  the days and the events the program shows; an event pressed there opens
+  the calendar program. Read again, when it has changed, as the popup opens,
+  as a calendar widget turns its minute and at sign-in; a file that will not
+  read keeps what was read before and says so in a notification. The
+  desktop's own event store, which nothing ever filled, is deleted (§1423).
+  **Next:** opening the calendar at the event pressed, or at a reminder's,
+  asked of lane E (`requests/c-e-open-the-calendar-at-an-event-or-a-day.md`).
 
 - `[x]` `[C]` **The desktop raises the calendar's reminders**
   (`design-decisions.md` §1498) -- done 2026-10-07. When an event's reminder

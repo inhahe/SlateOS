@@ -6572,6 +6572,15 @@ impl DesktopShell {
             // Likewise: opened above. Reaching here is a non-primary press on
             // the chevron, which the shell owns and so swallows.
             Hit::TrayOverflow => ShellAction::Consumed,
+            // An event on the chosen day's card: open it in the calendar
+            // program, which keeps it, and close the popup, as a program
+            // started from the start menu closes the menu. As it was left,
+            // for now: opening it at the event is asked of lane E
+            // (`requests/c-e-open-the-calendar-at-an-event-or-a-day.md`).
+            Hit::CalendarControl(calendar::CalendarHit::Event(_)) => {
+                self.calendar.set_visible(false);
+                ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(launcher::CALENDAR)))
+            }
             Hit::CalendarControl(control) => {
                 self.calendar.apply(control);
                 ShellAction::Consumed

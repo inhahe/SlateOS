@@ -97,7 +97,10 @@ pub const PASSWD_NAME: &str = "passwd";
 pub const SHADOW_NAME: &str = "shadow";
 
 /// The method new passwords are hashed with.
-const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
+///
+/// Public so that `authlib`, which must spend what checking a password costs
+/// on paths that check none, imitates this method rather than a copy of it.
+pub const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
 
 /// Canonical field names, and the aliases accepted when reading.
 pub mod field {

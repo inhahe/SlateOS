@@ -1108,6 +1108,15 @@ pub fn ignore_sigpipe() {
     stdfdguard::ignore_sigpipe();
 }
 
+/// gawk's `die_via_sigpipe`: `SIGPIPE` put back to its default and sent, so
+/// the program ends with status 141 whatever disposition it inherited -- what
+/// gawk does when standard output's reader has gone, `trap '' PIPE` or not.
+/// Returns only where the signal is blocked; does nothing off Linux. See
+/// [`stdfdguard::die_via_sigpipe`].
+pub fn die_via_sigpipe() {
+    stdfdguard::die_via_sigpipe();
+}
+
 /// The last thing a utility does with its standard output: gnulib's
 /// `atexit (close_stdout)`, spelled as a return value.
 ///

@@ -61,11 +61,19 @@ pub enum Fatal {
     /// was, and the run ends with status 2. Bytes, because most of them name
     /// a file or a command, and gawk prints those with `%s`.
     Said(Str),
-    /// Standard output's reader went away. gawk dies of `SIGPIPE` there; this
-    /// system does not use signals for process control, so -- as everywhere
-    /// in coreutils (`stdfd::reader_gone`) -- the run ends quietly, with the
-    /// status it had already earned.
-    ReaderGone,
+}
+
+/// gawk's `die_via_sigpipe`, for a write or flush of standard output that met
+/// `EPIPE`: its reader has gone. `SIGPIPE` is put back to its default and
+/// sent, so the run ends with status 141 whatever disposition it inherited --
+/// gawk overrides even `trap '' PIPE` there. It returns only where the signal
+/// is blocked, and each caller then goes on as gawk does at the same place,
+/// measured: a `print` is fatal, `fflush()` says nothing, and the flush at exit
+/// says nothing and makes the status 1.
+fn die_if_reader_gone(e: &std::io::Error) {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        coreutils::stdfd::die_via_sigpipe();
+    }
 }
 
 impl Fatal {
@@ -567,13 +575,18 @@ impl Interp {
                 }
                 match self.out.finish_stdout() {
                     Ok(()) => Ok(code),
-                    Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
                     Err(e) => {
-                        let message = format!(
-                            "error writing standard output: {}",
-                            coreutils::errmsg::strerror(&e)
-                        );
-                        self.warning(message.as_bytes());
+                        die_if_reader_gone(&e);
+                        // "we don't warn about stdout/stderr if EPIPE, but we
+                        // do error exit": where `SIGPIPE` was blocked, the
+                        // reader's going is only the status.
+                        if e.kind() != std::io::ErrorKind::BrokenPipe {
+                            let message = format!(
+                                "error writing standard output: {}",
+                                coreutils::errmsg::strerror(&e)
+                            );
+                            self.warning(message.as_bytes());
+                        }
                         Ok(if code == 0 && !self.exited { 1 } else { code })
                     }
                 }
@@ -583,12 +596,6 @@ impl Interp {
                 Err(e)
             }
         }
-    }
-
-    /// The status the run had earned: what `exit` said, or 0.
-    #[must_use]
-    pub fn exit_status(&self) -> i32 {
-        self.exit_code.unwrap_or(0)
     }
 
     /// The program itself, without the flush that has to happen either way.
@@ -676,12 +683,13 @@ impl Interp {
                 // No file arguments at all: read standard input, as every other
                 // filter does.
                 self.main.stdin_used = true;
-                self.main.current = Some(Records::new(Box::new(std::io::stdin())));
                 // gawk names standard input `-` here, `--posix` or not:
                 // `echo x | gawk --posix '{print FILENAME}'` prints `-`
                 // (measured), and so does its diagnostics' `(FILENAME=- FNR=1)`.
                 self.set_global(V_FILENAME, Value::str(b"-".to_vec()));
                 self.set_counter(V_FNR, 0);
+                let src = open_stdin().map_err(|e| cannot_open(b"-", &e))?;
+                self.main.current = Some(Records::new(src));
                 return Ok(true);
             }
             #[allow(clippy::cast_precision_loss)]
@@ -706,31 +714,17 @@ impl Interp {
             self.main.opened_any = true;
             self.set_global(V_FILENAME, Value::str(text.as_ref().clone()));
             self.set_counter(V_FNR, 0);
-            let src: Box<dyn Read> = if text.as_ref() == b"-" || text.as_ref() == b"/dev/stdin" {
+            let opened = if text.as_ref() == b"-" || text.as_ref() == b"/dev/stdin" {
                 self.main.stdin_used = true;
-                Box::new(std::io::stdin())
+                open_stdin()
             } else {
-                match open_input(&text) {
-                    Ok(f) => Box::new(f),
-                    Err(e) => {
-                        // An input file that cannot be opened stops the run. It
-                        // is tempting to skip it and carry on, but an awk
-                        // program is usually computing a total over the files it
-                        // was given, and a total that silently omits one of them
-                        // is worse than no answer at all.
-                        //
-                        // The wording is gawk's, quotes and all: this is not a
-                        // rendering of a parser's internals but a plain report
-                        // about a file, and a script that greps awk's stderr
-                        // should not have to know which awk it got.
-                        return Err(Fatal::Said(named(
-                            "fatal: cannot open file `",
-                            &text,
-                            &format!("' for reading: {}", coreutils::errmsg::strerror(&e)),
-                        )));
-                    }
-                }
+                open_input(&text).map(|f| Box::new(f) as Box<dyn Read>)
             };
+            // An input file that cannot be opened stops the run. It is tempting
+            // to skip it and carry on, but an awk program is usually computing
+            // a total over the files it was given, and a total that silently
+            // omits one of them is worse than no answer at all.
+            let src = opened.map_err(|e| cannot_open(&text, &e))?;
             self.main.current = Some(Records::new(src));
             return Ok(true);
         }
@@ -778,11 +772,13 @@ impl Interp {
         let Some((mode, name)) = target else {
             return match self.out.write_stdout(bytes) {
                 Ok(()) => Ok(()),
-                Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
-                Err(e) => Err(Fatal::said(format!(
-                    "fatal: {from} to \"standard output\" failed: {}",
-                    coreutils::errmsg::strerror(&e)
-                ))),
+                Err(e) => {
+                    die_if_reader_gone(&e);
+                    Err(Fatal::said(format!(
+                        "fatal: {from} to \"standard output\" failed: {}",
+                        coreutils::errmsg::strerror(&e)
+                    )))
+                }
             };
         };
         if name.is_empty() {
@@ -803,19 +799,17 @@ impl Interp {
                     }
                 }))
             }
-            // A write that reached standard output through `/dev/stdout`
-            // meets its reader going away as standard output does.
-            Err(crate::io::OutError::Write(e))
-                if coreutils::stdfd::reader_gone(&e)
-                    && (name.as_slice() == b"/dev/stdout" || name.as_slice() == b"-") =>
-            {
-                Err(Fatal::ReaderGone)
+            Err(crate::io::OutError::Write(e)) => {
+                // Even a write that reached standard output through
+                // `/dev/stdout`: `gawk --posix` opens that name as a file of
+                // its own, which is not `stdout`, so its `wrerror` does not
+                // die of `SIGPIPE` there -- it says this.
+                Err(Fatal::Said(named(
+                    &format!("fatal: {from} to \""),
+                    &name,
+                    &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
+                )))
             }
-            Err(crate::io::OutError::Write(e)) => Err(Fatal::Said(named(
-                &format!("fatal: {from} to \""),
-                &name,
-                &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
-            ))),
         }
     }
 
@@ -825,8 +819,11 @@ impl Interp {
     fn flush_io(&mut self) -> R<()> {
         match self.out.flush_all() {
             Ok(()) => Ok(()),
-            Err(crate::io::FlushError::Stdout(e)) if coreutils::stdfd::reader_gone(&e) => {
-                Err(Fatal::ReaderGone)
+            // gawk's `flush_io`: a reader gone is `die_via_sigpipe`, and where
+            // that returns, nothing said.
+            Err(crate::io::FlushError::Stdout(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                die_if_reader_gone(&e);
+                Ok(())
             }
             Err(crate::io::FlushError::Stdout(e)) => Err(Fatal::said(format!(
                 "fatal: fflush: cannot flush standard output: {}",
@@ -1375,6 +1372,29 @@ fn open_input(name: &[u8]) -> std::io::Result<std::fs::File> {
         return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory));
     }
     Ok(f)
+}
+
+/// gawk's fatal error for an input that will not open. The wording is gawk's,
+/// quotes and all: this is not a rendering of a parser's internals but a plain
+/// report about a file, and a script that greps awk's stderr should not have
+/// to know which awk it got.
+fn cannot_open(name: &[u8], e: &std::io::Error) -> Fatal {
+    Fatal::Said(named(
+        "fatal: cannot open file `",
+        name,
+        &format!("' for reading: {}", coreutils::errmsg::strerror(e)),
+    ))
+}
+
+/// Standard input as an input, refused as [`open_input`] refuses a named one
+/// when it is a directory, and read from descriptor 0 itself: `io::stdin()`
+/// would answer a closed descriptor with end of file, where gawk's read fails
+/// -- `awk 1 <&-` is `fatal: error reading input file `-'`.
+fn open_stdin() -> std::io::Result<Box<dyn Read>> {
+    if coreutils::stdfd::metadata(0).is_ok_and(|m| m.is_dir()) {
+        return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory));
+    }
+    Ok(Box::new(coreutils::stdfd::RawStdin))
 }
 
 /// The names gawk refuses as a command-line variable under `--posix`

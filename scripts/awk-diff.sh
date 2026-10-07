@@ -107,6 +107,10 @@ cd "$fixtures" >/dev/null || exit 1
 # source of truth, so a case that reads `nums` on stdin and one that names
 # `nums.txt` as an operand are looking at identical bytes.
 printf 'a\nb\nc\n'                                          > abc.txt
+# More output than one stdio buffer and less than two of BufWriter's: where a
+# full disk is first met, and so which record gawk's message names, depends on
+# stdio's buffer being exactly the device's block size.
+seq 1 3000                                                  > seq3000.txt
 printf '1\n2\n3\n4\n5\n'                                    > nums.txt
 printf 'alice 30 red\nbob 25 blue\ncarol 41 red\ndave 25 green\n' > table.txt
 printf 'a:b:c\nd:e:f\n:g:\n'                                > csv.txt
@@ -292,10 +296,17 @@ fsh_case() {
     [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
     err=$o_err; [ "$side" = gnu ] && err=$g_err
     # The program is `$0` to the shell, so it needs no quoting of its own;
-    # standard output defaults to nowhere, for words that do not say.
-    # shellcheck disable=SC2086
-    diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" \
-      sh -c "awk $flags \"\$0\" $words" "$prog" </dev/null >/dev/null 2>"$err"
+    # standard output defaults to nowhere, for words that do not say. An empty
+    # PROGRAM is none at all: the words carry the `-f`.
+    if [ -n "$prog" ]; then
+      # shellcheck disable=SC2086
+      diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" \
+        sh -c "awk $flags \"\$0\" $words" "$prog" </dev/null >/dev/null 2>"$err"
+    else
+      # shellcheck disable=SC2086
+      diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" \
+        sh -c "awk $flags $words" </dev/null >/dev/null 2>"$err"
+    fi
     rc=$?
     if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
   done
@@ -306,7 +317,39 @@ fsh_case() {
   REPORT=$(printf '  ours (rc=%s): {%s}\n  gnu  (rc=%s): {%s}' \
     "$o_rc" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
     "$g_rc" "$(printf '%s' "$g_msg" | tr '\n' '|')")
-  report "$AGREED_MSG" "sh -c 'awk $prog $words'"
+  # `XFSH` set: a case expected to differ, for the reason it holds.
+  if [ -n "${XFSH:-}" ]; then
+    report_x "$AGREED_MSG" "$XFSH" "sh -c 'awk $prog $words'"
+  else
+    report "$AGREED_MSG" "sh -c 'awk $prog $words'"
+  fi
+}
+
+# `gone_case DISPOSITION PROGRAM` — PROGRAM's output read by `head -1`, which
+# then leaves; SIGPIPE at its `default`, or `ignored` as `trap '' PIPE` leaves
+# it. awk's own status is compared, carried out of the pipeline in its stderr
+# file rather than through the pipe. gawk dies of the signal either way: its
+# `wrerror` puts the default back first (`die_via_sigpipe`).
+gone_case() {
+  local disp=$1 prog=$2 side flags o_msg g_msg o_err g_err err
+  o_err=$(mktemp); g_err=$(mktemp)
+  for side in ours gnu; do
+    flags=
+    [ "$side" = gnu ] && flags=$GNUFLAGS
+    [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
+    err=$o_err; [ "$side" = gnu ] && err=$g_err
+    # shellcheck disable=SC2086
+    ( if [ "$disp" = ignored ]; then trap '' PIPE; fi
+      { timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$prog" </dev/null 2>"$err"
+        echo "rc=$?" >>"$err"; } | head -1 >/dev/null )
+  done
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  rm -f "$o_err" "$g_err"
+  AGREED_MSG=no
+  [ "$o_msg" = "$g_msg" ] && AGREED_MSG=yes
+  REPORT=$(printf '  ours: {%s}\n  gnu:  {%s}' \
+    "$(printf '%s' "$o_msg" | tr '\n' '|')" "$(printf '%s' "$g_msg" | tr '\n' '|')")
+  report "$AGREED_MSG" "($disp SIGPIPE) awk '$prog' | head -1"
 }
 
 # `tty_case PROGRAM` — PROGRAM with standard output and standard error on one
@@ -959,6 +1002,50 @@ fsh_case 'BEGIN { s = sprintf("%9000s", "x"); x = 1
  print s; print "after" > "/dev/stderr" }' '> /dev/full'
 fsh_case 'BEGIN { print "x"; r = fflush(); print "r=" r > "/dev/stderr" }' '> /dev/full'
 fsh_case 'BEGIN { print "x"; print 1/z }' '> /dev/full'
+# The record a full disk is first met at is the one that fills stdio's buffer,
+# the device's block size: `(FILENAME=seq3000.txt FNR=1041)`.
+fsh_case '{ print }' 'seq3000.txt > /dev/full'
+fsh_case '{ print }' 'seq3000.txt > /dev/full 2>&1'
+# The same for a redirection, whose buffer is stdio's too.
+fmsg_case '{ print > "/dev/full" }' seq3000.txt
+# Standard output closed: the same sentences, with `Bad file descriptor`.
+fsh_case 'BEGIN { print "x" }' '>&-'
+fsh_case 'BEGIN { print "x"; exit 3 }' '>&-'
+fsh_case 'BEGIN { print "x"; exit 0 }' '>&-'
+fsh_case '{ print }' 'abc.txt >&-'
+fsh_case '{ print }' 'seq3000.txt >&-'
+fsh_case 'BEGIN { x = 1 }' '>&-'
+# Standard input closed, or a directory: a fatal read error -- located once a
+# rule has run -- or a warning and a skip; `getline < "-"` is -1 and quiet.
+fsh_case '1' '<&-'
+fsh_case '1' '- <&-'
+fsh_case '1' 'abc.txt - <&-'
+fsh_case 'END { print NR }' '<&-'
+fsh_case 'BEGIN { r = (getline l < "-"); print r > "/dev/stderr" }' '<&-'
+fsh_case '1' '< .'
+fsh_case '1' 'abc.txt - < .'
+# A program file that opens and will not read -- a directory, or `-f -` with
+# standard input closed or a directory -- is a parse error at its first line,
+# status 1, where one that will not open is fatal, status 2.
+fmsg_case -f .
+fsh_case '' '-f - <&-'
+fsh_case '' '-f - < .'
+# Standard output's reader going away: status 141, whatever the disposition.
+gone_case default 'BEGIN { for (i = 0; i < 100000; i++) print i }'
+gone_case ignored 'BEGIN { for (i = 0; i < 100000; i++) print i }'
+gone_case ignored 'BEGIN { for (i = 0; i < 100000; i++) printf "%d\n", i; exit 3 }'
+gone_case ignored 'BEGIN { for (i = 0; i < 100000; i++) print i > "/dev/stdout" }'
+gone_case ignored 'BEGIN { print "x"; while (1) { print "y"; fflush() } }'
+# Standard error closed: gawk opens `/dev/null` on it, read-only (`init_fds`),
+# so what it writes there fails as it would on a closed descriptor; a fatal
+# error is still status 2, and a lost warning changes nothing.
+fsh_case 'BEGIN { print 1/z }' '2>&-'
+fsh_case 'BEGIN { s = "a\q"; print s }' '2>&-'
+# `/dev/stderr` is standard error itself here, which SlateOS need not have as
+# a file; `gawk --posix` opens the name as a file, which on Linux reopens the
+# `/dev/null` its `init_fds` put on descriptor 2 for writing, and succeeds.
+XFSH='/dev/stderr is standard error, not a file gawk --posix reopens' \
+  fsh_case 'BEGIN { print "x" > "/dev/stderr" }' '2>&-'
 # Standard output on a terminal is flushed after every print, as gawk's is.
 # It was not until 2026-10-01: an interactive `awk '{ print $1 }'` held its
 # answers until 8 KiB had built up or input ended.

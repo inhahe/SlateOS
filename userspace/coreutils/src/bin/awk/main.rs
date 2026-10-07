@@ -80,8 +80,8 @@
 //! | a name used as both an array and a scalar | refused before the program runs | fatal when first reached |
 //! | a built-in given the wrong number of arguments | refused before the program runs | fatal when first reached |
 //! | `RS` longer than one character | a regex, as in gawk without `--posix`, mawk and the one true awk | its first character only |
-//! | standard output's reader goes away (`awk ... \| head -1`) | the run ends quietly with the status it had earned | dies of `SIGPIPE`, status 141 |
 //! | `ENVIRON` when `AWKPATH` or `AWKLIBPATH` is unset | as the environment has it | both added, naming gawk's own library directories |
+//! | `print > "/dev/stderr"` (and `"/dev/stdout"`) | the standard stream itself, which SlateOS need not have as a file | a file of that name, opened afresh -- so with descriptor 2 closed it reopens the `/dev/null` gawk's `init_fds` put there, and the print succeeds |
 //! | `length(arr)` | the number of elements, as POSIX.1-2024 specifies | fatal: gawk 5.2.1's `--posix` predates it |
 //! | a field past `NF`, `$(NF+1) == 0` | the uninitialized value, equal to `0` and `""` alike, as POSIX says | the empty string, unequal to `0` |
 //! | gawk's own variable names: `ARGIND`, `BINMODE`, `ERRNO`, `FIELDWIDTHS`, `FPAT`, `IGNORECASE`, `LINT`, `PREC`, `ROUNDMODE`, `RT`, `TEXTDOMAIN` | the program's, unset until it sets them | predefined (`PREC` is 53, `TEXTDOMAIN` `messages`), refused as arrays and function names; `LINT = 1` turns gawk's lint warnings on |
@@ -90,9 +90,10 @@
 //! The `RS` row is a choice POSIX leaves open ("If RS contains more than one
 //! character, the results are unspecified"), and the regex is what a program
 //! that sets one means: `RS = "\r\n"` for a file with CRLF line ends would
-//! otherwise split at the `\r` and glue each `\n` to the next record. The
-//! `SIGPIPE` row is this system's, for every utility: it does not use signals
-//! for process control (`stdfd::reader_gone`). The `ENVIRON` row: those two
+//! otherwise split at the `\r` and glue each `\n` to the next record. (A row
+//! that said standard output's reader going away ended the run quietly is
+//! gone: since 2026-10-07 this awk dies of `SIGPIPE` there as gawk does,
+//! `trap '' PIPE` or not -- gawk's `die_via_sigpipe`.) The `ENVIRON` row: those two
 //! are where gawk searches for `-f` files and loads extensions, directories of
 //! gawk's own installation; this awk searches no path for `-f` and loads no
 //! extensions, so the entries would name directories it never reads.
@@ -147,6 +148,12 @@ use coreutils::stdfd;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees the descriptors awk was
+// given: a closed standard input is a read error and a closed standard output
+// `error writing standard output`, as they are gawk's -- not the `/dev/null`
+// Rust's runtime would put on each.
+coreutils::guard_std_fds!();
+
 use value::Str;
 
 const USAGE: &str = "usage: awk [-F sepstring] [-v assignment]... program [argument...]\n       awk [-F sepstring] -f progfile [-f progfile]... [-v assignment]... [argument...]";
@@ -175,12 +182,31 @@ struct Args {
     operands: Vec<Str>,
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// gawk's start: its descriptors and its `SIGPIPE`, then the run.
+///
+/// There is no `stdfd::close_stderr` funnel here, unlike in the coreutils:
+/// that is gnulib's `close_stdout`, which gawk does not use, and a diagnostic
+/// gawk cannot write never changes its status. Measured, with standard error
+/// full or closed alike: a warning is still 0, a syntax error 1, a fatal error
+/// 2. So every way out of this program exits with the status it earned --
+/// [`exit`] -- and not through `stdfd::exit_now`, which would make a lost
+/// diagnostic 2.
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 2)
+    stdfd::restore();
+    // gawk's `init_fds`: a standard descriptor that was closed is opened on
+    // `/dev/null` the wrong way round, so that it still fails as a closed one
+    // does -- a read of descriptor 0, a write of 1 or 2 -- and a file opened
+    // later cannot become it: `awk '{ print > "out" }' >&-` must not send its
+    // standard output into `out`. Unchecked, as gawk's is: a descriptor it
+    // could not fill stays closed, and fails as one.
+    let _ = stdfd::stdopen();
+    // gawk ignores `SIGPIPE` and handles `EPIPE` itself: a pipe to a command
+    // whose reader has gone is `fatal: print to "CMD" failed: Broken pipe`,
+    // and only standard output's dies of the signal, through
+    // `die_via_sigpipe`. Children get the default back, as gawk's do: the
+    // standard library resets it in every process it starts.
+    stdfd::ignore_sigpipe();
+    run_main()
 }
 
 fn run_main() -> ExitCode {
@@ -195,7 +221,10 @@ fn run_main() -> ExitCode {
 
     let (text, map) = match program_source(&args) {
         Ok(s) => s,
-        Err(e) => die(&e),
+        Err((message, status)) => {
+            say(&message);
+            exit(status)
+        }
     };
 
     // gawk resolves the command line's assignments as it reads its options,
@@ -247,7 +276,7 @@ fn run_main() -> ExitCode {
                 line.push(b'\n');
                 stdfd::diag_bytes(&line);
             }
-            stdfd::exit_now(if e.fatal { 2 } else { 1 }, 2)
+            exit(if e.fatal { 2 } else { 1 })
         }
     };
     if let Err(e) = types::resolve(&mut prog) {
@@ -271,7 +300,7 @@ fn run_main() -> ExitCode {
         }
     }
     if clashed {
-        stdfd::exit_now(1, 2);
+        exit(1);
     }
 
     let env: Vec<(Str, Str)> = std::env::vars_os()
@@ -283,11 +312,8 @@ fn run_main() -> ExitCode {
     // In the order given, and all before BEGIN, so a BEGIN block can read
     // what the command line set and can override it.
     for (name, value) in preassigns {
-        match it.assign_cli(name, value) {
-            Ok(()) => {}
-            Err(interp::Fatal::Said(message)) => die(&message),
-            // Nothing was written yet, so nothing can have lost its reader.
-            Err(interp::Fatal::ReaderGone) => stdfd::exit_now(0, 2),
+        if let Err(interp::Fatal::Said(message)) = it.assign_cli(name, value) {
+            die(&message);
         }
     }
 
@@ -304,12 +330,7 @@ fn run_main() -> ExitCode {
             line.extend_from_slice(&message);
             line.push(b'\n');
             stdfd::diag_bytes(&line);
-            stdfd::exit_now(2, 2)
-        }
-        // Nobody is reading standard output any more: end quietly with the
-        // status earned, as every utility here does (`stdfd::reader_gone`).
-        Err(interp::Fatal::ReaderGone) => {
-            ExitCode::from(u8::try_from(it.exit_status() & 0xff).unwrap_or(0))
+            exit(2)
         }
     }
 }
@@ -435,7 +456,19 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
 }
 
 /// The program text: the `-f` files joined by newlines, or the operand.
-fn program_source(args: &Args) -> Result<(Str, source::SourceMap), Str> {
+///
+/// # Errors
+///
+/// A program file that would not open or read, as gawk says it -- the message
+/// after `awk: `, and the status. The two are told apart, as gawk's `srcopen`
+/// and `get_src_buf` tell them apart: a file that will not *open* is fatal,
+/// `fatal: cannot open source file `F' for reading: R`, status 2; one that
+/// opens and will not *read* -- a directory, or a closed standard input for
+/// `-f -` -- is a parse error at its first line, `F:1: error: cannot read
+/// source file `F': R`, status 1.
+fn program_source(args: &Args) -> Result<(Str, source::SourceMap), (Str, u8)> {
+    use std::io::Read;
+
     if let Some(text) = &args.program {
         return Ok((text.clone(), source::SourceMap::operand(text)));
     }
@@ -448,28 +481,33 @@ fn program_source(args: &Args) -> Result<(Str, source::SourceMap), Str> {
         // `source file`, not `file`: gawk distinguishes a program it could not
         // read from an *input* file it could not read, and the two failures are
         // worth telling apart — one is a broken command line, the other a
-        // broken argument to a working one.
-        let text = if name.as_slice() == b"-" {
-            let mut buf = Str::new();
-            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf).map_err(|e| {
-                format!(
-                    "fatal: cannot open source file `-' for reading: {}",
-                    coreutils::errmsg::strerror(&e)
-                )
-                .into_bytes()
-            })?;
-            buf
+        // broken argument to a working one. Every name is as given, which need
+        // not be text.
+        let mut source: Box<dyn Read> = if name.as_slice() == b"-" {
+            // Descriptor 0 itself: `io::stdin()` would answer a closed one
+            // with end of file -- an empty program -- where gawk's read fails.
+            Box::new(stdfd::RawStdin)
         } else {
-            std::fs::read(io::os_path(name)).map_err(|e| {
-                // The name as given, which need not be text.
-                let mut said = b"fatal: cannot open source file `".to_vec();
-                said.extend_from_slice(name);
-                said.extend_from_slice(
-                    format!("' for reading: {}", coreutils::errmsg::strerror(&e)).as_bytes(),
-                );
-                said
-            })?
+            match std::fs::File::open(io::os_path(name)) {
+                Ok(file) => Box::new(file),
+                Err(e) => {
+                    let mut said = b"fatal: cannot open source file `".to_vec();
+                    said.extend_from_slice(name);
+                    said.extend_from_slice(
+                        format!("' for reading: {}", coreutils::errmsg::strerror(&e)).as_bytes(),
+                    );
+                    return Err((said, 2));
+                }
+            }
         };
+        let mut text = Str::new();
+        if let Err(e) = source.read_to_end(&mut text) {
+            let mut said = name.clone();
+            said.extend_from_slice(b":1: error: cannot read source file `");
+            said.extend_from_slice(name);
+            said.extend_from_slice(format!("': {}", coreutils::errmsg::strerror(&e)).as_bytes());
+            return Err((said, 1));
+        }
         out.extend_from_slice(&text);
         // A `-f` file that does not end in a newline must not run its last
         // statement into the first statement of the next file.
@@ -502,7 +540,7 @@ fn arg_bytes(a: &OsString) -> Str {
 /// could not be opened.
 fn die(msg: &[u8]) -> ! {
     say(msg);
-    stdfd::exit_now(2, 2)
+    exit(2)
 }
 
 /// `awk: MESSAGE` on standard error, as bytes.
@@ -516,14 +554,20 @@ fn say(msg: &[u8]) {
 /// A program that will not compile.
 fn die_program(msg: &str) -> ! {
     diag!("awk: {msg}");
-    stdfd::exit_now(1, 2)
+    exit(1)
 }
 
 /// A command line that does not make sense.
 fn die_usage(msg: &[u8]) -> ! {
     say(msg);
     diag!("{USAGE}");
-    stdfd::exit_now(1, 2)
+    exit(1)
+}
+
+/// The end of the run, with the status it earned: gawk's `exit`, which no
+/// lost diagnostic changes (see [`main`]).
+fn exit(status: u8) -> ! {
+    std::process::exit(i32::from(status))
 }
 
 #[cfg(test)]

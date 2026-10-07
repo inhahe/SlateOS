@@ -73,6 +73,7 @@ mod imp {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
         fn signal(sig: i32, handler: usize) -> usize;
+        fn raise(sig: i32) -> i32;
     }
 
     const F_GETFD: i32 = 1;
@@ -152,6 +153,18 @@ mod imp {
         unsafe { signal(SIGPIPE, SIG_IGN) };
     }
 
+    pub fn die_via_sigpipe() {
+        // SAFETY: `signal` restores the default handler, installing no code of
+        // ours; `raise` sends the signal to this thread, whose default action
+        // ends the process. Neither touches memory of ours. Their results
+        // are not looked at, as gawk's are not: either the process is gone,
+        // or the signal is blocked and the caller carries on.
+        unsafe {
+            signal(SIGPIPE, SIG_DFL);
+            raise(SIGPIPE);
+        }
+    }
+
     pub fn restore() {
         let mask = CLOSED_AT_STARTUP.load(Ordering::Relaxed);
         for fd in 0..3 {
@@ -202,6 +215,8 @@ mod imp {
     }
 
     pub fn ignore_sigpipe() {}
+
+    pub fn die_via_sigpipe() {}
 }
 
 #[cfg(target_os = "linux")]
@@ -269,6 +284,19 @@ pub fn sigpipe_restored() -> bool {
 /// `EPIPE` for it to act on. Does nothing off Linux.
 pub fn ignore_sigpipe() {
     imp::ignore_sigpipe();
+}
+
+/// gawk's `die_via_sigpipe`: put `SIGPIPE` back to its default disposition and
+/// send it, so the program ends as a write to a gone reader ends one where the
+/// signal is not ignored -- status 141 -- whatever disposition it inherited.
+///
+/// For a program whose upstream does exactly that: gawk, whose `wrerror` does
+/// it for standard output even under `trap '' PIPE`. Every other utility here
+/// leaves an inherited "ignored" alone and reports the `EPIPE`, as GNU's do.
+/// Returns only where `SIGPIPE` is blocked, and does nothing off Linux; the
+/// caller then goes on as its upstream does after the call.
+pub fn die_via_sigpipe() {
+    imp::die_via_sigpipe();
 }
 
 /// Whether `fd` was closed when the process started -- the question

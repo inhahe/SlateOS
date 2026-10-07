@@ -216,7 +216,7 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Fifteen programs still lack it: `awk bc chmod df dir ed find hostname
+all. Fourteen programs still lack it: `bc chmod df dir ed find hostname
 install kill ls more patch stat vdir`. That list is now
 pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
 a program is added without the guard, when one is converted without being
@@ -228,7 +228,14 @@ silent successes with their standard output closed. Both are fixed, and
 Since 2026-10-07 the guard also puts `SIGPIPE` back (design-decisions §1060),
 so each of these is also still the old exception there: a reader leaving
 ends it quietly with status 0 or the status it had earned, where GNU's dies
-of the signal with 141. (`du`, `date` and `csplit` were converted on
+of the signal with 141. (`awk` was converted on 2026-10-07 as gawk 5.2.1
+starts -- `init_fds`, then `SIGPIPE` ignored and handled: standard output's
+reader going is `die_via_sigpipe`, 141 whatever the disposition, a command's
+is `fatal: print to "CMD" failed: Broken pipe` -- with glibc's buffer for
+standard output and for redirections, so a full disk is met at the record
+gawk's message names, and with no `close_stderr` funnel, since a lost
+diagnostic never changes gawk's status; 691 rows agree with `gawk --posix`.
+`du`, `date` and `csplit` were converted on
 2026-10-07, each with its closed-standard-input fix: `du` flushes after every
 row, as upstream's `print_size` does, so a full disk's `write error` comes
 with no reason; `date` keeps one stdio buffer for the run, so the same failure

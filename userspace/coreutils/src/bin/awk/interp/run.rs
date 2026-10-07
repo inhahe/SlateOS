@@ -869,9 +869,6 @@ impl Interp {
         }
         match self.out.flush_one(name) {
             Some(Ok(())) => return Ok(Value::Num(0.0)),
-            Some(Err(e)) if coreutils::stdfd::reader_gone(&e) && name == b"/dev/stdout" => {
-                return Err(Fatal::ReaderGone);
-            }
             Some(Err(e)) => {
                 return Err(Fatal::Said(super::named(
                     "fatal: fflush: cannot flush file `",
@@ -886,11 +883,13 @@ impl Interp {
         if name == b"/dev/stdout" {
             return match self.out.flush_stdout() {
                 Ok(()) => Ok(Value::Num(0.0)),
-                Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
-                Err(e) => Err(Fatal::said(format!(
-                    "fatal: fflush: cannot flush standard output: {}",
-                    coreutils::errmsg::strerror(&e)
-                ))),
+                Err(e) => {
+                    super::die_if_reader_gone(&e);
+                    Err(Fatal::said(format!(
+                        "fatal: fflush: cannot flush standard output: {}",
+                        coreutils::errmsg::strerror(&e)
+                    )))
+                }
             };
         }
         if name == b"/dev/stderr" {

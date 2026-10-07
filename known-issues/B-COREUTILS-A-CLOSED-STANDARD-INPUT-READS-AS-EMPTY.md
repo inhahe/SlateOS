@@ -1,8 +1,10 @@
 ## B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY (lane B, 2026-10-03)
 
-**Status:** OPEN (lane B). Fixed in 36 programs so far and in the `-i`/`-ok`
-prompts of `rm`, `cp`, `mv`, `ln` and `find`; "Where, measured" lists them,
-and the rest with GNU's wording.
+**Status:** FIXED 2026-10-07 (lane B), pending a boot test on `main` before
+the move to `known-issues-resolved/`. Every program the 2026-10-03 sweep
+found reads a closed standard input as upstream does -- 37 of them, and
+the `-i`/`-ok` prompts of `rm`, `cp`, `mv`, `ln` and `find`; "Where,
+measured" lists them.
 
 **In short:** when a program is started with its standard input closed
 (`prog <&-`) and then reads it, GNU's tools report it as an error, for
@@ -77,8 +79,11 @@ with standard input closed and with a directory as standard input, against a
 built coreutils 9.4. Converted so far: `base32 base64 cat comm csplit cut date
 dircolors du expand factor fold head join nl numfmt od paste sort tail tee tr
 tsort unexpand uniq wc` and the digests (`md5sum sha*sum b2sum cksum sum`); also `sed`, `tac`,
-`shuf`, the prompts, and four whose references are not coreutils, so their own
-harnesses carry the cases: `cmp` (diffutils 3.10: `xstdopen` first, then
+`shuf`, the prompts, and five whose references are not coreutils, so their own
+harnesses carry the cases: `awk` (gawk 5.2.1: `init_fds` reopens a closed
+descriptor the wrong way round, then `fatal: error reading input file `-'`
+with status 2, and a directory is refused as it would be opened),
+`cmp` (diffutils 3.10: `xstdopen` first, then
 `cmp: -: Bad file descriptor` with status 2), `grep` (3.11: `(standard input)` unquoted, and an
 `fstat` failure skips `-c`'s count where a read failure does not), `xargs`
 (findutils 4.9: a read error ends the input, and gnulib's `close_stdin` reports
@@ -107,11 +112,9 @@ noted. `du`, `date` and `csplit` were converted on 2026-10-07; what each
 needed beyond the descriptor is in its commit -- `du` streams its list and
 goes on after a read error, still printing `-c`'s total, and `csplit` reads
 as its split needs lines, so the error lands after the first piece's file
-is made. One is left:
-
-| program | GNU (each line a separate message, then status) |
-|---|---|
-| `awk 1` | `awk: fatal: error reading input file `-': Bad file descriptor`, 2 (a directory: gawk warns `command line argument `-' is a directory: skipped` and exits 0) |
+is made. `awk`, the last, followed the same day: its table row read
+`awk: fatal: error reading input file `-': Bad file descriptor`, 2, and
+that is what it says now.
 
 Other files contain `io::stdin()` too, some only for a tty check or in a
 comment: `bc diff ed find more patch sed sh split tar test`, and in the

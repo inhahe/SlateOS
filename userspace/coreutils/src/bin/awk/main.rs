@@ -212,9 +212,13 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     let raw: Vec<Str> = std::env::args_os().skip(1).map(|a| arg_bytes(&a)).collect();
     let args = match parse_args(&raw) {
-        Ok(Some(a)) => a,
-        // The help and version paths have already printed.
-        Ok(None) => return ExitCode::SUCCESS,
+        Ok(Parsed::Run(a)) => a,
+        // gawk's `usage` dies of `SIGPIPE` when its reader has gone, whatever
+        // the disposition -- `{ sleep 1; awk --help; } | true` is 141 under
+        // `trap '' PIPE` too -- and its version exits 1 without a word.
+        // Measured, both.
+        Ok(Parsed::Help) => print_and_exit(format!("{USAGE}\n").as_bytes(), ReaderGone::Signal),
+        Ok(Parsed::Version) => print_and_exit(b"awk (SlateOS coreutils)\n", ReaderGone::Quiet),
         Err(ArgError::Usage(e)) => die_usage(&e),
         Err(ArgError::Fatal(e)) => die(&e),
     };
@@ -351,10 +355,20 @@ impl From<String> for ArgError {
     }
 }
 
-/// Split the command line into options and operands.
-///
-/// Returns `Ok(None)` when `--help` or `--version` has already answered.
-fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
+/// What the command line asks for.
+enum Parsed {
+    /// `--help`: the usage, on standard output.
+    Help,
+    /// `--version`.
+    Version,
+    /// A program to run.
+    Run(Args),
+}
+
+/// Split the command line into options and operands. Prints nothing: the
+/// help and the version are answered by the caller, each at the point gawk
+/// answers it.
+fn parse_args(raw: &[Str]) -> Result<Parsed, ArgError> {
     let mut args = Args {
         progfiles: Vec::new(),
         preassigns: Vec::new(),
@@ -369,12 +383,10 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
             break;
         }
         if bytes == b"--help" {
-            println!("{USAGE}");
-            return Ok(None);
+            return Ok(Parsed::Help);
         }
         if bytes == b"--version" {
-            println!("awk (SlateOS coreutils)");
-            return Ok(None);
+            return Ok(Parsed::Version);
         }
         // A lone `-` is standard input, which is an operand, not an option.
         if bytes.len() < 2 || bytes.first() != Some(&b'-') {
@@ -452,7 +464,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
         args.program = Some(text.clone());
     }
     args.operands = raw.get(i..).unwrap_or_default().to_vec();
-    Ok(Some(args))
+    Ok(Parsed::Run(args))
 }
 
 /// The program text: the `-f` files joined by newlines, or the operand.
@@ -570,6 +582,42 @@ fn exit(status: u8) -> ! {
     std::process::exit(i32::from(status))
 }
 
+/// What [`print_and_exit`] does when standard output's reader has gone.
+#[derive(Clone, Copy)]
+enum ReaderGone {
+    /// gawk's `usage`: `die_via_sigpipe`, status 141 -- and where the signal
+    /// is blocked and that returns, the warning any other failure gets.
+    Signal,
+    /// gawk's version: status 1, nothing said.
+    Quiet,
+}
+
+/// `text` on standard output, flushed, and the end: gawk's `usage (EXIT_SUCCESS,
+/// stdout)` and its version, which check what they wrote. A write that failed
+/// is `warning: error writing standard output: R`, status 1 -- measured for a
+/// full disk and for standard output closed (`init_fds` left it open the wrong
+/// way round). A reader gone (`EPIPE`: the signal is ignored here) is
+/// `gone`'s answer, measured for each under each disposition, blocked
+/// included.
+fn print_and_exit(text: &[u8], gone: ReaderGone) -> ! {
+    let mut out = coreutils::stdio::StdioFile::stdout();
+    let Err(e) = out.write(text).and_then(|()| out.flush()) else {
+        exit(0)
+    };
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        match gone {
+            ReaderGone::Signal => stdfd::die_via_sigpipe(),
+            ReaderGone::Quiet => exit(1),
+        }
+    }
+    say(format!(
+        "warning: error writing standard output: {}",
+        coreutils::errmsg::strerror(&e)
+    )
+    .as_bytes());
+    exit(1)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -588,6 +636,21 @@ mod tests {
             }
             Ok(_) => panic!("expected these arguments to be refused: {argv:?}"),
         }
+    }
+
+    /// `--help` and `--version` come back to the caller, which answers each
+    /// where gawk does (see `run_main`): asking prints nothing and ends
+    /// nothing here, and nothing after them is read.
+    #[test]
+    fn help_and_version_are_returned_not_printed() {
+        let parse = |argv: &[&[u8]]| {
+            let raw: Vec<Str> = argv.iter().map(|a| a.to_vec()).collect();
+            parse_args(&raw)
+        };
+        assert!(matches!(parse(&[b"--help"]), Ok(Parsed::Help)));
+        assert!(matches!(parse(&[b"--version"]), Ok(Parsed::Version)));
+        assert!(matches!(parse(&[b"--help", b"-Q"]), Ok(Parsed::Help)));
+        assert!(matches!(parse(&[b"1"]), Ok(Parsed::Run(_))));
     }
 
     /// An unknown option byte is escaped, not cast to a `char`.

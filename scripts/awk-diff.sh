@@ -352,6 +352,35 @@ gone_case() {
   report "$AGREED_MSG" "($disp SIGPIPE) awk '$prog' | head -1"
 }
 
+# `late_case DISPOSITION ARGS...` — awk run with ARGS after its reader has
+# already gone: `true` reads nothing and leaves, and awk starts a moment later,
+# so its first write meets no reader at all. For output too short to fill a
+# pipe, which `gone_case`'s `head -1` would simply take. SIGPIPE at its
+# `default`, or `ignored`; the status and what was said are compared, as there.
+late_case() {
+  local disp=$1 side flags o_msg g_msg o_err g_err err
+  shift
+  o_err=$(mktemp); g_err=$(mktemp)
+  for side in ours gnu; do
+    flags=
+    [ "$side" = gnu ] && flags=$GNUFLAGS
+    [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
+    err=$o_err; [ "$side" = gnu ] && err=$g_err
+    # shellcheck disable=SC2086
+    ( if [ "$disp" = ignored ]; then trap '' PIPE; fi
+      { sleep 0.3
+        timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" </dev/null 2>"$err"
+        echo "rc=$?" >>"$err"; } | true )
+  done
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  rm -f "$o_err" "$g_err"
+  AGREED_MSG=no
+  [ "$o_msg" = "$g_msg" ] && AGREED_MSG=yes
+  REPORT=$(printf '  ours: {%s}\n  gnu:  {%s}' \
+    "$(printf '%s' "$o_msg" | tr '\n' '|')" "$(printf '%s' "$g_msg" | tr '\n' '|')")
+  report "$AGREED_MSG" "($disp SIGPIPE) awk $* | (a reader already gone)"
+}
+
 # `tty_case PROGRAM` — PROGRAM with standard output and standard error on one
 # pseudo-terminal (`script(1)`), the bytes the terminal received compared as a
 # dump. On a terminal gawk flushes after every print (`output_is_tty`), so
@@ -1036,6 +1065,18 @@ gone_case ignored 'BEGIN { for (i = 0; i < 100000; i++) print i }'
 gone_case ignored 'BEGIN { for (i = 0; i < 100000; i++) printf "%d\n", i; exit 3 }'
 gone_case ignored 'BEGIN { for (i = 0; i < 100000; i++) print i > "/dev/stdout" }'
 gone_case ignored 'BEGIN { print "x"; while (1) { print "y"; fflush() } }'
+# `--help` and `--version`, which gawk checks after writing: a full disk or a
+# closed standard output is `warning: error writing standard output`, status
+# 1. A reader already gone is `die_via_sigpipe` for `--help`, 141 whatever the
+# disposition, and a quiet status 1 for `--version`.
+fsh_case --help '> /dev/full'
+fsh_case --help '>&-'
+fsh_case --version '> /dev/full'
+fsh_case --version '>&-'
+late_case default --help
+late_case ignored --help
+late_case default --version
+late_case ignored --version
 # Standard error closed: gawk opens `/dev/null` on it, read-only (`init_fds`),
 # so what it writes there fails as it would on a closed descriptor; a fatal
 # error is still status 2, and a lost warning changes nothing.

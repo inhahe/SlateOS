@@ -2,6 +2,12 @@
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
+**2026-10-06: two now, not three.** The desktop's own panel,
+`gui/desktop/src/startup_settings.rs`, is deleted -- nothing ever put it
+on screen, and under every answer C-Q33 offers it goes, `apps/startupmanager`
+and the Settings page being the list's editor. The table below is as it
+was found.
+
 **2026-10-05: the fork is put to the operator as `open-questions.md` C-Q33.**
 Lane C had started on the desktop session starting the Linux autostart
 folders' entries at sign-in, and stopped at `design.txt`'s "only one or two

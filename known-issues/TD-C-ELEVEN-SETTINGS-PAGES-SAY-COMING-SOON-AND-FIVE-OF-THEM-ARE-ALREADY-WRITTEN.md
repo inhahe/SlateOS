@@ -20,7 +20,7 @@ the twenty-nine pages to a real builder and sends the rest to
 | Power | `desktop::power_settings` | 1 695 |
 | WiFi, Ethernet, VPN | `desktop::network_settings` | 4 107 |
 | Default apps | `desktop::default_apps` | 2 325 |
-| Startup apps | `desktop::startup_settings` | 2 129 |
+| Startup apps | `desktop::startup_settings` -- **deleted 2026-10-06**, never shown (C-Q33) | 2 129 |
 | Wallpaper, Fonts, Lock screen, Installed apps | — nothing written | — |
 
 **This is not a new decision. It is §815's second half, unstarted.** That

@@ -129,7 +129,6 @@ pub mod session;
 pub mod session_mgr;
 pub mod shortcut_editor;
 pub mod snap;
-pub mod startup_settings;
 pub mod storage_settings;
 pub mod taskbar;
 pub mod taskbar_autohide;

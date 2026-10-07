@@ -170,7 +170,8 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 #     nothing, in both directions.
 #   startup_settings:last_run_at -- when a startup program last ran,
 #     recorded and never shown, so a program that fails at every boot looks
-#     the same as one that ran a second ago.
+#     the same as one that ran a second ago. DELETED 2026-10-06 with the
+#     module, which nothing showed (open-questions C-Q33).
 #   sound_settings:output_device_id, volume_override -- per-app audio
 #     routing and volume, recorded and never applied. DELETED 2026-10-05
 #     with the module.
@@ -194,7 +195,6 @@ gui/desktop/src/bluetooth.rs:discoverable
 #   that has to be refreshed by hand is the stale half of a pair waiting
 #   to happen, and this gate finds them because the cache is what nobody
 #   reads. Fix in both cases is a deletion, keeping the live computation.
-gui/desktop/src/startup_settings.rs:last_run_at
 # FIXED 2026-09-14 -- the dragged glyph is drawn at alpha 110. Kept for the
 # reasoning:
 #   `DragSource::show_ghost` is documented "whether the icon should appear

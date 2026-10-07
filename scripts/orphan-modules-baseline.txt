@@ -311,7 +311,6 @@ gui/desktop/src/resmon.rs
 gui/desktop/src/screen_capture.rs
 gui/desktop/src/security_dialog.rs
 gui/desktop/src/session_mgr.rs
-gui/desktop/src/startup_settings.rs
 gui/desktop/src/storage_settings.rs
 gui/desktop/src/touchpad.rs
 gui/desktop/src/update_settings.rs
@@ -320,7 +319,4 @@ gui/desktop/src/window_peek.rs
 gui/filechooser/src/service.rs
 gui/imagecodec/src/avif/animation.rs
 gui/remote/src/reader.rs
-gui/toolkit/src/codeview.rs
-gui/toolkit/src/dirtree.rs
-gui/toolkit/src/dropdown.rs
 netproto/src/dhcp.rs

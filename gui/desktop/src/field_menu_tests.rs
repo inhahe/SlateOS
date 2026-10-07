@@ -225,6 +225,15 @@ fn a_press_away_or_escape_closes_the_menu_and_leaves_the_box() {
         shell.run_dialog.is_visible(),
         "Escape closed the box under the menu"
     );
+    // The suggestion list typing brought, while it is up, is the next
+    // Escape's; the box is the one after.
+    if shell.run_dialog.suggestions_showing() {
+        assert!(shell.handle_hotkey(&pressed(Key::Escape)).consumed);
+        assert!(
+            shell.run_dialog.is_visible(),
+            "Escape closed the box before its list"
+        );
+    }
     assert!(shell.handle_hotkey(&pressed(Key::Escape)).consumed);
     assert!(!shell.run_dialog.is_visible());
 

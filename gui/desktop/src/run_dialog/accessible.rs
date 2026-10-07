@@ -178,9 +178,19 @@ impl Accessible for RunDialog {
             (RunPart::Field, Action::Press) => self.press_key(Key::Enter, Modifiers::NONE, ""),
             // The line has the keyboard whenever the box is up.
             (RunPart::Field, Action::Focus) => {}
-            (RunPart::Suggestion(_), Action::Choose | Action::Press)
-            | (RunPart::Ok | RunPart::Cancel | RunPart::Browse | RunPart::Close, Action::Press) => {
+            (RunPart::Suggestion(_), Action::Choose | Action::Press) => {
                 let at = self.part_rect(*part).ok_or(Refusal::NoSuchWidget)?;
+                self.click(at);
+            }
+            (RunPart::Ok | RunPart::Cancel | RunPart::Browse | RunPart::Close, Action::Press) => {
+                let at = self.part_rect(*part).ok_or(Refusal::NoSuchWidget)?;
+                // The suggestion list lies over the buttons while it is up:
+                // a click at a button's middle under a row chooses the row
+                // (`design-decisions.md` §1491).
+                let (x, y) = at.centre();
+                if self.suggestion_at(x, y).is_some() {
+                    return Err(Refusal::Hidden);
+                }
                 self.click(at);
             }
             (part, action) => {

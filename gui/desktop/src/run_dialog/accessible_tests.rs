@@ -152,3 +152,31 @@ fn a_suggestion_is_chosen_and_the_buttons_pressed() {
     assert_eq!(said.first(), Some(&RunDialogEvent::Cancel));
     assert!(!dialog.is_visible());
 }
+
+/// **A button the suggestion list lies over is refused, and nothing
+/// changes** -- a click at its middle would choose the row over it; with the
+/// list put away, as Escape puts it away, the button presses.
+#[test]
+fn a_button_under_the_suggestions_is_refused() {
+    let mut dialog = shown();
+    act(
+        &mut dialog,
+        RunPart::Field,
+        Action::SetText("term".to_owned()),
+    )
+    .unwrap();
+    assert!(dialog.suggestions_showing(), "the premise");
+    assert_eq!(
+        act(&mut dialog, RunPart::Ok, Action::Press),
+        Err(Refusal::Hidden)
+    );
+    assert_eq!(dialog.input.text(), "term", "no row chosen");
+    assert!(dialog.suggestions_showing());
+
+    dialog.press_key(Key::Escape, Modifiers::NONE, "");
+    assert!(!dialog.suggestions_showing() && dialog.is_visible());
+    let said = act(&mut dialog, RunPart::Cancel, Action::Press)
+        .unwrap()
+        .expect("cancelled");
+    assert_eq!(said.first(), Some(&RunDialogEvent::Cancel));
+}

@@ -21897,6 +21897,22 @@ mod run_box_wiring_tests {
             .expect("the open box drew no background")
     }
 
+    /// Put the suggestion list away, as the user does before pressing a
+    /// button it lies over: Escape, while it is up -- and only then, since
+    /// Escape with no list up cancels the box.
+    fn put_away_suggestions(s: &mut DesktopShell) {
+        if s.run_dialog.suggestions_showing() {
+            assert!(
+                s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE))
+                    .consumed
+            );
+            assert!(
+                s.run_dialog.is_visible(),
+                "Escape took the box, not its list"
+            );
+        }
+    }
+
     /// The middle of the button carrying `label`.
     ///
     /// A button is a `FillRect` followed by the `Text` that names it, so the
@@ -22073,6 +22089,8 @@ mod run_box_wiring_tests {
         let mut s = shell();
         s.toggle_run_dialog();
         let _ = type_command(&mut s, "terminal");
+        // The suggestion list's Escape first; the box's is the next.
+        put_away_suggestions(&mut s);
         let outcome = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
         assert!(outcome.consumed);
         assert!(!s.run_dialog.is_visible(), "Escape left the box up");
@@ -22090,7 +22108,9 @@ mod run_box_wiring_tests {
         let mut s = shell();
         s.toggle_run_dialog();
         let _ = type_command(&mut s, "terminal");
+        put_away_suggestions(&mut s);
         let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+        assert!(!s.run_dialog.is_visible(), "the premise: abandoned");
 
         s.toggle_run_dialog();
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
@@ -22148,6 +22168,7 @@ mod run_box_wiring_tests {
         let mut s = shell();
         s.toggle_run_dialog();
         let _ = type_command(&mut s, "terminal");
+        put_away_suggestions(&mut s);
         let (x, y) = button_centre(&s, "OK");
         assert_eq!(
             press(&mut s, x, y),
@@ -22160,6 +22181,7 @@ mod run_box_wiring_tests {
         let mut s = shell();
         s.toggle_run_dialog();
         let _ = type_command(&mut s, "terminal");
+        put_away_suggestions(&mut s);
         let (x, y) = button_centre(&s, "Cancel");
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
         assert!(!s.run_dialog.is_visible());
@@ -22202,6 +22224,7 @@ mod run_box_wiring_tests {
     /// Press Browse and answer the listing it asks for, leaving the chooser up
     /// showing one file called `name`.
     fn browse_showing(s: &mut DesktopShell, name: std::ffi::OsString) {
+        put_away_suggestions(s);
         let (x, y) = button_centre(s, "Browse...");
         assert_eq!(press(s, x, y), ShellAction::Consumed);
         assert!(s.chooser_open(), "Browse put no chooser up");

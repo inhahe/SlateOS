@@ -662,7 +662,14 @@ impl RunDialog {
         let shift = event.modifiers.shift;
 
         match event.key {
-            // Escape → cancel
+            // Escape puts the suggestion list away while it is up -- a list
+            // dropped over the box closes before the box does, as a field's
+            // list does -- and cancels the box when it is not. The list lies
+            // over the buttons, so this is also how the keyboard's user
+            // uncovers them for the pointer.
+            Key::Escape if self.suggestions_showing() => {
+                self.hide_suggestions();
+            }
             Key::Escape => {
                 self.events.push(RunDialogEvent::Cancel);
                 self.hide();
@@ -835,6 +842,12 @@ impl RunDialog {
         );
         let list = guitk::frame::Rect::new(field.x, top, field.w, rows.total_height());
         Some((list, rows))
+    }
+
+    /// Whether the suggestion list is up, over the box.
+    #[must_use]
+    pub fn suggestions_showing(&self) -> bool {
+        self.suggestion_rows().is_some()
     }
 
     /// The suggestion whose row is at `(x, y)`, while the list shows.
@@ -1779,6 +1792,27 @@ mod tests {
             kind: MouseEventKind::Move,
         });
         assert_eq!(over.hovered_button, None);
+    }
+
+    /// **Escape puts the suggestion list away first, and cancels the box only
+    /// when no list is up**: the list lies over the buttons, as a field's
+    /// dropped list does, and closes before the box does -- which is also
+    /// how the buttons under it are uncovered.
+    #[test]
+    fn escape_puts_the_suggestions_away_before_it_cancels() {
+        let mut dialog = offering(3);
+        assert!(dialog.suggestions_showing());
+        let escape = make_key(Key::Escape, false, false, None);
+        assert_eq!(dialog.handle_key_event(&escape), EventResult::Consumed);
+        assert!(!dialog.suggestions_showing(), "the list put away");
+        assert!(dialog.is_visible(), "the box still up");
+        assert!(
+            !dialog.drain_events().contains(&RunDialogEvent::Cancel),
+            "nothing cancelled"
+        );
+        assert_eq!(dialog.handle_key_event(&escape), EventResult::Consumed);
+        assert!(!dialog.is_visible(), "and then the box cancelled");
+        assert!(dialog.drain_events().contains(&RunDialogEvent::Cancel));
     }
 
     /// **The suggestions are drawn over the buttons**, whose presses they

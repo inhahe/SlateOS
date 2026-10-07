@@ -195,6 +195,163 @@ process_global! {
     /// [`sync_kernel_blocked_mask`] another one raced knows to write again.
     fn mask_generation_ptr() -> core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
+
+    /// Bumped by every change to a disposition, so that a
+    /// [`sync_kernel_ignored`] another one raced knows to report again --
+    /// [`mask_generation_ptr`]'s pattern, for the ignored set.
+    fn ignored_generation_ptr() -> core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    /// Set once the kernel has answered `NoSuchSyscall` to
+    /// `SYS_SIGNAL_SET_IGNORED` or `SYS_SIGNAL_GET_IGNORED`: it keeps no
+    /// ignored set, and is not asked again. (Read on the target alone: the
+    /// host's stand-in for the kernel always keeps the set.)
+    #[cfg_attr(not(target_os = "none"), allow(dead_code))]
+    fn ignored_unsupported_ptr() -> core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+}
+
+/// `SYS_SIGNAL_SET_IGNORED`'s flag: `SIGCHLD` has `SA_NOCLDWAIT`.
+const SIGNAL_IGNORED_NOCLDWAIT: u64 = 1;
+
+/// The set this process ignores, as `SYS_SIGNAL_SET_IGNORED` takes it: bit
+/// `n - 1` for each signal `n` in 1..=64 whose disposition is `SIG_IGN`, and
+/// the flags -- [`SIGNAL_IGNORED_NOCLDWAIT`] when `SIGCHLD` has
+/// `SA_NOCLDWAIT`.
+fn ignored_now() -> (u64, u64) {
+    // SAFETY: `actions_ptr()` is this process's own table and this is a read.
+    let actions = unsafe { &*actions_ptr() };
+    let mut set = 0u64;
+    for (sig, action) in actions.iter().enumerate().skip(1) {
+        if action.sa_handler == SIG_IGN {
+            set |= sigmask_bit(i32::try_from(sig).unwrap_or(0));
+        }
+    }
+    let nocldwait = actions
+        .get(SIGCHLD as usize)
+        .is_some_and(|a| a.sa_flags & SA_NOCLDWAIT != 0);
+    let flags = if nocldwait {
+        SIGNAL_IGNORED_NOCLDWAIT
+    } else {
+        0
+    };
+    (set, flags)
+}
+
+/// A disposition has changed: report the ignored set to the kernel.
+///
+/// A native process's dispositions are this library's table, which an `exec`
+/// replaces: the new image's started all-default, so a signal ignored before
+/// it -- `nohup`'s `SIGHUP`, a shell's `SIGINT` for a background job -- was
+/// caught or fatal after it, and a `SIGCHLD` set to `SIG_IGN` could not stop
+/// children becoming zombies, which only the kernel can do
+/// (`known-issues/TD-D-SIG-IGN-DOES-NOT-SURVIVE-EXEC-OR-SPAWN.md`). The kernel
+/// keeps the set now (`SYS_SIGNAL_SET_IGNORED`, lane A's): across `exec`,
+/// through `fork` and spawn, discarding an ignored signal when it is sent
+/// and reaping children when `SIGCHLD` is ignored. Every change to a
+/// disposition sends the whole set; the new image reads it back at start-up
+/// ([`seed_inherited_ignored`]).
+fn ignored_changed() {
+    // SAFETY: an atomic, shared by every thread.
+    unsafe { &*ignored_generation_ptr() }.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    sync_kernel_ignored();
+}
+
+/// Report [`ignored_now`] to the kernel -- and report it again for as long as
+/// it changes while it is reported, as [`sync_kernel_blocked_mask`] writes
+/// the mask: two threads changing dispositions can land in either order, and
+/// the one computed first must not be the one that stays.
+#[cfg(target_os = "none")]
+fn sync_kernel_ignored() {
+    use core::sync::atomic::Ordering::SeqCst;
+    // SAFETY: atomics, shared by every thread.
+    let (generation, unsupported) =
+        unsafe { (&*ignored_generation_ptr(), &*ignored_unsupported_ptr()) };
+    if unsupported.load(SeqCst) {
+        return;
+    }
+    loop {
+        let seen = generation.load(SeqCst);
+        let (set, flags) = ignored_now();
+        let ret = crate::syscall::syscall3(crate::syscall::SYS_SIGNAL_SET_IGNORED, set, 0, flags);
+        if ret == errno::native::NO_SUCH_SYSCALL {
+            // A kernel without the record: the table alone, as before.
+            unsupported.store(true, SeqCst);
+            return;
+        }
+        // Any other refusal cannot be: the set never names SIGKILL or
+        // SIGSTOP (`sigaction` refuses them), the one flag is known, and no
+        // out-pointer is passed. Report again only if the table moved.
+        if generation.load(SeqCst) == seen {
+            return;
+        }
+    }
+}
+
+/// The host's stand-in: there is no kernel, so the set is only kept, for the
+/// tests to read ([`kernel_ignored`]).
+#[cfg(not(target_os = "none"))]
+fn sync_kernel_ignored() {
+    HOST_KERNEL_IGNORED.with(|k| k.set(ignored_now()));
+}
+
+#[cfg(not(target_os = "none"))]
+std::thread_local! {
+    /// The ignored set the host's stand-in for `SYS_SIGNAL_SET_IGNORED` was
+    /// last given, with its flags.
+    static HOST_KERNEL_IGNORED: core::cell::Cell<(u64, u64)> =
+        const { core::cell::Cell::new((0, 0)) };
+}
+
+/// The ignored set and flags, as the host's stand-in last kept them.
+#[cfg(all(test, not(target_os = "none")))]
+fn kernel_ignored() -> (u64, u64) {
+    HOST_KERNEL_IGNORED.with(core::cell::Cell::get)
+}
+
+/// Start the disposition table from what the kernel says this process
+/// ignores: the signals ignored when this image began, kept across the
+/// `exec` that started it or passed on by the `fork` or spawn that made it
+/// (`SYS_SIGNAL_GET_IGNORED`, lane A's). A program `nohup` started finds
+/// `SIGHUP` at `SIG_IGN` here, as on Linux. A kernel without the call
+/// leaves the table all-default, as it always started.
+#[cfg(target_os = "none")]
+fn seed_inherited_ignored() {
+    let mut inherited: u64 = 0;
+    let ret = crate::syscall::syscall1(
+        crate::syscall::SYS_SIGNAL_GET_IGNORED,
+        core::ptr::addr_of_mut!(inherited) as u64,
+    );
+    if ret < 0 {
+        if ret == errno::native::NO_SUCH_SYSCALL {
+            // SAFETY: an atomic, shared by every thread.
+            unsafe { &*ignored_unsupported_ptr() }
+                .store(true, core::sync::atomic::Ordering::SeqCst);
+        }
+        return;
+    }
+    adopt_inherited_ignored(inherited);
+}
+
+/// Set `SIG_IGN` in the table for each signal `inherited` names (bit `n - 1`
+/// for signal `n`), never `SIGKILL` or `SIGSTOP`, which cannot be ignored.
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+fn adopt_inherited_ignored(inherited: u64) {
+    // SAFETY: `actions_ptr()` is this process's; start-up has one thread.
+    let Some(actions) = (unsafe { actions_ptr().as_mut() }) else {
+        return;
+    };
+    for sig in 1..=64i32 {
+        if inherited & sigmask_bit(sig) == 0 || sig == SIGKILL || sig == SIGSTOP {
+            continue;
+        }
+        if let Some(slot) = actions.get_mut(sig as usize) {
+            *slot = Sigaction {
+                sa_handler: SIG_IGN,
+                ..DEFAULT_SIGACTION
+            };
+        }
+    }
 }
 
 /// How many threads may wait in `sigtimedwait` and its kin at once.  A
@@ -621,6 +778,7 @@ fn install_signal_with_flags(
     slot.sa_flags = flags;
     slot.sa_restorer = 0;
     slot.sa_mask = mask;
+    ignored_changed();
     old
 }
 
@@ -771,6 +929,8 @@ pub unsafe extern "C" fn sigaction(
         // and it has just changed. Only on the store path: a
         // `sigaction(sig, NULL, &old)` enquiry changes nothing to report.
         publish_altstack();
+        // And the ignored set, which an `exec` keeps.
+        ignored_changed();
     }
 
     0
@@ -935,6 +1095,9 @@ fn reset_disposition(sig: i32) {
     {
         *slot = DEFAULT_SIGACTION;
     }
+    // A handler, not `SIG_IGN`, was reset -- but `SIGCHLD`'s `SA_NOCLDWAIT`
+    // may have gone with it, which the kernel keeps too.
+    ignored_changed();
 }
 
 /// Planned outcome of dispatching a signal to the calling process.
@@ -1909,6 +2072,8 @@ pub fn init_signals() {
     // A failed read leaves `inherited` 0: the empty mask this library
     // always started with, which `adopt_inherited_mask` then writes back.
     adopt_inherited_mask(if read < 0 { 0 } else { inherited });
+    // And the dispositions: what came to this image ignored stays ignored.
+    seed_inherited_ignored();
 }
 
 /// Start the program's mask as `inherited` -- what the kernel held as this
@@ -4470,6 +4635,86 @@ mod tests {
         assert_eq!(signal(0, SIG_IGN), SIG_ERR);
         assert_eq!(signal(-1, SIG_IGN), SIG_ERR);
         assert_eq!(signal(NSIG, SIG_IGN), SIG_ERR);
+    }
+
+    /// Every change to a disposition reports the whole ignored set to the
+    /// kernel (the host's stand-in here): `SIG_IGN` in, out, and `SIGCHLD`'s
+    /// `SA_NOCLDWAIT` as the flag.
+    #[test]
+    fn the_ignored_set_reaches_the_kernel_with_every_change() {
+        let hup = sigmask_bit(SIGHUP);
+        let usr2 = sigmask_bit(SIGUSR2);
+        let _ = signal(SIGHUP, SIG_DFL);
+        let _ = signal(SIGUSR2, SIG_DFL);
+        assert_eq!(kernel_ignored().0 & (hup | usr2), 0);
+
+        let _ = signal(SIGHUP, SIG_IGN);
+        assert_eq!(kernel_ignored().0 & hup, hup, "signal() reports SIG_IGN");
+        let ign = Sigaction {
+            sa_handler: SIG_IGN,
+            ..DEFAULT_SIGACTION
+        };
+        // SAFETY: `ign` is a whole `Sigaction`; no old action is asked.
+        assert_eq!(
+            unsafe { sigaction(SIGUSR2, &raw const ign, core::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            kernel_ignored().0 & (hup | usr2),
+            hup | usr2,
+            "so does sigaction()"
+        );
+
+        let _ = signal(SIGHUP, SIG_DFL);
+        assert_eq!(kernel_ignored().0 & hup, 0, "and SIG_IGN going");
+
+        let nocldwait = Sigaction {
+            sa_flags: SA_NOCLDWAIT,
+            ..DEFAULT_SIGACTION
+        };
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { sigaction(SIGCHLD, &raw const nocldwait, core::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            kernel_ignored().1,
+            SIGNAL_IGNORED_NOCLDWAIT,
+            "SA_NOCLDWAIT is the flag"
+        );
+        let dfl = DEFAULT_SIGACTION;
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { sigaction(SIGCHLD, &raw const dfl, core::ptr::null_mut()) },
+            0
+        );
+        assert_eq!(kernel_ignored().1, 0);
+        let _ = signal(SIGUSR2, SIG_DFL);
+    }
+
+    /// What the kernel says came to this image ignored starts ignored --
+    /// never `SIGKILL` or `SIGSTOP`, whatever the set says.
+    #[test]
+    fn an_inherited_ignored_set_seeds_the_table() {
+        let _ = signal(SIGHUP, SIG_DFL);
+        let _ = signal(SIGINT, SIG_DFL);
+        adopt_inherited_ignored(
+            sigmask_bit(SIGHUP) | sigmask_bit(SIGINT) | sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP),
+        );
+        let disposition = |sig: i32| {
+            let mut old = DEFAULT_SIGACTION;
+            // SAFETY: `old` is a whole `Sigaction`; nothing new is stored.
+            let _ = unsafe { sigaction(sig, core::ptr::null(), &raw mut old) };
+            old.sa_handler
+        };
+        assert_eq!(disposition(SIGHUP), SIG_IGN, "nohup's SIGHUP");
+        assert_eq!(disposition(SIGINT), SIG_IGN);
+        // SAFETY: `actions_ptr()` is this thread's table on the host; a read.
+        let actions = unsafe { &*actions_ptr() };
+        assert_eq!(actions[SIGKILL as usize].sa_handler, SIG_DFL);
+        assert_eq!(actions[SIGSTOP as usize].sa_handler, SIG_DFL);
+        let _ = signal(SIGHUP, SIG_DFL);
+        let _ = signal(SIGINT, SIG_DFL);
     }
 
     #[test]

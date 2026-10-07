@@ -176,6 +176,17 @@ pub const SYS_THREAD_JOIN: u64 = 512;
 /// up; `WouldBlock` still means another thread is joining it. Lane A's
 /// (1085); a kernel without it answers `NoSuchSyscall`.
 pub const SYS_THREAD_JOIN_TIMEOUT: u64 = 1085;
+/// Report the signals the calling process ignores: `signal_set_ignored(set,
+/// old_out, flags)`, bit `n - 1` for signal `n`, the whole set each time;
+/// flag 1 is `SIGCHLD`'s `SA_NOCLDWAIT`. The kernel keeps the set across
+/// `exec`, passes it on through `fork` and spawn, discards an ignored signal
+/// when it is sent, and reaps children when `SIGCHLD` is ignored. Lane A's
+/// (1098); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_SIGNAL_SET_IGNORED: u64 = 1098;
+/// Read the calling process's ignored set into a `u64` at the pointer:
+/// `signal_get_ignored(out)`, for start-up to seed its disposition table.
+/// Lane A's (1099); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_SIGNAL_GET_IGNORED: u64 = 1099;
 pub const SYS_PROCESS_KILL: u64 = 506;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 /// Spawn with an explicit capability policy. arg0 = `*const SpawnEx2Args`.

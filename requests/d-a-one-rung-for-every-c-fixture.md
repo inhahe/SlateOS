@@ -115,19 +115,21 @@ will close them myself as each one goes on.
 | `ctest-fsetfl-append` | -- (filed with `F_SETFL`'s `O_APPEND` reaching your description, 2026-10-07; `known-issues/D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE.md`); a write landing at the end after `F_SETFL O_APPEND`, the flag cleared again, a dup sharing it, and two processes appending 2000 lines each through it without losing one; needs your `SYS_FS_SET_STATUS_FLAGS` | file | 60 |
 | `ctest-positional-io` | -- (filed with `pread`/`pwrite` on your positional calls, 2026-10-07); the position left alone by `pread`, `pwrite`, `preadv` and `pwritev`, and 20000 `pread`s undisturbed by another thread's seeks; needs your `SYS_FS_PREAD` and `SYS_FS_PWRITE` | file | 60 |
 | `ctest-timed-join` | -- (filed with the joins on your timed join, 2026-10-07; `known-issues/D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD.md`); `pthread_tryjoin_np`, `pthread_timedjoin_np` and `pthread_clockjoin_np` answering as glibc's -- `EBUSY`, `ETIMEDOUT` on time, a join when the thread exits; asks your `SYS_THREAD_JOIN_TIMEOUT`, and waits about two and a half seconds in all | - | 30 |
+| `ctest-sigign-exec` | -- (filed with the ignored set reaching your record, 2026-10-07; `known-issues/TD-D-SIG-IGN-DOES-NOT-SURVIVE-EXEC-OR-SPAWN.md`); `SIGHUP` ignored across an `exec` of itself and survived, a handler gone default, and an ignored `SIGCHLD` leaving no zombie (`waitpid` `ECHILD`); needs your `SYS_SIGNAL_SET_IGNORED` and `SYS_SIGNAL_GET_IGNORED` | file | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
 The nine rows from `ctest-sigpipe` to `ctest-string` were added on
 2026-10-06, which made twenty-one fixtures waiting where the summary above
-says eleven; the eleven after them came on 2026-10-07 -- GDB, Mono, binutils
+says eleven; the twelve after them came on 2026-10-07 -- GDB, Mono, binutils
 and GCC on the image, each run by the fixture named for it, and Unix
 sockets with names, shared anonymous memory, close-on-exec at a native exec,
-record locks, appends, positional I/O and timed joins, which your
-`SYS_UNIX_*`, native `MAP_SHARED`, `SYS_PROCESS_SET_EXEC_CLOSE`,
-`SYS_FS_RECORD_LOCK`, `SYS_FS_SET_STATUS_FLAGS`, `SYS_FS_PREAD`/`PWRITE` and
-`SYS_THREAD_JOIN_TIMEOUT` made possible.
+record locks, appends, positional I/O, timed joins and ignored signals,
+which your `SYS_UNIX_*`, native `MAP_SHARED`, `SYS_PROCESS_SET_EXEC_CLOSE`,
+`SYS_FS_RECORD_LOCK`, `SYS_FS_SET_STATUS_FLAGS`, `SYS_FS_PREAD`/`PWRITE`,
+`SYS_THREAD_JOIN_TIMEOUT` and `SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED` made
+possible.
 `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned

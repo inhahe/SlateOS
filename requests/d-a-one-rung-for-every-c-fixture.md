@@ -107,12 +107,19 @@ will close them myself as each one goes on.
 | `ctest-gdb-runs` | -- (filed with GDB 18.1 on the image, 2026-10-07; `scripts/gdb-spike/`); runs `/bin/gnu-gdb` and `/bin/gdbserver` -- start-up, `print 6*7`, a symbol read from another program's ELF -- the image's largest C++ program, and its first run here | file | 300 |
 | `ctest-mono-runs` | -- (filed with Mono 6.14.1 on the image, 2026-10-07; `scripts/mono-spike/`); runs `/bin/mono` on a .NET program: a JIT, faults turned into exceptions (`SIGSEGV`/`SIGFPE` with a context the handler rewrites -- the first native program here to need that), a collection, a thread, and C called by name (`dlsym`, design-decisions §1184) | file | 300 |
 | `ctest-binutils-runs` | -- (filed with GNU binutils 2.47 on the image, 2026-10-07; `scripts/binutils-spike/`); `/bin/as` and `/bin/ld.bfd` make a program from assembly source with the image's `libc.a` and run it, then the other twelve tools read or write what those two made; its scratch files are in `/tmp` | file | 300 |
+| `ctest-gcc-runs` | -- (filed with GCC 16.2 on the image, 2026-10-07; `scripts/gcc-spike/`, design-decisions 1185); `/usr/bin/gcc` and `/usr/bin/g++` compile and link a C program and a C++ one -- an exception thrown and caught, `std::cout`, a thread -- with the image's `libc.a`, libgcc and libstdc++, and run what they made; `cc1plus` compiling `<iostream>` is the slow part, hence the full 600; its scratch files are in `/tmp` | file | 600 |
+| `ctest-unix-socket` | -- (filed with Unix sockets that have names, 2026-10-07, on your `SYS_UNIX_*`; design-decisions 1186); stream, datagram and sequenced-packet sockets bound to paths in `/tmp` and to abstract names, a parent and a forked child talking over them, credentials passed with `SCM_CREDENTIALS` | file | 60 |
+| `ctest-shared-anon` | -- (filed with libc's `MAP_SHARED`, 2026-10-07, for your `a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`); a parent and a forked child share anonymous memory both ways, on its first page and its last, while a private mapping stays private; needs your kernel's native `MAP_SHARED`, which the library now asks for | - | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
-The last nine rows were added on 2026-10-06, which makes twenty-one
-fixtures waiting where the summary above says eleven.  `ctest-string` is
+The nine rows from `ctest-sigpipe` to `ctest-string` were added on
+2026-10-06, which made twenty-one fixtures waiting where the summary above
+says eleven; the six after them came on 2026-10-07 -- GDB, Mono, binutils
+and GCC on the image, each run by the fixture named for it, and Unix
+sockets with names and shared anonymous memory, which your `SYS_UNIX_*` and
+native `MAP_SHARED` made possible. `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned
 blocks past a string's end but never past its page, and only a SlateOS

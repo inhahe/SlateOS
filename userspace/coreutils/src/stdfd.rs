@@ -132,20 +132,23 @@
 //! to reach the caller's local variable; the stream therefore has to be
 //! reachable from anywhere, exactly as `stdout` is.
 //!
-//! ## What this module deliberately does not do
+//! ## `SIGPIPE`
 //!
-//! It does not restore `SIGPIPE`. Rust masks it, so `yes | head -1` yields
-//! `EPIPE` here where GNU's `yes` dies of the signal and reports 141. That
-//! divergence is *forced*: the target kernel has no Unix signals at all (see
-//! `design.txt` — "No Unix signals for process control"), so there is no
-//! behaviour to restore, only a different one to invent.
+//! [`restore`] puts `SIGPIPE` back to the disposition the process inherited,
+//! undoing the runtime's "ignored" as it undoes the runtime's `/dev/null`s.
+//! Inherited at its default, as it nearly always is, `yes | head -1` ends
+//! `yes` with the signal: no diagnostic, status 141, as GNU's. Inherited
+//! ignored (`trap '' PIPE`), the write fails with `EPIPE`, and the utility
+//! reports it as GNU's does, as the write error it then is.
 //!
-//! What it does instead is name the case once, in [`reader_gone`], so that a
-//! utility answering it inherits the tree's established convention — say
-//! nothing, keep the status the run had already earned — rather than deriving
-//! it again and landing somewhere slightly different. Without that, every
-//! caller of [`write_error`] would print `prog: write error: Broken pipe`
-//! where GNU prints nothing at all.
+//! Until 2026-10-07 it was left ignored, because the target sent no `SIGPIPE`
+//! to die of (design-decisions §377), and every utility answered `EPIPE` by
+//! saying nothing and keeping the status it had earned. Lane D's C library
+//! raises the signal now (§1176), and §1060 records the change. The old
+//! convention survives in [`reader_gone`], which still answers yes wherever
+//! the signal was not put back, so that a utility not yet converted to
+//! [`restore`] stays quiet rather than printing `prog: write error: Broken
+//! pipe`.
 //!
 //! ## Host builds
 //!
@@ -1055,15 +1058,23 @@ fn is_earlier_failure(err: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<EarlierFailure>())
 }
 
-/// Whether a failed write failed because the reader went away.
+/// Whether a failed write is one to stay quiet about because the reader went
+/// away -- standing in for the `SIGPIPE` this process would have died of.
 ///
-/// The one write failure a utility does not report. GNU answers it by dying of
-/// `SIGPIPE`: no diagnostic, status 141, and the pipeline ends. SlateOS does
-/// not use Unix signals for process control (`design.txt`) and Rust masks the
-/// signal anyway, so "die of `SIGPIPE`" has no translation — the faithful one
-/// is to stay quiet and keep whatever status the run had already earned, which
-/// is also what upstream's own `EPIPE` branches do where it has them
-/// (`tee`'s `--output-error` default, `iopoll`'s callers).
+/// GNU answers a broken pipe by dying of `SIGPIPE`: no diagnostic, status 141.
+/// Since [`restore`] puts `SIGPIPE` back to the disposition the process
+/// inherited (2026-10-07), a utility that called it does the same: it is dead
+/// before any `EPIPE` reaches it. If it gets one anyway, it was started with
+/// `SIGPIPE` ignored, and then GNU's answer is the write error itself --
+/// `seq: write error: Broken pipe` under `trap '' PIPE` -- so this is false
+/// and the error is reported like any other.
+///
+/// It is true only where `SIGPIPE` was *not* restored: a utility not yet
+/// converted to the [`restore`] funnel, still running with the runtime's
+/// "ignored", and the build host. There an `EPIPE` stands in for the signal,
+/// and the faithful answer is to stay quiet and keep the status the run had
+/// earned (design-decisions §377, which made that the rule for everyone
+/// while the target had no `SIGPIPE`).
 ///
 /// `cut`, `head`, `tail` and `uniq` each derived that convention separately,
 /// with the same paragraph of comment copied between them. It lives here now
@@ -1086,7 +1097,15 @@ fn is_earlier_failure(err: &io::Error) -> bool {
 /// four utilities wrong to save three lines in the rest.
 #[must_use]
 pub fn reader_gone(err: &io::Error) -> bool {
-    err.kind() == io::ErrorKind::BrokenPipe
+    err.kind() == io::ErrorKind::BrokenPipe && !stdfdguard::sigpipe_restored()
+}
+
+/// Ignore `SIGPIPE` from now on, as an upstream that calls
+/// `signal (SIGPIPE, SIG_IGN)` does -- `tee` in its `--output-error` modes,
+/// `split --filter` -- so that a write into a broken pipe returns `EPIPE` for
+/// the program to act on. Call it after [`restore`]. Does nothing off Linux.
+pub fn ignore_sigpipe() {
+    stdfdguard::ignore_sigpipe();
 }
 
 /// The last thing a utility does with its standard output: gnulib's

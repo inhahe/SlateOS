@@ -5264,11 +5264,13 @@ fn main() {
 /// The close is where a full disk is finally `couldn't flush stdout`, and where
 /// a standard output that was never open is `couldn't close stdout: Bad file
 /// descriptor` even when nothing was written to it; either is status 4. A
-/// reader that left is the exception, as everywhere (§377).
+/// reader that left is the exception where `SIGPIPE` could not be put back,
+/// as everywhere (`stdfd::reader_gone`); where it was, this process is
+/// already dead of it, as upstream's is.
 fn finish(status: i32) -> ! {
     match close_everything() {
         Ok(()) => exit_quietly(status),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => exit_quietly(status),
+        Err(e) if stdfd::reader_gone(&e) => exit_quietly(status),
         Err(e) => {
             let mut line = b"sed: ".to_vec();
             line.extend_from_slice(&failure_message(&e));
@@ -5328,10 +5330,11 @@ impl Job<'_> {
             Ok(q) => q,
             Err(Stop::Io(e)) => {
                 // A closed pipe is how `sed … | head` ends, not a failure:
-                // GNU is killed by `SIGPIPE` there, saying nothing, and there
-                // is no signal here to be killed by (design-decisions §377).
-                // Stop where it would have died, and keep the status earned.
-                if e.kind() == io::ErrorKind::BrokenPipe {
+                // GNU is killed by `SIGPIPE` there, saying nothing, and so is
+                // this since `stdfd::restore` put the signal back. Where it
+                // could not (see `stdfd::reader_gone`), stop where it would
+                // have died, and keep the status earned.
+                if stdfd::reader_gone(&e) {
                     exit_quietly(status(None, input.had_error));
                 }
                 // GNU's `ck_fwrite` panics: the message, then `exit`.

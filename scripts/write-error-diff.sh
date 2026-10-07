@@ -77,12 +77,25 @@
 # the exact invocation would have to be rewritten every time a case is added.
 # Nothing here can go stale, so there is no XPASS to report.
 #
-# ## Broken pipes are deliberately not here
+# ## Broken pipes
 #
-# `seq | head -1` exits 141 under GNU and 0 under ours, on purpose: the target
-# has no signals to be killed by (design-decisions.md §377). A harness case for
-# it would be a permanent xfail asserting a decision, which the decision record
-# already does.
+# Two more shapes, `pipe` and `pipeign`: the utility's stdout is a pipe whose
+# reader takes one byte and leaves. Under `pipe` SIGPIPE is at its default, and
+# GNU dies of it on the next write, status 141, saying nothing. Under `pipeign`
+# it is ignored, as `trap '' PIPE` leaves it, and the write fails with EPIPE
+# instead, which GNU reports as it would any other write error.
+#
+# These were left out until 2026-10-07, when ours exited 0 under `pipe` on
+# purpose because SlateOS raised no SIGPIPE (design-decisions.md §377). Lane D's
+# libc raises it now (§1176), and `stdfd::restore` puts back the disposition the
+# utility inherited (§1060). That makes the pipe shapes the same kind of question
+# as the others: both depend on `guard_std_fds!` having recorded the disposition
+# before Rust's runtime ignored it, and a binary without the macro gives itself
+# away here by exiting 0 under `pipe`.
+#
+# Only invocations whose output is far larger than a pipe's 64 KiB buffer are
+# asked. A smaller one may finish its writes before the reader leaves, and
+# then which side of that race it lands on decides the answer.
 #
 # Run `OURS=/usr/bin ./scripts/write-error-diff.sh` to confirm the harness still
 # discriminates. `OURS` names a *directory* here, not a binary, since there is
@@ -108,9 +121,9 @@ DIFF_PROG='write-error'
 DIFF_GNU_SOURCE=9.4
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
-DIFF_BINS="basename cat comm dirname echo expand fold head join logname md5sum
-           nice nl nohup paste printf pwd seq sha256sum tsort tty unexpand wc
-           whoami yes"
+DIFF_BINS="base64 basename cat comm cut dirname echo expand fold head join
+           logname md5sum nice nl nohup od paste printf pwd seq sha256sum sort
+           tac tsort tty unexpand uniq wc whoami yes"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -133,14 +146,15 @@ printf '1 right\n2 right\n'      > "$fix/j2"
 seq 1 200000                     > "$fix/huge"
 
 # --- run one case on both sides -----------------------------------------------
-# `MODE` is one of: plain, closed, full, errclosed, errfull, both.
+# `MODE` is one of: plain, closed, full, errclosed, errfull, both, pipe, pipeign.
 MODE=plain
 AGREED=no; REPORT=; OUT_DIFFERS_BY_ERRNO=no
 
 compare() {
   local prog="$1"; shift
-  local o_out g_out o_err g_err o_rc g_rc side out err rc
+  local o_out g_out o_err g_err o_rc g_rc side out err rc rcf
   o_out=$(mktemp); g_out=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
+  rcf=$(mktemp)
 
   for side in ours gnu; do
     if [ "$side" = ours ]; then out=$o_out; err=$o_err
@@ -155,16 +169,25 @@ compare() {
       errclosed) ( timeout -k 2 60 env PATH="$bindir/$side" "$prog" "$@" ) >"$out" 2>&- ;;
       errfull)   ( timeout -k 2 60 env PATH="$bindir/$side" "$prog" "$@" ) >"$out" 2>/dev/full ;;
       both)      ( timeout -k 2 60 env PATH="$bindir/$side" "$prog" "$@" ) >&-     2>&- ;;
+      # A pipeline's status is its last stage's, so the utility's own is carried
+      # out in a file. The `echo` writes to that file, not to the closed pipe,
+      # so it survives the SIGPIPE that ends the utility.
+      pipe)      { timeout -k 2 60 env PATH="$bindir/$side" "$prog" "$@" 2>"$err"
+                   echo $? >"$rcf"; } | head -c 1 >/dev/null ;;
+      pipeign)   ( trap '' PIPE
+                   { timeout -k 2 60 env PATH="$bindir/$side" "$prog" "$@" 2>"$err"
+                     echo $? >"$rcf"; } | head -c 1 >/dev/null ) ;;
     esac
     # On the very next line, before anything else runs — including a `[ ]`
     # test, whose own status would silently replace it.
     rc=$?
+    case $MODE in pipe|pipeign) rc=$(cat "$rcf") ;; esac
     if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
   done
 
   local o_msg g_msg
   o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
-  rm -f "$o_out" "$g_out" "$o_err" "$g_err"
+  rm -f "$o_out" "$g_out" "$o_err" "$g_err" "$rcf"
 
   # Is ours GNU's message with an errno appended? That is the one accepted
   # difference — see the header.
@@ -216,6 +239,18 @@ sweep() {
   have "$1" || return 0
   local m
   for m in closed full errclosed errfull both; do
+    MODE=$m
+    run "$@"
+  done
+}
+
+# `pipesweep PROG ARGS...` — the two broken-pipe shapes. Apart from `sweep`
+# because only an invocation with far more output than a pipe buffers can be
+# asked them; see the header.
+pipesweep() {
+  have "$1" || return 0
+  local m
+  for m in pipe pipeign; do
     MODE=$m
     run "$@"
   done
@@ -280,6 +315,31 @@ sweep wc         -L "$fix/huge"
 sweep head       -n 200000 "$fix/huge" "$fix/nosuch"
 sweep cat        "$fix/huge" "$fix/nosuch"
 sweep nl         "$fix/huge" "$fix/nosuch"
+
+# --- a reader that goes away --------------------------------------------------
+# Each writes well over a pipe's 64 KiB, so the reader is gone long before the
+# utility finishes. Under `pipe` both sides die of SIGPIPE; under `pipeign` both
+# report the failed write, each in its own utility's words and with its own
+# status (`sort` exits 2).
+pipesweep base64     "$fix/huge"
+pipesweep cat        "$fix/huge"
+pipesweep cut        -c1-3 "$fix/huge"
+pipesweep expand     "$fix/huge"
+pipesweep fold       -w 3 "$fix/huge"
+pipesweep head       -n 200000 "$fix/huge"
+pipesweep nl         "$fix/huge"
+pipesweep od         "$fix/huge"
+pipesweep paste      "$fix/huge" "$fix/huge"
+pipesweep seq        1 200000
+pipesweep sort       "$fix/huge"
+pipesweep tac        "$fix/huge"
+pipesweep unexpand   -a "$fix/huge"
+pipesweep uniq       "$fix/huge"
+pipesweep yes        alpha
+# A failure after the first operand: GNU stops at once, so the second is never
+# opened and its cannot-open complaint must not appear.
+pipesweep cat        "$fix/huge" "$fix/nosuch"
+pipesweep head       -n 200000 "$fix/huge" "$fix/nosuch"
 
 # --- the usage error, which never reaches a flush -----------------------------
 # Upstream's `usage (EXIT_FAILURE)` reaches `atexit (close_stdout)` with an

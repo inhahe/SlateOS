@@ -1133,9 +1133,11 @@ fn start_file(
     }
     let mut ok = match emit(&mut file, out, options) {
         Ok(()) => true,
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+        Err(e) if stdfd::reader_gone(&e) => {
             // Nothing downstream is listening. Upstream notices this through
             // `check_output_alive`; either way there is nothing to report.
+            // (`stdfd::reader_gone`: quiet only where `SIGPIPE`, which would
+            // have ended upstream, was not put back.)
             w.file = None;
             return true;
         }

@@ -1609,7 +1609,9 @@ mod imp {
             // end to a pipeline, not a failure. Anything else is data the
             // caller will never see and must not be reported as success.
             if let Err(e) = out.write_all(&buf) {
-                if e.kind() == io::ErrorKind::BrokenPipe {
+                // `stdfd::reader_gone`: quiet only where the `SIGPIPE` that
+                // would have ended upstream was not put back.
+                if coreutils::stdfd::reader_gone(&e) {
                     return ExitCode::from(u8::from(diags.fail));
                 }
                 diag!("stat: write error: {}", strerror(&e));
@@ -1621,7 +1623,7 @@ mod imp {
         }
 
         if let Err(e) = out.flush()
-            && e.kind() != io::ErrorKind::BrokenPipe
+            && !coreutils::stdfd::reader_gone(&e)
         {
             diag!("stat: write error: {}", strerror(&e));
             return ExitCode::from(1);

@@ -10,19 +10,14 @@
 # a record split across a buffer boundary, or a buffer that is not a whole
 # number of records — is invisible in the first 4 KiB and obvious in 40 KB.
 #
-# For those cases the program's own exit status is *not* compared, and the
-# reason is a real difference rather than a limitation of the method:
-#
-#   GNU `yes` dies of `SIGPIPE` when `head` goes away, and a shell reports 141.
-#   SlateOS has no Unix signals for process control (`design.txt`) and Rust
-#   masks the signal anyway, so the same situation arrives as `EPIPE`, is
-#   recognised, and exits 0 quietly. `cut`, `head`, `tail` and `uniq` in this
-#   tree already do exactly that.
-#
-# That difference is not swept under the bound — it is one explicit `xfail`
-# below, so it is recorded once instead of being smeared silently over every
-# case. Cases that *do* terminate on their own — `--help`, `--version`, every
-# option error — compare the status like any other harness.
+# Those cases compare the program's exit status too. `head` going away is what
+# ends them: the next write raises SIGPIPE, and the program dies of it, status
+# 141, on both sides. Until 2026-10-07 ours exited 0 there instead, because
+# SlateOS raised no SIGPIPE and Rust ignores it before `main`, so the status was
+# left out of these cases and recorded once as an `xfail`. Lane D's libc raises
+# it now (`design-decisions.md` §1176), and `stdfd::restore` puts back the
+# disposition `yes` inherited (§1060). Section 8 runs the same pipe with SIGPIPE
+# ignored, where the write fails instead and `yes` has to say so.
 #
 # ## Why both sides run inside WSL
 #
@@ -35,7 +30,7 @@
 # ## Cases that differ on purpose
 #
 # Two: `--help` omits the GNU project's `Report bugs to:` block and `--version`
-# names SlateOS, as everywhere here. Plus the broken-pipe status above.
+# names SlateOS, as everywhere here.
 #
 # Run `OURS=/usr/bin/yes ./scripts/yes-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else.
@@ -57,8 +52,11 @@ pass=0; fail=0; xfail=0; xpass=0
 # Several times the 8 KiB output buffer, so a record split across a write shows.
 LIMIT=40000
 
-# `ENDLESS` marks a case that never terminates: stdout is bounded by `head` and
-# the program's own status is not compared. See the header.
+# `ENDLESS` marks a case that never terminates on its own: stdout is bounded by
+# `head`, and the run ends when the next write after `head` leaves raises
+# SIGPIPE. Its status is compared like any other, and GNU's must be 141: a case
+# so marked that GNU ends some other way is not the case its label says, and is
+# reported rather than trusted. See the header.
 ENDLESS=
 
 # `KIND` marks a case that asks *which* of the three things the program did, not
@@ -142,7 +140,8 @@ compare() {
   rm -f "$o_out" "$g_out" "$o_err" "$g_err"
 
   local status_ok=yes
-  [ -z "$ENDLESS" ] && [ "$o_rc" != "$g_rc" ] && status_ok=no
+  [ "$o_rc" != "$g_rc" ] && status_ok=no
+  [ -n "$ENDLESS" ] && [ "$g_rc" != 141 ] && status_ok=no
 
   if [ "$o_sum" = "$g_sum" ] && [ "$o_msg" = "$g_msg" ] && [ "$status_ok" = yes ]; then
     AGREED=yes
@@ -332,33 +331,40 @@ writefail closed --version;   report 'yes --version >&-'
 writefail closed --bogus;     report 'yes --bogus >&-'
 
 # =============================================================================
-# 8. The broken-pipe status, recorded once
+# 8. A reader that goes away, under either disposition of SIGPIPE
 # =============================================================================
-# Every ENDLESS case above compared content only, for this reason. Here it is
-# on its own so the difference is a line in the summary rather than a silence.
+# Every ENDLESS case above ends with SIGPIPE at its default, so the first case
+# here is the one they all share, with stderr compared as well. The second
+# inherits SIGPIPE ignored, as a program started from a shell that ran
+# `trap '' PIPE` does. Then the write fails with EPIPE, and GNU says
+# `yes: standard output: Broken pipe` and exits 1. Ours has to match that and
+# must not go quiet, since nothing else will stop it.
+#
+# `timeout` is the backstop for a `yes` that drops the failed write and carries
+# on, which would otherwise hang the harness rather than fail it.
 
 pipestatus() {
-  local side rc o_rc g_rc rcf
-  rcf=$(mktemp)
+  local ignored=$1 side rc o_rc g_rc rcf o_err g_err err
+  rcf=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
   for side in ours gnu; do
-    { env PATH="$bindir/$side" yes 2>/dev/null; echo $? >"$rcf"; } \
-      | head -c 10 >/dev/null
+    if [ "$side" = ours ]; then err=$o_err; else err=$g_err; fi
+    ( [ -n "$ignored" ] && trap '' PIPE
+      { timeout -k 2 60 env PATH="$bindir/$side" yes 2>"$err"; echo $? >"$rcf"; } \
+        | head -c 10 >/dev/null )
     rc=$(cat "$rcf")
     if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
   done
-  rm -f "$rcf"
-  if [ "$o_rc" = "$g_rc" ]; then AGREED=yes; else AGREED=no; fi
-  REPORT=$(printf '  ours rc=%s\n  gnu  rc=%s' "$o_rc" "$g_rc")
+  local o_msg g_msg
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
+  rm -f "$rcf" "$o_err" "$g_err"
+  if [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ]; then AGREED=yes; else AGREED=no; fi
+  REPORT=$(printf '  ours (rc=%s): err{%s}\n  gnu  (rc=%s): err{%s}' \
+    "$o_rc" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
+    "$g_rc" "$(printf '%s' "$g_msg" | tr '\n' '|')")
 }
 
-pipestatus
-if [ "$AGREED" = yes ]; then
-  xpass=$((xpass+1))
-  printf 'XPASS yes | head  (expected to differ: SIGPIPE kills GNU, we exit 0)\n'
-else
-  xfail=$((xfail+1))
-  [ -n "${VERBOSE:-}" ] && printf 'xfail yes | head  (SIGPIPE kills GNU, we exit 0)\n'
-fi
+pipestatus '';  report 'yes | head -c 10'
+pipestatus yes; report "trap '' PIPE; yes | head -c 10"
 
 # The wording is the family's, not this harness's own: `scripts/all-diff.sh`
 # decides green by matching " 0 differed" in the tail line, so a summary that

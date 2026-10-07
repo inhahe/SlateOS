@@ -1671,11 +1671,14 @@ static FATAL: AtomicBool = AtomicBool::new(false);
 /// Set when the member list's reader has gone away.
 ///
 /// GNU is killed by `SIGPIPE` at the flush that discovers it: no more members,
-/// no more messages, and no deferred work done. SlateOS has no signal to be
-/// killed by (`design-decisions` §377), so the translation is the one the rest
-/// of the tree uses -- stop where GNU would have died, say nothing more, and keep
-/// the status the run had earned so far. Every loop that writes the list asks
-/// [`reader_gone`] after doing so and unwinds when it is set.
+/// no more messages, and no deferred work done. So is this, since
+/// `stdfd::restore` puts back the disposition it inherited (design-decisions
+/// §1060), and inherited ignored, the failure is an ordinary write error for
+/// both. This is set only where neither holds -- `stdfd::reader_gone`, where the
+/// signal could not be put back -- and the translation then is the one the
+/// rest of the tree uses (§377): stop where GNU would have died, say nothing
+/// more, and keep the status the run had earned so far. Every loop that writes
+/// the list asks [`reader_gone`] after doing so and unwinds when it is set.
 static READER_GONE: AtomicBool = AtomicBool::new(false);
 
 /// See [`READER_GONE`].
@@ -1723,8 +1726,9 @@ fn list_line(line: &[u8]) {
 /// right.
 ///
 /// Except a reader of a piped archive going away, which is reported by nobody:
-/// GNU is killed by `SIGPIPE` at that write, and this sets [`READER_GONE`]
-/// instead, for the caller to stop on.
+/// GNU is killed by `SIGPIPE` at that write, as this is. Where the signal could
+/// not be put back (`stdfd::reader_gone`) this sets [`READER_GONE`] instead,
+/// for the caller to stop on.
 ///
 /// Create mode is unix-only (see the module docs), and so is its one caller.
 #[cfg(unix)]

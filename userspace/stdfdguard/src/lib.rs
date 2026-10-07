@@ -49,15 +49,21 @@
 //! way, where Rust's `Command` restores the default in every child. The same
 //! constructor records it, and [`sigpipe_ignored_at_startup`] answers.
 //!
+//! [`restore`] then puts it back, as it puts the descriptors back: a program
+//! started with `SIGPIPE` at its default dies of a broken pipe, silently, as
+//! every GNU program does, and one started with it ignored gets `EPIPE`.
+//!
 //! This half of coreutils' `stdfd` moved here on 2026-09-26 so that programs
 //! outside coreutils -- the util-linux ports first -- can have it too;
 //! `coreutils::guard_std_fds!` and `coreutils::stdfd::restore` are this. The
 //! other half, the stdio-shaped writer that does not swallow `EBADF`, stays in
 //! coreutils: it is gnulib's `close_stdout`, and util-linux's differs.
 //!
-//! Linux only: elsewhere the macro expands to nothing, [`restore`] does
-//! nothing, and [`was_closed_at_startup`] and [`sigpipe_ignored_at_startup`]
-//! are always `false`.
+//! Linux only: elsewhere the macro expands to nothing, [`restore`] and
+//! [`ignore_sigpipe`] do nothing, and [`was_closed_at_startup`],
+//! [`sigpipe_ignored_at_startup`] and [`sigpipe_restored`] are always `false`.
+//! "Linux" includes SlateOS, whose userspace target is `linux`-`musl` over the
+//! POSIX layer, and whose C library raises `SIGPIPE` as Linux's kernel does.
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -120,10 +126,30 @@ mod imp {
             unsafe { signal(SIGPIPE, SIG_DFL) };
         }
         SIGPIPE_IGNORED_AT_STARTUP.store(old == SIG_IGN, Ordering::Relaxed);
+        SIGPIPE_RECORDED.store(true, Ordering::Relaxed);
     }
+
+    /// Whether the constructor learned `SIGPIPE`'s disposition. Without the
+    /// macro it never runs, and [`restore`] then leaves `SIGPIPE` as the
+    /// runtime set it, as it leaves the descriptors.
+    static SIGPIPE_RECORDED: AtomicBool = AtomicBool::new(false);
 
     pub fn sigpipe_ignored_at_startup() -> bool {
         SIGPIPE_IGNORED_AT_STARTUP.load(Ordering::Relaxed)
+    }
+
+    /// Whether [`restore`] has put `SIGPIPE` back to the disposition the
+    /// process inherited. Until then it is the runtime's "ignored".
+    static SIGPIPE_RESTORED: AtomicBool = AtomicBool::new(false);
+
+    pub fn sigpipe_restored() -> bool {
+        SIGPIPE_RESTORED.load(Ordering::Relaxed)
+    }
+
+    pub fn ignore_sigpipe() {
+        // SAFETY: `signal` with `SIG_IGN` installs no code of ours and
+        // touches no memory of ours.
+        unsafe { signal(SIGPIPE, SIG_IGN) };
     }
 
     pub fn restore() {
@@ -137,6 +163,15 @@ mod imp {
                 unsafe { close(fd) };
             }
         }
+        if !SIGPIPE_RECORDED.load(Ordering::Relaxed) {
+            return;
+        }
+        if !SIGPIPE_IGNORED_AT_STARTUP.load(Ordering::Relaxed) {
+            // SAFETY: as in `record_sigpipe` -- restoring the default handler,
+            // which the process was started with.
+            unsafe { signal(SIGPIPE, SIG_DFL) };
+        }
+        SIGPIPE_RESTORED.store(true, Ordering::Relaxed);
     }
 
     pub fn was_closed_at_startup(fd: i32) -> bool {
@@ -161,6 +196,12 @@ mod imp {
     pub fn sigpipe_ignored_at_startup() -> bool {
         false
     }
+
+    pub fn sigpipe_restored() -> bool {
+        false
+    }
+
+    pub fn ignore_sigpipe() {}
 }
 
 #[cfg(target_os = "linux")]
@@ -188,8 +229,9 @@ macro_rules! guard_std_fds {
     };
 }
 
-/// Undo the runtime's substitution: close again each standard descriptor the
-/// process was started without.
+/// Undo the runtime's substitutions: close again each standard descriptor the
+/// process was started without, and put `SIGPIPE` back to the disposition it
+/// inherited.
 ///
 /// Call this as the first statement of `main`, in a binary that has expanded
 /// [`guard_std_fds!`]. Without the macro it does nothing, which is the failure
@@ -199,8 +241,34 @@ macro_rules! guard_std_fds {
 /// It must run before anything touches standard I/O, because it closes the
 /// substituted descriptors outright, and a live [`std::io::Stdout`] buffer
 /// pointed at one would then flush into whatever opened next.
+///
+/// **`SIGPIPE`** is usually inherited at its default, and then a write into a
+/// pipe whose reader has gone ends the program silently, status 141 -- as it
+/// ends every GNU program, which none of them change except where named
+/// (`tee`'s `--output-error` modes, `split --filter`, which call
+/// [`ignore_sigpipe`]). Started with it ignored (`trap '' PIPE`), a program
+/// gets `EPIPE` instead, as GNU's do, and reports it as the write error it is.
+/// Until 2026-10-07 the runtime's "ignored" was kept and the error answered
+/// quietly, because the target sent no `SIGPIPE`; it does now
+/// (design-decisions §1176, and lane B's entry that follows from it).
 pub fn restore() {
     imp::restore();
+}
+
+/// Whether [`restore`] has put `SIGPIPE` back to the disposition the process
+/// inherited. False before it runs, without [`guard_std_fds!`], and off Linux:
+/// the runtime's "ignored" then still stands, and an `EPIPE` stands in for the
+/// signal the program would have died of.
+#[must_use]
+pub fn sigpipe_restored() -> bool {
+    imp::sigpipe_restored()
+}
+
+/// Ignore `SIGPIPE` from now on, for a program whose upstream does --
+/// `signal (SIGPIPE, SIG_IGN)` -- so that a write into a broken pipe returns
+/// `EPIPE` for it to act on. Does nothing off Linux.
+pub fn ignore_sigpipe() {
+    imp::ignore_sigpipe();
 }
 
 /// Whether `fd` was closed when the process started -- the question
@@ -237,6 +305,10 @@ mod tests {
         }
         assert!(!sigpipe_ignored_at_startup());
         restore();
+        // Nothing was recorded, so `SIGPIPE` was left as the runtime set it,
+        // which is what lets `reader_gone` keep standing in for the signal in
+        // a program without the macro -- this test binary among them.
+        assert!(!sigpipe_restored());
         // Standard output is still there to be written to.
         use std::io::Write;
         assert!(std::io::stdout().flush().is_ok());

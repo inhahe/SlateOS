@@ -45,24 +45,23 @@
 //! and copying stops as soon as *every* output has been dropped, stdout
 //! included, because there is nothing left to copy to.
 //!
-//! # The default mode, on an OS with no signals
+//! # The default mode, and `SIGPIPE`
 //!
 //! Upstream's fifth mode is `output_error_sigpipe`, the default, which differs
 //! from `warn-nopipe` in exactly one respect: it leaves `SIGPIPE` at its
 //! default disposition, so writing to a dead pipe kills the process outright
-//! (a shell reports 141) instead of reaching `fail_output` at all.
+//! (a shell reports 141) instead of reaching `fail_output` at all. Every other
+//! mode calls `signal (SIGPIPE, SIG_IGN)`, and so does this `tee`
+//! ([`stdfd::ignore_sigpipe`]), so that `EPIPE` reaches the table above.
 //!
-//! SlateOS does not use Unix signals for process control (`design.txt`), and
-//! Rust masks `SIGPIPE` even where it exists, so "die from `SIGPIPE`" has no
-//! translation. The faithful reading is that the default mode then *becomes*
-//! its own `EPIPE` path — which is `fail = false`: drop that output, stay
-//! quiet, keep copying to the others, exit on whatever the rest of the run
-//! deserved. That is upstream's own code for the case, not an invention, and
-//! it is what `cut`, `head`, `tail` and `uniq` in this tree already do with a
-//! broken stdout. The one visible consequence: `yes | tee log | head -1`
-//! leaves `tee` writing to `log` until the input ends, where GNU's `tee` dies
-//! with the pipeline. Recorded as a deliberate difference in
-//! `scripts/tee-diff.sh`.
+//! Until 2026-10-07 the default mode could not die of `SIGPIPE`: the target
+//! sent no signal, so the default mode *became* its own `EPIPE` path -- drop
+//! that output, stay quiet, keep copying -- and `yes | tee log | head -1` kept
+//! writing to `log` where GNU's `tee` dies with the pipeline. The target sends
+//! `SIGPIPE` now (design-decisions §1176), and [`stdfd::restore`] puts back
+//! the disposition `tee` inherited, so it dies as GNU's does. Started with
+//! `SIGPIPE` ignored, the default mode still meets `EPIPE`, and upstream's own
+//! `fail_output` then drops the output quietly -- the same answer as before.
 //!
 //! # What is deliberately not here
 //!
@@ -346,6 +345,12 @@ fn run(settings: &Settings) -> ExitCode {
     // already covered.
     if settings.ignore_interrupts {
         ignore_sigint();
+    }
+    // `if (output_error != output_error_sigpipe) signal (SIGPIPE, SIG_IGN);`
+    // -- every mode but the default acts on `EPIPE`, which it can only see if
+    // the signal does not end the process first.
+    if settings.output_error != OutputError::SigPipe {
+        stdfd::ignore_sigpipe();
     }
 
     let mut ok = true;

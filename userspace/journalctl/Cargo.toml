@@ -11,6 +11,11 @@ quoting = { path = "../quoting" }
 # --vacuum-size rewrite a log under its lock, and rename the result over it,
 # so a record appended meanwhile is not lost.
 journalio = { path = "../journalio" }
+# The one spelling of a journal value: a field that is not text is written,
+# and here re-written, as an array of its bytes (design-decisions §1063).
+journalrec = { path = "../journalrec" }
+# `strerror`'s words for output that could not be written.
+errmsg = { path = "../errmsg" }
 
 [dev-dependencies]
 # Log files for the reading tests: a bad byte, text lines, a torn append,

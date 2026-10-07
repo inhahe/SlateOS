@@ -2175,6 +2175,7 @@ dependencies = [
  "authlib",
  "guitk",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 

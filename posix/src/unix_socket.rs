@@ -286,6 +286,23 @@ pub(crate) fn errno_of(ret: i64) -> i32 {
     }
 }
 
+/// The errno for a negative answer `ret` from the call that makes a socket
+/// (`SYS_UNIX_SOCKET`, `SYS_UNIX_PAIR`): [`errno_of`]'s, except that a kernel
+/// with no such call -- every kernel before lane A's Unix sockets -- has none
+/// to make, which is `absent`. For `socket` that is `EAFNOSUPPORT`, Linux's
+/// answer when it is built without Unix-domain sockets and the library's
+/// before it had them; programs test for exactly that, as `syslog` does to
+/// choose the journal over `/dev/log` (`posix/src/syslog.rs`). The kernel's
+/// own answer, `ENOSYS`, would have them treat the family as present and
+/// broken.
+fn creation_errno(ret: i64, absent: i32) -> i32 {
+    if ret == native::NO_SUCH_SYSCALL {
+        absent
+    } else {
+        errno_of(ret)
+    }
+}
+
 /// Set `errno` for `ret` and answer -1.
 fn fail(ret: i64) -> i32 {
     errno::set_errno(errno_of(ret));
@@ -354,7 +371,7 @@ pub(crate) fn socket(sock_type: i32, nonblock: bool, cloexec: bool, protocol: i3
     };
     let ret = syscall1(SYS_UNIX_SOCKET, kind as u64);
     if ret < 0 {
-        return fail(ret);
+        return refuse(creation_errno(ret, errno::EAFNOSUPPORT));
     }
     install(ret as u64, kind, nonblock, cloexec)
 }
@@ -377,7 +394,9 @@ pub(crate) unsafe fn socketpair(
     };
     let (a, b) = syscall3_2ret(SYS_UNIX_PAIR, kind as u64, 0, 0);
     if a < 0 {
-        return fail(a);
+        // A kernel without them: `EOPNOTSUPP`, what the library answered for
+        // a datagram or sequenced-packet pair before it could make one.
+        return refuse(creation_errno(a, errno::EOPNOTSUPP));
     }
     let fd0 = install(a as u64, kind, nonblock, cloexec);
     if fd0 < 0 {
@@ -1635,6 +1654,30 @@ mod tests {
         assert_eq!(&autobind_name(0), b"00000");
         assert_eq!(&autobind_name(0xABCDE), b"abcde");
         assert_eq!(&autobind_name(0x1_2345), b"12345");
+    }
+
+    #[test]
+    fn a_kernel_without_unix_sockets_answers_as_one_without_the_family() {
+        // No such call: the family is absent -- EAFNOSUPPORT for `socket`,
+        // EOPNOTSUPP for a datagram pair -- never ENOSYS, which a program
+        // would read as "present and broken".
+        assert_eq!(
+            creation_errno(native::NO_SUCH_SYSCALL, errno::EAFNOSUPPORT),
+            errno::EAFNOSUPPORT
+        );
+        assert_eq!(
+            creation_errno(native::NO_SUCH_SYSCALL, errno::EOPNOTSUPP),
+            errno::EOPNOTSUPP
+        );
+        // Any other answer is the call's own.
+        assert_eq!(
+            creation_errno(native::CONNECT_ALREADY, errno::EAFNOSUPPORT),
+            errno::EISCONN
+        );
+        assert_eq!(
+            creation_errno(native::NOT_SUPPORTED, errno::EAFNOSUPPORT),
+            errno::EOPNOTSUPP
+        );
     }
 
     #[test]

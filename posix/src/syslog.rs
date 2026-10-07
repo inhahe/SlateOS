@@ -50,12 +50,16 @@
 //!
 //! ## The journal (SlateOS)
 //!
-//! SlateOS has no Unix-domain sockets that can have a name: `socket(AF_UNIX,
-//! ...)` fails with `EAFNOSUPPORT`, so there is no `/dev/log` to reach, and
-//! glibc's code would lose every record not under `LOG_CONS`. While that is
-//! so, the journal file `journalctl` reads stands in for the daemon, as lane B
-//! asked in `requests/b-d-libc-syslog-could-reach-journalctl-today.md`
-//! (design-decisions §1166). A record becomes one JSON line in
+//! A kernel without Unix-domain sockets that can have a name -- every kernel
+//! before lane A's `SYS_UNIX_*` calls -- makes `socket(AF_UNIX, ...)` fail
+//! with `EAFNOSUPPORT` (`posix/src/unix_socket.rs`, `creation_errno`), so
+//! there is no `/dev/log` to reach, and glibc's code would lose every record
+//! not under `LOG_CONS`. While that is so, the journal file `journalctl`
+//! reads stands in for the daemon, as lane B asked in
+//! `requests/b-d-libc-syslog-could-reach-journalctl-today.md`
+//! (design-decisions §1166). On a kernel with them, records go to whatever
+//! listens at `/dev/log`, as glibc's do -- lane B's `syslogd`, once it binds
+//! the path -- and, with nothing there, nowhere. A record becomes one JSON line in
 //! `/var/log/syslog.jsonl`, in `journalrec`'s spelling, appended under the
 //! journal's lock as `logger` and `syslogd` append theirs (`journalio`'s
 //! protocol, design-decisions §1037).

@@ -359,6 +359,10 @@ pub mod alloca;
 pub mod argp;
 pub mod argz;
 pub mod assert;
+// bcrypt, `crypt`'s `$2a$`, `$2b$`, `$2x$` and `$2y$` methods: their
+// settings and libxcrypt's self-test, over `pwhash::bcrypt`'s Eksblowfish;
+// reached only through `crypt.rs`.
+mod bcrypt;
 pub mod besl;
 pub mod c23math;
 pub mod compiler_rt;

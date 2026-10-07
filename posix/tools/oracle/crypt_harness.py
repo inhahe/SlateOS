@@ -17,7 +17,9 @@ The cases:
 
 - libxcrypt's own known-answer table's 92 passwords (test/ka-table.inc in
   its source) under that table's settings for the methods posix implements
-  -- MD5, SHA-256, SHA-512, scrypt and yescrypt;
+  -- MD5, SHA-256, SHA-512, scrypt, yescrypt and bcrypt's four variants;
+- bcrypt's variants over keys built for their key setup, its 72-byte key,
+  its salt's last character and the settings it refuses;
 - yescrypt and scrypt settings that reach each parameter -- flavour, N, r,
   p, t -- and each of `yescrypt_kdf`'s paths: classic scrypt and WORM lanes
   one by one, RW lanes sharing V, the prehash a large hash starts with;
@@ -158,7 +160,26 @@ KA_SETTINGS = [
     "$y$j75$LdJMENpBABJJ3hIHjB1Bi.",
     "$y$j85$.......",
     "$y$j85$LdJMENpBABJJ3hIHjB1Bi.",
+    "$2a$04$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2a$04$abcdefghijklmnopqrstuu",
+    "$2a$05$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2a$05$abcdefghijklmnopqrstuu",
+    "$2b$04$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2b$04$abcdefghijklmnopqrstuu",
+    "$2b$05$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2b$05$abcdefghijklmnopqrstuu",
+    "$2x$04$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2x$04$abcdefghijklmnopqrstuu",
+    "$2x$05$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2x$05$abcdefghijklmnopqrstuu",
+    "$2y$04$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2y$04$abcdefghijklmnopqrstuu",
+    "$2y$05$CCCCCCCCCCCCCCCCCCCCC.",
+    "$2y$05$abcdefghijklmnopqrstuu",
 ]
+
+# bcrypt's own base-64 alphabet: crypt's characters, in another order.
+BF_ITOA64 = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def enc_u32(src: int, minimum: int) -> str:
@@ -310,6 +331,33 @@ def generated():
     cases += [(pw, s) for s in refused]
     # A have field naming nothing, and one naming a field that is missing.
     cases += [(pw, "$y$j75" + enc_u32(16, 1) + "$abcd"), (pw, "$y$j75" + enc_u32(1, 1) + "$abcd")]
+
+    # bcrypt: each variant at its least cost over keys built for its key
+    # setup -- high bytes, which the $2x$ bug sign-extends and $2a$'s
+    # safety watches for, and libxcrypt's self-test keys.
+    salt = "abcdefghijklmnopqrstuu"
+    keys = [b"", b"U*U", bytes(range(1, 73)), b"\xff" * 80, b"\x80" * 4,
+            b"8b \xd0\xc1\xd2\xcf\xcc\xd8", b"\xff\xa334\xff\xff\xff\xa3345",
+            b"\xa3" * 3 + b"345"]
+    for variant in "abxy":
+        for word in keys:
+            cases.append((word, f"$2{variant}$04${salt}"))
+    # It reads 72 bytes of key: 71, 72, 73 and 100 of them.
+    for n in (71, 72, 73, 100):
+        cases.append((bytes((i * 13) % 255 + 1 for i in range(n)), f"$2b$04${salt}"))
+    # The salt's last character carries two bits: every one of the 64.
+    for c in BF_ITOA64:
+        cases.append((pw, f"$2b$04${salt[:21]}{c}"))
+    # A whole hash as the setting, and what follows the salt.
+    cases.append((pw, "$2b$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"))
+    cases.append((pw, f"$2b$04${salt}$"))
+    cases.append((pw, f"$2b$04${salt}junk"))
+    # Settings it refuses.
+    for s in [f"$2b$03${salt}", f"$2b$32${salt}", f"$2b$40${salt}", f"$2b$4${salt}",
+              f"$2b$0a${salt}", f"$2b$a4${salt}", f"$2c$04${salt}", f"$2B$04${salt}",
+              f"$2b$04${salt[:21]}", "$2b$04$abcdefghij-lmnopqrstuu", "$2", "$2b", "$2b$",
+              "$2b$04", "$2b$04$", "$2b$04x" + salt]:
+        cases.append((pw, s))
     return cases
 
 

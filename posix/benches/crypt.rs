@@ -43,12 +43,14 @@ use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
-    let cases: [(&str, u32); 5] = [
+    let cases: [(&str, u32); 7] = [
         ("$y$j9T$PKXc3hCOSyMqdaEQArI62/", 20),
         ("$y$j75$LdJMENpBABJJ3hIHjB1Bi.", 100),
         ("$7$CU..../....SodiumChloride", 10),
         ("$7$66..../....SodiumChloride", 200),
         ("$6$saltstring", 200),
+        ("$2b$05$CCCCCCCCCCCCCCCCCCCCC.", 100),
+        ("$2b$10$CCCCCCCCCCCCCCCCCCCCC.", 5),
     ];
     for (setting, reps) in cases {
         let mut out = posix::crypt::buf();

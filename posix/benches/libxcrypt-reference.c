@@ -34,6 +34,8 @@ int main(void)
         { "$7$CU..../....SodiumChloride", 10 },
         { "$7$66..../....SodiumChloride", 200 },
         { "$6$saltstring", 200 },
+        { "$2b$05$CCCCCCCCCCCCCCCCCCCCC.", 100 },
+        { "$2b$10$CCCCCCCCCCCCCCCCCCCCC.", 5 },
     };
     static struct crypt_data data;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {

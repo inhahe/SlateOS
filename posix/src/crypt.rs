@@ -3,14 +3,15 @@
 //! Implements the SHA-256 (`$5$`) and SHA-512 (`$6$`) crypt methods —
 //! the shadow suite's — following Ulrich Drepper's specification ("Unix
 //! crypt using SHA-256 and SHA-512"); legacy MD5 crypt (`$1$`, Poul-Henning
-//! Kamp's algorithm); and yescrypt (`$y$`) and scrypt (`$7$`), which Ubuntu,
-//! Debian and Fedora hash new passwords with, ported from libxcrypt
-//! (`yescrypt.rs` reads their settings).  The hashing itself -- SHA-2, MD5,
-//! the SHA-crypt and md5crypt rounds, yescrypt's KDF -- is the `pwhash`
-//! crate's, compiled for speed where this one is compiled for size (its
-//! crate docs); this module implements the settings' parsing, the crypt
-//! base-64 encoding, the C ABI, and the dispatch of a setting to its
-//! method.
+//! Kamp's algorithm); yescrypt (`$y$`) and scrypt (`$7$`), which Ubuntu,
+//! Debian and Fedora hash new passwords with; and bcrypt (`$2a$`, `$2b$`,
+//! `$2x$`, `$2y$`), OpenBSD's -- the last two ported from libxcrypt
+//! (`yescrypt.rs` and `bcrypt.rs` read their settings).  The hashing itself
+//! -- SHA-2, MD5, the SHA-crypt and md5crypt rounds, yescrypt's KDF,
+//! Eksblowfish -- is the `pwhash` crate's, compiled for speed where this
+//! one is compiled for size (its crate docs); this module implements the
+//! settings' parsing, the crypt base-64 encoding, the C ABI, and the
+//! dispatch of a setting to its method.
 //!
 //! Previously `crypt()` returned `"$0$<key>"` — i.e. the password in
 //! cleartext with a marker prefix.  Any program that hashed a password
@@ -45,6 +46,7 @@
 //! | the setting names no method this module implements | `EINVAL` |
 //! | a `$y$` or `$7$` setting is 212 bytes or longer (see below) | `ERANGE` |
 //! | a `$y$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
+//! | a bcrypt setting the method refuses (a cost below 04), or its self-test failing | `EINVAL` |
 //!
 //! Until 2026-09-26 a NULL argument was `EFAULT` and every failure returned
 //! NULL, which a program ported from Linux does not expect.
@@ -65,10 +67,10 @@
 //!
 //! ## Unsupported methods
 //!
-//! Legacy DES (two-character salt), BSDi DES, bcrypt, gost-yescrypt and
-//! libxcrypt's other methods are **not** implemented: their settings fail
-//! with the token and `EINVAL`, never with a fabricated hash.  (See
-//! `todo.txt` for the follow-ups.)
+//! Legacy DES (two-character salt), BSDi DES, gost-yescrypt and libxcrypt's
+//! other methods are **not** implemented: their settings fail with the
+//! token and `EINVAL`, never with a fabricated hash.  (See `todo.txt` for
+//! the follow-ups.)
 //!
 //! `encrypt`/`setkey` (raw DES block cipher) remain unimplemented and
 //! answer `ENOSYS`.
@@ -112,6 +114,8 @@ const MD5_SALT_MAX: usize = 8;
 /// carry: libxcrypt's `crypt_gensalt` takes at most 64 bytes of randomness,
 /// which are 86 base-64 characters.
 const YESCRYPT_SALT_MAX: usize = 86;
+/// A bcrypt (`$2b$`) setting's salt: always 22 characters, 16 bytes.
+const BCRYPT_SALT_LEN: usize = 22;
 
 // ---------------------------------------------------------------------------
 // Fixed-capacity output builder
@@ -358,6 +362,13 @@ fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Ref
         out.push(0);
         return Ok(());
     }
+    if crate::bcrypt::names_method(setting) {
+        // 60 characters: within the room, with the NUL.
+        let len = crate::bcrypt::crypt(key, setting, &mut out.buf).ok_or(Refusal::Invalid)?;
+        out.len = len;
+        out.push(0);
+        return Ok(());
+    }
     if md5_crypt(key, setting, out) || sha_crypt(key, setting, out) {
         Ok(())
     } else {
@@ -577,6 +588,11 @@ pub enum Method {
     /// setting asks for libxcrypt's default cost: N = 2^14, r = 32, 64 MiB a
     /// hash.
     Scrypt,
+    /// `$2b$` — bcrypt, OpenBSD's default, which `htpasswd -B` writes.  A
+    /// new setting asks for libxcrypt's default cost, `$2b$05$`: 2^5 rounds
+    /// of Eksblowfish's key setup.  Stored `$2a$`, `$2x$` and `$2y$` entries
+    /// are bcrypt too, each its own history of the algorithm (`bcrypt.rs`).
+    Bcrypt,
 }
 
 impl Method {
@@ -589,6 +605,7 @@ impl Method {
             Self::Sha512 => "$6$",
             Self::Yescrypt => "$y$",
             Self::Scrypt => "$7$",
+            Self::Bcrypt => "$2b$",
         }
     }
 
@@ -600,6 +617,8 @@ impl Method {
             Self::Yescrypt => "$y$j9T$",
             // N = 2^14 ('C'), then r = 32 and p = 1 in five characters each.
             Self::Scrypt => "$7$CU..../....",
+            // Cost 5, in two digits.
+            Self::Bcrypt => "$2b$05$",
             Self::Md5 | Self::Sha256 | Self::Sha512 => self.prefix(),
         }
     }
@@ -607,8 +626,9 @@ impl Method {
     /// How many crypt-base-64 characters this method's hash field holds.
     ///
     /// A fixed number, because the digest is a fixed size: 16 bytes for MD5
-    /// (22 characters), 32 for SHA-256, yescrypt and scrypt (43), 64 for
-    /// SHA-512 (86).  This is what [`stored_method`] checks, and it is how
+    /// (22 characters), 23 for bcrypt (31), 32 for SHA-256, yescrypt and
+    /// scrypt (43), 64 for SHA-512 (86).  This is what [`stored_method`]
+    /// checks, and it is how
     /// an entry this tree wrote before the safe API existed — 64 *hex*
     /// digits under a `$5$` label — is told apart from a genuine one, with
     /// no ambiguity in either direction.
@@ -617,6 +637,7 @@ impl Method {
         match self {
             Self::Md5 => 22,
             Self::Sha256 | Self::Yescrypt | Self::Scrypt => 43,
+            Self::Bcrypt => 31,
             Self::Sha512 => 86,
         }
     }
@@ -626,25 +647,29 @@ impl Method {
     /// For MD5 and the SHA methods it is the longest they use: a longer one
     /// is truncated when hashing, so an entry carrying one can never be
     /// reproduced.  For yescrypt and scrypt it is libxcrypt's: 64 bytes of
-    /// randomness, in 86 characters.
+    /// randomness, in 86 characters.  For bcrypt it is also the shortest: a
+    /// salt is always 16 bytes, 22 characters.
     #[must_use]
     pub fn salt_max(self) -> usize {
         match self {
             Self::Md5 => MD5_SALT_MAX,
             Self::Sha256 | Self::Sha512 => SALT_MAX,
             Self::Yescrypt | Self::Scrypt => YESCRYPT_SALT_MAX,
+            Self::Bcrypt => BCRYPT_SALT_LEN,
         }
     }
 
     /// Whether `salt` may follow this method's setting head: crypt base-64,
     /// non-empty, no longer than [`Method::salt_max`] -- and, for yescrypt,
     /// whose salt is the bytes the characters decode to, characters that
-    /// decode.
+    /// decode; for bcrypt, exactly 22 characters, the last as bcrypt writes
+    /// it (it holds two bits, so `crypt` would rewrite any other).
     fn takes_salt(self, salt: &[u8]) -> bool {
         !salt.is_empty()
             && salt.len() <= self.salt_max()
             && salt.iter().copied().all(is_b64)
             && (self != Self::Yescrypt || crate::yescrypt::is_yescrypt_salt(salt))
+            && (self != Self::Bcrypt || crate::bcrypt::is_salt(salt))
     }
 
     /// The method named by a `$N$` prefix, if it is one we implement.
@@ -655,6 +680,7 @@ impl Method {
             b"$6$" => Some(Self::Sha512),
             b"$y$" => Some(Self::Yescrypt),
             b"$7$" => Some(Self::Scrypt),
+            _ if crate::bcrypt::names_method(setting) => Some(Self::Bcrypt),
             _ => None,
         }
     }
@@ -692,7 +718,8 @@ fn compute_into(key: &[u8], setting: &[u8], out: &mut HashBuf) -> Option<usize> 
 /// `setting` may be a bare `"$6$<salt>$"` (see [`setting_into`]) or a whole
 /// stored hash, since the salt is read up to the first `$` either way --
 /// for yescrypt and scrypt, up to the last, which in a stored hash is the
-/// one before the hash.
+/// one before the hash; bcrypt's is always 22 characters, and what follows
+/// them is not read.
 ///
 /// Returns `None` if `crypt` would fail -- `setting` selects no method we
 /// implement or holds a character `crypt` refuses, or `key` is 512 bytes or
@@ -706,8 +733,8 @@ pub fn hash_into<'o>(key: &[u8], setting: &[u8], out: &'o mut HashBuf) -> Option
 }
 
 /// Assemble a setting for a *new* password: `"$N$<salt>$"` -- for yescrypt
-/// `"$y$j9T$<salt>$"` and for scrypt `"$7$CU..../....<salt>$"`, libxcrypt's
-/// default costs (see [`Method`]).
+/// `"$y$j9T$<salt>$"`, for scrypt `"$7$CU..../....<salt>$"` and for bcrypt
+/// `"$2b$05$<salt>$"`, libxcrypt's default costs (see [`Method`]).
 ///
 /// Rejects a salt that is empty, longer than [`Method::salt_max`] (for MD5
 /// and SHA, a truncated salt means the entry written is not the entry that
@@ -749,8 +776,8 @@ pub fn setting_into<'o>(method: Method, salt: &[u8], out: &'o mut HashBuf) -> Op
 /// Returns `None` for [`Method::Md5`]: MD5 crypt has no rounds field, and
 /// `$1$rounds=N$` would be read as a SALT beginning with `rounds=`, quietly
 /// hashing a different password-salt pair than the caller asked for.  And
-/// for [`Method::Yescrypt`] and [`Method::Scrypt`], whose cost is in their
-/// parameters, not a rounds field.
+/// for [`Method::Yescrypt`], [`Method::Scrypt`] and [`Method::Bcrypt`],
+/// whose cost is in their parameters, not a rounds field.
 pub fn setting_rounds_into<'o>(
     method: Method,
     rounds: u32,
@@ -856,6 +883,9 @@ pub fn stored_method(stored: &[u8]) -> Option<Method> {
     let method = Method::from_prefix(stored)?;
     if matches!(method, Method::Yescrypt | Method::Scrypt) {
         return crate::yescrypt::is_stored_hash(stored, CRYPT_OUTPUT_LEN).then_some(method);
+    }
+    if method == Method::Bcrypt {
+        return crate::bcrypt::is_stored_hash(stored).then_some(method);
     }
     let mut rest = stored.get(3..)?;
 
@@ -980,10 +1010,11 @@ mod tests {
 
     /// libxcrypt's own answers (`posix/tools/oracle/crypt_harness.py`): its
     /// table of known answers for every method this module implements, and
-    /// yescrypt's and scrypt's parameters, salts and refusals.  Each through
-    /// `crypt` -- the result, and `errno` when it fails -- and each hash's
-    /// stored form through `stored_method`, which names the method it
-    /// begins with, and for yescrypt and scrypt through `verify`.
+    /// yescrypt's, scrypt's and bcrypt's parameters, salts and refusals.
+    /// Each through `crypt` -- the result, and `errno` when it fails -- and
+    /// each hash's stored form through `stored_method`, which names the
+    /// method it begins with, and for yescrypt, scrypt and bcrypt through
+    /// `verify`.
     #[test]
     fn libxcrypt_answers() {
         const ORACLE: &str = include_str!("crypt_oracle.txt");
@@ -1017,15 +1048,19 @@ mod tests {
             let named = Method::from_prefix(result.as_bytes());
             assert!(named.is_some(), "{line}");
             assert_eq!(stored_method(result.as_bytes()), named, "{line}");
-            // A stored yescrypt or scrypt hash is its own setting, its salt
-            // read to the last `$`: new here, so each is verified too.  (A
+            // A stored yescrypt, scrypt or bcrypt hash is its own setting --
+            // yescrypt's salt read to the last `$`, bcrypt's 22 characters
+            // and nothing after: new here, so each is verified too.  (A
             // second hash each; the SHA and MD5 entries' verification has
             // tests of its own, and would double this test's time.)
-            if matches!(named, Some(Method::Yescrypt | Method::Scrypt)) {
+            if matches!(
+                named,
+                Some(Method::Yescrypt | Method::Scrypt | Method::Bcrypt)
+            ) {
                 assert!(verify(&password, result.as_bytes()), "{line}");
             }
         }
-        assert_eq!(lines, 1926, "the oracle's every line");
+        assert_eq!(lines, 3517, "the oracle's every line");
     }
 
     // -----------------------------------------------------------------------

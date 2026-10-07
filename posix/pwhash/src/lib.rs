@@ -1,6 +1,7 @@
 //! The hashing behind `posix`'s `crypt`: SHA-256 and SHA-512 ([`sha2`]),
 //! MD5 ([`md5`]), the SHA-crypt and md5crypt rounds ([`shacrypt`],
-//! [`md5crypt`]), and yescrypt's and scrypt's KDF ([`yescrypt`]).
+//! [`md5crypt`]), yescrypt's and scrypt's KDF ([`yescrypt`]), and bcrypt's
+//! Eksblowfish ([`bcrypt`]).
 //!
 //! ## Why a crate and not modules of `posix`
 //!
@@ -48,6 +49,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod bcrypt;
 pub mod md5;
 pub mod md5crypt;
 pub mod sha2;

@@ -801,7 +801,7 @@ fn a_menu_under_another_is_not_pressed() {
     appearance::config::testing::with_scratch_config("acc-menu-under", |_root| {
         let mut shell = shell();
         shell.open_desktop_menu(400.0, 300.0);
-        shell.open_notification_menu("Chat".to_owned(), 900.0, 500.0, false);
+        shell.open_notification_menu("Chat".to_owned(), None, 900.0, 500.0, false);
         assert!(
             shell.desktop_menu.is_visible() && shell.notification_menu.is_some(),
             "the test's premise: both open"

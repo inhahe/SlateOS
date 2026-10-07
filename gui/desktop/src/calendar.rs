@@ -362,6 +362,19 @@ fn day_of_week_name(dow: u32) -> &'static str {
 // The user's calendar
 // ============================================================================
 
+/// The settings group the calendar's file is followed as: the settings watch
+/// announces it written as a change to `calendar` -- the calendar program's
+/// own name -- and that is the desktop's word to read it again
+/// ([`watched_paths`], design-decisions §1498).
+pub const SETTINGS_GROUP: &str = "calendar";
+
+/// What the settings watch follows for [`SETTINGS_GROUP`]: the calendar's
+/// file, where the environment names a home to keep it in.
+#[must_use]
+pub fn watched_paths() -> Vec<std::path::PathBuf> {
+    calendarstore::events_path().into_iter().collect()
+}
+
 /// How long a file must have gone unwritten before its length and time are
 /// trusted to say it has not changed since: longer than the coarsest time a
 /// filesystem keeps -- whole seconds on an ext4 made with small inodes, two
@@ -383,8 +396,9 @@ const STAMP_SETTLES: std::time::Duration = std::time::Duration::from_secs(3);
 /// (§1423), and the program's model is the one read here (§1497).
 ///
 /// The program is the only writer, and says nothing when it saves, so the
-/// file is read again when it has changed ([`refresh`](Self::refresh)) -- as
-/// the popup opens, and as a calendar widget turns its minute.
+/// file is read again when it has changed ([`refresh`](Self::refresh)): when
+/// the settings watch says it was written (§1498), and -- in case the watch
+/// is down -- as the popup opens and as a calendar widget turns its minute.
 #[derive(Clone, Debug, Default)]
 pub struct Agenda {
     /// The events, as last read.
@@ -469,6 +483,13 @@ impl Agenda {
     #[must_use]
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
+    }
+
+    /// Every event, as last read: what the reminders are raised from
+    /// (`crate::reminders`).
+    #[must_use]
+    pub fn events(&self) -> &[calendarstore::CalendarEvent] {
+        &self.events
     }
 
     /// The events on `year-month-day`, as the calendar program finds them

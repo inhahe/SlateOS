@@ -1369,7 +1369,7 @@ impl DesktopShell {
         match which {
             ShellMenu::Field => self.field_menu.as_ref().map(|(menu, _)| menu),
             ShellMenu::Desktop => Some(&self.desktop_menu),
-            ShellMenu::Notification => self.notification_menu.as_ref().map(|(menu, _)| menu),
+            ShellMenu::Notification => self.notification_menu.as_ref().map(|(menu, ..)| menu),
             ShellMenu::Taskbar => self.taskbar_menu.as_ref(),
             ShellMenu::Tile => self.pin_menu.as_ref().map(|(menu, _)| menu),
             ShellMenu::HiddenIcons => self.tray_overflow_menu.as_ref().map(|(menu, _)| menu),
@@ -1382,7 +1382,7 @@ impl DesktopShell {
         match which {
             ShellMenu::Field => self.field_menu.as_mut().map(|(menu, _)| menu),
             ShellMenu::Desktop => Some(&mut self.desktop_menu),
-            ShellMenu::Notification => self.notification_menu.as_mut().map(|(menu, _)| menu),
+            ShellMenu::Notification => self.notification_menu.as_mut().map(|(menu, ..)| menu),
             ShellMenu::Taskbar => self.taskbar_menu.as_mut(),
             ShellMenu::Tile => self.pin_menu.as_mut().map(|(menu, _)| menu),
             ShellMenu::HiddenIcons => self.tray_overflow_menu.as_mut().map(|(menu, _)| menu),

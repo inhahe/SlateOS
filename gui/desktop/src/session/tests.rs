@@ -991,7 +991,7 @@ fn a_notifications_menu_is_put_on_the_screen() {
 
         session
             .shell_mut()
-            .open_notification_menu("Chat".to_owned(), 300.0, 300.0, false);
+            .open_notification_menu("Chat".to_owned(), None, 300.0, 300.0, false);
         // Opened by a call rather than an event, so nothing marked the
         // screen as needing a paint; an event would have.
         session.dirty = true;
@@ -9913,4 +9913,203 @@ fn the_glass_is_behind_the_open_menu_alone() {
     session.shell_mut().toggle_start_menu();
     session.repaint().expect("paint");
     assert!(!session.glass_shown, "the menu closed and its glass stayed");
+}
+
+/// Tell `session` the calendar's file was written, as the settings watch
+/// does through the compositor (`watch_settings`), and pump.
+fn announce_calendar(session: &mut Session, desktop: &Desktop) {
+    let name = guitk::event::SettingsName::new(crate::calendar::SETTINGS_GROUP.as_bytes())
+        .expect("a settings name");
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.background().window(),
+        guitk::event::Event::SettingsChanged {
+            group: SettingsGroup::Program(name),
+        },
+    )]);
+    session.pump().expect("pump");
+}
+
+/// Write `events` as the calendar program keeps them, under `root`, the
+/// scratch configuration.
+fn write_calendar(root: &std::path::Path, events: &[calendarstore::CalendarEvent]) {
+    let dir = root.join("slateos").join("calendar");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("events.txt"), calendarstore::calendar_text(events)).expect("write");
+}
+
+/// **Told the calendar was written, the session sleeps until its next
+/// reminder** -- a quarter of an hour before an event two hours out -- and
+/// not a frame sooner (design-decisions §1498).
+#[test]
+fn the_session_wakes_for_the_calendars_next_reminder() {
+    settingsfile::testing::with_scratch_config("session-reminder-wake", |root| {
+        let (mut session, desktop, _turn) = session();
+        let zone = session.shell().local_zone();
+        let now = DesktopShell::unix_now();
+        write_calendar(
+            root,
+            &[crate::reminder_shell_tests::event_ahead(
+                "Review", now, 120, 15, &zone,
+            )],
+        );
+        session.pump().expect("pump");
+        assert_eq!(
+            session.events_mut().next_wakeup(),
+            None,
+            "the premise: an idle desktop, the calendar unread"
+        );
+
+        announce_calendar(&mut session, &desktop);
+        let wake = session
+            .events_mut()
+            .next_wakeup()
+            .expect("no wake-up for the reminder");
+        let wait = wake.saturating_duration_since(std::time::Instant::now());
+        let (soonest, latest) = (
+            std::time::Duration::from_mins(103),
+            std::time::Duration::from_mins(105),
+        );
+        assert!((soonest..=latest).contains(&wait), "{wait:?}");
+    });
+}
+
+/// **A reminder due is raised at the pump that finds it, and kept as
+/// raised**: written down, so that the desktop restarted does not raise it
+/// again.
+#[test]
+fn a_due_reminder_is_raised_once_across_a_restart() {
+    settingsfile::testing::with_scratch_config("session-reminder-kept", |root| {
+        let raised = |session: &Session| {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.app_name == crate::reminders::APP_NAME)
+                .map(|n| n.title.clone())
+                .collect::<Vec<_>>()
+        };
+        let (mut session, desktop, _turn) = session();
+        let zone = session.shell().local_zone();
+        let now = DesktopShell::unix_now();
+        // In ten minutes, reminded fifteen before: due as it is read.
+        write_calendar(
+            root,
+            &[crate::reminder_shell_tests::event_ahead(
+                "Dentist", now, 10, 15, &zone,
+            )],
+        );
+        announce_calendar(&mut session, &desktop);
+        assert_eq!(raised(&session), ["Dentist"]);
+        let path = settingsfile::data_path_for(crate::reminders::DATA_NAME).expect("a data path");
+        let kept = std::fs::read_to_string(&path).expect("nothing was kept");
+        assert!(kept.contains("raised\t"), "{kept}");
+        drop(session);
+
+        // Started as the desktop's `main` starts it, reading what the user
+        // left -- the notifications, the calendar, and the reminders raised.
+        // The one raised before is back as history, with no toast; raised
+        // again, it would be a second, popping up.
+        let (mut session, desktop, _turn) = self::session();
+        session.load_appearance();
+        announce_calendar(&mut session, &desktop);
+        assert_eq!(
+            raised(&session),
+            ["Dentist"],
+            "raised again after a restart"
+        );
+        assert!(
+            session.shell().toasts.ids().is_empty(),
+            "it popped up again"
+        );
+    });
+}
+
+/// **The calendar is read as the session starts**: a reminder that fell due
+/// while nobody was signed in is raised at the first pump, with no save to
+/// announce it.
+#[test]
+fn the_calendar_is_read_as_the_session_starts() {
+    settingsfile::testing::with_scratch_config("session-calendar-start", |root| {
+        let (mut session, _desktop, _turn) = session();
+        let zone = session.shell().local_zone();
+        let now = DesktopShell::unix_now();
+        write_calendar(
+            root,
+            &[crate::reminder_shell_tests::event_ahead(
+                "Dentist", now, 10, 15, &zone,
+            )],
+        );
+        session.load_appearance();
+        session.pump().expect("pump");
+        let raised: Vec<String> = session
+            .shell()
+            .notifications
+            .notifications()
+            .iter()
+            .filter(|n| n.app_name == crate::reminders::APP_NAME)
+            .map(|n| n.title.clone())
+            .collect();
+        assert_eq!(raised, ["Dentist"]);
+    });
+}
+
+/// **A calendar widget turning its minute reads the calendar again** -- for
+/// a desktop whose settings watch is down, the calendar is still followed
+/// while a calendar is out to show it.
+#[test]
+fn a_calendar_widgets_minute_reads_the_calendar_again() {
+    settingsfile::testing::with_scratch_config("session-calendar-widget", |root| {
+        let (mut session, _desktop, _turn) = session();
+        session.load_appearance();
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+        let panel = session.panel().window();
+        let zone = session.shell().local_zone();
+        let now = DesktopShell::unix_now();
+        write_calendar(
+            root,
+            &[crate::reminder_shell_tests::event_ahead(
+                "Review", now, 600, 15, &zone,
+            )],
+        );
+        assert!(
+            session.shell().agenda.events().is_empty(),
+            "the test's premise: written after the calendar was read"
+        );
+        deliver(
+            &mut session,
+            panel,
+            guitk::event::Event::Tick { elapsed_ms: 61_000 },
+        );
+        assert_eq!(session.shell().agenda.events().len(), 1);
+    });
+}
+
+/// **A calendar that will not read is said once**, in a notice from the
+/// desktop -- not at every pump after it -- and the dots it had are kept.
+#[test]
+fn a_calendar_that_will_not_read_is_said_once() {
+    settingsfile::testing::with_scratch_config("session-calendar-broken", |root| {
+        let dir = root.join("slateos").join("calendar");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("events.txt"), "not a calendar").expect("write");
+        let (mut session, _desktop, _turn) = session();
+        let told = |session: &Session| {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.title == "Your calendar could not be read")
+                .count()
+        };
+        session.load_appearance();
+        session.pump().expect("pump");
+        assert_eq!(told(&session), 1, "not said");
+        session.pump().expect("pump");
+        session.pump().expect("pump");
+        assert_eq!(told(&session), 1, "said again with nothing new to say");
+    });
 }

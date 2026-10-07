@@ -122,6 +122,7 @@ mod pictures;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
+pub mod reminders;
 pub mod run_dialog;
 pub mod screen_capture;
 pub mod security_dialog;
@@ -162,6 +163,8 @@ mod photo_frame_tests;
 mod pointer_tests;
 #[cfg(test)]
 mod quick_settings_tests;
+#[cfg(test)]
+mod reminder_shell_tests;
 #[cfg(test)]
 mod service_menu_tests;
 #[cfg(test)]
@@ -2221,11 +2224,13 @@ pub struct DesktopShell {
     /// and its tray -- when it is open: the bar's options.
     taskbar_menu: Option<guitk::menu::ContextMenu>,
     /// A notification's menu -- a right-click on its card in the pane, or on
-    /// its toast -- when it is open, and the program it was opened for.
+    /// its toast -- when it is open, the program it was opened for, and the
+    /// notification, when it was opened on one rather than on a program's
+    /// heading.
     ///
-    /// The program is captured with the menu, as the pin menu captures its
-    /// row: what the menu said it was about is what its rows act on.
-    notification_menu: Option<(guitk::menu::ContextMenu, String)>,
+    /// Both are captured with the menu, as the pin menu captures its row:
+    /// what the menu said it was about is what its rows act on.
+    notification_menu: Option<(guitk::menu::ContextMenu, String, Option<u64>)>,
     /// A text field's menu -- a right-click on the Run box's command line,
     /// the start menu's search, a note's writing area or an icon's name
     /// being edited -- when it is open, and the field it was opened on: what
@@ -2586,6 +2591,20 @@ pub struct DesktopShell {
     /// *view* is a way of looking at events, not a place to keep them -- the
     /// popup and the widget read the same one.
     pub agenda: calendar::Agenda,
+    /// The calendar's reminders raised and put off, as kept on disk
+    /// (`reminders`, design-decisions §1498).
+    pub reminders: reminders::Reminders,
+    /// The reminders' state as last written -- its revision: what says
+    /// whether it is to be written again.
+    reminders_saved: Option<u64>,
+    /// When the next reminder falls due, as last worked out, and the zone it
+    /// was worked out in: worked out once, not at every frame, and again when
+    /// the calendar is read anew, a reminder is raised or put off, or the
+    /// zone changes. `None` until it is worked out again.
+    reminders_next: Option<(Tz, Option<i64>)>,
+    /// Which notifications are reminders, and of what: what lets a reminder's
+    /// menu offer it again later. Only those still in the pane are kept.
+    reminder_notes: Vec<(u64, reminders::ReminderKey)>,
     /// The zone-tiling overlay: which layout is chosen, and whether it is up.
     ///
     /// State only. The rectangles it draws are a *picture* of what the user is
@@ -3076,6 +3095,11 @@ impl DesktopShell {
             toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
             agenda: calendar::Agenda::default(),
+            reminders: reminders::Reminders::new(),
+            // Nothing written yet; nothing to write until something changes.
+            reminders_saved: Some(0),
+            reminders_next: None,
+            reminder_notes: Vec::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
             // immediately below rather than left to the first gesture, so that
@@ -5444,7 +5468,7 @@ impl DesktopShell {
         if self.notification_menu.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
-                    if let Some((menu, _)) = self.notification_menu.as_mut() {
+                    if let Some((menu, ..)) = self.notification_menu.as_mut() {
                         menu.handle_mouse_move(event.x, event.y);
                     }
                     return ShellAction::Consumed;
@@ -7699,17 +7723,17 @@ impl DesktopShell {
             let chosen = self
                 .notification_menu
                 .as_mut()
-                .map(|(menu, app)| (menu.handle_key(key), app.clone()));
+                .map(|(menu, app, about)| (menu.handle_key(key), app.clone(), *about));
             match chosen {
-                Some((Some(MenuAction::Selected(id)), app)) => {
+                Some((Some(MenuAction::Selected(id)), app, about)) => {
                     self.close_notification_menu();
                     if let ShellAction::Launch(launch) =
-                        self.activate_notification_menu_item(id, &app)
+                        self.activate_notification_menu_item(id, &app, about)
                     {
                         return HotkeyOutcome::start(vec![launch]);
                     }
                 }
-                Some((Some(MenuAction::Closed), _)) => self.close_notification_menu(),
+                Some((Some(MenuAction::Closed), ..)) => self.close_notification_menu(),
                 _ => {}
             }
             return HotkeyOutcome::consumed();
@@ -11674,6 +11698,13 @@ impl DesktopShell {
     /// A notification's menu's way to the Settings app's Notifications page.
     const MENU_NOTIFY_SETTINGS: MenuItemId = 2;
 
+    /// A reminder's menu's row opening the times it can come again in.
+    const MENU_REMIND_AGAIN: MenuItemId = 3;
+
+    /// The first of a reminder's times to come again in: one id for each of
+    /// [`reminders::SNOOZES`], in order, from here.
+    const MENU_REMIND_IN: MenuItemId = 10;
+
     /// Whether the user has turned off notifications from `app`: its rule is
     /// `Silent`, which is what the Settings app's switch for a program writes
     /// and what [`focus_assist`] reads.
@@ -11705,7 +11736,18 @@ impl DesktopShell {
     /// the toasts hold while it is up, as they do under the pointer: the
     /// pointer has gone from the toast to its menu, and the toast the menu is
     /// about must not leave while the menu is read.
-    fn open_notification_menu(&mut self, app: String, x: f32, y: f32, from_toast: bool) {
+    ///
+    /// **On a calendar's reminder** -- `about` naming one -- a first row,
+    /// "Remind me again", opens the times it can come again in
+    /// ([`reminders::SNOOZES`]).
+    fn open_notification_menu(
+        &mut self,
+        app: String,
+        about: Option<u64>,
+        x: f32,
+        y: f32,
+        from_toast: bool,
+    ) {
         let switch = if self.notifications_off_for(&app) {
             format!("Turn on notifications from {app}")
         } else {
@@ -11719,13 +11761,27 @@ impl DesktopShell {
             enabled: true,
             checked: None,
         };
-        let mut menu = guitk::menu::ContextMenu::new(vec![
-            row(Self::MENU_NOTIFY_SWITCH, switch),
-            row(
-                Self::MENU_NOTIFY_SETTINGS,
-                "Notification settings".to_owned(),
-            ),
-        ]);
+        let mut rows = Vec::new();
+        let reminder = about.is_some_and(|id| self.reminder_notes.iter().any(|(n, _)| *n == id));
+        if reminder {
+            let times = (Self::MENU_REMIND_IN..)
+                .zip(reminders::SNOOZES)
+                .map(|(id, minutes)| row(id, reminders::snooze_label(minutes)))
+                .collect();
+            rows.push(guitk::menu::MenuItem::Submenu {
+                id: Self::MENU_REMIND_AGAIN,
+                label: "Remind me again".to_owned(),
+                icon: None,
+                enabled: true,
+                children: times,
+            });
+        }
+        rows.push(row(Self::MENU_NOTIFY_SWITCH, switch));
+        rows.push(row(
+            Self::MENU_NOTIFY_SETTINGS,
+            "Notification settings".to_owned(),
+        ));
+        let mut menu = guitk::menu::ContextMenu::new(rows);
         let x = if from_toast {
             self.dismiss_popups();
             let beside = self.toast_extent().map_or(x, |stack| stack.x);
@@ -11734,7 +11790,7 @@ impl DesktopShell {
             x
         };
         menu.show(x, y, self.viewport());
-        self.notification_menu = Some((menu, app));
+        self.notification_menu = Some((menu, app, about));
         self.toasts.hold_for_menu(from_toast);
     }
 
@@ -11748,27 +11804,51 @@ impl DesktopShell {
     }
 
     /// A press while a notification's menu is open: a row takes its action,
-    /// and a press anywhere else closes the menu, as every menu's does.
+    /// a row that opens a submenu -- a reminder's "Remind me again" -- opens
+    /// it and the menu stays, and a press anywhere else closes the menu, as
+    /// every menu's does.
     fn click_notification_menu(&mut self, x: f32, y: f32) -> ShellAction {
-        let chosen = self
+        let clicked = self
             .notification_menu
             .as_mut()
-            .and_then(|(menu, app)| menu.handle_click(x, y).map(|id| (id, app.clone())));
-        self.close_notification_menu();
-        match chosen {
-            Some((id, app)) => self.activate_notification_menu_item(id, &app),
-            None => ShellAction::Consumed,
+            .map(|(menu, app, about)| (menu.click(x, y), app.clone(), *about));
+        match clicked {
+            Some((guitk::menu::MenuClick::Opened, _, _)) => ShellAction::Consumed,
+            Some((guitk::menu::MenuClick::Chosen(id), app, about)) => {
+                self.close_notification_menu();
+                self.activate_notification_menu_item(id, &app, about)
+            }
+            Some((guitk::menu::MenuClick::Missed, _, _)) | None => {
+                self.close_notification_menu();
+                ShellAction::Consumed
+            }
         }
     }
 
-    /// One row of a notification's menu, chosen by click or by key.
+    /// One row of a notification's menu, chosen by click or by key, about
+    /// `app` and -- opened on one -- the notification `about`.
     ///
     /// Turning a program off takes its toasts away at once -- the user has
     /// just said not to be shown them -- and leaves its cards in the pane,
     /// which is where they are turned back on from. Opening Settings closes
     /// the pane: the window it opens is what the user asked to see, and the
-    /// pane's scrim would dim it.
-    fn activate_notification_menu_item(&mut self, id: MenuItemId, app: &str) -> ShellAction {
+    /// pane's scrim would dim it. A reminder asked to come again goes until
+    /// then ([`snooze_reminder`](Self::snooze_reminder)).
+    fn activate_notification_menu_item(
+        &mut self,
+        id: MenuItemId,
+        app: &str,
+        about: Option<u64>,
+    ) -> ShellAction {
+        if let Some(minutes) = id
+            .checked_sub(Self::MENU_REMIND_IN)
+            .and_then(|i| reminders::SNOOZES.get(usize::try_from(i).ok()?))
+        {
+            if let Some(notification) = about {
+                self.snooze_reminder(notification, *minutes, Self::unix_now());
+            }
+            return ShellAction::Consumed;
+        }
         match id {
             Self::MENU_NOTIFY_SWITCH => {
                 let turning_off = !self.notifications_off_for(app);
@@ -11793,7 +11873,7 @@ impl DesktopShell {
     /// A notification's menu's draw commands, `None` when it is closed.
     #[must_use]
     pub fn render_notification_menu(&self) -> Option<RenderTree> {
-        let (menu, _) = self.notification_menu.as_ref()?;
+        let (menu, ..) = self.notification_menu.as_ref()?;
         let mut tree = RenderTree::new();
         tree.commands.extend(self.render_menu(menu));
         Some(tree)
@@ -13004,10 +13084,132 @@ impl DesktopShell {
 
     /// Read the user's calendar again if its file has changed
     /// ([`calendar::Agenda::refresh`]), and say whether its events may have:
-    /// as the popup opens, and as a calendar widget turns its minute. Nothing
-    /// to read where the environment names no home.
+    /// when the settings watch says it was written, as the popup opens, and as
+    /// a calendar widget turns its minute. Nothing to read where the
+    /// environment names no home. Events read anew may bring a reminder
+    /// sooner, so when the next is due is worked out again.
     pub fn refresh_agenda(&mut self) -> bool {
-        calendarstore::events_path().is_some_and(|path| self.agenda.refresh(&path))
+        let changed = calendarstore::events_path().is_some_and(|path| self.agenda.refresh(&path));
+        if changed {
+            self.reminders_next = None;
+        }
+        changed
+    }
+
+    /// Whether the calendar's reminders want looking at at `utc_secs`: one
+    /// is due, or when the next is has to be worked out again -- the calendar
+    /// read anew, a reminder put off, the zone changed. Cheap, for asking at
+    /// every pump.
+    #[must_use]
+    pub fn reminders_due(&self, utc_secs: u64) -> bool {
+        let now = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+        match self.reminders_next {
+            Some((zone, next)) => zone != self.local_zone() || next.is_some_and(|at| at <= now),
+            None => true,
+        }
+    }
+
+    /// Raise every reminder of the calendar due at `utc_secs`
+    /// (design-decisions §1498) -- each a notification from Calendar that
+    /// stays on screen until it is closed -- and work out when the next is
+    /// due. Answers how many were raised.
+    pub fn raise_due_reminders(&mut self, utc_secs: u64) -> usize {
+        let now = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+        let zone = self.local_zone();
+        let due = self.reminders.take_due(self.agenda.events(), &zone, now);
+        // The notes of notifications no longer in the pane go: nothing can
+        // open their menu.
+        let kept: Vec<u64> = self
+            .notifications
+            .notifications()
+            .iter()
+            .map(|n| n.id)
+            .collect();
+        self.reminder_notes.retain(|(id, _)| kept.contains(id));
+        for reminder in &due {
+            let id = self.notify_staying(
+                notif_pane::Notification {
+                    id: 0,
+                    app_name: reminders::APP_NAME.to_owned(),
+                    title: reminder.title.clone(),
+                    body: reminders::body(reminder, now, &zone),
+                    timestamp: utc_secs,
+                    priority: notif_pane::NotifPriority::High,
+                    read: false,
+                    action: Some(launcher::CALENDAR.to_owned()),
+                    // `notify`'s to decide, as for every notification.
+                    silent: false,
+                },
+                true,
+            );
+            self.reminder_notes.push((id, reminder.key));
+        }
+        self.reminders_next = Some((
+            zone,
+            self.reminders.next_due(self.agenda.events(), &zone, now),
+        ));
+        due.len()
+    }
+
+    /// How long until the next reminder is due, from `utc_secs` -- for the
+    /// session to sleep exactly that long, as it does for quiet hours. `None`
+    /// with no reminder ahead, or before it is worked out
+    /// ([`reminders_due`](Self::reminders_due) says to).
+    #[must_use]
+    pub fn next_reminder_in(&self, utc_secs: u64) -> Option<Duration> {
+        let (_, next) = self.reminders_next?;
+        let now = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+        let secs = u64::try_from(next?.saturating_sub(now)).unwrap_or(0);
+        // Never zero: a wake-up of no length would come before the moment
+        // it is for, and arm itself again for nothing, as fast as the loop
+        // can run.
+        Some(Duration::from_secs(secs.max(1)))
+    }
+
+    /// Put off the reminder the notification `notification` raised for
+    /// `minutes` from `utc_secs`: its toast goes, its card is read, and it is
+    /// raised again then. Nothing for a notification that is no reminder.
+    pub fn snooze_reminder(&mut self, notification: u64, minutes: u32, utc_secs: u64) {
+        let Some(&(_, key)) = self
+            .reminder_notes
+            .iter()
+            .find(|(id, _)| *id == notification)
+        else {
+            return;
+        };
+        let now = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+        let until = now.saturating_add(i64::from(minutes).saturating_mul(60));
+        self.reminders.snooze(key, until);
+        self.reminders_next = None;
+        self.toasts.forget(notification);
+        self.notifications.mark_read(notification);
+    }
+
+    /// Read the reminders raised and put off before the desktop started
+    /// ([`reminders::Reminders::load`]), so none is raised twice.
+    pub fn load_reminders(&mut self) {
+        self.reminders = reminders::Reminders::load();
+        self.reminders_saved = Some(self.reminders.revision());
+        self.reminders_next = None;
+    }
+
+    /// Whether the reminders raised or put off changed since they were last
+    /// written ([`save_reminders`](Self::save_reminders)).
+    #[must_use]
+    pub fn reminders_dirty(&self) -> bool {
+        self.reminders_saved != Some(self.reminders.revision())
+    }
+
+    /// Write the reminders raised and put off. Counted as written before the
+    /// write is tried, as the notifications are: a failure is reported once,
+    /// and tried again at the next change rather than at every pump.
+    ///
+    /// # Errors
+    ///
+    /// The write's own.
+    pub fn save_reminders(&mut self) -> std::io::Result<()> {
+        self.reminders_saved = Some(self.reminders.revision());
+        self.reminders.store()
     }
 
     /// Open the notification pane, or close it if it is already open.
@@ -13504,7 +13706,14 @@ impl DesktopShell {
     ///
     /// [`attention_count`]: notif_pane::NotificationPane::attention_count
     /// [`FocusAssistManager::show_summary`]: focus_assist::FocusAssistManager
-    pub fn notify(&mut self, mut notif: notif_pane::Notification) -> u64 {
+    pub fn notify(&mut self, notif: notif_pane::Notification) -> u64 {
+        self.notify_staying(notif, false)
+    }
+
+    /// [`notify`](Self::notify), with its toast -- if it pops up -- staying
+    /// until it is closed when `until_closed`, whatever its priority: a
+    /// calendar's reminder ([`toasts::ToastStack::show_until_closed`]).
+    fn notify_staying(&mut self, mut notif: notif_pane::Notification, until_closed: bool) -> u64 {
         // Keyed on `app_name` because that is the only app identity a
         // `Notification` carries, and it is the same key the pane files its
         // per-app settings under. A separate opaque id would have to be
@@ -13540,7 +13749,11 @@ impl DesktopShell {
         let id = self.notifications.push_notification(notif);
         if let Some(mut shown) = pop_up {
             shown.id = id;
-            self.toasts.show(&shown);
+            if until_closed {
+                self.toasts.show_until_closed(&shown);
+            } else {
+                self.toasts.show(&shown);
+            }
         }
         id
     }
@@ -13626,8 +13839,8 @@ impl DesktopShell {
                         .or(launch);
                 }
                 toasts::ToastEvent::Closed(_) => {}
-                toasts::ToastEvent::MenuAsked { app, x, y } => {
-                    self.open_notification_menu(app, x, y, true);
+                toasts::ToastEvent::MenuAsked { app, id, x, y } => {
+                    self.open_notification_menu(app, Some(id), x, y, true);
                 }
             }
         }
@@ -13753,8 +13966,8 @@ impl DesktopShell {
                     value,
                 } => self.apply_app_notification_setting(&app, setting, value),
                 // A right-click on a card: its program's menu, over the pane.
-                NotifPaneEvent::MenuAsked { app, x, y } => {
-                    self.open_notification_menu(app, x, y, false);
+                NotifPaneEvent::MenuAsked { app, id, x, y } => {
+                    self.open_notification_menu(app, id, x, y, false);
                 }
                 // The other three are already done by the time they are
                 // reported: the card is gone, the list is empty, the pane is

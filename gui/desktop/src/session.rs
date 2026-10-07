@@ -2153,7 +2153,11 @@ impl<T: Transport> ShellSession<T> {
     /// over under its own name is announced as a change to `appearance`;
     /// every window's appearance watcher then compares the theme's file as
     /// well as the settings, and this session its pictures' stamps
-    /// (design-decisions §1483).
+    /// (design-decisions §1483). And the calendar's file is followed as the
+    /// calendar's group (`calendar::SETTINGS_GROUP`): a save is announced as
+    /// a change to `calendar`, and this desktop reads the calendar again --
+    /// which the reminders it raises need, to hear of an event added minutes
+    /// before its reminder is due (§1498).
     ///
     /// Started by the desktop's `main` and not by `start`, so that no test
     /// watches the folder of whoever runs it.
@@ -2162,7 +2166,7 @@ impl<T: Transport> ShellSession<T> {
         // The loop's waker, so a report reaches a loop parked with nothing on
         // the wire; without one a report waits for the loop's next pass.
         let waker = self.events.waker().ok().flatten();
-        let dependents: Vec<settingswatch::Dependents> =
+        let mut dependents: Vec<settingswatch::Dependents> =
             settingswatch::SettingsName::new(appearance::CONFIG_NAME.as_bytes())
                 .map(|name| settingswatch::Dependents {
                     name,
@@ -2170,6 +2174,31 @@ impl<T: Transport> ShellSession<T> {
                 })
                 .into_iter()
                 .collect();
+        // And the calendar's file, followed as the calendar's group: written
+        // -- by the calendar program, as a rule -- it is announced as a change
+        // to `calendar`, which tells this desktop to read it again, for the
+        // popup, a calendar widget and the reminders, which must hear of an
+        // event added minutes before its reminder is due (§1498). Its folder
+        // is made if it is not there, as the settings folder is: a followed
+        // file's folder must be, and the calendar program's first save must
+        // be heard too.
+        if let Some(name) =
+            settingswatch::SettingsName::new(crate::calendar::SETTINGS_GROUP.as_bytes())
+        {
+            for path in crate::calendar::watched_paths() {
+                if let Some(folder) = path.parent()
+                    && let Err(e) = std::fs::create_dir_all(folder)
+                {
+                    eprintln!(
+                        "desktop: the calendar's folder could not be made, so its changes are seen only when it is looked at: {e}"
+                    );
+                }
+            }
+            dependents.push(settingswatch::Dependents {
+                name,
+                paths: crate::calendar::watched_paths,
+            });
+        }
         let started = std::thread::Builder::new()
             .name("desktop-settings-watch".into())
             .spawn(move || {
@@ -2987,6 +3016,21 @@ impl<T: Transport> ShellSession<T> {
         // clock's popup opened -- and found unreadable.
         self.tell_agenda_problem();
 
+        // The calendar's reminders (§1498): those due raised -- their time
+        // come, or the calendar read anew in this batch, or one put off --
+        // and the loop woken for the next. Asked at every pump and nearly
+        // free: when the next is due is worked out once, not each time.
+        let now = unix_now();
+        if self.shell.reminders_due(now) {
+            if self.shell.raise_due_reminders(now) > 0 {
+                self.dirty = true;
+                worked = true;
+            }
+            // The next one's moment may have moved, and a reminder's toast
+            // slides in, which nothing else may be waking the loop for.
+            self.arm_next_frame();
+        }
+
         // *After* the input, deliberately. `poll` is also what reads the window
         // list off the wire, so by here the connection may already hold a newer
         // desktop than the taskbar the user clicked was drawn from. Folding it
@@ -3120,6 +3164,12 @@ impl<T: Transport> ShellSession<T> {
         if self.shell.notification_history_dirty() {
             let saved = self.shell.save_notification_history();
             self.report_save("The notifications", saved);
+        }
+        // And the calendar's reminders raised and put off, on the same terms:
+        // what keeps one from being raised twice across a restart.
+        if self.shell.reminders_dirty() {
+            let saved = self.shell.save_reminders();
+            self.report_save("The calendar's reminders", saved);
         }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --
@@ -3261,6 +3311,10 @@ impl<T: Transport> ShellSession<T> {
         // And the notifications themselves, kept from before the desktop
         // started -- after the rules, which say how long they are kept.
         self.shell.load_notification_history();
+        // And the calendar's reminders raised and put off before, so none is
+        // raised twice. One that fell due while nobody was signed in is
+        // raised at the first pump, as everything due is (§1498).
+        self.shell.load_reminders();
         // Quiet hours saved before the last logout are in force now if the
         // hour says so. Without this the desktop would be noisy from login
         // until whatever else happened to tick it, which at three in the
@@ -4083,6 +4137,19 @@ impl<T: Transport> ShellSession<T> {
             } if name.as_str() == windowrules::file::CONFIG_NAME => {
                 self.adopt_window_rules();
             }
+            // The calendar's file was written, which the settings watch
+            // follows as the calendar's group (`watch_settings`): read again,
+            // for the popup and a calendar widget, and for the reminders,
+            // which the end of this pump looks at (§1498). Arrives once per
+            // surface: a repeat costs a look at the file's length and time,
+            // and a second read only while the save is seconds old.
+            Event::SettingsChanged {
+                group: SettingsGroup::Program(name),
+            } if name.as_str() == crate::calendar::SETTINGS_GROUP => {
+                if self.shell.refresh_agenda() {
+                    self.dirty = true;
+                }
+            }
             _ => {}
         }
         if !overview_was_visible && self.shell.overview.visible {
@@ -4471,6 +4538,9 @@ impl<T: Transport> ShellSession<T> {
             .toasts
             .next_due_in()
             .map(|ms| Duration::from_millis(ms.max(1)));
+        // The calendar's next reminder, on the wall clock (§1498): at 08:45
+        // for a meeting at 09:00, not so long after the desktop started.
+        let reminder = self.shell.next_reminder_in(unix_now());
         if let Some(delay) = [
             widget,
             schedule,
@@ -4480,6 +4550,7 @@ impl<T: Transport> ShellSession<T> {
             tooltip,
             ending,
             toast,
+            reminder,
         ]
         .into_iter()
         .flatten()

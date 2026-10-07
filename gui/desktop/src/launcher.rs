@@ -5,7 +5,8 @@
 //! programs (`gui/programs`), as the start menu's fallback for those no
 //! installed desktop entry names; [`FILE_MANAGER`],
 //! [`SETTINGS`] and [`TERMINAL`] are the three paths the menus, the desktop
-//! icons and the shortcuts start by name; `search_score` is how the start
+//! icons and the shortcuts start by name, and [`CALENDAR`] the one a
+//! calendar's reminder opens; `search_score` is how the start
 //! menu's search ranks a program against what was typed; and
 //! [`program_started`] says which program a launch really starts, for the
 //! "recently used" list.
@@ -33,6 +34,11 @@ pub const RECYCLE_BIN_VIEW_ARG: &str = "--recycle-bin";
 /// The settings application: what the start menu's Settings button and the
 /// Settings shortcut start, and this database's entry for it.
 pub const SETTINGS: &str = "/usr/bin/settings";
+
+/// The calendar program: what a reminder of one of its events opens when it
+/// is pressed (`crate::reminders`). SlateOS's own, whatever the user's
+/// calendar of choice: the file the reminder came from is this program's.
+pub const CALENDAR: &str = "/usr/bin/calendar";
 
 /// How Settings is asked to open on one of its pages: `settings --page
 /// <name>`, with the name `SettingsPage::name` gives the page (lane E,

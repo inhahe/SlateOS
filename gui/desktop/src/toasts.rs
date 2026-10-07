@@ -14,10 +14,11 @@
 //! # How long one stays
 //!
 //! By priority ([`stays_for`]): low four seconds, normal six, high ten, and an
-//! urgent one until it is closed. The pointer over the stack holds every
-//! toast in it where it is -- a toast that leaves while it is being read is
-//! one that could not be read. That time is a wait, not motion: the user's
-//! animation speed does not change it (§1446).
+//! urgent one until it is closed -- as is a calendar's reminder, whatever its
+//! priority ([`ToastStack::show_until_closed`]). The pointer over the stack
+//! holds every toast in it where it is -- a toast that leaves while it is
+//! being read is one that could not be read. That time is a wait, not motion:
+//! the user's animation speed does not change it (§1446).
 //!
 //! # Where
 //!
@@ -25,8 +26,8 @@
 //! beside the tray's bell, which opens the pane holding the same notifications
 //! -- the newest at the bottom, nearest the bell. At most [`MAX_SHOWN`] at
 //! once: a new one pushes the oldest out early, since the pane keeps it; only
-//! urgent ones are never pushed out, and a newcomer waits for one of those to
-//! be closed.
+//! those staying until they are closed are never pushed out, and a newcomer
+//! waits for one of those to be closed.
 //!
 //! # Motion
 //!
@@ -135,10 +136,14 @@ pub enum ToastEvent {
     Closed(u64),
     /// The toast was pressed with the secondary button, at `(x, y)` on the
     /// screen: offer what can be done about the program it came from, as a
-    /// secondary press on its card in the pane does. The toast stays.
+    /// secondary press on its card in the pane does -- and about the
+    /// notification, when there is something to do about it: a calendar's
+    /// reminder can be asked again later. The toast stays.
     MenuAsked {
         /// The program the notification came from.
         app: String,
+        /// The notification's id.
+        id: u64,
         /// Where the press was, in screen coordinates.
         x: f32,
         /// Where the press was, in screen coordinates.
@@ -167,6 +172,10 @@ struct Toast {
     /// The body, wrapped to the toast's width when it arrived.
     body: Vec<String>,
     priority: NotifPriority,
+    /// How long it stays, in milliseconds -- its priority's time
+    /// ([`stays_for`]) -- or `None` until it is closed: an urgent one, or one
+    /// shown as [`ToastStack::show_until_closed`] shows a calendar's reminder.
+    stays: Option<u64>,
     phase: Phase,
     /// Its height, fixed at arrival: the body is wrapped once.
     height: f32,
@@ -286,23 +295,37 @@ impl ToastStack {
         self.motion = motion;
     }
 
-    /// Show `notif`, sliding in at the bottom of the stack.
+    /// Show `notif`, sliding in at the bottom of the stack, for as long as its
+    /// priority says ([`stays_for`]).
     ///
-    /// When the stack is full the oldest toast that is not urgent starts to
+    /// When the stack is full the oldest toast that goes by itself starts to
     /// leave early, to make room -- the pane keeps it. When every toast shown
-    /// is urgent, the newcomer waits for one to be closed.
+    /// stays until it is closed, the newcomer waits for one to be.
     pub fn show(&mut self, notif: &Notification) {
+        self.show_staying(notif, stays_for(notif.priority));
+    }
+
+    /// Show `notif` as [`show`](Self::show) does, but until it is closed,
+    /// whatever its priority: a calendar's reminder, which asks to be seen
+    /// by someone who may have looked away for the ten seconds a high
+    /// priority stays (`crate::reminders`).
+    pub fn show_until_closed(&mut self, notif: &Notification) {
+        self.show_staying(notif, None);
+    }
+
+    /// Show `notif` for `stays` milliseconds, or until it is closed.
+    fn show_staying(&mut self, notif: &Notification, stays: Option<u64>) {
         // Showing a notification that is already on screen again (an update
         // under the same id) replaces it in place rather than stacking twice.
         self.shown.retain(|t| t.id != notif.id);
         self.waiting.retain(|t| t.id != notif.id);
-        let toast = Toast::new(notif);
+        let toast = Toast::new(notif, stays);
         let motion = self.motion;
         if self.staying_count() >= MAX_SHOWN {
             let oldest = self
                 .shown
                 .iter_mut()
-                .find(|t| !matches!(t.phase, Phase::Leaving(_)) && stays_for(t.priority).is_some());
+                .find(|t| !matches!(t.phase, Phase::Leaving(_)) && t.stays.is_some());
             match oldest {
                 Some(t) => t.leave(motion),
                 None => {
@@ -403,7 +426,7 @@ impl ToastStack {
                 }
                 Phase::Shown(ms) => {
                     let ms = if held { ms } else { ms.saturating_add(dt_ms) };
-                    match stays_for(toast.priority) {
+                    match toast.stays {
                         Some(stay) if ms >= stay => Phase::Leaving(0.0),
                         _ => Phase::Shown(ms),
                     }
@@ -445,7 +468,8 @@ impl ToastStack {
     /// When the next toast's time is up, in milliseconds from now -- for a
     /// wake-up at that moment rather than a frame every sixtieth of a second
     /// while toasts sit still. `None` when nothing is waiting to go: no
-    /// toasts, only urgent ones, or the pointer or a menu holding them.
+    /// toasts, only ones that stay until they are closed, or the pointer or a
+    /// menu holding them.
     #[must_use]
     pub fn next_due_in(&self) -> Option<u64> {
         if self.is_held() {
@@ -454,7 +478,7 @@ impl ToastStack {
         self.shown
             .iter()
             .filter_map(|t| match t.phase {
-                Phase::Shown(ms) => stays_for(t.priority).map(|stay| stay.saturating_sub(ms)),
+                Phase::Shown(ms) => t.stays.map(|stay| stay.saturating_sub(ms)),
                 _ => None,
             })
             .min()
@@ -581,6 +605,7 @@ impl ToastStack {
                 };
                 self.events.push(ToastEvent::MenuAsked {
                     app,
+                    id: hit.id,
                     x: event.x,
                     y: event.y,
                 });
@@ -610,7 +635,7 @@ impl ToastStack {
 }
 
 impl Toast {
-    fn new(notif: &Notification) -> Self {
+    fn new(notif: &Notification, stays: Option<u64>) -> Self {
         let body = body_lines(&notif.body);
         #[expect(clippy::cast_precision_loss, reason = "at most BODY_MAX_LINES lines")]
         let height = BASE_HEIGHT + BODY_LINE * body.len() as f32;
@@ -620,6 +645,7 @@ impl Toast {
             title: notif.title.clone(),
             body,
             priority: notif.priority,
+            stays,
             phase: Phase::Arriving(0.0),
             height,
             settle: Settle::at(0.0),
@@ -856,6 +882,38 @@ mod tests {
         assert_eq!(s.take_events(), [ToastEvent::Closed(1)]);
         s.tick(SETTLED);
         assert!(!s.is_showing());
+    }
+
+    /// **A toast shown until closed stays whatever its priority** -- a
+    /// calendar's reminder, at high priority, past its ten seconds -- and is
+    /// never pushed out to make room: a newcomer waits for it, as for an
+    /// urgent one. Shown the ordinary way, the same notification goes.
+    #[test]
+    fn a_toast_shown_until_closed_stays_whatever_its_priority() {
+        let mut s = stack();
+        s.show_until_closed(&notif(1, NotifPriority::High));
+        s.tick(SETTLED);
+        assert_eq!(s.next_due_in(), None, "a time was set on it");
+        s.tick(600_000);
+        assert_eq!(s.ids(), [1]);
+        assert!(!s.is_moving(), "it started to leave");
+
+        for id in 2..=u64::try_from(MAX_SHOWN).unwrap() {
+            s.show_until_closed(&notif(id, NotifPriority::Low));
+        }
+        s.show(&notif(99, NotifPriority::Normal));
+        s.tick(SETTLED);
+        assert!(
+            !s.ids().contains(&99),
+            "a newcomer pushed one shown until closed out"
+        );
+        assert!(s.ids().contains(&1));
+
+        // The same notification shown the ordinary way goes in its time.
+        let mut s = stack();
+        s.show(&notif(1, NotifPriority::High));
+        s.tick(SETTLED);
+        assert_eq!(s.next_due_in(), Some(10_000));
     }
 
     /// **The pointer over the stack holds every toast in it**, and leaving
@@ -1146,6 +1204,7 @@ mod tests {
             s.take_events(),
             [ToastEvent::MenuAsked {
                 app: "Mail".to_owned(),
+                id: 1,
                 x,
                 y
             }]
@@ -1156,6 +1215,7 @@ mod tests {
             s.take_events(),
             [ToastEvent::MenuAsked {
                 app: "Calendar".to_owned(),
+                id: 2,
                 x: close.x + 2.0,
                 y: close.y + 2.0
             }]

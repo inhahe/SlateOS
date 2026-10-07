@@ -592,11 +592,16 @@ pub enum NotifPaneEvent {
     /// A notification's card was pressed with the secondary button, at
     /// `(x, y)` on the screen: the shell offers what can be done about the
     /// program it came from -- `design.txt`'s "option for any notification to
-    /// not show notifications from that application again". The card is left
-    /// as it was, unread if it was.
+    /// not show notifications from that application again" -- and about the
+    /// notification, when there is something to do about it: a calendar's
+    /// reminder can be asked again later. The card is left as it was, unread
+    /// if it was.
     MenuAsked {
         /// The program the notification came from.
         app: String,
+        /// The notification's id: `None` for a program's heading, which is
+        /// about the program alone.
+        id: Option<u64>,
         /// Where the press was, in screen coordinates.
         x: f32,
         /// Where the press was, in screen coordinates.
@@ -1178,9 +1183,10 @@ impl NotificationPane {
             // the pane, nothing -- the header, the switches and the program
             // list have no menu of their own.
             MouseEventKind::Press(MouseButton::Right) => {
-                if let Some(app) = self.card_app_at(ry) {
+                if let Some((app, id)) = self.card_menu_at(ry) {
                     self.events.push(NotifPaneEvent::MenuAsked {
                         app,
+                        id,
                         x: event.x,
                         y: event.y,
                     });
@@ -2819,18 +2825,22 @@ impl NotificationPane {
     }
 
     /// The program whose notification's card, or whose heading, is at `ry`
-    /// in the pane, or `None` where there is neither: above the list (the
-    /// header, the quick settings), between cards, past the last, on a time
-    /// section's heading or a "more" row, and anywhere while the pane shows
-    /// its per-program settings instead of the notifications.
-    fn card_app_at(&self, ry: f32) -> Option<String> {
+    /// in the pane -- with the notification's id on a card -- or `None` where
+    /// there is neither: above the list (the header, the quick settings),
+    /// between cards, past the last, on a time section's heading or a "more"
+    /// row, and anywhere while the pane shows its per-program settings
+    /// instead of the notifications.
+    fn card_menu_at(&self, ry: f32) -> Option<(String, Option<u64>)> {
         let list_top = Self::list_start_y();
         if self.show_settings || ry < list_top {
             return None;
         }
         match self.row_at(ry - list_top + self.scroll_offset)?.kind {
-            RowKind::Card(idx) => self.notifications.get(idx).map(|n| n.app_name.clone()),
-            RowKind::Program { app, .. } => Some(app),
+            RowKind::Card(idx) => self
+                .notifications
+                .get(idx)
+                .map(|n| (n.app_name.clone(), Some(n.id))),
+            RowKind::Program { app, .. } => Some((app, None)),
             RowKind::Section(_) | RowKind::More { .. } => None,
         }
     }
@@ -3211,10 +3221,10 @@ mod tests {
         }
         wheel_at(&mut pane, -1.0);
         assert!(pane.scroll_offset > 0.0);
-        let apps: Vec<String> = pane
+        let cards: Vec<(String, u64)> = pane
             .notifications
             .iter()
-            .map(|n| n.app_name.clone())
+            .map(|n| (n.app_name.clone(), n.id))
             .collect();
         let list_top = NotificationPane::list_start_y();
         let x = SCREEN_W - PANE_WIDTH + PANE_PADDING + 10.0;
@@ -3226,10 +3236,12 @@ mod tests {
             }
             let y = top + NOTIF_CARD_HEIGHT / 2.0;
             let idx = click_index(&pane, top);
+            // The card's own notification, which the menu can be about.
             assert_eq!(
                 secondary_press_at(&mut pane, y),
                 [NotifPaneEvent::MenuAsked {
-                    app: apps[idx].clone(),
+                    app: cards[idx].0.clone(),
+                    id: Some(cards[idx].1),
                     x,
                     y
                 }],
@@ -5426,14 +5438,18 @@ mod tests {
     }
 
     /// **A secondary press on a program's heading asks for the program's
-    /// menu**, as one on its card does.
+    /// menu**, as one on its card does -- about the program alone, since a
+    /// heading is no one notification.
     #[test]
     fn a_secondary_press_on_a_programs_heading_asks_for_its_menu() {
         let (mut pane, _, _) = grouped_pane();
         let heading = row_top(&pane, |k| matches!(k, RowKind::Program { .. }));
         let said = secondary_press_at(&mut pane, heading + 10.0);
         assert!(
-            matches!(said.as_slice(), [NotifPaneEvent::MenuAsked { app, .. }] if app == "Mail"),
+            matches!(
+                said.as_slice(),
+                [NotifPaneEvent::MenuAsked { app, id: None, .. }] if app == "Mail"
+            ),
             "{said:?}"
         );
     }

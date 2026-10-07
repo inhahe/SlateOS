@@ -139,15 +139,18 @@ fn the_month_shows_tools_its_controls_and_its_days() {
 #[test]
 fn a_chosen_days_events_are_listed() {
     let mut view = calendar();
+    let mut holiday = event("Holiday", 10, 0, 0);
+    holiday.all_day = true;
     let agenda = Agenda::of(vec![
         event("Dentist", 10, 9, 30),
         event("Call Mum", 10, 18, 0),
+        holiday,
         event("Haircut", 12, 11, 0),
     ]);
     let tenth = CalendarPart::Control(CalendarHit::Day(day_index(&view, 10)));
     assert_eq!(
         node(&view, &agenda, tenth).description.as_deref(),
-        Some("2 events")
+        Some("3 events")
     );
     let twelfth = CalendarPart::Control(CalendarHit::Day(day_index(&view, 12)));
     assert_eq!(
@@ -169,9 +172,15 @@ fn a_chosen_days_events_are_listed() {
         .iter()
         .map(|n| (n.name.as_str(), n.description.as_deref()))
         .collect();
+    // The day's own event first, said as lasting all day rather than as a
+    // time it does not have.
     assert_eq!(
         rows,
-        [("Dentist", Some("09:30")), ("Call Mum", Some("18:00"))]
+        [
+            ("Holiday", Some("All day")),
+            ("Dentist", Some("09:30")),
+            ("Call Mum", Some("18:00"))
+        ]
     );
     // The card takes a press as the popup's own, wherever on it.
     let (x, y) = card.children[1].bounds.centre();

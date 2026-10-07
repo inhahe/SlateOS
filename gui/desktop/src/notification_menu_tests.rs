@@ -54,7 +54,7 @@ fn key(k: Key) -> KeyEvent {
 
 /// The labels of the notification menu's rows, `None` when it is closed.
 fn rows(shell: &DesktopShell) -> Option<Vec<String>> {
-    let (menu, _) = shell.notification_menu.as_ref()?;
+    let (menu, ..) = shell.notification_menu.as_ref()?;
     Some(
         menu.items()
             .iter()
@@ -68,7 +68,7 @@ fn rows(shell: &DesktopShell) -> Option<Vec<String>> {
 
 /// The middle of the notification menu's row `index`, on the screen.
 fn row_centre(shell: &DesktopShell, index: usize) -> (f32, f32) {
-    let (menu, _) = shell.notification_menu.as_ref().expect("the menu is open");
+    let (menu, ..) = shell.notification_menu.as_ref().expect("the menu is open");
     let r = menu.item_rect(index).expect("the row is shown");
     (r.x + r.w / 2.0, r.y + r.h / 2.0)
 }

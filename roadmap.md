@@ -2299,8 +2299,20 @@ live.
   changed, as the popup opens, as a calendar widget turns its minute and at
   sign-in; a file that will not read keeps what was read before and says so
   in a notification. The desktop's own event store, which nothing ever
-  filled, is deleted (§1423). **Next:** the desktop raises the calendar's
-  reminders, which nothing does today, and hears of a save as it is made.
+  filled, is deleted (§1423).
+
+- `[x]` `[C]` **The desktop raises the calendar's reminders**
+  (`design-decisions.md` §1498) -- done 2026-10-07. When an event's reminder
+  is due, a notification from Calendar -- the event, when and where -- stays
+  on the screen until it is closed, opens the calendar when pressed, and
+  offers "Remind me again" in 5, 15 or 30 minutes or an hour on its menu.
+  One missed while the machine was off or asleep is raised late if its event
+  is still on; each is raised once, across a restart too (`reminders` in the
+  data folder). The settings watch follows the calendar's file, so a save
+  reaches the desktop -- the popup, a calendar widget and the reminders -- as
+  it is made. **Next:** the calendar program's form offering the reminder it
+  keeps, asked of lane E
+  (`requests/c-e-the-calendar-can-offer-reminders-the-desktop-raises-them.md`).
 
 - `[x]` `[C]` **A theme is checked before it is installed or shared**
   (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated

@@ -329,7 +329,7 @@ fn opening_it_closes_every_other_menu() {
     shell.tray_overflow_menu = Some((menu(), Vec::new()));
     shell.pin_menu = Some((menu(), crate::PinTarget::Pinned(0)));
     shell.taskbar_menu = Some(menu());
-    shell.notification_menu = Some((menu(), "Chat".to_owned()));
+    shell.notification_menu = Some((menu(), "Chat".to_owned(), None));
 
     shell.open_field_menu(MenuField::Note(id), x, y);
     assert!(shell.field_menu.is_some());

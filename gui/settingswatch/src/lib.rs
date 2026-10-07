@@ -45,7 +45,11 @@
 //! place and gone quiet; a followed folder itself going -- is announced as a
 //! change to the group. Each process then compares what it reads
 //! (`settingsfile::Watcher::with_dependencies`), so a change that alters
-//! nothing it uses costs it a look and no more. The paths are asked for again
+//! nothing it uses costs it a look and no more. A group may follow what its
+//! program keeps, too: the desktop follows the calendar's events file as the
+//! `calendar` group, so that what it shows of the calendar, and the reminders
+//! it raises, follow a save as it is made (`design-decisions.md` §1498).
+//! The paths are asked for again
 //! each time the group is announced, which is when they can change; when
 //! they do, the watch is made afresh -- the old one read out first, so
 //! nothing seen in between is lost.

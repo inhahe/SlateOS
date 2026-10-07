@@ -1943,6 +1943,47 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
     count
 }
 
+/// The handles an `exec` should close, written to `out` (each entry's `fd`
+/// 0, which the kernel ignores), and how many: those of `child`'s
+/// close-on-exec descriptors that no kept descriptor shares, each once.
+///
+/// A handle a kept descriptor also names stays open, as Linux keeps an open
+/// file description while any descriptor refers to it -- `dup2(fd, 1)` of a
+/// close-on-exec `fd` must leave standard output working. (The kernel checks
+/// that too; deciding it here keeps the list to what will be closed.) Kinds
+/// with no `fd_handle_type` -- named Unix sockets, and the userspace-only
+/// epoll, timerfd and inotify -- never reach the list, since
+/// [`inheritable_fds`] leaves them out of both halves: the kernel refuses a
+/// list naming a type it does not know.
+fn exec_close_list(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize {
+    let mut count = 0usize;
+    for &(handle_type, handle) in child.cloexec.iter().flatten() {
+        let kept = child
+            .virt
+            .iter()
+            .flatten()
+            .any(|&kept| kept == (handle_type, handle));
+        let listed = out
+            .get(..count)
+            .unwrap_or_default()
+            .iter()
+            .any(|e| (e.handle_type, e.handle) == (handle_type, handle));
+        if kept || listed {
+            continue;
+        }
+        if let Some(dst) = out.get_mut(count) {
+            *dst = FdMapEntry {
+                fd: 0,
+                handle_type,
+                _pad: [0; 3],
+                handle,
+            };
+            count = count.wrapping_add(1);
+        }
+    }
+    count
+}
+
 /// What a spawned child starts with, once `file_actions` have been applied.
 struct ChildPlan {
     /// How many entries of the fd map were written.
@@ -2580,7 +2621,8 @@ fn exec_with(
         }; MAX_FD_MAP];
         // No file actions, so nothing is opened and nothing can fail: the
         // inheritable descriptors, flattened.
-        let fd_count = flatten_fd_map(&inheritable_fds(), &mut fd_map);
+        let fds = inheritable_fds();
+        let fd_count = flatten_fd_map(&fds, &mut fd_map);
         let _ = syscall2(
             SYS_PROCESS_SET_EXEC_FDS,
             if fd_count > 0 {
@@ -2589,6 +2631,34 @@ fn exec_with(
                 0
             },
             fd_count as u64,
+        );
+        // And the other half: the handles of the close-on-exec descriptors
+        // left behind, for the kernel to close once the new image is in, as
+        // `close()` would -- so a close-on-exec pipe's reader sees end-of-file
+        // at the exec rather than when the new program exits, which is what
+        // `std::process::Command`'s fork path, an sshd session and the GUI
+        // terminal's first spawn wait on
+        // (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+        // Sent before every attempt: each takes the list, and a failed one
+        // leaves the handles open, as POSIX requires. Discarding the answer is
+        // safe: a kernel without the call answers `NoSuchSyscall` and closes
+        // nothing, which is what every exec did before, and the list is built
+        // only of handle types the kernel names, so it is never refused.
+        let mut close_map = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
+        let close_count = exec_close_list(&fds, &mut close_map);
+        let _ = syscall2(
+            SYS_PROCESS_SET_EXEC_CLOSE,
+            if close_count > 0 {
+                close_map.as_ptr() as u64
+            } else {
+                0
+            },
+            close_count as u64,
         );
     }
 
@@ -5683,6 +5753,41 @@ mod tests {
         let found = out[..count].iter().find(|e| e.fd == 40).copied();
         let _ = crate::fdtable::close_fd(40);
         assert_eq!(found.map(|e| e.handle), Some(4040));
+    }
+
+    /// What an `exec` asks the kernel to close: each close-on-exec handle
+    /// once, and none a kept descriptor shares. Built on a table of its own,
+    /// not the process's, which other tests change.
+    #[test]
+    fn exec_closes_close_on_exec_handles_no_kept_descriptor_shares() {
+        use fd_handle_type::{FILE, PIPE};
+        let mut child = ChildFds {
+            virt: [None; MAX_FD_MAP],
+            cloexec: [None; MAX_FD_MAP],
+            from: [None; MAX_FD_MAP],
+        };
+        child.virt[1] = Some((PIPE, 11)); // standard output, kept
+        child.cloexec[3] = Some((PIPE, 10)); // a pipe end, close-on-exec
+        child.cloexec[5] = Some((PIPE, 11)); // dup of fd 1: the kept one
+        child.cloexec[6] = Some((PIPE, 10)); // dup of fd 3: listed once
+        child.cloexec[9] = Some((FILE, 12));
+        child.virt[10] = Some((FILE, 13)); // kept, and no close-on-exec twin
+        let mut out = empty_map();
+        let count = exec_close_list(&child, &mut out);
+        let listed: std::vec::Vec<(u8, u64)> = out[..count]
+            .iter()
+            .map(|e| (e.handle_type, e.handle))
+            .collect();
+        assert_eq!(listed, [(PIPE, 10), (FILE, 12)]);
+        assert!(out[..count].iter().all(|e| e.fd == 0));
+
+        // Nothing close-on-exec: an empty list, which clears the kernel's.
+        let kept_only = ChildFds {
+            virt: child.virt,
+            cloexec: [None; MAX_FD_MAP],
+            from: [None; MAX_FD_MAP],
+        };
+        assert_eq!(exec_close_list(&kept_only, &mut out), 0);
     }
 
     /// POSIX: `adddup2(fd, fd)` hands over a close-on-exec descriptor, with

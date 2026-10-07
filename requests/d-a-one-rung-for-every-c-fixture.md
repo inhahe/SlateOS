@@ -110,16 +110,18 @@ will close them myself as each one goes on.
 | `ctest-gcc-runs` | -- (filed with GCC 16.2 on the image, 2026-10-07; `scripts/gcc-spike/`, design-decisions 1185); `/usr/bin/gcc` and `/usr/bin/g++` compile and link a C program and a C++ one -- an exception thrown and caught, `std::cout`, a thread -- with the image's `libc.a`, libgcc and libstdc++, and run what they made; `cc1plus` compiling `<iostream>` is the slow part, hence the full 600; its scratch files are in `/tmp` | file | 600 |
 | `ctest-unix-socket` | -- (filed with Unix sockets that have names, 2026-10-07, on your `SYS_UNIX_*`; design-decisions 1186); stream, datagram and sequenced-packet sockets bound to paths in `/tmp` and to abstract names, a parent and a forked child talking over them, credentials passed with `SCM_CREDENTIALS` | file | 60 |
 | `ctest-shared-anon` | -- (filed with libc's `MAP_SHARED`, 2026-10-07, for your `a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`); a parent and a forked child share anonymous memory both ways, on its first page and its last, while a private mapping stays private; needs your kernel's native `MAP_SHARED`, which the library now asks for | - | 30 |
+| `ctest-cloexec-exec` | -- (filed with libc's half of `b-ad-close-on-exec-does-not-close-on-a-native-exec.md`, 2026-10-07); a close-on-exec pipe end is closed at a native exec, not when the new program exits; a failed exec keeps it; a handle a kept descriptor shares stays open. It execs itself from `/mnt/tests/`, sleeping two seconds three times at most; needs your `SYS_PROCESS_SET_EXEC_CLOSE` | file | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
 The nine rows from `ctest-sigpipe` to `ctest-string` were added on
 2026-10-06, which made twenty-one fixtures waiting where the summary above
-says eleven; the six after them came on 2026-10-07 -- GDB, Mono, binutils
+says eleven; the seven after them came on 2026-10-07 -- GDB, Mono, binutils
 and GCC on the image, each run by the fixture named for it, and Unix
-sockets with names and shared anonymous memory, which your `SYS_UNIX_*` and
-native `MAP_SHARED` made possible. `ctest-string` is
+sockets with names, shared anonymous memory and close-on-exec at a native
+exec, which your `SYS_UNIX_*`, native `MAP_SHARED` and
+`SYS_PROCESS_SET_EXEC_CLOSE` made possible. `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned
 blocks past a string's end but never past its page, and only a SlateOS

@@ -196,6 +196,13 @@ pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 /// `SYS_PROCESS_GET_INITIAL_FDS`).  arg0 = `FdMapEntry` array ptr,
 /// arg1 = entry count.
 pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
+/// Name the handles the caller's next successful `exec` closes: the handles
+/// of the close-on-exec descriptors that no kept descriptor shares. arg0 =
+/// `FdMapEntry` array ptr (`fd` ignored), arg1 = entry count; an empty list
+/// clears it. Every exec attempt takes the list, and a failed one leaves the
+/// handles open, so it is sent before each attempt. Lane A's (1090); a kernel
+/// without it answers `NoSuchSyscall` and closes nothing, as before.
+pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

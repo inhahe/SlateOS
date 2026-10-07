@@ -115,8 +115,13 @@ fn a_reminder_is_raised_as_a_calendar_notification_that_stays() {
 
         s.advance_toasts(1_000);
         assert_eq!(s.toasts.ids(), [n.id]);
+        assert_eq!(s.toasts.next_due_in(), None, "a time was set on it");
         s.advance_toasts(600_000);
+        // A leaving toast is still listed until it has slid out: a second
+        // step is what tells one sliding from one that stays.
+        s.advance_toasts(1_000);
         assert_eq!(s.toasts.ids(), [n.id], "it went by itself");
+        assert!(!s.toasts.is_moving(), "it started to leave");
 
         assert_eq!(s.raise_due_reminders(due + 60), 0, "raised twice");
         assert_eq!(s.next_reminder_in(due + 60), None, "nothing more ahead");

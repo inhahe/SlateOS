@@ -597,3 +597,39 @@ fn the_times_to_come_again_in_are_offered_in_words() {
         ]
     );
 }
+
+/// **"Today" and "Tomorrow" are the zone's days**: at eleven at night in
+/// Tokyo -- two in the afternoon in UTC -- an event at nine the next
+/// morning is tomorrow's, not today's ten hours on.
+#[test]
+fn tomorrow_is_the_zones_tomorrow() {
+    let tokyo = Tz::parse(b"JST-9").unwrap();
+    // 09:00 on 9 October in Tokyo is midnight UTC.
+    let nine = utc((2026, 10, 9), 0, 0);
+    let now = utc((2026, 10, 8), 14, 0);
+    assert_eq!(when(&due_at(nine, false), now, &tokyo), "Tomorrow at 09:00");
+    // And half an hour later it is still tomorrow there, not yet today.
+    assert_eq!(
+        when(&due_at(nine, false), now + 30 * MINUTE, &tokyo),
+        "Tomorrow at 09:00"
+    );
+}
+
+/// **An event in the hour the clock repeats is reminded of at the first
+/// of the two**, as the clock first reads that hour: half past one on the
+/// night New York's clocks go back is 05:30 UTC, not 06:30.
+#[test]
+fn the_repeated_hour_is_read_as_its_first() {
+    // Sunday 1 November 2026: 02:00 EDT becomes 01:00 EST.
+    let events = [event(
+        1,
+        (2026, 11, 1),
+        (1, 30),
+        20,
+        RecurrenceRule::None,
+        Reminder::AtTime,
+    )];
+    let first = utc((2026, 11, 1), 5, 30);
+    let mut r = Reminders::new();
+    assert_eq!(starts(&r.take_due(&events, &new_york(), first)), [first]);
+}

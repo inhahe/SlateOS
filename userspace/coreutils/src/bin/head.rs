@@ -564,6 +564,8 @@ fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
     // still the first and gets no leading blank line.
     let mut printed_header = false;
     let mut ok = true;
+    // Upstream's `have_read_stdin`, for the close at the end.
+    let mut have_read_stdin = false;
     let default = [OsString::from("-")];
     let operands: &[OsString] = if files.is_empty() { &default } else { files };
 
@@ -587,7 +589,9 @@ fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
         let label: &[u8] = if is_stdin { b"standard input" } else { &bytes };
 
         let mut source: Box<dyn Read> = if is_stdin {
-            Box::new(io::stdin())
+            have_read_stdin = true;
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+            Box::new(stdfd::RawStdin)
         } else {
             match File::open(name) {
                 Ok(f) => Box::new(f),
@@ -632,6 +636,14 @@ fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
 
     if let Some(status) = write_stopped(out, ok) {
         return status;
+    }
+    // Upstream's `if (have_read_stdin && close (STDIN_FILENO) < 0) error
+    // (EXIT_FAILURE, errno, "-")`. Measured, `head <&-` says
+    // `head: error reading 'standard input': Bad file descriptor` for the
+    // read and then `head: -: Bad file descriptor` for this.
+    if have_read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("head: -: {}", strerror(&e));
+        ok = false;
     }
     if ok {
         ExitCode::SUCCESS

@@ -85,6 +85,10 @@ printf 'a\xe2\x80\x8bb\n'                       > zwsp.txt
 # sizes is what sets it, so this file exists to make that observable.
 printf '%0.sz' $(seq 1 40) > forty.txt
 printf 'q\n'                                    > w1.txt
+# A directory, which opens and then fails its first read, and a list naming one
+# file for `--files0-from`.
+mkdir -p adir
+printf 'plain.txt\0'                            > list0
 
 compare() {
   local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
@@ -96,6 +100,14 @@ compare() {
   if [ "$stdin" = "-" ]; then
     run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
     run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "$stdin" = "<&-" ]; then
+    # Standard input closed: see [`run_closed`].
+    run_side ours "$@" <&- >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" <&- >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "${stdin#<}" != "$stdin" ]; then
+    # Standard input redirected from a path: see [`run_from`].
+    run_side ours "$@" <"${stdin#<}" >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" <"${stdin#<}" >"$g_bin" 2>"$g_err"; g_rc=$?
   else
     printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
     printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
@@ -139,6 +151,13 @@ report() {
 }
 
 run_case() { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }wc $*"; }
+# Standard input closed, or redirected from a path that may not be readable (a
+# directory): what `wc` does when the input it was told to read cannot be. Both
+# sides were once very different here -- ours read a closed descriptor as an
+# empty file and exited 0, because Rust's `io::stdin()` turns `EBADF` into end
+# of input. See `known-issues/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
+run_closed() { compare '<&-' "$@"; report "wc $* <&-"; }
+run_from() { local from=$1; shift; compare "<$from" "$@"; report "wc $* < $from"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
@@ -305,6 +324,38 @@ run_case nosuchfile plain.txt
 run_case plain.txt nosuchfile
 run_case -- plain.txt
 run_case -- -l
+
+# --- an input that cannot be read ---------------------------------------------
+# A read error names the input -- `'standard input'` with no operand, `-` as
+# one -- and the row is still printed, with whatever was read; only an input
+# that could not be *opened* has no row. And when standard input was one of the
+# inputs, upstream closes it last and reports that failing too, as `-`.
+run_case adir
+run_case -c adir
+run_case adir plain.txt
+run_from adir
+run_from adir -c
+run_from adir -
+run_from adir -l - plain.txt
+run_closed
+run_closed -l
+run_closed -c
+run_closed -m
+run_closed -L
+run_closed -w -
+run_closed -
+run_closed - -
+run_closed plain.txt -
+run_closed nosuchfile -
+run_closed --total=only -
+run_closed --total=never - plain.txt
+run_closed plain.txt
+# The list itself unreadable: streamed, so a non-fatal `read error` after the
+# rows of the names read before it; read up front, a fatal one.
+run_closed --files0-from=-
+run_from adir --files0-from=-
+run_case --files0-from=adir
+run_closed --files0-from=list0
 
 # --- option diagnostics, compared word for word ------------------------------
 #

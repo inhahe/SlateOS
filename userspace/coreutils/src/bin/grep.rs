@@ -2659,7 +2659,8 @@ fn run_main() -> ExitCode {
         taken = taken.max(*before);
         let raw = if pf == "-" {
             let mut buf = Vec::new();
-            io::stdin().read_to_end(&mut buf).map(|_| buf)
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+            stdfd::RawStdin.read_to_end(&mut buf).map(|_| buf)
         } else {
             fs::read(pf)
         };
@@ -2901,10 +2902,23 @@ impl Run<'_> {
         // tree pays it once per entry.
         let mut size: Option<u64> = None;
         let mut reader: Box<dyn Read> = if path == "-" {
+            // Upstream's `grepdesc` `fstat`s the descriptor before reading
+            // it, and a failure there ends the file before its `-c` count is
+            // printed: measured, `grep -c x <&-` prints the error and no `0`,
+            // where `grep -c x < dir` -- which `fstat`s fine and then fails
+            // its read -- prints both.
+            if let Err(e) = stdfd::probe(0) {
+                report_read_error(&display_name(path, self.opts), &e, self.opts);
+                self.had_error = true;
+                return;
+            }
             if self.opts.align_tabs {
                 size = filekind::borrowed_stdin().and_then(|f| regular_size(&f));
             }
-            Box::new(io::stdin())
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty,
+            // where upstream's `grep x <&-` is `grep: (standard input): Bad
+            // file descriptor`, status 2.
+            Box::new(stdfd::RawStdin)
         } else {
             if Path::new(path).is_dir() {
                 // A backstop, not the usual route: [`Run::operand`] settles
@@ -2950,15 +2964,22 @@ impl Run<'_> {
         // works for `-` as well. Re-reading stdin is not a thing, and a gate
         // that silently did nothing on a pipe would be worse than one that
         // costs memory on a file.
+        let shown = display_name(path, self.opts);
+        // How a read error names the input: upstream's `input_filename ()`
+        // for standard input -- `(standard input)`, or `--label`'s value,
+        // unquoted -- and a named file as `quotef` spells it.
+        let error_name: Vec<u8> = if path == "-" {
+            shown.to_vec()
+        } else {
+            quotef_os(path).into_bytes()
+        };
         let mut eligible: Option<BTreeSet<usize>> = None;
         let mut dotall_data: Vec<u8> = Vec::new();
         let gated = self.opts.every_pattern && self.pats.len() > 1;
         if gated || self.opts.near.is_some() || self.opts.dotall {
             let mut data = Vec::new();
             if let Err(e) = reader.read_to_end(&mut data) {
-                if !self.opts.no_messages {
-                    diag!("grep: {}: {}", quotef_os(path), strerror(&e));
-                }
+                report_read_error(&error_name, &e, self.opts);
                 self.had_error = true;
                 return;
             }
@@ -2989,11 +3010,11 @@ impl Run<'_> {
             reader = Box::new(io::Cursor::new(data));
         }
 
-        let shown = display_name(path, self.opts);
         let src = Source {
             filename: &shown,
             show_filename: self.show_filename,
             width: offset_width(size, self.opts),
+            error_name: &error_name,
         };
         let searched = if self.opts.dotall {
             // `dotall_data` is the buffer filled above; the Cursor is not used
@@ -3014,7 +3035,12 @@ impl Run<'_> {
             Ok(Outcome {
                 matched,
                 binary_match,
+                read_failed,
             }) => {
+                // Reported where it happened; what is left is the status.
+                if read_failed {
+                    self.had_error = true;
+                }
                 // On **stderr**, and worded exactly so. Older grep printed
                 // `Binary file F matches` on stdout; 3.x moved it and lowered
                 // the case, which matters because it is the difference between
@@ -3555,6 +3581,10 @@ struct Source<'a> {
     show_filename: bool,
     /// The column `-T` right-aligns numbers in. Meaningless without it.
     width: usize,
+    /// The input as a read error names it. For `-` that is upstream's
+    /// `input_filename ()`, unquoted: `(standard input)`, or `--label`'s
+    /// value.
+    error_name: &'a [u8],
 }
 
 /// What one file's search came to.
@@ -3573,6 +3603,24 @@ struct Outcome {
     /// `-c`, `-l`, `-L` and `-q` all leave this alone, because what the binary
     /// rule suppresses is *lines*, and those four print none to begin with.
     binary_match: bool,
+    /// Reading the input failed part way and the failure has been reported.
+    /// The run's status is 2, but what was read before it still counted, as
+    /// upstream's does: measured, `grep -c x - < dir` says
+    /// `grep: (standard input): Is a directory` and then prints `0`.
+    read_failed: bool,
+}
+
+/// Report a failed read of the input being searched: upstream's
+/// `suppressible_error`, which `-s` silences.
+fn report_read_error(name: &[u8], e: &io::Error, opts: &Options) {
+    if !opts.no_messages {
+        let mut msg = b"grep: ".to_vec();
+        msg.extend_from_slice(name);
+        msg.extend_from_slice(b": ");
+        msg.extend_from_slice(strerror(e).as_bytes());
+        msg.push(b'\n');
+        stdfd::diag_bytes(&msg);
+    }
 }
 
 /// Search one stream, printing what the options ask for.
@@ -3614,6 +3662,7 @@ fn search_dotall(
     let hit = Outcome {
         matched: !spans.is_empty(),
         binary_match: false,
+        read_failed: false,
     };
 
     // `-c` counts MATCHES here, not lines, because under `--dotall` there are
@@ -3675,7 +3724,11 @@ fn search_stream(
     let no = Outcome {
         matched: false,
         binary_match: false,
+        read_failed: false,
     };
+    // Upstream's `fillbuf` failing: the error is reported at once, and the
+    // search then finishes with what had been read -- `-c`'s count included.
+    let mut read_failed = false;
     // `-m 0` is not "no limit", and it is not "stop after the first" either:
     // GNU prints nothing at all — not even the `-c` count line, which is the
     // surprising half — and reports the file as not matching. Answering it
@@ -3695,7 +3748,15 @@ fn search_stream(
     // the same bytes upstream's first buffer holds only when the underlying
     // reads line up; see `BINARY_PROBE`.
     let looks_binary = opts.binary_files != BinaryFiles::Text && sep != 0;
-    let binary = looks_binary && buf.fill_buf()?.contains(&0);
+    let binary = looks_binary
+        && match buf.fill_buf() {
+            Ok(first) => first.contains(&0),
+            Err(e) => {
+                report_read_error(src.error_name, &e, opts);
+                read_failed = true;
+                false
+            }
+        };
     if binary && opts.binary_files == BinaryFiles::WithoutMatch {
         // Upstream's `return 0`: not "no lines were selected after searching"
         // but "this file is not searched at all", which is why it counts
@@ -3750,8 +3811,17 @@ fn search_stream(
         line.clear();
         // Lines are read as bytes: a file this system can name may hold any
         // byte but `/` and NUL, and `String`-typed input could not carry one.
-        if buf.read_until(sep, &mut line)? == 0 {
+        if read_failed {
             break;
+        }
+        match buf.read_until(sep, &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                report_read_error(src.error_name, &e, opts);
+                read_failed = true;
+                break;
+            }
         }
         // The separator is not part of the line, and a final line without one
         // is still a line.
@@ -3797,6 +3867,7 @@ fn search_stream(
                 return Ok(Outcome {
                     matched: true,
                     binary_match: binary_suppressed,
+                    read_failed,
                 });
             }
             if !opts.count_only {
@@ -3920,6 +3991,7 @@ fn search_stream(
         // not counting stops at its first match above. Written out rather than
         // hard-coded so that the invariant is not silently load-bearing.
         binary_match: binary_suppressed && match_count > 0,
+        read_failed,
     })
 }
 
@@ -5689,6 +5761,7 @@ mod tests {
             filename: filename.as_bytes(),
             show_filename,
             width: 0,
+            error_name: filename.as_bytes(),
         }
     }
 

@@ -216,9 +216,28 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Thirty-four programs still lack it: `bc chmod chown cmp cp csplit cut
-date df dir du ed expr find install kill ln ls mktemp more mv od patch shuf stat
-tac tail tee tr uniq vdir awk hostname sort`. (`uname`, `id`, `env`, `readlink`,
+all. Twenty-one programs still lack it: `bc chmod chown cmp csplit
+date df dir du ed find install kill ls more patch stat tail vdir awk hostname`.
+(`sort` was converted on 2026-10-03, its output moved onto
+`stdio::StdioFile` so that a failure is upstream's `write failed` or `fflush
+failed` -- whichever glibc's buffer makes it -- followed by `close_stdout`'s
+`write error`; 32 of 35 descriptor rows agree, the rest `--help`'s text.
+`od`, `tee`, `tr` and `uniq` were converted on 2026-10-03 with their
+closed-standard-input fixes, each measured with every standard descriptor
+closed and full: 73 of 85 rows agree with GNU, the rest `--help`'s text.
+`cut` was converted on 2026-10-03 with its
+closed-standard-input fix: 27 of 30 rows agree with GNU, the other three
+being `--help`'s text. `expr`, `mktemp`, `tac` and `shuf` were converted
+on 2026-10-03: 82 of 85 rows agree with GNU, the other three being `expr
+--help`'s own text. Two needed more than the guard once it let them see a
+closed standard input: `tac` made its temporary file with a plain open, which
+then landed on descriptor 0 and was read back as the input -- upstream's
+`mkstemp` is gnulib's safer one, so it now goes through `stdfd::fd_safer`;
+and `shuf nosuch <&-` names `EBADF`, glibc `freopen`'s leftover `errno`.
+`cp`, `mv` and `ln` were
+converted on 2026-10-03 together with upstream's `close_stdin`, which all
+three register -- see `B-PROMPTS-READ-STANDARD-INPUT-UNLIKE-STDIO`: 121 of 130
+rows agree with GNU and the other nine are `--help`'s text. `uname`, `id`, `env`, `readlink`,
 `realpath`, `mkdir`, `rmdir`, `mkfifo` and `touch` were converted on
 2026-10-03, each measured against GNU coreutils 9.4 with standard output
 closed and full, standard error closed and full, and standard input closed:

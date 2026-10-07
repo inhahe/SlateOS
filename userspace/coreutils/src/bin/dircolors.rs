@@ -517,7 +517,16 @@ fn run() -> std::process::ExitCode {
             return stdfd::close_stdout("dircolors", out, ExitCode::SUCCESS);
         }
         Request::PrintDatabase => {
-            let _ = out.write_all(DATABASE);
+            // Upstream's `puts` per line, not one write of the whole text:
+            // what is still buffered when the stream is closed decides
+            // whether a full disk is reported with its reason. Measured,
+            // `dircolors -p >/dev/full` is `write error: No space left on
+            // device`; a single 5481-byte write drained everything at once
+            // and left only the reason-less `write error`.
+            for line in DATABASE.split_inclusive(|&b| b == b'\n') {
+                // Deliberately unread: `close_stdout` reports a failed write.
+                let _ = out.write_all(line);
+            }
             return stdfd::close_stdout("dircolors", out, ExitCode::SUCCESS);
         }
         Request::Run {
@@ -569,12 +578,13 @@ fn run() -> std::process::ExitCode {
         }
         Some(name) => {
             let name_b = name_bytes.as_deref().unwrap_or_default();
-            // `freopen` for a name, the standard input for `-`.
-            let reader: Box<dyn Read> = if name_b == b"-" {
-                Box::new(std::io::stdin())
+            // `freopen` for a name, the standard input for `-`: either way
+            // upstream reads `stdin`, and then `fclose`s it below.
+            let file = if name_b == b"-" {
+                None
             } else {
                 match std::fs::File::open(name) {
-                    Ok(f) => Box::new(f),
+                    Ok(f) => Some(f),
                     Err(e) => {
                         diag!(
                             "dircolors: {}: {}",
@@ -584,6 +594,12 @@ fn run() -> std::process::ExitCode {
                         return ExitCode::FAILURE;
                     }
                 }
+            };
+            // Descriptor 0 itself for `-`: `io::stdin()` reads a closed one
+            // as empty.
+            let reader: Box<dyn Read + '_> = match &file {
+                Some(f) => Box::new(f),
+                None => Box::new(stdfd::RawStdin),
             };
             let mut reader = BufReader::new(reader);
             let mut line = Vec::new();
@@ -608,6 +624,28 @@ fn run() -> std::process::ExitCode {
                         break;
                     }
                 }
+            }
+            drop(reader);
+            // What the parse still had to say comes first: upstream prints it
+            // inside `dc_parse_stream`, before the close.
+            for message in parser.diags.drain(..) {
+                diag!("dircolors: {message}");
+            }
+            // `if (fclose (stdin) != 0) { error (0, errno, "%s", quotef
+            // (filename)); return false; }`. Measured, `dircolors - <&-` says
+            // `dircolors: -: read error: Bad file descriptor` and then
+            // `dircolors: -: Bad file descriptor` for this.
+            let closed = match file {
+                Some(f) => stdfd::close(f),
+                None => stdfd::close_stdin(),
+            };
+            if let Err(e) = closed {
+                diag!(
+                    "dircolors: {}: {}",
+                    coreutils::quote::quotef(name_b),
+                    strerror(&e)
+                );
+                parser.ok = false;
             }
         }
     }

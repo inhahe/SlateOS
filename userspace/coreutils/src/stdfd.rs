@@ -185,6 +185,27 @@ mod imp {
         // Declared as the standard library declares it, for the reason given
         // at `write`.
         fn open(path: *const core::ffi::c_char, oflag: i32, ...) -> i32;
+        // `*const u8`, as `dirfd.rs` declares it: two declarations of one C
+        // symbol must agree (`clashing_extern_declarations`).
+        fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) -> i32;
+    }
+
+    /// `AT_FDCWD`, `R_OK` and `AT_EACCESS`: the Linux values.
+    const AT_FDCWD: i32 = -100;
+    const R_OK: i32 = 4;
+    const AT_EACCESS: i32 = 0x200;
+
+    pub fn readable(path: &[u8]) -> io::Result<()> {
+        // A name from argv cannot hold a NUL, and a `--files0-from` list is cut
+        // at them, so this is unreachable; `EINVAL` is what a kernel would say.
+        let c_path = std::ffi::CString::new(path).map_err(|_| io::Error::from_raw_os_error(22))?;
+        // SAFETY: `c_path` is a NUL-terminated string that outlives the call,
+        // and `faccessat` only reads it.
+        if unsafe { faccessat(AT_FDCWD, c_path.as_ptr().cast::<u8>(), R_OK, AT_EACCESS) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     pub fn is_tty(fd: i32) -> bool {
@@ -425,6 +446,12 @@ mod imp {
 mod imp {
     use std::io::{self, Write};
 
+    /// No `euidaccess` without libc: whether the name exists is the nearest
+    /// question the standard library can ask.
+    pub fn readable(path: &[u8]) -> io::Result<()> {
+        std::fs::metadata(crate::quote::os_from_bytes(path)).map(drop)
+    }
+
     pub fn is_tty(_fd: i32) -> bool {
         // No `isatty` without libc, and the answer only decides buffering. The
         // conservative choice is the one that shows output soonest.
@@ -626,6 +653,19 @@ pub fn probe(fd: i32) -> io::Result<()> {
     imp::probe(fd)
 }
 
+/// `euidaccess (path, R_OK)`: whether this process may read `path`, asked
+/// without opening it. That matters for a FIFO, whose open would wait for a
+/// writer, and it is how `sort`'s `check_inputs` refuses an unreadable
+/// operand before reading any of them.
+///
+/// # Errors
+///
+/// Whatever `faccessat(2)` reports -- `ENOENT`, `EACCES` and the like. Off
+/// Linux, whether the name exists at all.
+pub fn readable(path: &[u8]) -> io::Result<()> {
+    imp::readable(path)
+}
+
 /// `fstat(2)` on a descriptor: what [`probe`] asks, with the answer kept.
 ///
 /// For a utility that must know *what* a standard descriptor is, not merely
@@ -725,6 +765,47 @@ pub fn write_some(fd: i32, bytes: &[u8]) -> io::Result<usize> {
 /// Whatever `read(2)` reports.
 pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     imp::read_fd(fd, buf)
+}
+
+/// Descriptor 0 as an [`io::Read`]: [`read`] on it, and nothing buffered.
+///
+/// The drop-in for `io::stdin()` in a program that has to see a closed
+/// standard input. `std`'s answers `EBADF` with end of input (see [`read`]),
+/// which made `cat <&-` print nothing and exit 0 where GNU says
+/// `cat: -: Bad file descriptor` -- see `known-issues/`
+/// `B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`. Put a
+/// `BufReader` in front of it where the program reads lines. It never closes
+/// descriptor 0: [`close_stdin`] does that, where upstream does.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawStdin;
+
+impl io::Read for RawStdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        crate::stdfd::read(0, buf)
+    }
+}
+
+/// Descriptor 1 as an [`io::Write`]: [`write_some`] on it, and nothing
+/// buffered.
+///
+/// [`RawStdin`]'s other half, for a program that reports its own write errors
+/// as they happen -- upstream's `fwrite (...) != n` checks -- rather than
+/// through a [`Stream`] and [`close_stdout`]. `io::stdout()` will not do for
+/// that: `std` answers a write's `EBADF` with success, so once
+/// [`guard_std_fds!`](crate::guard_std_fds) keeps a closed descriptor 1
+/// closed, `tr a b >&-` would have exited 0 where GNU reports
+/// `write error: Bad file descriptor`. Put a `BufWriter` in front of it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawStdout;
+
+impl io::Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        crate::stdfd::write_some(1, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// `lseek (fd, delta, SEEK_CUR)` on a descriptor this process does not own:
@@ -1046,6 +1127,45 @@ pub fn close_stdout(program: &str, out: Stream, earned: ExitCode) -> ExitCode {
 /// a working stderr and 3 without one.
 pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: u8) -> ExitCode {
     close_stdout_bytes(program.as_bytes(), out, earned, failure)
+}
+
+/// gnulib's `atexit (close_stdin)`, for the utilities upstream registers it
+/// in -- `cp`, `install`, `ln`, `mv` and `rm`, the ones whose `-i` reads
+/// answers from standard input.
+///
+/// `stdin` is the stream the answers were read through, which this closes
+/// (see [`crate::stdio::StdioReader::close_stdin`]): read-ahead goes back to
+/// a seekable descriptor, so `{ rm -i a; cat; } < answers` leaves `cat` the
+/// lines `rm` did not use, and a stream on which a read failed is reported --
+///
+/// ```text
+/// ln: error closing file: Bad file descriptor
+/// ```
+///
+/// -- before [`close_stdout`] does its work, whose own failure is reported
+/// after it. Either failure is status 1, whatever was earned: upstream's
+/// handler `_exit`s with `exit_failure`.
+pub fn close_stdin_and_stdout(
+    program: &str,
+    stdin: crate::stdio::StdioReader,
+    out: Stream,
+    earned: ExitCode,
+) -> ExitCode {
+    let failed = stdin.close_stdin().err();
+    match &failed {
+        Some(Some(e)) => diag_line(&format!("{program}: error closing file: {}", strerror(e))),
+        Some(None) => diag_line(&format!("{program}: error closing file")),
+        None => {}
+    }
+    let status = close_stdout(program, out, earned);
+    if failed.is_some() {
+        // `_exit (exit_failure)`, after `close_stdout` has had its say. A
+        // diagnostic lost on the way is status 1 as well, so nothing is
+        // hidden by not asking.
+        ExitCode::FAILURE
+    } else {
+        status
+    }
 }
 
 /// [`close_stdout_with`] for a program named by bytes -- see

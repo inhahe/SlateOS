@@ -404,7 +404,7 @@ impl Relative {
         {
             return None;
         }
-        relpath(answer, to)
+        canon::relpath(answer, to)
     }
 }
 
@@ -493,97 +493,6 @@ fn path_prefix(prefix: &[u8], path: &[u8]) -> bool {
         i = i.saturating_add(1);
     }
     prefix.get(i).is_none() && matches!(path.get(i), None | Some(&b'/'))
-}
-
-/// How many *bytes* of two canonical paths are a common prefix, rounded down to
-/// a component boundary. `0` for no shared component at all.
-///
-/// The unit is bytes, not components, and the boundary is normally *past* the
-/// separator: `/home/u` and `/home/user` answer 6 — `/home/` — because `u` and
-/// `user` are different components. The separator is only excluded when one
-/// name stops exactly where the other has one, so `/home/u` against
-/// `/home/u/d` answers 7. Both callers below strip a leading separator from
-/// the suffix they take, which is why the inconsistency does not reach them.
-///
-/// coreutils' `path_common_prefix`, transcribed.
-#[must_use]
-fn path_common_prefix(path1: &[u8], path2: &[u8]) -> usize {
-    // `//` again: a name under it shares nothing with a name under `/`.
-    if (path1.get(1) == Some(&b'/')) != (path2.get(1) == Some(&b'/')) {
-        return 0;
-    }
-
-    let mut i: usize = 0;
-    let mut ret: usize = 0;
-    while let (Some(&a), Some(&b)) = (path1.get(i), path2.get(i)) {
-        if a != b {
-            break;
-        }
-        if a == b'/' {
-            ret = i.saturating_add(1);
-        }
-        i = i.saturating_add(1);
-    }
-
-    // One name ending exactly where the other has a separator (or where both
-    // end) is a whole-component match up to that point: `/a/b` and `/a/b/c`
-    // share two components, not one.
-    let (a, b) = (path1.get(i), path2.get(i));
-    if (a.is_none() && b.is_none())
-        || (a.is_none() && b == Some(&b'/'))
-        || (b.is_none() && a == Some(&b'/'))
-    {
-        ret = i;
-    }
-    ret
-}
-
-/// `can_fname` written relative to directory `can_reldir`, or `None` if the two
-/// share no component at all.
-///
-/// coreutils' `relpath`, transcribed, minus its buffer mode — this returns the
-/// bytes rather than writing them, so the caller decides where they go and the
-/// `ENAMETOOLONG` branch has nothing to overflow.
-///
-/// The `..` count is one per *remaining separator* plus one, not one per
-/// component, which is the same number written a way that needs no split.
-#[must_use]
-fn relpath(can_fname: &[u8], can_reldir: &[u8]) -> Option<Vec<u8>> {
-    let common = path_common_prefix(can_reldir, can_fname);
-    if common == 0 {
-        return None;
-    }
-
-    let mut relto_suffix = can_reldir.get(common..).unwrap_or_default();
-    let mut fname_suffix = can_fname.get(common..).unwrap_or_default();
-    if relto_suffix.first() == Some(&b'/') {
-        relto_suffix = relto_suffix.get(1..).unwrap_or_default();
-    }
-    if fname_suffix.first() == Some(&b'/') {
-        fname_suffix = fname_suffix.get(1..).unwrap_or_default();
-    }
-
-    let mut out: Vec<u8> = Vec::new();
-    if relto_suffix.is_empty() {
-        // The file is inside the reference directory, or is it.
-        out.extend_from_slice(if fname_suffix.is_empty() {
-            b"."
-        } else {
-            fname_suffix
-        });
-    } else {
-        out.extend_from_slice(b"..");
-        for &c in relto_suffix {
-            if c == b'/' {
-                out.extend_from_slice(b"/..");
-            }
-        }
-        if !fname_suffix.is_empty() {
-            out.push(b'/');
-            out.extend_from_slice(fname_suffix);
-        }
-    }
-    Some(out)
 }
 
 // --------------------------------------------------------------- running ---
@@ -1156,7 +1065,7 @@ mod tests {
             (b"/tmp", b"//tmp", 0),
         ] {
             assert_eq!(
-                path_common_prefix(a, b),
+                canon::path_common_prefix(a, b),
                 want,
                 "path_common_prefix({}, {})",
                 String::from_utf8_lossy(a),
@@ -1185,7 +1094,7 @@ mod tests {
             (b"//a", b"/a", None),
         ] {
             assert_eq!(
-                relpath(fname, reldir).as_deref(),
+                canon::relpath(fname, reldir).as_deref(),
                 want,
                 "relpath({}, {})",
                 String::from_utf8_lossy(fname),

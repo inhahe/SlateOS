@@ -144,6 +144,20 @@ tools with the LTO plugin, which this GCC has not got. The
 first attempt failed at `cc1` and `cc1plus` on `__popcountdi2`, which
 `libc.a` and libgcc both defined strongly -- the second C library fix above.
 
+**The C++23 `std` module was empty until the second build.** The build
+compiles `bits/std.cc` -- the source of `import std;`, every header at once
+-- and when that fails it says "Cannot compile std module", installs empty
+module sources and goes on, exit 0. It failed here: the cross compiler that
+builds libstdc++ searches its *own* installed libstdc++ headers too, and the
+two copies share include guards, so libstdc++'s `<fenv.h>` wrapper, reaching
+for musl's `<fenv.h>` with `#include_next`, found the cross compiler's copy
+of itself, already guarded and so empty, and `fenv_t` was never declared. A
+program on SlateOS saying `import std;` would have got nothing. `native.sh`
+now gives the target libraries' compiler `-nostdinc++`, as GCC's configure
+gives an in-tree build's for the same reason, and refuses a build that still
+says "Cannot compile std module"; `slatelink.sh` refuses a tree whose
+`std.cc` or `std.compat.cc` is empty.
+
 Whether it compiles a program **on SlateOS** is `services/ctest-gcc-runs`'
 question: `gcc --version`, `cpp` expanding a macro, and a C program and a C++
 one (an exception, `std::cout`, strings in a vector, a joined thread)

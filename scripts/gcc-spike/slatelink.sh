@@ -140,6 +140,18 @@ if [ "$unwinder" -eq 0 ]; then
     echo "MISSING_FROM_TREE the unwinder (_Unwind_RaiseException, in libgcc.a or libgcc_eh.a)"
     missing=$((missing + 1))
 fi
+# The C++23 standard library modules' sources, which `import std;` and
+# `import std.compat;` compile. GCC installs empty ones when it could not
+# compile them while building libstdc++, and an empty module gives a program
+# none of the library; native.sh's comment on CXX_FOR_TARGET says what once
+# caused that.
+for m in std std.compat; do
+    src="$OUT/usr/include/c++/$VER/bits/$m.cc"
+    if [ ! -f "$src" ] || [ "$(wc -c <"$src")" -lt 1000 ]; then
+        echo "EMPTY_IN_TREE the $m module's source (usr/include/c++/$VER/bits/$m.cc)"
+        missing=$((missing + 1))
+    fi
+done
 
 # Every ELF program in the tree: stripped of DWARF, and checked as every
 # port's link is -- ours, not musl's (our libc's rust_begin_unwind, none of

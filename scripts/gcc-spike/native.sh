@@ -77,6 +77,18 @@ mkdir build && cd build || exit 1
 # the generator programs that run during the build.
 export CC="$TARGET-gcc" CXX="$TARGET-g++" AR="$TARGET-ar" RANLIB="$TARGET-ranlib"
 export CC_FOR_BUILD=gcc CXX_FOR_BUILD=g++
+# The target libraries' C++ compiler without the C++ headers it has
+# installed, as an in-tree build's is (configure.ac gives that one
+# -nostdinc++, in GCC_TARGET_TOOL(c++ ...), for this reason). The cross
+# compiler's own libstdc++ headers are on its search path, and the libstdc++
+# being built has the same headers under the same include guards: so a
+# wrapper of the one being built that #include_next's the C header found the
+# cross compiler's copy of itself, already guarded and so empty, in its
+# place. <fenv.h>'s did -- fenv_t was never declared -- and the C++23 `std`
+# module (bits/std.cc, every header at once) did not compile, which the
+# build tolerates by installing empty module sources ("Cannot compile std
+# module"): `import std;` then gave a program on SlateOS nothing.
+export CXX_FOR_TARGET="$TARGET-c++ -nostdinc++"
 "../gcc-$VER/configure" \
     --build=x86_64-pc-linux-gnu --host="$TARGET" --target="$TARGET" \
     --prefix=/usr --with-build-sysroot="$CROSS/sysroot" \
@@ -99,6 +111,12 @@ echo "LIBSTDCXX_MAKE_EXIT=$?"
 for log in make-gcc make-libgcc make-libstdcxx; do
     grep -E ' error: |Error [0-9]' "$log.log" | head -10
 done
+# The std module's failure is one the build tolerates (above), so it is
+# looked for: a GCC whose `import std;` is empty is not the one to install.
+if [ "$(grep -c 'Cannot compile std module' make-libstdcxx.log)" -ne 0 ]; then
+    echo "STD_MODULE_NOT_COMPILED -- make-libstdcxx.log says why"
+    exit 1
+fi
 
 # The rest -- installing, assembling the tree for the image, and checking
 # it -- is the step the rootfs recipe runs alone when libc.a has moved on

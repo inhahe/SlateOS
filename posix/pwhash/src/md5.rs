@@ -1,6 +1,7 @@
 //! MD5 message digest (`RFC 1321`) — minimal `no_std` implementation.
 //!
-//! Used only by the legacy MD5 crypt method (`$1$`) in [`crate::crypt`].
+//! Used only by the legacy MD5 crypt method (`$1$`) in `posix`'s
+//! `crypt.rs`, which re-exports this module as `posix::md5`.
 //! MD5 is cryptographically broken and must **never** be used for new
 //! security purposes; it is provided solely so the OS can verify (and
 //! interoperate with) `$1$` entries in legacy `/etc/shadow` files.

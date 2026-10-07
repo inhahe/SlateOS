@@ -1,7 +1,9 @@
 //! SHA-256 and SHA-512 (`FIPS 180-4`) — minimal `no_std` implementations.
 //!
-//! These are used by the SHA-crypt password hashing in [`crate::crypt`]
-//! (`$5$` / `$6$`).  They are deliberately self-contained — no heap, no
+//! These are used by `posix`'s SHA-crypt password hashing (`crypt.rs`,
+//! `$5$` / `$6$`), its Ed25519 (SHA-512) and yescrypt's HMAC and PBKDF2
+//! ([`crate::yescrypt`], SHA-256); `posix` re-exports this module as
+//! `posix::sha2`.  They are deliberately self-contained — no heap, no
 //! external crypto crate — so they work in the bare-metal (`target_os =
 //! "none"`) build as well as in host tests.
 //!

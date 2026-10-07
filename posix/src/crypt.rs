@@ -4,11 +4,13 @@
 //! the shadow suite's — following Ulrich Drepper's specification ("Unix
 //! crypt using SHA-256 and SHA-512"); legacy MD5 crypt (`$1$`, Poul-Henning
 //! Kamp's algorithm); and yescrypt (`$y$`) and scrypt (`$7$`), which Ubuntu,
-//! Debian and Fedora hash new passwords with, ported from libxcrypt in
-//! `yescrypt.rs`.  The SHA and MD5 cores live in [`crate::sha2`] and
-//! [`crate::md5`]; this module implements their salt/rounds parsing, their
-//! key-derivation rounds and the crypt base-64 encoding, and the dispatch
-//! of a setting to its method.
+//! Debian and Fedora hash new passwords with, ported from libxcrypt
+//! (`yescrypt.rs` reads their settings).  The hashing itself -- SHA-2, MD5,
+//! the SHA-crypt and md5crypt rounds, yescrypt's KDF -- is the `pwhash`
+//! crate's, compiled for speed where this one is compiled for size (its
+//! crate docs); this module implements the settings' parsing, the crypt
+//! base-64 encoding, the C ABI, and the dispatch of a setting to its
+//! method.
 //!
 //! Previously `crypt()` returned `"$0$<key>"` — i.e. the password in
 //! cleartext with a marker prefix.  Any program that hashed a password
@@ -75,8 +77,6 @@
 #![allow(clippy::indexing_slicing)] // Fixed-size digest arrays indexed by compile-time constants.
 
 use crate::errno;
-use crate::md5::Md5;
-use crate::sha2::{Digest, Sha256, Sha512};
 
 /// The room for a crypt result, NUL included: what `crypt_r` may write into
 /// a C caller's `struct crypt_data`, whose size musl's `<crypt.h>` sets at
@@ -177,97 +177,12 @@ fn b64_from_24bit(out: &mut OutBuf, b2: u8, b1: u8, b0: u8, n: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// SHA-crypt core
+// SHA-crypt
 // ---------------------------------------------------------------------------
-
-/// Feed `digest` into `ctx` repeatedly until `total` bytes have been
-/// added (full copies followed by a final partial copy).  This realises
-/// the "sequence P / sequence S" construction without materialising the
-/// (potentially large) intermediate buffers.
-fn add_repeated<D: Digest>(ctx: &mut D, digest: &[u8], total: usize) {
-    let mut remaining = total;
-    while remaining > 0 {
-        let n = core::cmp::min(remaining, digest.len());
-        ctx.update(&digest[..n]);
-        remaining -= n;
-    }
-}
-
-/// Run the SHA-crypt key-derivation and write the raw `D::OUTPUT_LEN`
-/// digest into `alt`.  Implements steps 1–21 of Drepper's spec.
-fn sha_crypt_raw<D: Digest>(key: &[u8], salt: &[u8], rounds: u32, alt: &mut [u8]) {
-    let dl = D::OUTPUT_LEN;
-
-    // Digest B = H(key || salt || key).
-    let mut b = [0u8; 64];
-    {
-        let mut h = D::new();
-        h.update(key);
-        h.update(salt);
-        h.update(key);
-        h.finalize_into(&mut b);
-    }
-
-    // Digest A.
-    let mut a_ctx = D::new();
-    a_ctx.update(key);
-    a_ctx.update(salt);
-    add_repeated::<D>(&mut a_ctx, &b[..dl], key.len());
-    // For each bit of key.len(), low to high: 1 -> add B, 0 -> add key.
-    let mut bits = key.len();
-    while bits > 0 {
-        if bits & 1 != 0 {
-            a_ctx.update(&b[..dl]);
-        } else {
-            a_ctx.update(key);
-        }
-        bits >>= 1;
-    }
-    a_ctx.finalize_into(alt);
-
-    // Digest DP = H(key repeated key.len() times); sequence P repeats it.
-    let mut dp = [0u8; 64];
-    {
-        let mut h = D::new();
-        for _ in 0..key.len() {
-            h.update(key);
-        }
-        h.finalize_into(&mut dp);
-    }
-
-    // Digest DS = H(salt repeated 16 + A[0] times); sequence S repeats it.
-    let mut ds = [0u8; 64];
-    {
-        let mut h = D::new();
-        let times = 16 + usize::from(alt[0]);
-        for _ in 0..times {
-            h.update(salt);
-        }
-        h.finalize_into(&mut ds);
-    }
-
-    // The deliberately-expensive stretching loop.
-    for cnt in 0..rounds {
-        let mut h = D::new();
-        if cnt & 1 != 0 {
-            add_repeated::<D>(&mut h, &dp[..dl], key.len()); // sequence P
-        } else {
-            h.update(&alt[..dl]);
-        }
-        if cnt % 3 != 0 {
-            add_repeated::<D>(&mut h, &ds[..dl], salt.len()); // sequence S
-        }
-        if cnt % 7 != 0 {
-            add_repeated::<D>(&mut h, &dp[..dl], key.len()); // sequence P
-        }
-        if cnt & 1 != 0 {
-            h.update(&alt[..dl]);
-        } else {
-            add_repeated::<D>(&mut h, &dp[..dl], key.len()); // sequence P
-        }
-        h.finalize_into(alt);
-    }
-}
+//
+// The digests themselves -- Drepper's steps 1 to 21, and md5crypt's thousand
+// rounds -- are `pwhash::shacrypt` and `pwhash::md5crypt`, compiled for speed
+// (pwhash's crate docs); here are the settings and the encodings.
 
 /// Crypt-base64 encoding for a 64-byte SHA-512 digest (86 chars).
 fn encode_sha512(out: &mut OutBuf, a: &[u8]) {
@@ -378,11 +293,11 @@ fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
 
     if is_512 {
         let mut alt = [0u8; 64];
-        sha_crypt_raw::<Sha512>(key, salt, rounds, &mut alt);
+        pwhash::shacrypt::sha512(key, salt, rounds, &mut alt);
         encode_sha512(out, &alt);
     } else {
         let mut alt = [0u8; 32];
-        sha_crypt_raw::<Sha256>(key, salt, rounds, &mut alt);
+        pwhash::shacrypt::sha256(key, salt, rounds, &mut alt);
         encode_sha256(out, &alt);
     }
     out.push(0); // NUL terminator
@@ -395,9 +310,7 @@ fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
 /// Returns `true` if `setting` selected MD5 crypt and the result was
 /// written; `false` otherwise (caller tries the next method).
 ///
-/// Implements Poul-Henning Kamp's md5crypt exactly (including the
-/// deliberately-obscure key-length bit loop, in which the running
-/// digest has been zeroed before being mixed in).
+/// Poul-Henning Kamp's md5crypt; its digest is `pwhash::md5crypt`'s.
 fn md5_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
     let Some(rest) = setting.strip_prefix(b"$1$") else {
         return false;
@@ -410,64 +323,7 @@ fn md5_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
     }
     let salt = &rest[..core::cmp::min(salt_end, MD5_SALT_MAX)];
 
-    // Primary context: H(key || "$1$" || salt).
-    let mut ctx = Md5::new();
-    ctx.update(key);
-    ctx.update(b"$1$");
-    ctx.update(salt);
-
-    // alt = H(key || salt || key).
-    let alt = {
-        let mut h = Md5::new();
-        h.update(key);
-        h.update(salt);
-        h.update(key);
-        h.finalize()
-    };
-
-    // Mix in key.len() bytes of `alt`, 16 at a time.
-    let mut pl = key.len();
-    while pl > 0 {
-        let n = core::cmp::min(pl, Md5::OUTPUT_LEN);
-        ctx.update(&alt[..n]);
-        pl -= n;
-    }
-
-    // For each bit of key.len() (low -> high): set bit adds a zero byte,
-    // clear bit adds key[0].  (key[0] is only reached when key is
-    // non-empty, since the loop runs only while bits != 0.)
-    let mut bits = key.len();
-    while bits != 0 {
-        if bits & 1 != 0 {
-            ctx.update(&[0u8]);
-        } else {
-            ctx.update(&key[..1]);
-        }
-        bits >>= 1;
-    }
-    let mut digest = ctx.finalize();
-
-    // 1000 rounds of recombination to slow brute force.
-    for i in 0usize..1000 {
-        let mut c = Md5::new();
-        if i & 1 != 0 {
-            c.update(key);
-        } else {
-            c.update(&digest);
-        }
-        if i % 3 != 0 {
-            c.update(salt);
-        }
-        if i % 7 != 0 {
-            c.update(key);
-        }
-        if i & 1 != 0 {
-            c.update(&digest);
-        } else {
-            c.update(key);
-        }
-        digest = c.finalize();
-    }
+    let digest = pwhash::md5crypt::digest(key, salt);
 
     // "$1$salt$" + 22-character md5crypt base64.
     out.push_slice(b"$1$");

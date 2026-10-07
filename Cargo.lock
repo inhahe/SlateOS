@@ -3108,6 +3108,7 @@ dependencies = [
  "charwidth",
  "journalrec",
  "libm",
+ "pwhash",
  "tzrules",
 ]
 
@@ -3192,6 +3193,10 @@ dependencies = [
 
 [[package]]
 name = "pwdb"
+version = "0.1.0"
+
+[[package]]
+name = "pwhash"
 version = "0.1.0"
 
 [[package]]

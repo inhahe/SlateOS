@@ -13,11 +13,10 @@ verifies, and `stored_method` names them `Method::Yescrypt` and
 `Method::Scrypt`. Two things in lane B's tree follow from that.
 
 1. **`authlib::burn` no longer costs what a real check costs.** It spends a
-   `$6$` hash (`DUMMY_METHOD`, 5000 rounds: about 10 ms) so that "no such
-   user" takes as long as "wrong password". A `$y$j9T$` entry costs about
-   51 ms at the libc's current optimisation, and 23 ms after
-   `known-issues/D-CRYPT-HASHES-RUN-AT-THE-LIBCS-SIZE-OPTIMISATION.md` is
-   fixed. On a system with yescrypt entries, a client timing `sshd`, `login`
+   `$6$` hash (`DUMMY_METHOD`, 5000 rounds: about 4 ms on the development
+   machine) so that "no such user" takes as long as "wrong password". A
+   `$y$j9T$` entry costs about 25 ms. On a system with yescrypt entries, a
+   client timing `sshd`, `login`
    or `ftpd` sees which account names exist. OpenSSH's answer is to burn
    with the cost of the system's own entries; one way is to burn with the
    method -- and, for `$y$`, the parameters -- of an entry the system holds,

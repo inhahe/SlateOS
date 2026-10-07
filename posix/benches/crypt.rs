@@ -21,21 +21,23 @@
 //! row.
 //!
 //! Measured on the development machine, 2026-10-06, ms a hash -- with other
-//! builds running, so good to perhaps ±20% -- in the bench profile, which is
-//! the release profile the libc ships with (`opt-level = "s"`), and again at
-//! opt-level 3 (`CARGO_PROFILE_BENCH_OPT_LEVEL=3`):
+//! builds running, so good to perhaps ±25% -- in the bench profile (the
+//! release profile the libc ships with): first with the hashing in `posix`
+//! at its `opt-level = "s"`, then in `posix/pwhash` at 3, as it ships now
+//! (known-issues-resolved/D-CRYPT-HASHES-RUN-AT-THE-LIBCS-SIZE-OPTIMISATION.md),
+//! beside libxcrypt's on the same machine at the same time:
 //!
-//! | setting | `s` | 3 | libxcrypt 4.4.36 |
-//! |---|---|---|---|
-//! | `$y$j9T$` | 51.2 | 22.8 | 37.4 |
-//! | `$y$j75$` | 5.71 | 1.59 | 1.54 |
-//! | `$7$CU..../....` | 307 | 184 | 163 |
-//! | `$7$66..../....` | 1.22 | 0.75 | 0.64 |
-//! | `$6$` | 9.79 | 5.23 | 4.81 |
+//! | setting | in `posix`, `s` | libxcrypt | in `pwhash`, 3 | libxcrypt |
+//! |---|---|---|---|---|
+//! | `$y$j9T$` | 51.2 | 37.4 | 25.1 | 56.7 |
+//! | `$y$j75$` | 5.71 | 1.54 | 0.95 | 1.95 |
+//! | `$7$CU..../....` | 307 | 163 | 201 | 242 |
+//! | `$7$66..../....` | 1.22 | 0.64 | 0.63 | 0.77 |
+//! | `$6$` | 9.79 | 4.81 | 3.97 | 4.80 |
 //!
-//! The code matches libxcrypt's; the libc's size optimisation does not
-//! (known-issues/D-CRYPT-HASHES-RUN-AT-THE-LIBCS-SIZE-OPTIMISATION.md).  The
-//! 1 MiB row is the one to watch: at 16 MiB both wait on memory.
+//! Read each against the libxcrypt column beside it: the machine's load
+//! moved libxcrypt's own figures by half between the two.  The 1 MiB row is
+//! the one to watch: at 16 MiB both wait on memory.
 
 use std::hint::black_box;
 use std::time::Instant;

@@ -27,6 +27,11 @@ libm = { path = "vendor/libm", features = ["unstable-public-internals"] }
 # as they do (requests/b-d-libc-wcwidth-should-answer-from-the-one-width-table.md;
 # design-decisions §1042). `no_std` and dependency-free, as the libc needs.
 charwidth = { path = "../userspace/charwidth" }
+# The hashes behind `crypt` -- SHA-2, MD5, yescrypt and scrypt -- in a crate
+# of their own so that they compile at opt-level 3 while the libc compiles
+# for size (the root Cargo.toml's `[profile.release.package.pwhash]`;
+# pwhash's crate docs).
+pwhash = { path = "pwhash" }
 
 # The journal record's one spelling. `syslog.rs` writes it with an escaper of
 # its own -- the libc has no allocator for this crate's `String`s -- and its

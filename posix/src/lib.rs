@@ -81,8 +81,9 @@
 //! - **System V IPC** (stubs): `msgget`/`msgsnd`/`msgrcv`/`msgctl`,
 //!   `semget`/`semop`/`semtimedop`/`semctl`,
 //!   `shmget`/`shmat`/`shmdt`/`shmctl`
-//! - **Password Hashing**: `crypt`, `crypt_r` (stub — returns
-//!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
+//! - **Password Hashing**: `crypt`, `crypt_r` (MD5, SHA-256, SHA-512,
+//!   yescrypt and scrypt, answering as libxcrypt does; the hashes themselves
+//!   in the `pwhash` crate), `encrypt`, `setkey` (DES stubs — ENOSYS)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
 //!   (C locale date/time formats, day/month names, codeset, etc.)
 //! - **Monetary Formatting**: `strfmon`, `strfmon_l` (glibc's in the C
@@ -457,7 +458,10 @@ pub mod malloc;
 pub mod math;
 pub mod mathl;
 pub mod mcheck;
-pub mod md5;
+// MD5 and SHA-2 live in `pwhash`, compiled for speed where this crate is
+// compiled for size (pwhash's crate docs); re-exported, so `posix::md5` and
+// `posix::sha2` are where they were.
+pub use pwhash::md5;
 pub mod mman;
 pub mod mntent;
 pub mod monetary;
@@ -496,7 +500,7 @@ pub mod sched;
 pub mod search;
 pub mod semaphore;
 pub mod setjmp;
-pub mod sha2;
+pub use pwhash::sha2;
 pub mod shadow;
 /// `#!` interpreter lines and the argument rewrite they imply — the pure half
 /// of running a script, driven by `spawn`'s `execve` and `posix_spawn`.

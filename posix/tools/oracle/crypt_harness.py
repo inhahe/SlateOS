@@ -1,5 +1,6 @@
 """libxcrypt 4.4.36's crypt -- Ubuntu 24.04's libcrypt.so.1 -- as the oracle
-for posix/src/crypt.rs and posix/src/yescrypt.rs.
+for posix/src/crypt.rs and posix/src/yescrypt.rs, and the hashing behind
+them in posix/pwhash.
 
     python posix/tools/oracle/crypt_harness.py   # writes posix/src/crypt_oracle.txt
 

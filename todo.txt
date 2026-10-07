@@ -59096,8 +59096,9 @@ is already waiting, not whether the setter exists.
 
 - **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  $1$, $5$,
   $6$ and, since 2026-10-06, yescrypt ($y$) and scrypt ($7$) hash
-  (posix/src/yescrypt.rs, ported from libxcrypt 4.4.36 and held to it by
-  posix/tools/oracle/crypt_harness.py's 1926 answers); every other setting
+  (posix/src/yescrypt.rs and posix/pwhash, ported from libxcrypt 4.4.36
+  and held to it by posix/tools/oracle/crypt_harness.py's 1926 answers);
+  every other setting
   gets the failure token "*0" with EINVAL, as libxcrypt answers for a method
   it lacks.  Ubuntu 24.04's libxcrypt also has, probed 2026-09-26:
   traditional DES (two-character salt), BSDi DES ("_"), bcrypt ($2b$, and
@@ -59105,8 +59106,10 @@ is already waiting, not whether the setter exists.
   and NT ($3$), and real DES behind encrypt/setkey (compat symbols there;
   ours answer ENOSYS).  bcrypt next: OpenBSD's and FreeBSD's default, and
   what htpasswd writes.  Port from D:\refsrc\libxcrypt-4.4.36, per
-  design-decisions.md §539: primitives ported, not written; extend
-  crypt_harness.py's KA_SETTINGS with the method's rows of ka-table.inc.
+  design-decisions.md §539: primitives ported, not written -- the hashing
+  into posix/pwhash, compiled for speed (§1183), the setting's parsing
+  into posix; extend crypt_harness.py's KA_SETTINGS with the method's rows
+  of ka-table.inc.
   (Replaces the DES follow-up of the 2026-05-29 crypt entry, deleted as
   done.)
 

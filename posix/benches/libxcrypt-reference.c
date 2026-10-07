@@ -31,6 +31,7 @@ int main(void)
     } cases[] = {
         { "$y$j9T$PKXc3hCOSyMqdaEQArI62/", 20 },
         { "$y$j75$LdJMENpBABJJ3hIHjB1Bi.", 100 },
+        { "$gy$j75$LdJMENpBABJJ3hIHjB1Bi.", 100 },
         { "$7$CU..../....SodiumChloride", 10 },
         { "$7$66..../....SodiumChloride", 200 },
         { "$6$saltstring", 200 },
@@ -39,6 +40,9 @@ int main(void)
         { "ab", 2000 },
         { "ab..............", 2000 },
         { "_J9..CCCC", 200 },
+        { "$sha1$262144$GGXpNqoJvglVTkGU", 5 },
+        { "$md5$1xMeE.at", 50 },
+        { "$3$", 20000 },
     };
     static struct crypt_data data;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {

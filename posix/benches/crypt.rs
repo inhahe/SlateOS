@@ -47,9 +47,11 @@ use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
-    let cases: [(&str, u32); 10] = [
+    let cases: [(&str, u32); 14] = [
         ("$y$j9T$PKXc3hCOSyMqdaEQArI62/", 20),
         ("$y$j75$LdJMENpBABJJ3hIHjB1Bi.", 100),
+        // gost-yescrypt at the same cost: yescrypt and two Streebog HMACs.
+        ("$gy$j75$LdJMENpBABJJ3hIHjB1Bi.", 100),
         ("$7$CU..../....SodiumChloride", 10),
         ("$7$66..../....SodiumChloride", 200),
         ("$6$saltstring", 200),
@@ -60,6 +62,11 @@ fn main() {
         ("ab", 2000),
         ("ab..............", 2000),
         ("_J9..CCCC", 200),
+        // sha1crypt at gensalt's default count, SunMD5 at its least (4096
+        // rounds), and NT.
+        ("$sha1$262144$GGXpNqoJvglVTkGU", 5),
+        ("$md5$1xMeE.at", 50),
+        ("$3$", 20000),
     ];
     for (setting, reps) in cases {
         let mut out = posix::crypt::buf();

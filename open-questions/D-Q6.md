@@ -38,6 +38,8 @@ What is translated, as far as lane D knows:
 | `posix/src/argp/`: the parse, the help's order and layout, the line filler -- function for function | `argp/argp-parse.c`, `argp-help.c`, `argp-fmtstream.c` | 2026-10-01 |
 | `posix/src/tz.rs`: `tzset`, the POSIX rule engine, the zoneinfo reader and `mktime`'s search -- function for function, read from the source | `time/tzset.c`, `time/tzfile.c`, `time/mktime.c` | 2026-10-01 |
 | `posix/src/syslog.rs`: the logger -- connecting, building the record, sending it and trying again -- function for function, read from the source | `misc/syslog.c`, BSD's in origin (the University of California's licence) with glibc's changes under the LGPL | 2026-10-01 |
+| `posix/src/crypt.rs`, `posix/src/gensalt.rs`: the crypt API's order of checks, its failure token, the matching of a setting to its method, and what `crypt_rn`, `crypt_ra`, `crypt_gensalt_rn` and `crypt_checksalt` do with their buffers -- read from the source, not glibc's but under the same licence | libxcrypt's `lib/crypt.c` and `lib/crypt-gensalt-static.c` (LGPL) | 2026-09-26 and 2026-10-06 |
+| `posix/include/crypt.h`: libxcrypt's interface -- its struct and constants -- in words of its own | libxcrypt's `lib/crypt.h.in` (LGPL) | 2026-10-06 |
 
 One more part, since this was raised, was written with glibc's source
 open, though not translated from it: `posix/src/regex/parse.rs`
@@ -107,6 +109,20 @@ until no code point differed (`posix/tools/wctype_gen.py --oracle`), and
 two were found only that way. The tables are Unicode's data, not glibc's
 code, so under **B** nothing changes: the rules are what the oracle fixes.
 
+The crypt API, `posix/src/crypt.rs` and `posix/src/gensalt.rs`, follows
+libxcrypt's `crypt.c` and `crypt-gensalt-static.c`, read with the source
+open (2026-09-26 and 2026-10-06) -- libxcrypt is not glibc, but those two
+files are under the same LGPL. The code is its own and short, and the
+oracle (`posix/tools/oracle/crypt_harness.py`: 6909 `crypt` calls, 1116
+`crypt_gensalt` and `crypt_checksalt` probes) fixes every behaviour it
+has; under **B** it would be written again from the crypt(3),
+crypt_gensalt(3) and crypt_checksalt(3) pages and those answers.
+`posix/include/crypt.h` declares libxcrypt's interface as `<obstack.h>`
+does glibc's. The hashing methods are not in question: libxcrypt's are
+under BSD licences or in the public domain, and their notices travel
+with the ports (`posix/pwhash`, `posix/src/yescrypt.rs`, `bcrypt.rs`,
+`des.rs`, `sha1crypt.rs`, `sunmd5.rs`, `nthash.rs`).
+
 (The character tables themselves -- which byte means which letter -- are
 facts read from glibc's data files and from running its converters, not
 code; they are not in question. And not everything follows glibc's
@@ -116,7 +132,7 @@ written from the mathematics, with glibc only run to see its answers.)
 | Option | *What changes:* |
 |---|---|
 | **A.** Keep the translations; honour the LGPL | The files above say they are LGPL. Every program built on the C library must be re-linkable by its user -- which means shipping the library's object files with the system, or making the C library a shared library (`libc.so`) as design.txt plans for later. Nothing is rewritten. |
-| **B.** Rewrite those parts clean-room; glibc stays the oracle, never the source | The library stays under whatever licence SlateOS chooses, with no condition on programs. The six parts are written again from the standards (C23, IEEE 754, the TSCII and ISO 6937 specifications) and must pass the same glibc-comparison tests they pass now; a rule is written down: glibc may be tested against, not read and copied. |
+| **B.** Rewrite those parts clean-room; glibc stays the oracle, never the source | The library stays under whatever licence SlateOS chooses, with no condition on programs. The parts above are written again from the standards (C23, IEEE 754, the TSCII and ISO 6937 specifications, libxcrypt's manual pages) and must pass the same glibc-comparison tests they pass now; a rule is written down: glibc may be tested against, not read and copied. |
 | **C.** Decide before the first public release, not now | Work continues as it is; the table above is kept current; before anything is distributed as a binary, A or B is applied. |
 
 **If never answered:** nothing breaks and nothing is distributed yet; the
@@ -133,6 +149,6 @@ the standards with glibc as the oracle, and where it has read glibc's
 source after all -- the timezone code and the logger, both 2026-10-01 --
 the table above says so.
 
-**Where it bites:** the six places above; `design-decisions.md` §1133 (the
+**Where it bites:** the places above; `design-decisions.md` §1133 (the
 earlier assumption); and every future port where glibc's behaviour is the
 target.

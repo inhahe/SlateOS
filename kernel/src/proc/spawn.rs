@@ -22783,6 +22783,88 @@ pub fn self_test_linux_madvise() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the names for a process's own descriptors
+/// (`/dev/stdin`, `/dev/fd/N`): [`elf::build_linux_dev_stdin_test_elf`]
+/// re-opens a file through `/dev/stdin` at offset 0 while descriptor 0 keeps
+/// its own, stats it, finds a closed `/dev/fd/N` absent, opens a pipe's other
+/// end through `/dev/fd/N`, and stats a piped `/dev/stdin` as a FIFO. It exits
+/// `0x2A` on success; any other code names the check that failed (see the
+/// builder). Bounded like the fork test: the harness never blocks.
+pub fn self_test_linux_dev_stdin() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const MAX_YIELDS: usize = 4096;
+
+    serial_println!("[spawn] Running Linux /dev/stdin and /dev/fd/N (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_dev_stdin_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-dev-stdin"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-dev-stdin",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: /dev/stdin spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: /dev/stdin (ring 3) — the program did not finish in {} yields \
+             (state {:?})",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => "setting up the file failed",
+            Some(0x34) => "opening /dev/stdin failed",
+            Some(0x35 | 0x36) => "/dev/stdin did not read from offset 0 (not a re-open)",
+            Some(0x37 | 0x38) => "descriptor 0 lost its offset to the re-open",
+            Some(0x39 | 0x3A) => "stat of /dev/stdin was not the file on descriptor 0",
+            Some(0x3B) => "a closed /dev/fd/N was not ENOENT",
+            Some(0x3C | 0x3D) => "the pipe setup failed",
+            Some(0x3E) => "opening a pipe's other end through /dev/fd/N failed",
+            Some(0x3F..=0x41) => "a byte written to the other end did not arrive",
+            Some(0x42 | 0x43) => "stat of a piped /dev/stdin was not a FIFO",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: /dev/stdin (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux /dev/stdin and /dev/fd/N (ring 3: a re-open from offset 0, the \
+         object's stat, ENOENT when closed, a pipe's other end, a FIFO): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the SlateOS channel descriptors from a real
 /// Linux-ABI process: [`elf::build_linux_slate_channel_test_elf`] makes a
 /// channel with `slate_channel_create` (1000), round-trips a message, forks

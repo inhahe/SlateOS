@@ -3472,6 +3472,14 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_madvise(),
     );
 
+    // Ring-3 end-to-end test of /dev/stdin and /dev/fd/N: a re-open of the
+    // caller's own descriptor, and stat of it. Same bounded harness.
+    selftest::dispatch_debug(
+        "Linux /dev/stdin and /dev/fd/N (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_dev_stdin(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

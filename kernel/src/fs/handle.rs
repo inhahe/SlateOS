@@ -1523,6 +1523,57 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
     }
 }
 
+/// Open the file a handle holds again: a new open file description of the
+/// same file -- the same inode, even if renamed or unlinked since -- at
+/// offset 0, with `flags`. What `open("/proc/self/fd/N")` does on Linux,
+/// behind the Linux ABI's `/dev/stdin`, `/dev/fd/N` and `/proc/self/fd/N`
+/// (`syscall::linux::reopen_own_fd`).
+///
+/// `flags` may ask for no more access than the handle has: `PermissionDenied`
+/// otherwise, since widening it needs the permission check an open by name
+/// makes, which the caller then makes (and which needs the name to still be
+/// this file). `TRUNCATE` truncates, with write access. A directory reopens
+/// only for reading (`IsADirectory`), its listing from the start.
+///
+/// # Errors
+///
+/// `InvalidHandle`, `PermissionDenied`, `IsADirectory`, or the truncate's.
+pub fn reopen(handle: u64, flags: OpenFlags) -> KernelResult<u64> {
+    let (path, size, have, is_directory, object, ro_volume) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        (
+            file.path.clone(),
+            file.seen_size,
+            file.flags,
+            file.is_directory,
+            file.object.clone(),
+            file.ro_volume,
+        )
+    };
+    let wants = |f: OpenFlags| flags.contains(f) && !have.contains(f);
+    if wants(OpenFlags::READ) || wants(OpenFlags::WRITE) {
+        return Err(KernelError::PermissionDenied);
+    }
+    if is_directory {
+        if flags.contains(OpenFlags::WRITE) {
+            return Err(KernelError::IsADirectory);
+        }
+        return allocate_dir_handle(path, flags).map(|h| marked(h, ro_volume));
+    }
+    // A new description of the same file shares its hold, as `dup`'s does.
+    let new =
+        allocate_handle_holding(path, 0, size, flags, object).map(|h| marked(h, ro_volume))?;
+    if flags.contains(OpenFlags::TRUNCATE) && flags.contains(OpenFlags::WRITE) {
+        if let Err(e) = ftruncate(new, 0) {
+            // The new description is this call's own; nobody else has it.
+            let _ = close(new);
+            return Err(e);
+        }
+    }
+    Ok(new)
+}
+
 /// Duplicate a file handle by sharing the *same* open file description.
 ///
 /// Unlike [`dup`], this does not allocate a new handle id or a fresh

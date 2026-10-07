@@ -3725,7 +3725,7 @@ fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
 /// labels.  The console maps to `/dev/console`.  Nothing here is
 /// fabricated: if a File handle can no longer be resolved (it raced a
 /// close), we report `anon_inode:[file]` rather than inventing a path.
-fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
+pub(crate) fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
         HandleKind::Console => PathBuf::from("/dev/console"),

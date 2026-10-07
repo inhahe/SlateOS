@@ -6181,6 +6181,23 @@ fn open_common(
     // name.  Linux's `getname()` copies bytes and validates nothing either.
     let canon_path = Path::new(canon.as_slice());
 
+    // The caller's own descriptors by name: `/dev/stdin`, `/dev/stdout`,
+    // `/dev/stderr`, `/dev/fd/N`, `/proc/self/fd/N` (and `thread-self`, and
+    // `/proc/<its pid>/fd/N`). On Linux each is a link to what descriptor N
+    // holds, and opening one opens that again. Here the three std names were
+    // devfs's console nodes, so `cmd | tee /dev/stderr` wrote to the QEMU
+    // console and `sed '1r /dev/stdin'` read nothing (lane B's
+    // requests/b-a-dev-stdin-stdout-and-stderr-are-console-nodes-...). Each
+    // is a link, so a caller that refuses to follow links is refused.
+    if let Some(pid) = caller_pid() {
+        if let Some(fd) = own_fd_name(canon.as_slice(), pid) {
+            if no_symlinks {
+                return linux_err(errno::ELOOP);
+            }
+            return reopen_own_fd(pid, fd, flags);
+        }
+    }
+
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
     let no_symlinks_bit = if no_symlinks {
         crate::fs::handle::OpenFlags::NO_SYMLINKS.bits()
@@ -6261,6 +6278,229 @@ fn open_common(
             linux_err(linux_errno_for(e))
         }
     }
+}
+
+/// The descriptor a canonical path names, among the names that stand for the
+/// caller's own descriptors: `/dev/stdin` (0), `/dev/stdout` (1),
+/// `/dev/stderr` (2), `/dev/fd/N`, `/proc/self/fd/N`, `/proc/thread-self/fd/N`
+/// and `/proc/<pid>/fd/N` with the caller's own `pid`. `None` for any other
+/// path -- another process's descriptors included, which procfs answers.
+///
+/// `N` as procfs names a descriptor: decimal digits, no sign, no leading zero
+/// (Linux's `name_to_int`).
+fn own_fd_name(path: &[u8], pid: u64) -> Option<i32> {
+    match path {
+        b"/dev/stdin" => return Some(0),
+        b"/dev/stdout" => return Some(1),
+        b"/dev/stderr" => return Some(2),
+        _ => {}
+    }
+    let number = if let Some(rest) = path.strip_prefix(b"/dev/fd/") {
+        rest
+    } else if let Some(rest) = path.strip_prefix(b"/proc/self/fd/") {
+        rest
+    } else if let Some(rest) = path.strip_prefix(b"/proc/thread-self/fd/") {
+        rest
+    } else {
+        let rest = path.strip_prefix(b"/proc/")?;
+        let slash = rest.iter().position(|&b| b == b'/')?;
+        let (who, tail) = rest.split_at(slash);
+        if procfs_number(who)? != pid {
+            return None;
+        }
+        tail.strip_prefix(b"/fd/")?
+    };
+    i32::try_from(procfs_number(number)?).ok()
+}
+
+/// A number as procfs spells one in a path: decimal digits only, no sign, no
+/// leading zero.
+fn procfs_number(s: &[u8]) -> Option<u64> {
+    if s.is_empty() || (s.len() > 1 && s.first() == Some(&b'0')) {
+        return None;
+    }
+    s.iter().try_fold(0u64, |acc, &d| {
+        if !d.is_ascii_digit() {
+            return None;
+        }
+        acc.checked_mul(10)?
+            .checked_add(u64::from(d.wrapping_sub(b'0')))
+    })
+}
+
+/// Open, again, what the caller's descriptor `fd` holds: Linux's open of
+/// `/proc/self/fd/N`, where `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and
+/// `/dev/fd/N` lead. A *re-open*, not a `dup`: a file gets a new open file
+/// description at offset 0, which `O_TRUNC` truncates.
+///
+/// | `fd` holds | the new descriptor |
+/// |---|---|
+/// | nothing | `ENOENT` |
+/// | a file, asked for no more access than `fd` has | a new description of the same file, renamed or unlinked or not (`fs::handle::reopen`) |
+/// | a file, asked for more | the file opened by name, with the permission check that makes, if the name is still that file; `EACCES` if not |
+/// | a directory | for reading only (`EISDIR` otherwise), its listing from the start |
+/// | a pipe end | that end, or the other -- Linux opens a pipe through `/proc` as a FIFO; `EACCES` for both at once (`O_RDWR`), `ENXIO` if the other end is gone |
+/// | the console | the console |
+/// | an ALSA, DRM or input device | its device node, opened again |
+/// | a socket, a memfd, or an eventfd, timerfd, signalfd, epoll, inotify or pidfd | `ENXIO` |
+///
+/// Linux reopens a memfd (it is a file on tmpfs); here a memfd's offset lives
+/// in its one handle, so a second description of it cannot yet be made.
+/// Lane D's C library answers the same names for native programs, whose
+/// descriptors the kernel does not see (`posix/src/fdname.rs`, which has
+/// Linux's answers as measured); this differs from it only where the kernel
+/// can do more (a pipe's other end).
+fn reopen_own_fd(pid: u64, fd: i32, flags: u32) -> SyscallResult {
+    use crate::cap::ResourceType;
+    use crate::fs::handle::OpenFlags;
+    use crate::ipc::pipe::{PipeEnd, PipeHandle};
+
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return linux_err(errno::ENOENT);
+    };
+    // The name is a link that exists: never created, so O_EXCL refuses, and
+    // a link is what O_NOFOLLOW refuses to follow.
+    if flags & oflags::O_CREAT != 0 && flags & oflags::O_EXCL != 0 {
+        return linux_err(errno::EEXIST);
+    }
+    if flags & oflags::O_NOFOLLOW != 0 {
+        return linux_err(errno::ELOOP);
+    }
+    let mut access = flags & oflags::O_ACCMODE;
+    if access > oflags::O_RDWR {
+        access = oflags::O_RDONLY;
+    }
+    let status = access | (flags & (oflags::O_APPEND | oflags::O_NONBLOCK));
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+
+    // Whether `new_entry` holds a reference this call took (and must give
+    // back if the descriptor cannot be installed).
+    let mut took_reference = false;
+    let mut new_entry = match entry.kind {
+        HandleKind::File => {
+            let raw = entry.raw_handle;
+            let is_dir = crate::fs::handle::is_directory(raw);
+            if flags & oflags::O_DIRECTORY != 0 && !is_dir {
+                return linux_err(errno::ENOTDIR);
+            }
+            let mut wanted = OpenFlags::NONE;
+            if access != oflags::O_WRONLY {
+                wanted = wanted.union(OpenFlags::READ);
+            }
+            if access != oflags::O_RDONLY {
+                wanted = wanted.union(OpenFlags::WRITE);
+            }
+            if flags & oflags::O_TRUNC != 0 {
+                wanted = wanted.union(OpenFlags::TRUNCATE);
+            }
+            if flags & oflags::O_APPEND != 0 {
+                wanted = wanted.union(OpenFlags::APPEND);
+            }
+            let new = match crate::fs::handle::reopen(raw, wanted) {
+                Ok(h) => {
+                    pcb::register_ipc_handle(pid, ResourceType::File, h);
+                    h
+                }
+                Err(KernelError::PermissionDenied) => match reopen_file_by_name(pid, raw, flags) {
+                    Ok(h) => h,
+                    Err(r) => return r,
+                },
+                Err(KernelError::IsADirectory) => return linux_err(errno::EISDIR),
+                Err(e) => return linux_err(linux_errno_for(e)),
+            };
+            took_reference = true;
+            FdEntry::file(new, status)
+        }
+        HandleKind::Pipe => {
+            let raw = entry.raw_handle;
+            let is_read_end = PipeHandle::from_raw(raw).end() == PipeEnd::Read;
+            let target = match (access, is_read_end) {
+                (oflags::O_RDONLY, true) | (oflags::O_WRONLY, false) => raw,
+                (oflags::O_RDONLY, false) | (oflags::O_WRONLY, true) => raw ^ 1,
+                _ => return linux_err(errno::EACCES),
+            };
+            // One reference per process per pipe end: an end this process
+            // already holds is shared, as `dup` shares it; the other end, not
+            // held, takes a reference of its own.
+            if !pcb::owns_ipc_handle(pid, ResourceType::Pipe, target) {
+                if crate::ipc::pipe::dup(PipeHandle::from_raw(target)).is_err() {
+                    return linux_err(errno::ENXIO);
+                }
+                pcb::register_ipc_handle(pid, ResourceType::Pipe, target);
+                took_reference = true;
+            }
+            FdEntry::pipe(target, status)
+        }
+        HandleKind::Console => FdEntry::console(status),
+        HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard | HandleKind::Evdev => {
+            // A device node: opened again through the same interceptors a
+            // first open of its name takes.
+            let node = crate::fs::procfs::fd_link_target(&entry);
+            let node = node.as_bytes();
+            return try_open_alsa_pcm(node, flags)
+                .or_else(|| try_open_alsa_control(node, flags))
+                .or_else(|| try_open_drm(node, flags))
+                .or_else(|| try_open_evdev(node, flags))
+                .unwrap_or_else(|| linux_err(errno::ENXIO));
+        }
+        _ => return linux_err(errno::ENXIO),
+    };
+    new_entry.fd_flags = fd_flags;
+    match pcb::linux_fd_install(pid, new_entry, 0) {
+        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
+        Err(e) => {
+            // The table is full: give back what this call took. A pipe end
+            // or the console this process already held stays as it was.
+            if took_reference {
+                // Best effort: the reference is this call's own, and the
+                // error the caller sees is the table's.
+                let _ = close_handle(new_entry);
+            }
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// [`reopen_own_fd`]'s file opened for more access than its descriptor has:
+/// the name the descriptor was opened by, opened as any open would be -- with
+/// its permission check -- and accepted only if it is still the same file
+/// (`EACCES` if renamed, replaced or unlinked: what Linux reopens then is the
+/// inode, which this cannot widen access to without a name). Returns the
+/// new handle, registered to the caller.
+fn reopen_file_by_name(pid: u64, raw: u64, flags: u32) -> Result<u64, SyscallResult> {
+    let host = crate::fs::handle::handle_path(raw).map_err(|e| linux_err(linux_errno_for(e)))?;
+    let guest = crate::ipc::namespace::unjail_path_for(pid, &host);
+    let no_create = flags & !(oflags::O_CREAT | oflags::O_EXCL);
+    let r = handlers::fs_open_kernel_path_mode(&guest, translate_open_flags(no_create), 0);
+    if r.value < 0 {
+        // The name is gone: the file is reachable only through the inode.
+        if r.value == SyscallResult::err(KernelError::NotFound).value {
+            return Err(linux_err(errno::EACCES));
+        }
+        return Err(linux_from_native(r));
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let new = r.value as u64;
+    let same = match (crate::fs::handle::fstat(raw), crate::fs::handle::fstat(new)) {
+        (Ok(a), Ok(b)) => a.dev == b.dev && a.ino == b.ino,
+        _ => false,
+    };
+    if !same {
+        let _ = handlers::sys_fs_close(&SyscallArgs {
+            arg0: new,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        });
+        return Err(linux_err(errno::EACCES));
+    }
+    Ok(new)
 }
 
 /// `open(path, flags, mode)` — equivalent to `openat(AT_FDCWD, path, flags, mode)`.
@@ -21120,9 +21360,17 @@ fn stat_path_common(path_ptr: u64, statbuf_ptr: u64, follow: bool) -> SyscallRes
     // through this syscall even though the filesystem holding it accepts the
     // name.  Linux's `getname()` copies bytes and validates nothing either.
     let canon_path = Path::new(canon.as_slice());
-    let meta = match stat_meta_for_path(canon_path, follow) {
-        Ok(m) => m,
-        Err(r) => return r,
+    let own_fd = match own_fd_stat_target(canon.as_slice(), follow) {
+        Some(Ok(entry)) => Some(entry),
+        Some(Err(r)) => return r,
+        None => None,
+    };
+    let meta = match own_fd {
+        Some(_) => None,
+        None => match stat_meta_for_path(canon_path, follow) {
+            Ok(m) => Some(m),
+            Err(r) => return r,
+        },
     };
 
     // Lookup succeeded — now the statbuf pointer is observed (cp_new_stat).
@@ -21133,13 +21381,35 @@ fn stat_path_common(path_ptr: u64, statbuf_ptr: u64, follow: bool) -> SyscallRes
         return linux_err(linux_errno_for(e));
     }
     let mut buf = [0u8; STAT_SIZE];
-    fill_stat_from_meta(&mut buf, &meta);
+    match (&own_fd, &meta) {
+        (Some(entry), _) => fill_stat_for_fd(&mut buf, entry),
+        (None, Some(meta)) => fill_stat_from_meta(&mut buf, meta),
+        (None, None) => return linux_err(errno::ENOENT),
+    }
     // SAFETY: validated as a writable STAT_SIZE-byte range above.
     let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), statbuf_ptr, STAT_SIZE) };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
+}
+
+/// The descriptor a followed stat of `path` is really about, when `path` is
+/// one of the names for the caller's own descriptors (`own_fd_name`):
+/// `Some(Ok(entry))`, or `Some(Err(ENOENT))` if that descriptor is closed.
+/// `None` for any other path, or when not following -- the name itself is
+/// devfs's node here, where Linux has a symbolic link.
+///
+/// So `stat("/dev/stdin")` reports what descriptor 0 holds, as `fstat(0)`
+/// does: `[ -p /dev/stdin ]` asks about the pipe the shell connected, not
+/// devfs's console node (lane B's request, alongside [`reopen_own_fd`]).
+fn own_fd_stat_target(path: &[u8], follow: bool) -> Option<Result<FdEntry, SyscallResult>> {
+    if !follow {
+        return None;
+    }
+    let pid = caller_pid()?;
+    let fd = own_fd_name(path, pid)?;
+    Some(pcb::linux_fd_lookup(pid, fd).ok_or_else(|| linux_err(errno::ENOENT)))
 }
 
 /// `stat(path, statbuf)` — follow trailing symlink.
@@ -21270,9 +21540,17 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
         Err(r) => return r,
     };
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    let meta = match stat_meta_for_path(&resolved, follow) {
-        Ok(m) => m,
-        Err(r) => return r,
+    let own_fd = match own_fd_stat_target(resolved.as_bytes(), follow) {
+        Some(Ok(entry)) => Some(entry),
+        Some(Err(r)) => return r,
+        None => None,
+    };
+    let meta = match own_fd {
+        Some(_) => None,
+        None => match stat_meta_for_path(&resolved, follow) {
+            Ok(m) => Some(m),
+            Err(r) => return r,
+        },
     };
     if statbuf == 0 {
         return linux_err(errno::EFAULT);
@@ -21281,7 +21559,11 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     let mut buf = [0u8; STAT_SIZE];
-    fill_stat_from_meta(&mut buf, &meta);
+    match (&own_fd, &meta) {
+        (Some(entry), _) => fill_stat_for_fd(&mut buf, entry),
+        (None, Some(meta)) => fill_stat_from_meta(&mut buf, meta),
+        (None, None) => return linux_err(errno::ENOENT),
+    }
     // SAFETY: validated as a writable STAT_SIZE-byte range above.
     let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), statbuf, STAT_SIZE) };
     if let Err(e) = r {
@@ -21586,9 +21868,17 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
         Err(r) => return r,
     };
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    let meta = match stat_meta_for_path(&resolved, follow) {
-        Ok(m) => m,
-        Err(r) => return r,
+    let own_fd = match own_fd_stat_target(resolved.as_bytes(), follow) {
+        Some(Ok(entry)) => Some(entry),
+        Some(Err(r)) => return r,
+        None => None,
+    };
+    let meta = match own_fd {
+        Some(_) => None,
+        None => match stat_meta_for_path(&resolved, follow) {
+            Ok(m) => Some(m),
+            Err(r) => return r,
+        },
     };
     if statxbuf == 0 {
         return linux_err(errno::EFAULT);
@@ -21597,7 +21887,11 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     let mut buf = [0u8; STATX_SIZE];
-    fill_statx_from_meta(&mut buf, &meta);
+    match (&own_fd, &meta) {
+        (Some(entry), _) => fill_statx_for_fd(&mut buf, entry),
+        (None, Some(meta)) => fill_statx_from_meta(&mut buf, meta),
+        (None, None) => return linux_err(errno::ENOENT),
+    }
     // SAFETY: validated as a writable STATX_SIZE-byte range above.
     let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), statxbuf, STATX_SIZE) };
     if let Err(e) = r {

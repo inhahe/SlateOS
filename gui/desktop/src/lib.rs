@@ -122,7 +122,6 @@ mod pictures;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
-pub mod resmon;
 pub mod run_dialog;
 pub mod screen_capture;
 pub mod security_dialog;
@@ -2037,6 +2036,9 @@ pub struct DesktopShell {
     prev_cpu: Option<procinfo::CpuTimes>,
     /// Processor and memory as of the last widget-due tick.
     sampled: crate::widgets::SystemSample,
+    /// The system monitor's graphs: the last minute of each, and the
+    /// counters last read to difference the next against.
+    monitor: crate::widgets::monitor::Sampler,
     /// All managed windows.
     pub windows: BTreeMap<WindowId, ManagedWindow>,
     /// Currently focused window.
@@ -2955,6 +2957,7 @@ impl DesktopShell {
         let mut shell = Self {
             prev_cpu: None,
             sampled: crate::widgets::SystemSample::default(),
+            monitor: crate::widgets::monitor::Sampler::new(),
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -14515,19 +14518,26 @@ impl DesktopShell {
         core::mem::take(&mut self.icons_dirty)
     }
 
-    /// Read processor and memory from `/proc`, for the next frame to report.
+    /// Read processor, memory and the disks and network from `/proc`, at
+    /// `now_ms` on the session's clock, for the next frame to report -- while
+    /// a system monitor is out to report them, and no sooner after the last
+    /// sample than [`MIN_SAMPLE_SPACING_MS`](crate::widgets::monitor::MIN_SAMPLE_SPACING_MS).
     ///
-    /// Called from the widget-due tick, which fires at the monitor widget's own
-    /// interval, rather than from `live_readings` -- that runs once a frame,
-    /// and sixty reads of `/proc/stat` a second to answer a question asked once
-    /// a second is its own small defect.
+    /// Called from the widget-due tick, which fires when a widget falls due
+    /// -- the monitor's once a second -- rather than from `live_readings`:
+    /// that runs once a frame, and sixty reads of `/proc/stat` a second to
+    /// answer a question asked once a second is its own small defect. With
+    /// no monitor out, nothing is read at all.
     ///
     /// **The first call after start-up measures nothing**, and that is correct
     /// rather than a gap: a processor fraction is a ratio over an interval, and
     /// at the first sample there is no interval yet. `None` until the second
     /// tick is the honest answer, and the meter says "CPU (not measured)" for
     /// that one second.
-    pub fn sample_system(&mut self) {
+    pub fn sample_system(&mut self, now_ms: u64) {
+        if !self.widgets.draws(&WidgetKind::SystemMonitor) || !self.monitor.due(now_ms) {
+            return;
+        }
         let fs = procinfo::ProcFs::new();
         self.sampled.memory_fraction = fs
             .memory()
@@ -14548,6 +14558,25 @@ impl DesktopShell {
         self.sampled.disk_fraction = fs_space::of(b"/")
             .ok()
             .and_then(|space| space.used_fraction());
+        // The counters the graphs difference. A file that will not read is a
+        // reading not taken, and its graph says it is not measured rather
+        // than hold the line where it stopped -- the error has nowhere more
+        // useful to go than that. SlateOS's own `/proc/diskstats` carries no
+        // counters, and it has no `/proc/net/dev`; read as on any Linux, the
+        // two graphs measure the day the kernel serves Linux's.
+        let disks = fs
+            .read_optional("diskstats")
+            .ok()
+            .flatten()
+            .map(|text| procinfo::DiskStats::parse_all(&text));
+        let nets = fs.net_devices().ok().flatten();
+        self.monitor.record(
+            now_ms,
+            self.sampled.cpu_fraction,
+            self.sampled.memory_fraction,
+            disks,
+            nets,
+        );
     }
 
     /// The readings the widget layer cannot derive for itself.
@@ -14595,6 +14624,13 @@ impl DesktopShell {
                 self.calendar.month_glance(secs, &zone, &self.events)
             } else {
                 calendar::MonthGlance::default()
+            },
+            // The minute `sample_system` kept, copied only while a monitor
+            // is out to draw it.
+            graphs: if self.widgets.draws(&WidgetKind::SystemMonitor) {
+                self.monitor.graphs()
+            } else {
+                crate::widgets::monitor::Graphs::default()
             },
         }
     }

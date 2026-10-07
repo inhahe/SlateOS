@@ -307,7 +307,6 @@ gui/desktop/src/network_indicator.rs
 gui/desktop/src/network_settings.rs
 gui/desktop/src/power_settings.rs
 gui/desktop/src/print_manager.rs
-gui/desktop/src/resmon.rs
 gui/desktop/src/screen_capture.rs
 gui/desktop/src/security_dialog.rs
 gui/desktop/src/session_mgr.rs

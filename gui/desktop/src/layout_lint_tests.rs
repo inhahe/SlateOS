@@ -25,6 +25,7 @@
 use guitk::widget::automation::Accessible;
 
 use crate::accessible::ShellPart;
+use crate::widgets::{WidgetKind, WidgetSize};
 use crate::{DesktopShell, WindowInfo, WindowList};
 
 /// Note every two parts of `shell`'s drawn over each other -- the toolkit's
@@ -88,6 +89,7 @@ fn lived_in(width: u32, height: u32) -> DesktopShell {
 #[test]
 fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
     let mut found = Vec::new();
+    let mut roomy = 0;
     for (width, height) in [(1920, 1080), (1024, 768), (800, 600)] {
         let size = format!("{width}x{height}");
         let mut shell = lived_in(width, height);
@@ -193,6 +195,21 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
         );
         check(&shell, &format!("{size} widgets"), &mut found);
 
+        // The system monitor given two rows, where the grid has them: its
+        // graphs of the last minute, and the disk's meter at their foot.
+        let monitor = shell
+            .widgets
+            .all_widgets()
+            .iter()
+            .find(|w| w.kind == WidgetKind::SystemMonitor)
+            .map(|w| w.id);
+        if let Some(id) = monitor
+            && shell.widgets.resize_widget(id, WidgetSize::LARGE)
+        {
+            roomy += 1;
+            check(&shell, &format!("{size} roomy monitor"), &mut found);
+        }
+
         // A crowded bar: a dozen windows, two with very long titles.
         let crowd: Vec<WindowInfo> = (1..=12)
             .map(|i| {
@@ -216,6 +233,10 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
         );
         check(&shell, &format!("{size} a dozen windows"), &mut found);
     }
+    assert!(
+        roomy > 0,
+        "no display had room for a monitor's graphs, so they were never checked"
+    );
     assert!(
         found.is_empty(),
         "{} overlaps:\n{}",

@@ -1842,6 +1842,26 @@ fn the_desktops_widgets_are_seen_over_its_icons() {
     assert!(!written.focused);
 }
 
+/// **The system is sampled only while a system monitor is out**: with none,
+/// a widget's tick reads nothing; with one, it reads, and then no sooner
+/// than the spacing after.
+#[test]
+fn the_system_is_sampled_only_while_a_monitor_is_out() {
+    let spacing = crate::widgets::monitor::MIN_SAMPLE_SPACING_MS;
+    let mut s = shell();
+    s.sample_system(10_000);
+    assert!(s.monitor.due(10_001), "sampled with no monitor out");
+    s.open_desktop_menu(900.0, 500.0);
+    assert!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_ADD_SYSTEM_MONITOR)
+            .changed()
+    );
+    s.dismiss_popups();
+    s.sample_system(10_000);
+    assert!(!s.monitor.due(10_001), "not sampled with a monitor out");
+    assert!(s.monitor.due(10_000 + spacing));
+}
+
 /// **A calendar widget shows the month today is in**, made by the shell's
 /// own calendar, the popup's -- and the month is made only while a calendar
 /// is out.

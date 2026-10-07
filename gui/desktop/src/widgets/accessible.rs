@@ -4,7 +4,7 @@
 //! | widget | what is in it |
 //! |---|---|
 //! | clock | its time and its date, each a label, read as the taskbar's clock reads them |
-//! | system monitor | a progress bar for each meter -- CPU, memory, disk -- or, for one nothing has measured, no value and "not measured" |
+//! | system monitor | a progress bar for each meter -- CPU, memory, disk -- or, for one nothing has measured, no value and "not measured"; given two rows, a picture for each graph of the last minute, described by what it reads now and at most, and the disk's meter below them |
 //! | note | a text area holding its text, the one being written in having the keyboard |
 //! | photo frame | the picture up on it, named by its file, or what it says in a picture's place |
 //! | battery | its charge, or "No battery", described by what its icon shows and the time left |
@@ -22,11 +22,12 @@
 use guitk::render::FontWeightHint;
 use guitk::widget::automation::{Node, Role, Value};
 
+use super::monitor::{Graph, Graphs, Panel};
 use super::{
-    BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_PITCH,
-    METER_TROUGH_HEIGHT, METER_TROUGH_TOP, Meter, NOT_MEASURED, PLACEHOLDER_SIZE, PROBLEM_SIZE,
-    WidgetInstance, WidgetInstanceId, WidgetKind, calendar_cell, charge_text, clock_date,
-    estimate_text, fit_within, placeholder_line, problem_line,
+    BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_HEIGHT, Meter,
+    NOT_MEASURED, PLACEHOLDER_SIZE, PROBLEM_SIZE, WidgetInstance, WidgetInstanceId, WidgetKind,
+    calendar_cell, charge_text, clock_date, estimate_text, fit_within, monitor_layout,
+    placeholder_line, problem_line,
 };
 use crate::Rect;
 use crate::calendar::MonthGlance;
@@ -45,6 +46,8 @@ pub enum WidgetPart {
     Date(WidgetInstanceId),
     /// One of a system monitor's meters.
     Meter(WidgetInstanceId, Meter),
+    /// One of a system monitor's graphs of the last minute.
+    Graph(WidgetInstanceId, Graph),
     /// A note's writing area: written in as its user writes in it.
     Note(WidgetInstanceId),
     /// A photo frame's picture, or what the frame says in a picture's place.
@@ -100,6 +103,47 @@ fn month_node(
         grid.children.push(node);
     }
     Some(grid)
+}
+
+/// A system monitor's `meter`, its heading's line at `(x, top)`, `width`
+/// wide: a progress bar at its reading in `live`, or -- nothing having
+/// measured it -- none, and said so.
+fn meter_node(
+    id: WidgetInstanceId,
+    meter: Meter,
+    (x, top, width): (f32, f32, f32),
+    live: &LiveReadings,
+) -> Node<WidgetPart> {
+    let mut node = Node::new(
+        WidgetPart::Meter(id, meter),
+        Role::ProgressBar,
+        meter.label(),
+        Rect::new(x, top, width, METER_HEIGHT),
+    );
+    match meter.reading(live) {
+        Some(fraction) => {
+            node.value = Some(Value::Progress {
+                value: fraction.clamp(0.0, 1.0) * 100.0,
+                max: 100.0,
+            });
+        }
+        None => node.description = Some(NOT_MEASURED.to_owned()),
+    }
+    node
+}
+
+/// A system monitor's graph, where `panel` places it: a picture named by
+/// what it plots, described by what it reads now and at most in the minute
+/// -- or that nothing measures it.
+fn graph_node(id: WidgetInstanceId, panel: &Panel, graphs: &Graphs) -> Node<WidgetPart> {
+    let mut node = Node::new(
+        WidgetPart::Graph(id, panel.graph),
+        Role::Image,
+        panel.graph.label(),
+        panel.bounds(),
+    );
+    node.description = Some(graphs.description(panel.graph));
+    node
 }
 
 /// What else the battery widget says of the charge: what its icon shows --
@@ -166,28 +210,20 @@ impl DesktopWidgetManager {
                 ),
             ],
             WidgetKind::SystemMonitor => {
-                let mut top = cy;
-                let mut meters = Vec::new();
-                for meter in Meter::ALL {
-                    let mut node = Node::new(
-                        WidgetPart::Meter(id, meter),
-                        Role::ProgressBar,
-                        meter.label(),
-                        Rect::new(cx, top, cw, METER_TROUGH_TOP + METER_TROUGH_HEIGHT),
-                    );
-                    match meter.reading(live) {
-                        Some(fraction) => {
-                            node.value = Some(Value::Progress {
-                                value: fraction.clamp(0.0, 1.0) * 100.0,
-                                max: 100.0,
-                            });
-                        }
-                        None => node.description = Some(NOT_MEASURED.to_owned()),
-                    }
-                    meters.push(node);
-                    top += METER_PITCH;
-                }
-                meters
+                // Top to bottom, as they are drawn: the graphs, if it has
+                // room for them, and then its meters.
+                let layout = monitor_layout(w.size, (cx, cy, cw, ch));
+                layout
+                    .panels
+                    .iter()
+                    .map(|panel| graph_node(id, panel, &live.graphs))
+                    .chain(
+                        layout
+                            .meters
+                            .iter()
+                            .map(|&(meter, top)| meter_node(id, meter, (cx, top, cw), live)),
+                    )
+                    .collect()
             }
             WidgetKind::Notes => {
                 let mut note = Node::new(

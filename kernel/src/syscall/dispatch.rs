@@ -61,7 +61,7 @@ use super::number::{
     SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
     SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
     SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
-    SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
+    SYS_MEMORY_ADVISE, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
     SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
     SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
     SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
@@ -770,6 +770,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PIDFD_OPEN as usize] = Some(handlers::sys_pidfd_open);
     handlers[SYS_PIDFD_CLOSE as usize] = Some(handlers::sys_pidfd_close);
     handlers[SYS_POWER_RELOAD as usize] = Some(handlers::sys_power_reload);
+    handlers[SYS_MEMORY_ADVISE as usize] = Some(handlers::sys_memory_advise);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -1108,6 +1109,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_shared_anonymous_memory()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;
+    test_dispatch_memory_advise()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
     test_dispatch_pty_syscalls()?;
@@ -5233,6 +5235,60 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
 /// is registered and gated, not ungated or gated after its arguments. The granted
 /// arm (which returns NotSupported until the jump is wired) needs a ring-3 caller
 /// holding the right, as the secure-boot doors above do.
+/// `SYS_MEMORY_ADVISE` is wired to the Linux ABI's `madvise`, answering in
+/// Linux errnos: an unknown advice is `-EINVAL` before anything else is
+/// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
+/// 0, and memory-failure injection is `-EPERM`. (Its effects need a process
+/// and are tested in ring 3: `spawn::self_test_linux_madvise_fork`.)
+fn test_dispatch_memory_advise() -> KernelResult<()> {
+    use super::linux::errno;
+    let call = |addr: u64, len: u64, advice: u64| {
+        let args = SyscallArgs {
+            arg0: addr,
+            arg1: len,
+            arg2: advice,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_MEMORY_ADVISE, &args).value
+    };
+    let cases: [(u64, u64, u64, i64, &str); 4] = [
+        (
+            0x1000,
+            4096,
+            9999,
+            -i64::from(errno::EINVAL),
+            "an unknown advice",
+        ),
+        (
+            0x1001,
+            4096,
+            0,
+            -i64::from(errno::EINVAL),
+            "a misaligned address",
+        ),
+        (0x1000, 0, 4, 0, "MADV_DONTNEED of length 0"),
+        (0x1000, 4096, 100, -i64::from(errno::EPERM), "MADV_HWPOISON"),
+    ];
+    for (addr, len, advice, want, what) in cases {
+        let got = call(addr, len, advice);
+        if got != want {
+            serial_println!(
+                "[syscall]   FAIL: SYS_MEMORY_ADVISE answered {} for {}, want {}",
+                got,
+                what,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   SYS_MEMORY_ADVISE is the Linux madvise, answering Linux errnos: OK"
+    );
+    Ok(())
+}
+
 fn test_dispatch_power_reload() -> KernelResult<()> {
     let probe = SyscallArgs {
         arg0: 0x1000,

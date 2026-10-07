@@ -8068,6 +8068,15 @@ pub fn sys_power_reload(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::err(KernelError::NotSupported)
 }
 
+/// `SYS_MEMORY_ADVISE(addr, len, advice)` (1140): `madvise(2)` for native
+/// programs -- the Linux ABI's own implementation, with Linux's `MADV_*`
+/// values and `-errno` answers, which lane D's C library passes through
+/// unchanged (the device door's convention). The caller's own memory only,
+/// so no capability.
+pub fn sys_memory_advise(args: &SyscallArgs) -> SyscallResult {
+    super::linux::sys_madvise(args)
+}
+
 /// Copy a `len`-byte argument of at most `max` bytes out of user memory.
 fn read_bounded_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
     let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;

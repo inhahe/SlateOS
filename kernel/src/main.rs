@@ -3463,12 +3463,13 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_fork_wait(),
     );
 
-    // Ring-3 end-to-end test of madvise's fork advice (MADV_WIPEONFORK,
-    // MADV_DONTFORK) through a real fork. Same bounded harness.
+    // Ring-3 end-to-end test of madvise's promises: MADV_DONTNEED at 4 KiB,
+    // MADV_REMOVE, and MADV_WIPEONFORK / MADV_DONTFORK through a real fork.
+    // Same bounded harness.
     selftest::dispatch_debug(
-        "Linux madvise fork advice (ring 3)",
+        "Linux madvise (ring 3)",
         selftest::Severity::Diagnostic,
-        || proc::spawn::self_test_linux_madvise_fork(),
+        || proc::spawn::self_test_linux_madvise(),
     );
 
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):

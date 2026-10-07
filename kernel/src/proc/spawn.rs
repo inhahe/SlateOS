@@ -22681,31 +22681,33 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
     Ok(())
 }
 
-/// Ring-3 end-to-end test of `madvise`'s fork advice through a real `fork`:
-/// [`elf::build_linux_madvise_fork_test_elf`] marks one page wipe-on-fork and
-/// one don't-fork, forks, and has the child check what it got and the parent
-/// what it kept. It exits `0x2A` on success; any other code names the check
-/// that failed (see the builder).
+/// Ring-3 end-to-end test of `madvise`'s promises:
+/// [`elf::build_linux_madvise_test_elf`] drops one 4 KiB page of a frame with
+/// `MADV_DONTNEED`, punches shared memory with `MADV_REMOVE`, marks one page
+/// wipe-on-fork and one don't-fork, forks, and has the child check what it
+/// got and the parent what it kept. It exits `0x2A` on success; any other
+/// code names the check that failed (see the builder).
 ///
 /// What the kernel-context tests (`pcb`'s and `cow`'s) cannot reach, this
 /// does: `madvise` from a program, the policy carried from the parent's
-/// regions into the clone and the child's region list, and the child's first
-/// touch of a wiped page beside pages it shares with its parent. Bounded like
-/// the fork test: the harness never blocks.
-pub fn self_test_linux_madvise_fork() -> KernelResult<()> {
+/// regions into the clone and the child's region list, the child's first
+/// touch of a wiped page beside pages it shares with its parent, and a
+/// program's own read of a page it dropped. Bounded like the fork test: the
+/// harness never blocks.
+pub fn self_test_linux_madvise() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     // Scheduling rounds for the parent and child to finish: a healthy run
     // ends in a handful, and the loop stops the moment the parent is a
     // zombie; counted in yields, not time, so a busy host cannot use it up.
     const MAX_YIELDS: usize = 4096;
 
-    serial_println!("[spawn] Running Linux madvise fork advice (ring 3) integration test...");
+    serial_println!("[spawn] Running Linux madvise (ring 3) integration test...");
 
-    let exe_elf = elf::build_linux_madvise_fork_test_elf();
-    let argv: &[&[u8]] = &[b"spawn-test-linux-madvise-fork"];
+    let exe_elf = elf::build_linux_madvise_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-madvise"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
     let options = SpawnOptions {
-        name: "spawn-test-linux-madvise-fork",
+        name: "spawn-test-linux-madvise",
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &[],
@@ -22719,7 +22721,7 @@ pub fn self_test_linux_madvise_fork() -> KernelResult<()> {
     let result = match spawn_process(&exe_elf, &options) {
         Ok(r) => r,
         Err(e) => {
-            serial_println!("[spawn]   FAIL: madvise-fork spawn returned {:?}", e);
+            serial_println!("[spawn]   FAIL: madvise spawn returned {:?}", e);
             return Err(e);
         }
     };
@@ -22735,8 +22737,8 @@ pub fn self_test_linux_madvise_fork() -> KernelResult<()> {
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: madvise fork advice (ring 3) — the parent did not finish in {} \
-             yields (state {:?})",
+            "[spawn]   FAIL: madvise (ring 3) — the parent did not finish in {} yields \
+             (state {:?})",
             MAX_YIELDS,
             state
         );
@@ -22748,6 +22750,12 @@ pub fn self_test_linux_madvise_fork() -> KernelResult<()> {
             Some(0x31) => "madvise(MADV_WIPEONFORK) failed",
             Some(0x32) => "madvise(MADV_DONTFORK) failed",
             Some(0x36) => "MADV_WIPEONFORK on shared memory was not EINVAL",
+            Some(0x3A) => "MADV_REMOVE on shared memory failed",
+            Some(0x3B) => "shared memory was not zero after MADV_REMOVE",
+            Some(0x3C) => "MADV_REMOVE on private memory was not EINVAL",
+            Some(0x37) => "MADV_DONTNEED failed",
+            Some(0x38) => "a page dropped with MADV_DONTNEED did not read zero",
+            Some(0x39) => "MADV_DONTNEED of one page lost its neighbour's bytes",
             Some(0x33) => "fork failed",
             Some(0x34) => "wait4 failed",
             Some(0x35) => "the child did not exit normally",
@@ -22760,15 +22768,17 @@ pub fn self_test_linux_madvise_fork() -> KernelResult<()> {
             _ => "unexpected exit code",
         };
         serial_println!(
-            "[spawn]   FAIL: madvise fork advice (ring 3) — exit {:?}: {}",
+            "[spawn]   FAIL: madvise (ring 3) — exit {:?}: {}",
             exit_code,
             what
         );
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[spawn]   Linux madvise fork advice (ring 3: the child got the wiped page zeroed, \
-         the copied page intact and no don't-fork page; the parent kept both): OK"
+        "[spawn]   Linux madvise (ring 3: a DONTNEED'd page read zero beside a kept one, \
+         REMOVE zeroed shared memory and refused private; across fork the child got the \
+         wiped page zeroed, the copied page intact and no don't-fork page, and the parent \
+         kept both): OK"
     );
     Ok(())
 }

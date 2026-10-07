@@ -6027,11 +6027,12 @@ impl ForkAdvice {
     }
 }
 
-/// Whether [`ForkAdvice::Wipe`] may apply to `vma`: private anonymous memory
-/// only, as Linux's `madvise_vma_behavior` allows it (`EINVAL` for a file or
-/// a shared mapping). A guard or fixed region -- the kernel's own stack
-/// guards, the copied program headers, shared memory -- is not that.
-fn wipe_applies_to(vma: &Vma) -> bool {
+/// Whether `vma` is private anonymous memory: what Linux allows
+/// [`ForkAdvice::Wipe`] and `MADV_FREE` on (`EINVAL` for a file or a shared
+/// mapping). A guard or fixed region -- the kernel's own stack guards, the
+/// copied program headers, shared memory -- is not that.
+#[must_use]
+pub fn is_private_anonymous(vma: &Vma) -> bool {
     matches!(vma.kind, VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk)
         && !vma.flags.contains(crate::mm::page_table::PageFlags::SHARED)
 }
@@ -6042,7 +6043,7 @@ fn wipe_applies_to(vma: &Vma) -> bool {
 /// MADV_KEEPONFORK, MADV_DONTFORK, MADV_DOFORK)`.
 ///
 /// [`ForkAdvice::Wipe`] is refused for the whole range if any VMA in it is
-/// not private anonymous memory (see [`wipe_applies_to`]), and then nothing
+/// not private anonymous memory (see [`is_private_anonymous`]), and then nothing
 /// changes -- Linux changes the VMAs before the first unsuitable one and
 /// stops, which leaves a half-applied request; refusing all of it is the
 /// version a caller can reason about.
@@ -6073,7 +6074,9 @@ pub fn set_fork_policy(
         let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
         let in_range = |v: &&Vma| v.start < end && v.end > start;
-        if advice == ForkAdvice::Wipe && !proc.vmas.iter().filter(in_range).all(wipe_applies_to) {
+        if advice == ForkAdvice::Wipe
+            && !proc.vmas.iter().filter(in_range).all(is_private_anonymous)
+        {
             return Err(KernelError::InvalidArgument);
         }
 
@@ -6298,6 +6301,18 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
     proc.linux_securebits &= !LINUX_SECBIT_KEEP_CAPS;
 }
 
+/// Whether any 4 KiB sub-page of the 16 KiB frame at `frame_base` is mapped
+/// in `pml4_phys` -- for a not-present fault, whether the frame is *partly*
+/// present, since the faulting sub-page is not.
+#[allow(clippy::arithmetic_side_effects)]
+fn frame_partly_present(pml4_phys: u64, frame_base: u64) -> bool {
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, HW_PAGES_PER_FRAME, VirtAddr};
+    (0..HW_PAGES_PER_FRAME).any(|i| {
+        let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+        page_table::translate(pml4_phys, VirtAddr::new(sub_va)).is_some()
+    })
+}
+
 /// A per-4 KiB-subpage fill descriptor for [`resolve_subpaged_fault`].
 ///
 /// One of these is produced for each hardware 4 KiB page of a 16 KiB frame
@@ -6324,10 +6339,14 @@ struct SubpageFill {
 /// permissions and (for file-backed VMAs) its own file offset.
 ///
 /// The frame is allocated lazily on the first faulting subpage and *reused*
-/// by later faults on its siblings (found via [`page_table::translate`]).
-/// RSS accounting, reclaim registration, and the reverse map are keyed on
-/// the 16 KiB frame base and applied exactly once, matching the fast path's
-/// `map_frame`.
+/// by later faults on its siblings (found via [`page_table::translate`]) --
+/// when this address space alone holds it; see the body. RSS accounting,
+/// reclaim registration, and the reverse map are keyed on the 16 KiB frame
+/// base and applied exactly once, matching the fast path's `map_frame`.
+///
+/// Also the resolver for a frame one VMA covers but only some of whose
+/// sub-pages are present ([`frame_partly_present`]): it maps exactly the
+/// absent ones, which the whole-frame paths cannot.
 ///
 /// Returns `true` if at least one subpage of the frame is now mapped (the
 /// faulting subpage always is on success, so the instruction can retry).
@@ -6748,7 +6767,16 @@ fn resolve_fault_inner(
     // shared-object segment packing), fall to the per-subpage resolver, which
     // backs all four 4 KiB subpages with one shared physical frame but gives
     // each its own PTE permissions and file backing.
-    if !(vma_start <= frame_base && vma_end >= frame_end) {
+    //
+    // So does a frame some of whose sub-pages are already present, even when
+    // one VMA covers it all -- what `madvise(MADV_DONTNEED)` leaves when it
+    // drops 4 KiB of a 16 KiB frame. The whole-frame paths below map all four
+    // sub-pages at once; `map_frame` would find the present ones and answer
+    // `AlreadyExists`, which they take as another CPU's fault having won, and
+    // the faulting sub-page -- never mapped -- would fault again, forever.
+    // The per-subpage resolver fills exactly the absent ones.
+    let partly_present = pml4_phys != 0 && frame_partly_present(pml4_phys, frame_base);
+    if partly_present || !(vma_start <= frame_base && vma_end >= frame_end) {
         use crate::mm::page_table::{HW_PAGE_SIZE, HW_PAGES_PER_FRAME};
         let mut subpages: [Option<SubpageFill>; HW_PAGES_PER_FRAME] = [None; HW_PAGES_PER_FRAME];
         for (i, slot) in subpages.iter_mut().enumerate() {
@@ -8837,6 +8865,7 @@ pub fn self_test() -> KernelResult<()> {
     test_prot_none()?;
     test_fork_policy()?;
     test_subpage_fault_spares_a_shared_frame()?;
+    test_partly_present_frame_refills()?;
     test_fault_with_the_table_held()?;
     test_fault_swaps_in()?;
     test_rlimits()?;
@@ -9497,6 +9526,95 @@ fn test_subpage_fault_spares_a_shared_frame() -> KernelResult<()> {
 
     destroy(pid);
     serial_println!("[proc]   sub-page fault: own frame reused, shared frame left alone: OK");
+    Ok(())
+}
+
+/// Test: a frame one VMA covers, with one 4 KiB sub-page dropped -- what
+/// `madvise(MADV_DONTNEED)` leaves -- faults that sub-page back in as zeros
+/// and leaves its siblings' bytes alone.
+///
+/// The whole-frame paths map all four sub-pages at once, so before the
+/// partly-present rule `map_frame` found the present ones, answered
+/// `AlreadyExists`, and the fault was reported resolved with nothing mapped
+/// -- the faulting access would have faulted forever. "Resolved" is
+/// therefore not the assertion; "mapped, and zero" is.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_partly_present_frame_refills() -> KernelResult<()> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    use crate::mm::vma::ForkPolicy;
+
+    const USER_WRITE_NOT_PRESENT: u64 = (1 << 1) | (1 << 2);
+    const MARK: u8 = 0x5A;
+    let frame_size = FRAME_SIZE as u64;
+    let hw = HW_PAGE_SIZE as u64;
+    let Some(hhdm) = page_table::hhdm() else {
+        return Err(KernelError::NotSupported);
+    };
+
+    let pid = create("partly-present-test", 0);
+    let fail = |what: &str| {
+        serial_println!("[proc]   FAIL: partly present frame: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    };
+    if set_running(pid).is_err() {
+        return fail("could not start the test process");
+    }
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the test process has no address space");
+    };
+    let base: u64 = 0x0000_0034_0000_0000;
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let vma = Vma {
+        start: base,
+        end: base + frame_size,
+        kind: VmaKind::Anonymous,
+        flags: rw,
+        fork: ForkPolicy::COPY,
+    };
+    if add_vma(pid, vma).is_err() || !try_resolve_fault(pid, base, USER_WRITE_NOT_PRESENT) {
+        return fail("could not fault in the test frame");
+    }
+    let Some(frame) = page_table::translate(pml4, VirtAddr::new(base)) else {
+        return fail("the first fault mapped nothing");
+    };
+    // Mark sub-pages 0 and 1, then drop sub-page 1 alone.
+    // SAFETY: `frame` is the live 16 KiB frame mapped above, reached through
+    // its HHDM alias; no thread of the test process runs.
+    unsafe { core::ptr::write_bytes(frame.wrapping_add(hhdm) as *mut u8, MARK, 2 * HW_PAGE_SIZE) };
+    crate::mm::user::unmap_user_range(pml4, base + hw, base + 2 * hw);
+    if page_table::translate(pml4, VirtAddr::new(base + hw)).is_some() {
+        return fail("the dropped sub-page is still mapped");
+    }
+
+    let resolved = try_resolve_fault(pid, base + hw, USER_WRITE_NOT_PRESENT);
+    let Some(again) = page_table::translate(pml4, VirtAddr::new(base + hw)) else {
+        return fail(if resolved {
+            "the fault was reported resolved but nothing was mapped (the whole-frame loop)"
+        } else {
+            "the fault on the dropped sub-page was not resolved"
+        });
+    };
+    // SAFETY: `again` is the 4 KiB page now mapped at `base + hw` and `frame`
+    // the page still mapped at `base`, both read through the HHDM.
+    let (refilled, kept) = unsafe {
+        (
+            core::slice::from_raw_parts(again.wrapping_add(hhdm) as *const u8, HW_PAGE_SIZE),
+            core::slice::from_raw_parts(frame.wrapping_add(hhdm) as *const u8, HW_PAGE_SIZE),
+        )
+    };
+    if refilled.iter().any(|&b| b != 0) {
+        return fail("the refilled sub-page is not zero");
+    }
+    if kept.iter().any(|&b| b != MARK) {
+        return fail("the sibling sub-page lost its bytes");
+    }
+    destroy(pid);
+    serial_println!("[proc]   partly present frame: the dropped page comes back zero, alone: OK");
     Ok(())
 }
 

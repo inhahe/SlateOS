@@ -6591,6 +6591,19 @@ pub const SYS_PIDFD_CLOSE: u64 = 1138;
 /// a well-formed, authorised call currently returns `NotSupported`.
 pub const SYS_POWER_RELOAD: u64 = 1139;
 
+/// `SYS_MEMORY_ADVISE(addr, len, advice)` -- `madvise(2)` for native programs:
+/// the same call the Linux ABI's `madvise` makes, taking Linux's `MADV_*`
+/// values and answering Linux's errnos (as `-errno`), for the C library to
+/// pass through unchanged -- the convention of the device door
+/// ([`SYS_DEVICE_OPEN`]). It covers the advice that is a promise, not a hint:
+/// `MADV_DONTNEED` (and `_LOCKED`, `MADV_FREE`) leave the range reading as
+/// zeros (a private file mapping: as the file), `MADV_REMOVE` zeroes shared
+/// memory for every sharer, `MADV_WIPEONFORK` / `MADV_DONTFORK` (and their
+/// undoing) shape what the next fork copies. Acts only on the caller's own
+/// memory, so it needs no capability. Lane D's request
+/// `requests/d-a-a-native-program-has-no-madvise.md`.
+pub const SYS_MEMORY_ADVISE: u64 = 1140;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

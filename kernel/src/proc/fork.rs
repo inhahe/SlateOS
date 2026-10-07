@@ -539,14 +539,17 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
     //    we do any blocking dup work).
     let parent_handles = pcb::ipc_handles_snapshot(parent_pid).ok_or(KernelError::NoSuchProcess)?;
 
-    // 3. Copy-on-write clone of the address space.
-    //
+    // 3. Copy-on-write clone of the address space, less the parent's
+    //    `madvise(MADV_WIPEONFORK / MADV_DONTFORK)` regions, whose pages
+    //    the child must not get (`fork_create` below drops the DONTFORK
+    //    regions themselves).
+    let uncopied = pcb::fork_uncopied_ranges(parent_pid).ok_or(KernelError::NoSuchProcess)?;
     // SAFETY: `parent_pml4` is a live PML4 owned by `parent_pid`,
     // obtained from the PCB above.  `clone_address_space_cow` only
     // reads the parent tables and allocates new child tables; it does
     // not mutate parent mappings except to mark shared user pages
     // read-only for CoW, which is the intended behavior.
-    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(parent_pml4) }?;
+    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(parent_pml4, &uncopied) }?;
 
     // 4. Refcount-duplicate inheritable handles for the child.
     let mut child_handles: Vec<(ResourceType, u64)> = Vec::new();

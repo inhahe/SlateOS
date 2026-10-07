@@ -7133,6 +7133,7 @@ fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> Syscall
         end,
         kind: VmaKind::Anonymous,
         flags: page_flags,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     if pcb::add_vma(pid, vma).is_err() {
         pcb::linux_as_release(pid, length_aligned);
@@ -7749,6 +7750,39 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::ENOMEM);
     }
 
+    // What the next fork does with the range: recorded on the VMAs
+    // (`pcb::set_fork_policy`) and read by `fork` (`pcb::fork_uncopied_ranges`
+    // into `mm::cow::clone_address_space_cow`, and `pcb::fork_create`). Until
+    // 2026-10-07 all four were accepted and ignored, which for WIPEONFORK was
+    // a security bug: BoringSSL keeps its fork-detection word in such a page
+    // and trusts a zero there, so a forked child went on producing its
+    // parent's random numbers (lane D's report).
+    //
+    // WIPEONFORK over anything but private anonymous memory is EINVAL, as on
+    // Linux, and then nothing changes. A part of the range no VMA covers is
+    // ENOMEM, after the covered parts change, as on Linux -- with one
+    // divergence: the program's own segments and its initial stack, which
+    // the kernel's loader maps without VMA records, count as such parts here,
+    // where Linux has a VMA for them. Nothing marks those for fork.
+    let fork_advice = match advice {
+        MADV_WIPEONFORK => Some(pcb::ForkAdvice::Wipe),
+        MADV_KEEPONFORK => Some(pcb::ForkAdvice::Keep),
+        MADV_DONTFORK => Some(pcb::ForkAdvice::DontCopy),
+        MADV_DOFORK => Some(pcb::ForkAdvice::Copy),
+        _ => None,
+    };
+    if let Some(change) = fork_advice {
+        // An in-kernel caller has no address space to mark.
+        let Some(pid) = caller_pid() else {
+            return SyscallResult::ok(0);
+        };
+        return match pcb::set_fork_policy(pid, addr, end, change) {
+            Ok(true) => SyscallResult::ok(0),
+            Ok(false) => linux_err(errno::ENOMEM),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+
     // Reclaim hints actually free the resident frames backing
     // anonymous-class pages in the range — the *action* Linux performs for
     // MADV_DONTNEED / MADV_FREE / MADV_DONTNEED_LOCKED.  Without this, a
@@ -8050,30 +8084,20 @@ fn sys_brk(args: &SyscallArgs) -> SyscallResult {
             | PageFlags::WRITABLE
             | PageFlags::USER_ACCESSIBLE
             | PageFlags::NO_EXECUTE;
-        // Resize the heap VMA: drop the old (smaller) one, add the larger.
-        // remove_vma_range only edits bookkeeping — already-faulted frames
-        // in [brk_start, old_top) stay mapped and are re-covered below.
-        if old_top > brk_start && pcb::remove_vma_range(pid, brk_start, old_top).is_err() {
-            pcb::linux_as_release(pid, added);
-            return unchanged;
-        }
+        // Add only the new span, merged into the heap's top piece when that
+        // piece is plain heap (same flags, copied on fork). Until 2026-10-07
+        // growth replaced the whole heap VMA with a fresh one, which reset
+        // whatever `mprotect` or `madvise(MADV_WIPEONFORK / MADV_DONTFORK)`
+        // had recorded on the heap below -- for WIPEONFORK, a secret the next
+        // fork then copied into the child.
         let vma = Vma {
-            start: brk_start,
+            start: old_top,
             end: new_top,
             kind: VmaKind::Brk,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         };
-        if pcb::add_vma(pid, vma).is_err() {
-            // Roll back: restore the old heap VMA and refund the charge.
-            if old_top > brk_start {
-                let old_vma = Vma {
-                    start: brk_start,
-                    end: old_top,
-                    kind: VmaKind::Brk,
-                    flags,
-                };
-                let _ = pcb::add_vma(pid, old_vma);
-            }
+        if pcb::add_vma_merging(pid, vma).is_err() {
             pcb::linux_as_release(pid, added);
             return unchanged;
         }
@@ -13091,6 +13115,7 @@ fn linux_file_mmap(
                     end,
                     kind,
                     flags: page_flags,
+                    fork: crate::mm::vma::ForkPolicy::COPY,
                 },
             )
             .is_err()
@@ -13129,6 +13154,7 @@ fn linux_file_mmap(
             end,
             kind: VmaKind::Fixed,
             flags: page_flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         };
         if pcb::add_vma(pid, vma).is_err() {
             linux_file_mmap_rollback(pml4, base, want_frames, frame_size);
@@ -54257,6 +54283,7 @@ pub fn self_test_madvise_dontneed() -> crate::error::KernelResult<()> {
             end,
             kind: VmaKind::Anonymous,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     ) {
         pcb::destroy(pid);
@@ -54556,6 +54583,7 @@ pub fn self_test_process_vm_cross_as() -> crate::error::KernelResult<()> {
             end,
             kind: VmaKind::Anonymous,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     ) {
         cleanup();

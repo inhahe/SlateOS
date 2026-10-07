@@ -311,7 +311,12 @@ fn install_cow(pml4_phys: u64, prep: CowPrep) -> KernelResult<()> {
     // and a reference given up could let its last other owner free it.
     crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
-    if !old_still_referenced {
+    if old_still_referenced {
+        // The group now maps two frames, the old and the new: one more
+        // frame in this address space's RSS (released by whichever of
+        // munmap or teardown drops the new frame's last sub-page).
+        super::accounting::charge(pml4_phys, 1);
+    } else {
         // This address space's last reference to the old frame is gone.
         super::rmap::remove(frame_base, pml4_phys, group_virt_base);
         // SAFETY: old frame is a valid allocated frame.
@@ -529,6 +534,11 @@ unsafe fn map_child_pte(
 /// `false` if the group was entirely unmapped (nothing to copy — the
 /// child will demand-fault it via the inherited VMA, if any).
 ///
+/// Sub-pages marked in `skip` are left out entirely: not mapped in the
+/// child, not downgraded in the parent, and not counted. They are the
+/// pieces of `madvise(MADV_WIPEONFORK / MADV_DONTFORK)` regions that fall in
+/// this group (see [`clone_address_space_cow`]).
+///
 /// # Safety
 ///
 /// - `parent_pml4` and `child_pml4` must be valid PML4 tables.
@@ -542,6 +552,7 @@ unsafe fn clone_frame_group(
     parent_pt: u64,
     base_pt_idx: usize,
     hhdm: u64,
+    skip: [bool; HW_PAGES_PER_FRAME],
 ) -> KernelResult<bool> {
     let mut parent_needs_flush = false;
     // Distinct 16 KiB frame bases referenced by this group's siblings.  At
@@ -551,6 +562,9 @@ unsafe fn clone_frame_group(
     let mut seen_count = 0usize;
 
     for i in 0..HW_PAGES_PER_FRAME {
+        if skip.get(i) == Some(&true) {
+            continue;
+        }
         let pt_idx = base_pt_idx + i;
         // SAFETY: parent_pt is a valid PT page, pt_idx < 512.
         let pte = unsafe { page_table::read_entry(parent_pt, pt_idx, hhdm) };
@@ -637,8 +651,10 @@ unsafe fn clone_frame_group(
         return Ok(false);
     }
 
-    // Charge the child's RSS for the shared frame (mirrors map_frame).
-    super::accounting::charge(child_pml4, 1);
+    // Charge the child's RSS for each frame it now maps (mirrors map_frame):
+    // usually one, but a group whose sub-pages point into different frames
+    // maps each of them, and its teardown and munmap release each one.
+    super::accounting::charge(child_pml4, seen_count as u64);
 
     // If we downgraded any parent PTE to CoW, the parent (the running
     // process that called fork) must flush stale writable TLB entries.
@@ -649,15 +665,40 @@ unsafe fn clone_frame_group(
     Ok(true)
 }
 
+/// Which sub-pages of the group at `group_virt` fall in `uncopied` (sorted,
+/// non-overlapping `[start, end)` ranges): the per-sub-page `skip` mask for
+/// [`clone_frame_group`].
+#[allow(clippy::arithmetic_side_effects)]
+fn uncopied_mask(uncopied: &[(u64, u64)], group_virt: u64) -> [bool; HW_PAGES_PER_FRAME] {
+    let mut skip = [false; HW_PAGES_PER_FRAME];
+    if uncopied.is_empty() {
+        return skip;
+    }
+    for (i, slot) in skip.iter_mut().enumerate() {
+        let sub_va = group_virt + (i as u64) * (HW_PAGE_SIZE as u64);
+        // The last range starting at or below `sub_va` is the only one that
+        // can contain it.
+        let idx = uncopied.partition_point(|&(start, _)| start <= sub_va);
+        *slot = idx > 0 && uncopied.get(idx - 1).is_some_and(|&(_, end)| sub_va < end);
+    }
+    skip
+}
+
 /// Walk the parent's user half and duplicate every mapped frame group into
 /// the child via [`clone_frame_group`].  Swapped-out pages are brought
-/// back into RAM first (in the parent) so they can be shared CoW.
+/// back into RAM first (in the parent) so they can be shared CoW.  Pages in
+/// `uncopied` are not duplicated (see [`clone_address_space_cow`]).
 ///
 /// # Safety
 ///
 /// - `parent_pml4` and `child_pml4` must be valid PML4 tables.
 #[allow(clippy::arithmetic_side_effects)]
-unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> KernelResult<()> {
+unsafe fn clone_user_half(
+    parent_pml4: u64,
+    child_pml4: u64,
+    hhdm: u64,
+    uncopied: &[(u64, u64)],
+) -> KernelResult<()> {
     for pml4_idx in 0..256usize {
         // SAFETY: parent_pml4 valid, index < 512.
         let pml4e = unsafe { page_table::read_entry(parent_pml4, pml4_idx, hhdm) };
@@ -686,6 +727,12 @@ unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> Kerne
                     let group_virt = compose_virt(pml4_idx, pdpt_idx, pd_idx, base_pt_idx);
 
                     let virt = VirtAddr::new(group_virt);
+                    let skip = uncopied_mask(uncopied, group_virt);
+                    if skip.iter().all(|&s| s) {
+                        // Nothing of this group reaches the child: not even
+                        // worth bringing back from swap.
+                        continue;
+                    }
 
                     loop {
                         // Swapped-out frame: bring it back to RAM (in the
@@ -729,6 +776,7 @@ unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> Kerne
                                 pt,
                                 base_pt_idx,
                                 hhdm,
+                                skip,
                             )?;
                         }
                         break;
@@ -754,6 +802,12 @@ unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> Kerne
 ///   shared CoW.
 /// - **Unmapped / demand-paged** regions are skipped (the child inherits
 ///   the parent's VMAs separately and will demand-fault them on access).
+/// - **`uncopied`** ranges -- sorted, non-overlapping `[start, end)`, from
+///   [`crate::proc::pcb::fork_uncopied_ranges`] -- are skipped too, page by
+///   4 KiB page: the parent's `madvise(MADV_WIPEONFORK)` regions, which the
+///   child keeps as regions and demand-zeroes, and `MADV_DONTFORK` ones,
+///   which it does not get at all. The parent's own pages there are left
+///   exactly as they were (still writable: nothing shares them).
 ///
 /// On any failure the partially-built child address space is fully torn
 /// down (releasing all shared references) before the error is returned.
@@ -773,14 +827,17 @@ unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> Kerne
 /// - `parent_pml4` must be a valid PML4 table that the caller owns.
 /// - The parent's user address space must be quiescent for the duration of
 ///   the call (no other thread mutating its page tables concurrently).
-pub unsafe fn clone_address_space_cow(parent_pml4: u64) -> KernelResult<u64> {
+pub unsafe fn clone_address_space_cow(
+    parent_pml4: u64,
+    uncopied: &[(u64, u64)],
+) -> KernelResult<u64> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
     // Allocate the child PML4 (kernel half cloned from the active table).
     let child_pml4 = page_table::alloc_pml4()?;
 
     // SAFETY: both PML4s are valid; parent is quiescent (caller guarantee).
-    let result = unsafe { clone_user_half(parent_pml4, child_pml4, hhdm) };
+    let result = unsafe { clone_user_half(parent_pml4, child_pml4, hhdm, uncopied) };
 
     if let Err(e) = result {
         // Roll back: tear down everything we mapped into the child.  Shared
@@ -844,6 +901,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 6: a page shared by design stays shared across fork().
     test_fork_keeps_shared_pages_shared()?;
 
+    // Test 7: madvise(MADV_WIPEONFORK / MADV_DONTFORK) pages stay behind.
+    test_fork_leaves_out_uncopied_pages()?;
+
     serial_println!("[cow] Self-test PASSED");
     Ok(())
 }
@@ -894,7 +954,7 @@ fn test_fork_keeps_shared_pages_shared() -> KernelResult<()> {
         let rmap_before = super::rmap::mapper_count(phys);
 
         // SAFETY: p is a valid, quiescent PML4 built above.
-        let c = unsafe { clone_address_space_cow(p)? };
+        let c = unsafe { clone_address_space_cow(p, &[])? };
         child = Some(c);
 
         let refs = frame::refcount(region_frame);
@@ -966,6 +1026,122 @@ fn test_fork_keeps_shared_pages_shared() -> KernelResult<()> {
 
     serial_println!(
         "[cow]   fork keeps a shared page shared (same frame, writable, no COW, no rmap): OK"
+    );
+    Ok(())
+}
+
+/// Test 7: the pages of a parent's `madvise(MADV_WIPEONFORK / MADV_DONTFORK)`
+/// regions do not reach the child -- at 4 KiB granularity, inside a group as
+/// well as a whole group -- and the parent's own pages there stay exactly as
+/// they were: writable, not copy-on-write, not shared.
+///
+/// Two groups, each fully mapped in the parent to a frame of its own. The
+/// first loses one sub-page to `uncopied`, the second all four. The test
+/// holds a reference of its own on each frame, so the counts it checks after
+/// both teardowns are exact rather than racing a reuse of a freed frame.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_fork_leaves_out_uncopied_pages() -> KernelResult<()> {
+    let base: u64 = 0x0000_4000_0002_0000; // user half, frame-aligned
+    let hw = HW_PAGE_SIZE as u64;
+    let group = FRAME_SIZE as u64;
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let fail = |what: &str| {
+        serial_println!("[cow]   FAIL: fork with uncopied ranges: {}", what);
+        Err(KernelError::InternalError)
+    };
+
+    let mut parent: Option<u64> = None;
+    let mut child: Option<u64> = None;
+    let mut frames: [Option<PhysFrame>; 2] = [None, None];
+
+    let outcome = (|| -> KernelResult<()> {
+        let p = page_table::alloc_pml4()?;
+        parent = Some(p);
+        for (k, slot) in frames.iter_mut().enumerate() {
+            let f = frame::alloc_frame_zeroed()?;
+            let va = VirtAddr::new(base + k as u64 * group);
+            // SAFETY: `p` is the valid PML4 built above; `va` is a
+            // frame-aligned user address with nothing mapped at it. The
+            // mapping takes the allocation's reference.
+            if let Err(e) = unsafe { page_table::map_frame(p, va, f, rw) } {
+                // SAFETY: never mapped; this drops the allocation's reference.
+                unsafe { frame::free_frame(f)? };
+                return Err(e);
+            }
+            // SAFETY: `f` is live (mapped above). The test's own reference,
+            // dropped after the teardowns.
+            unsafe { frame::ref_inc(f)? };
+            *slot = Some(f);
+        }
+
+        let uncopied = [(base + hw, base + 2 * hw), (base + group, base + 2 * group)];
+        // SAFETY: `p` is a valid, quiescent PML4 built above.
+        let c = unsafe { clone_address_space_cow(p, &uncopied)? };
+        child = Some(c);
+
+        for i in 0..2 * HW_PAGES_PER_FRAME as u64 {
+            let va = VirtAddr::new(base + i * hw);
+            let left_out = i == 1 || i >= HW_PAGES_PER_FRAME as u64;
+            let in_child = page_table::translate(c, va).is_some();
+            let pflags = page_table::translate_flags(p, va).unwrap_or(PageFlags::empty());
+            if left_out {
+                if in_child {
+                    return fail("the child got a page of an uncopied range");
+                }
+                if !pflags.contains(PageFlags::WRITABLE) || pflags.contains(PageFlags::COW) {
+                    return fail("the parent's page in an uncopied range was changed");
+                }
+            } else {
+                if !in_child {
+                    return fail("the child lost a page outside the uncopied ranges");
+                }
+                if pflags.contains(PageFlags::WRITABLE) || !pflags.contains(PageFlags::COW) {
+                    return fail("the parent's shared page was not made copy-on-write");
+                }
+            }
+        }
+        // test + parent + child for the first group's frame; test + parent
+        // for the second's, which nothing shares.
+        let refs: [u16; 2] = frames.map(|f| f.map_or(0, frame::refcount));
+        if refs != [3, 2] {
+            serial_println!("[cow]   references after fork: {:?}, want [3, 2]", refs);
+            return fail("wrong frame references after fork");
+        }
+        Ok(())
+    })();
+
+    // SAFETY: neither PML4 is loaded in any CR3; no thread uses them.
+    unsafe {
+        if let Some(c) = child {
+            page_table::destroy_user_address_space(c);
+        }
+        if let Some(p) = parent {
+            page_table::destroy_user_address_space(p);
+        }
+    }
+    let mut left = [0u16; 2];
+    for (slot, f) in left.iter_mut().zip(frames.iter()) {
+        if let Some(f) = *f {
+            *slot = frame::refcount(f);
+            if *slot >= 1 {
+                // SAFETY: the test's own reference, taken above.
+                unsafe { frame::free_frame(f)? };
+            }
+        }
+    }
+    outcome?;
+    if left != [1, 1] {
+        serial_println!(
+            "[cow]   references after both teardowns: {:?}, want [1, 1]",
+            left
+        );
+        return fail("a teardown kept or lost a reference");
+    }
+    serial_println!(
+        "[cow]   fork leaves wipe/dontfork pages out, 4 KiB-exact, parent untouched: OK"
     );
     Ok(())
 }
@@ -1042,7 +1218,7 @@ fn test_clone_address_space_cow() {
 
     // Clone the address space (fork).
     // SAFETY: parent is a valid, quiescent PML4 we just built.
-    let child = unsafe { clone_address_space_cow(parent).expect("clone_address_space_cow") };
+    let child = unsafe { clone_address_space_cow(parent, &[]).expect("clone_address_space_cow") };
 
     // Refcounts bumped to 2 (parent + child).
     assert!(

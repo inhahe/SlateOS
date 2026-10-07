@@ -1771,11 +1771,29 @@ pub fn fork_create(
             parent.linux_nice,
             parent.linux_sched_reset_on_fork,
         );
+        // `madvise(MADV_DONTFORK)` regions are not the child's at all: no VMA
+        // (and `clone_address_space_cow` copied none of their pages). The
+        // child's address-space charge drops by their size, which is what a
+        // munmap of them would refund. A `wipe` region is kept: the child has
+        // the region, empty, and demand-zeroes it.
+        let dropped_bytes = parent
+            .vmas
+            .iter()
+            .filter(|v| v.fork.dont_copy)
+            .fold(0u64, |sum, v| {
+                sum.saturating_add(v.end.saturating_sub(v.start))
+            });
+        let child_vmas: Vec<Vma> = parent
+            .vmas
+            .iter()
+            .filter(|v| !v.fork.dont_copy)
+            .copied()
+            .collect();
         (
             parent.name.clone(),
             parent.cap_table.clone(),
             parent.credentials.clone(),
-            parent.vmas.clone(),
+            child_vmas,
             parent.abi_mode,
             cloned_fd_table,
             // A forked child shares the parent's already-built SysV
@@ -1787,7 +1805,7 @@ pub fn fork_create(
             parent.cwd.clone(),
             parent.root_dir.clone(),
             parent.rlimits,
-            parent.linux_as_bytes,
+            parent.linux_as_bytes.saturating_sub(dropped_bytes),
             // The child's address space mirrors the parent's, including its
             // heap, so it inherits the same brk floor and break.
             parent.brk_start,
@@ -5510,6 +5528,55 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
     Ok(())
 }
 
+/// [`add_vma`], but when the VMA ending exactly at `vma.start` is the same
+/// kind of anonymous memory with the same flags and fork policy, extend that
+/// one instead of adding a neighbour -- what Linux's `vma_merge` does, and
+/// what keeps a heap grown by a thousand `brk` calls one region rather than
+/// a thousand.
+///
+/// Never merges file-backed VMAs (each owns a reference on its file and an
+/// offset that would have to agree) and never guard or fixed ones.
+///
+/// # Errors
+///
+/// As [`add_vma`].
+pub fn add_vma_merging(pid: ProcessId, vma: Vma) -> KernelResult<()> {
+    use crate::mm::page_table::VirtAddr;
+
+    let mergeable_kind = matches!(vma.kind, VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk);
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+        if !VirtAddr::new(vma.start).is_hw_page_aligned()
+            || !VirtAddr::new(vma.end).is_hw_page_aligned()
+        {
+            return Err(KernelError::BadAlignment);
+        }
+        if vma.end <= vma.start {
+            return Err(KernelError::InvalidArgument);
+        }
+        if proc
+            .vmas
+            .iter()
+            .any(|existing| vma.start < existing.end && vma.end > existing.start)
+        {
+            return Err(KernelError::AlreadyExists);
+        }
+        if mergeable_kind {
+            if let Some(below) = proc.vmas.iter_mut().find(|v| {
+                v.end == vma.start
+                    && v.kind == vma.kind
+                    && v.flags == vma.flags
+                    && v.fork == vma.fork
+            }) {
+                below.end = vma.end;
+                return Ok(());
+            }
+        }
+    }
+    add_vma(pid, vma)
+}
+
 /// Snapshot a process's VMA list, sorted by start address.
 ///
 /// Returns a cloned `Vec` (the live list is behind the process-table
@@ -5640,6 +5707,7 @@ pub fn reserve_unmapped_area(
             end,
             kind,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     );
     Some(base)
@@ -5798,6 +5866,9 @@ fn vma_subrange(
         end: new_end,
         kind,
         flags,
+        // A piece of a region is still that region: what fork does with it
+        // does not change because something else split it.
+        fork: orig.fork,
     }
 }
 
@@ -5925,6 +5996,163 @@ pub fn protect_vma_range(
         let _ = crate::fs::handle::dup_shared(handle);
     }
     Ok(())
+}
+
+/// A `madvise` change to what `fork` does with a range: one flag of
+/// [`crate::mm::vma::ForkPolicy`] set or cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkAdvice {
+    /// `MADV_WIPEONFORK`: the child gets the range zero-filled.
+    Wipe,
+    /// `MADV_KEEPONFORK`: undo [`ForkAdvice::Wipe`].
+    Keep,
+    /// `MADV_DONTFORK`: the child does not get the range at all.
+    DontCopy,
+    /// `MADV_DOFORK`: undo [`ForkAdvice::DontCopy`].
+    Copy,
+}
+
+impl ForkAdvice {
+    /// `policy` with this advice applied.
+    #[must_use]
+    pub const fn apply(self, policy: crate::mm::vma::ForkPolicy) -> crate::mm::vma::ForkPolicy {
+        let mut p = policy;
+        match self {
+            Self::Wipe => p.wipe = true,
+            Self::Keep => p.wipe = false,
+            Self::DontCopy => p.dont_copy = true,
+            Self::Copy => p.dont_copy = false,
+        }
+        p
+    }
+}
+
+/// Whether [`ForkAdvice::Wipe`] may apply to `vma`: private anonymous memory
+/// only, as Linux's `madvise_vma_behavior` allows it (`EINVAL` for a file or
+/// a shared mapping). A guard or fixed region -- the kernel's own stack
+/// guards, the copied program headers, shared memory -- is not that.
+fn wipe_applies_to(vma: &Vma) -> bool {
+    matches!(vma.kind, VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk)
+        && !vma.flags.contains(crate::mm::page_table::PageFlags::SHARED)
+}
+
+/// Change what `fork` does with `[start, end)` (4 KiB aligned) in every VMA
+/// of `pid` the range covers, splitting VMAs at its boundaries as
+/// [`protect_vma_range`] does. The work behind `madvise(MADV_WIPEONFORK,
+/// MADV_KEEPONFORK, MADV_DONTFORK, MADV_DOFORK)`.
+///
+/// [`ForkAdvice::Wipe`] is refused for the whole range if any VMA in it is
+/// not private anonymous memory (see [`wipe_applies_to`]), and then nothing
+/// changes -- Linux changes the VMAs before the first unsuitable one and
+/// stops, which leaves a half-applied request; refusing all of it is the
+/// version a caller can reason about.
+///
+/// Returns whether VMAs cover the whole range. Linux answers `ENOMEM` for a
+/// range with unmapped parts, but only after changing the mapped ones, and
+/// this does the same: the change is made to whatever is covered either way.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if the PID doesn't exist.
+/// - [`KernelError::InvalidArgument`] if `end <= start`, or `Wipe` over
+///   memory it does not apply to.
+pub fn set_fork_policy(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+    advice: ForkAdvice,
+) -> KernelResult<bool> {
+    if end <= start {
+        return Err(KernelError::InvalidArgument);
+    }
+    // A FileBacked VMA split into several pieces needs one owned backing
+    // reference per piece; taken after the table lock is released, as
+    // `protect_vma_range` does (the open-file lock must never nest under it).
+    let mut retains: Vec<u64> = Vec::new();
+    let covered = {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+        let in_range = |v: &&Vma| v.start < end && v.end > start;
+        if advice == ForkAdvice::Wipe && !proc.vmas.iter().filter(in_range).all(wipe_applies_to) {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Coverage over the sorted, non-overlapping list: walk the VMAs that
+        // intersect the range and look for a gap before, between or after.
+        let mut cursor = start;
+        let mut gap = false;
+        for v in proc.vmas.iter().filter(in_range) {
+            if v.start > cursor {
+                gap = true;
+            }
+            cursor = core::cmp::max(cursor, v.end);
+        }
+        let covered = !gap && cursor >= end;
+
+        let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len().saturating_add(2));
+        for vma in proc.vmas.drain(..) {
+            let new_policy = advice.apply(vma.fork);
+            if vma.end <= start || vma.start >= end || new_policy == vma.fork {
+                kept.push(vma);
+                continue;
+            }
+            let mut pieces = 0u32;
+            if vma.start < start {
+                kept.push(vma_subrange(&vma, vma.start, start, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            let mut middle = vma_subrange(
+                &vma,
+                core::cmp::max(start, vma.start),
+                core::cmp::min(end, vma.end),
+                vma.flags,
+            );
+            middle.fork = new_policy;
+            kept.push(middle);
+            pieces = pieces.saturating_add(1);
+            if vma.end > end {
+                kept.push(vma_subrange(&vma, end, vma.end, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                for _ in 1..pieces {
+                    retains.push(handle);
+                }
+            }
+        }
+        kept.sort_unstable_by_key(|v| v.start);
+        proc.vmas = kept;
+        covered
+    };
+    for handle in retains {
+        if let Err(e) = crate::fs::handle::dup_shared(handle) {
+            // Cannot fail while the split VMA holds its own reference -- the
+            // failures are an unknown handle and refcount overflow -- but if
+            // it ever does, the pieces share one reference, so say so.
+            serial_println!(
+                "[pcb] set_fork_policy: no reference for a piece of a split file mapping \
+                 (handle {handle}): {e:?}"
+            );
+        }
+    }
+    Ok(covered)
+}
+
+/// The ranges of `pid`'s address space whose pages a fork must not copy --
+/// VMAs marked [`crate::mm::vma::ForkPolicy::wipe`] or `dont_copy` -- in
+/// address order, for [`crate::mm::cow::clone_address_space_cow`]. Empty
+/// for nearly every process. `None` if there is no such process.
+#[must_use]
+pub fn fork_uncopied_ranges(pid: ProcessId) -> Option<Vec<(u64, u64)>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    Some(
+        proc.vmas
+            .iter()
+            .filter(|v| !v.fork.copies_pages())
+            .map(|v| (v.start, v.end))
+            .collect(),
+    )
 }
 
 /// Return the sub-ranges of `[start, end)` that are **not** covered by any
@@ -6117,19 +6345,42 @@ fn resolve_subpaged_fault(
         None => return false,
     };
 
-    // Is a physical 16 KiB frame already backing any subpage of this frame?
-    // If so, reuse it (a sibling subpage was mapped by an earlier fault);
-    // otherwise allocate a fresh zeroed frame.  Physical address 0 is never
-    // a valid user frame, so it doubles as the "none found" sentinel.
+    // Is a physical 16 KiB frame already backing a subpage of this frame,
+    // which this address space alone holds? If so, reuse it (a sibling
+    // subpage was mapped by an earlier fault); otherwise allocate a fresh
+    // zeroed frame.  Physical address 0 is never a valid user frame, so it
+    // doubles as the "none found" sentinel.
+    //
+    // "Alone" is the whole point. The slice of the frame this fault zeroes
+    // and fills is unmapped *here*, which says nothing about anywhere else:
+    // after a fork the frame is copy-on-write-shared with the other process,
+    // which may map that very slice; a page-cache frame is shared by every
+    // process mapping the file; a `MAP_SHARED` one is shared by design.
+    // Until 2026-10-07 any present sibling's frame was reused, so a child
+    // that unmapped 4 KiB of an inherited group and mapped fresh memory there
+    // zeroed its parent's page in place, and a group first faulted in from
+    // the page cache and later partly overlaid (`ld.so`'s pattern) had file
+    // bytes written into the cache's frame. A shared sibling now gets a frame
+    // of its own beside it: sub-pages of one group in different frames is a
+    // shape the rest of the mm already handles (a partial copy-on-write
+    // break makes it).
     let mut base16: u64 = 0;
+    let mut sibling_present = false;
     for i in 0..HW_PAGES_PER_FRAME {
         #[allow(clippy::arithmetic_side_effects)]
-        let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
-        if let Some(phys4k) = page_table::translate(pml4_phys, VirtAddr::new(sub_va)) {
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                base16 = phys4k & !(FRAME_SIZE as u64 - 1);
-            }
+        let sub_va = VirtAddr::new(frame_base + (i as u64) * (HW_PAGE_SIZE as u64));
+        let Some(phys4k) = page_table::translate(pml4_phys, sub_va) else {
+            continue;
+        };
+        sibling_present = true;
+        #[allow(clippy::arithmetic_side_effects)]
+        let candidate = phys4k & !(FRAME_SIZE as u64 - 1);
+        let shared_by_design = page_table::translate_flags(pml4_phys, sub_va)
+            .is_some_and(|f| f.contains(PageFlags::SHARED));
+        let alone = !shared_by_design
+            && PhysFrame::from_addr(candidate).is_some_and(|f| frame::refcount(f) == 1);
+        if alone {
+            base16 = candidate;
             break;
         }
     }
@@ -6241,12 +6492,19 @@ fn resolve_subpaged_fault(
         page_table::flush_frame(VirtAddr::new(frame_base));
     }
 
-    if newly {
+    if newly && !sibling_present {
         // Account for the new 16 KiB frame and register it for reclaim and
         // reverse mapping — once, keyed on the frame base, mirroring the
         // fast path's `map_frame` + post-map bookkeeping.
         crate::mm::accounting::charge(pml4_phys, 1);
         crate::mm::swap::register_reclaimable(pml4_phys, frame_base, repr_flags);
+        crate::mm::rmap::add(base16, pml4_phys, frame_base);
+    } else if newly {
+        // A second frame beside a shared sibling's (above): one more frame
+        // in this address space's RSS and its reverse mapping, exactly what a
+        // partial copy-on-write break records (`mm::cow::install_cow`). The
+        // group was registered for reclaim when its first frame came.
+        crate::mm::accounting::charge(pml4_phys, 1);
         crate::mm::rmap::add(base16, pml4_phys, frame_base);
     }
 
@@ -8577,6 +8835,8 @@ pub fn self_test() -> KernelResult<()> {
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
+    test_fork_policy()?;
+    test_subpage_fault_spares_a_shared_frame()?;
     test_fault_with_the_table_held()?;
     test_fault_swaps_in()?;
     test_rlimits()?;
@@ -8882,6 +9142,7 @@ fn test_prot_none() -> KernelResult<()> {
             end,
             kind: VmaKind::Anonymous,
             flags: none_flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     ) {
         serial_println!("[proc]   FAIL: prot-none add_vma {:?}", e);
@@ -8943,6 +9204,299 @@ fn test_prot_none() -> KernelResult<()> {
 
     destroy(pid);
     serial_println!("[proc]   real PROT_NONE (resolver gate + mprotect round-trip): OK");
+    Ok(())
+}
+
+/// Test: `madvise`'s fork advice on the VMA list ([`set_fork_policy`]):
+/// 4 KiB-exact splits, the four changes and their independence, wipe's
+/// private-anonymous rule (refused whole, changing nothing), coverage, the
+/// ranges a fork leaves out ([`fork_uncopied_ranges`]), and a heap that grows
+/// without losing them ([`add_vma_merging`]).
+#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
+fn test_fork_policy() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+    use crate::mm::vma::ForkPolicy;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let hw = crate::mm::page_table::HW_PAGE_SIZE as u64;
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let wipe = ForkPolicy {
+        wipe: true,
+        dont_copy: false,
+    };
+    let dont = ForkPolicy {
+        wipe: false,
+        dont_copy: true,
+    };
+    let both = ForkPolicy {
+        wipe: true,
+        dont_copy: true,
+    };
+    let copy = ForkPolicy::COPY;
+
+    let pid = create("fork-policy-test", 0);
+    let fail = |what: &str| {
+        serial_println!("[proc]   FAIL: fork policy: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    };
+    if set_running(pid).is_err() {
+        return fail("could not start the test process");
+    }
+    // The policies of the VMAs in [lo, hi), as (start, end, policy).
+    let policies = |lo: u64, hi: u64| -> Vec<(u64, u64, ForkPolicy)> {
+        list_vmas(pid)
+            .unwrap_or_default()
+            .iter()
+            .filter(|v| v.start < hi && v.end > lo)
+            .map(|v| (v.start, v.end, v.fork))
+            .collect()
+    };
+    let anon = |start: u64, end: u64, flags: PageFlags| Vma {
+        start,
+        end,
+        kind: VmaKind::Anonymous,
+        flags,
+        fork: ForkPolicy::COPY,
+    };
+
+    // Private anonymous [base, base + 2 frames); shared anonymous memory two
+    // frames above it.
+    let base: u64 = 0x0000_0031_0000_0000;
+    let shared_at = base + 4 * frame;
+    if add_vma(pid, anon(base, base + 2 * frame, rw)).is_err()
+        || add_vma(
+            pid,
+            anon(shared_at, shared_at + frame, rw | PageFlags::SHARED),
+        )
+        .is_err()
+    {
+        return fail("could not add the test regions");
+    }
+
+    // 1. Wipe one 4 KiB page: three pieces, only the middle one marked.
+    if set_fork_policy(pid, base + hw, base + 2 * hw, ForkAdvice::Wipe) != Ok(true) {
+        return fail("wipe of a mapped page was refused");
+    }
+    if policies(base, base + 2 * frame)
+        != [
+            (base, base + hw, copy),
+            (base + hw, base + 2 * hw, wipe),
+            (base + 2 * hw, base + 2 * frame, copy),
+        ]
+    {
+        return fail("wipe did not split the region at 4 KiB");
+    }
+    if fork_uncopied_ranges(pid).as_deref() != Some(&[(base + hw, base + 2 * hw)][..]) {
+        return fail("a wiped page is not among the ranges fork leaves out");
+    }
+
+    // 2. DONTFORK over the wiped page and the next: the flags are independent.
+    if set_fork_policy(pid, base + hw, base + 3 * hw, ForkAdvice::DontCopy) != Ok(true) {
+        return fail("dontfork of mapped pages was refused");
+    }
+    if policies(base + hw, base + 3 * hw)
+        != [
+            (base + hw, base + 2 * hw, both),
+            (base + 2 * hw, base + 3 * hw, dont),
+        ]
+    {
+        return fail("dontfork did not combine with wipe page by page");
+    }
+
+    // 3. DOFORK clears only dont_copy: the wiped page is still wiped.
+    if set_fork_policy(pid, base + hw, base + 3 * hw, ForkAdvice::Copy) != Ok(true) {
+        return fail("dofork was refused");
+    }
+    if policies(base + hw, base + 3 * hw)
+        != [
+            (base + hw, base + 2 * hw, wipe),
+            (base + 2 * hw, base + 3 * hw, copy),
+        ]
+    {
+        return fail("dofork cleared more than dont_copy");
+    }
+
+    // 4. Wipe over shared memory is refused -- also when the range starts in
+    //    private memory -- and nothing changes.
+    let before = list_vmas(pid);
+    if set_fork_policy(pid, shared_at, shared_at + frame, ForkAdvice::Wipe)
+        != Err(KernelError::InvalidArgument)
+        || set_fork_policy(pid, base, shared_at + frame, ForkAdvice::Wipe)
+            != Err(KernelError::InvalidArgument)
+    {
+        return fail("wipe of shared memory was not refused");
+    }
+    if list_vmas(pid) != before {
+        return fail("a refused wipe changed the regions");
+    }
+
+    // 5. KEEPONFORK: nothing is left out any more.
+    if set_fork_policy(pid, base, base + 2 * frame, ForkAdvice::Keep) != Ok(true)
+        || fork_uncopied_ranges(pid).as_deref() != Some(&[][..])
+    {
+        return fail("keeponfork left something out of fork");
+    }
+
+    // 6. A range with a hole: the mapped part changes, and the answer says
+    //    the range was not all mapped (Linux's ENOMEM).
+    if set_fork_policy(pid, base + frame, base + 3 * frame, ForkAdvice::DontCopy) != Ok(false) {
+        return fail("a range with a hole was reported fully mapped");
+    }
+    if fork_uncopied_ranges(pid).as_deref() != Some(&[(base + frame, base + 2 * frame)][..]) {
+        return fail("the mapped part of a range with a hole was not changed");
+    }
+
+    // 7. The heap: a piece grows into its neighbour only when nothing tells
+    //    them apart, so a wiped piece keeps its policy as the heap grows.
+    let heap: u64 = 0x0000_0032_0000_0000;
+    let brk = |start: u64, end: u64| Vma {
+        start,
+        end,
+        kind: VmaKind::Brk,
+        flags: rw,
+        fork: ForkPolicy::COPY,
+    };
+    if add_vma_merging(pid, brk(heap, heap + frame)).is_err()
+        || add_vma_merging(pid, brk(heap + frame, heap + 2 * frame)).is_err()
+    {
+        return fail("could not grow the heap");
+    }
+    if policies(heap, heap + 4 * frame) != [(heap, heap + 2 * frame, copy)] {
+        return fail("two plain heap pieces did not merge");
+    }
+    if set_fork_policy(pid, heap, heap + frame, ForkAdvice::Wipe) != Ok(true)
+        || add_vma_merging(pid, brk(heap + 2 * frame, heap + 3 * frame)).is_err()
+    {
+        return fail("could not wipe or grow the heap");
+    }
+    if policies(heap, heap + 4 * frame)
+        != [
+            (heap, heap + frame, wipe),
+            (heap + frame, heap + 3 * frame, copy),
+        ]
+    {
+        return fail("growing the heap lost a wiped piece or did not merge");
+    }
+
+    destroy(pid);
+    serial_println!("[proc]   madvise fork advice on the region list: OK");
+    Ok(())
+}
+
+/// Test: the sub-page fault resolver never writes into a frame another
+/// address space holds, and still reuses one this address space alone holds.
+///
+/// The shape it guards: a group of four 4 KiB sub-pages mapped to one frame;
+/// one sub-page unmapped and mapped again as fresh memory, so the group
+/// straddles regions and its next fault there takes the sub-page path. Until
+/// 2026-10-07 that path zeroed and filled the slice of whatever frame a
+/// present sibling used -- a frame a fork child shares with its parent, or a
+/// page-cache frame, so the "fresh" page was carved out of someone else's
+/// memory. Here the test's own extra reference stands in for the other
+/// holder, and the slice it watches holds a marker that must survive.
+#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
+fn test_subpage_fault_spares_a_shared_frame() -> KernelResult<()> {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    use crate::mm::vma::ForkPolicy;
+
+    const USER_WRITE_NOT_PRESENT: u64 = (1 << 1) | (1 << 2);
+    const MARK: u8 = 0xA5;
+    let frame_size = FRAME_SIZE as u64;
+    let hw = HW_PAGE_SIZE as u64;
+    let mask = !(frame_size - 1);
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let Some(hhdm) = page_table::hhdm() else {
+        return Err(KernelError::NotSupported);
+    };
+
+    let pid = create("subpage-share-test", 0);
+    let fail = |what: &str| {
+        serial_println!("[proc]   FAIL: sub-page fault: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    };
+    if set_running(pid).is_err() {
+        return fail("could not start the test process");
+    }
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the test process has no address space");
+    };
+    let anon = |start: u64, end: u64| Vma {
+        start,
+        end,
+        kind: VmaKind::Anonymous,
+        flags: rw,
+        fork: ForkPolicy::COPY,
+    };
+
+    // Two groups, the first's frame held by someone else as well, the
+    // second's not.
+    for (g, shared) in [(0u64, true), (1u64, false)] {
+        let base = 0x0000_0033_0000_0000 + g * frame_size;
+        if add_vma(pid, anon(base, base + frame_size)).is_err() {
+            return fail("could not add the test region");
+        }
+        if !try_resolve_fault(pid, base, USER_WRITE_NOT_PRESENT) {
+            return fail("the first fault was not resolved");
+        }
+        let Some(old) = page_table::translate(pml4, VirtAddr::new(base)).map(|p| p & mask) else {
+            return fail("the first fault mapped nothing");
+        };
+        let Some(old_frame) = PhysFrame::from_addr(old) else {
+            return fail("the first fault mapped no frame");
+        };
+        // Mark sub-page 1's slice of the frame.
+        let slice1 = (old + hw).wrapping_add(hhdm) as *mut u8;
+        // SAFETY: `old` is a live 16 KiB frame mapped into the test process,
+        // read and written here through its HHDM alias; no thread of the test
+        // process runs.
+        unsafe { core::ptr::write_bytes(slice1, MARK, 16) };
+        if shared {
+            // SAFETY: `old_frame` is live (mapped above); dropped below.
+            if unsafe { frame::ref_inc(old_frame) }.is_err() {
+                return fail("could not take a second reference");
+            }
+        }
+
+        // Sub-page 1 unmapped and mapped again as a region of its own.
+        crate::mm::user::unmap_user_range(pml4, base + hw, base + 2 * hw);
+        if remove_vma_range(pid, base + hw, base + 2 * hw).is_err()
+            || add_vma(pid, anon(base + hw, base + 2 * hw)).is_err()
+        {
+            return fail("could not remap sub-page 1");
+        }
+        if !try_resolve_fault(pid, base + hw, USER_WRITE_NOT_PRESENT) {
+            return fail("the sub-page fault was not resolved");
+        }
+        let now = page_table::translate(pml4, VirtAddr::new(base + hw)).map_or(0, |p| p & mask);
+        // SAFETY: as above -- `old` is still mapped by sub-pages 0, 2 and 3.
+        let kept = unsafe { core::slice::from_raw_parts(slice1, 16) }
+            .iter()
+            .all(|&b| b == MARK);
+        if shared {
+            // SAFETY: the reference taken above.
+            if unsafe { frame::free_frame(old_frame) }.is_err() {
+                return fail("could not drop the second reference");
+            }
+        }
+        if shared && (now == old || !kept) {
+            return fail("a fresh page was carved out of a frame another holder shares");
+        }
+        if !shared && now != old {
+            return fail("a frame this address space alone holds was not reused");
+        }
+    }
+
+    destroy(pid);
+    serial_println!("[proc]   sub-page fault: own frame reused, shared frame left alone: OK");
     Ok(())
 }
 
@@ -9037,6 +9591,7 @@ fn test_fault_with_the_table_held() -> KernelResult<()> {
             end: base.saturating_add(frame),
             kind: VmaKind::Anonymous,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     ) {
         serial_println!("[proc]   FAIL: busy-table fault add_vma {:?}", e);
@@ -9094,6 +9649,7 @@ fn test_fault_swaps_in() -> KernelResult<()> {
             end: base + frame,
             kind: VmaKind::Anonymous,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     )
     .is_err()

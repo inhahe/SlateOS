@@ -3300,6 +3300,7 @@ unsafe fn place_phdr_table(
         end: PHDR_COPY_END,
         kind: crate::mm::vma::VmaKind::Fixed,
         flags,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     if let Err(e) = pcb::add_vma(pid, vma) {
         serial_println!(
@@ -22676,6 +22677,98 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
         "[spawn]   Linux fork()+wait4() (ring 3: parent forked a child, blocked in wait4, \
          reaped it on the child's exit, decoded WEXITSTATUS == {}): OK",
         CHILD_EXIT
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of `madvise`'s fork advice through a real `fork`:
+/// [`elf::build_linux_madvise_fork_test_elf`] marks one page wipe-on-fork and
+/// one don't-fork, forks, and has the child check what it got and the parent
+/// what it kept. It exits `0x2A` on success; any other code names the check
+/// that failed (see the builder).
+///
+/// What the kernel-context tests (`pcb`'s and `cow`'s) cannot reach, this
+/// does: `madvise` from a program, the policy carried from the parent's
+/// regions into the clone and the child's region list, and the child's first
+/// touch of a wiped page beside pages it shares with its parent. Bounded like
+/// the fork test: the harness never blocks.
+pub fn self_test_linux_madvise_fork() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    // Scheduling rounds for the parent and child to finish: a healthy run
+    // ends in a handful, and the loop stops the moment the parent is a
+    // zombie; counted in yields, not time, so a busy host cannot use it up.
+    const MAX_YIELDS: usize = 4096;
+
+    serial_println!("[spawn] Running Linux madvise fork advice (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_madvise_fork_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-madvise-fork"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-madvise-fork",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: madvise-fork spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: madvise fork advice (ring 3) — the parent did not finish in {} \
+             yields (state {:?})",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "mmap failed",
+            Some(0x31) => "madvise(MADV_WIPEONFORK) failed",
+            Some(0x32) => "madvise(MADV_DONTFORK) failed",
+            Some(0x36) => "MADV_WIPEONFORK on shared memory was not EINVAL",
+            Some(0x33) => "fork failed",
+            Some(0x34) => "wait4 failed",
+            Some(0x35) => "the child did not exit normally",
+            Some(0x41) => "the child's wipe-on-fork page was not zero",
+            Some(0x42) => "the child's copied page lost the parent's data",
+            Some(0x43) => "the child got the don't-fork page",
+            Some(0x44) => "the child could not write its wiped page",
+            Some(0x51) => "the parent's wipe-on-fork page lost its data",
+            Some(0x52) => "the parent's don't-fork page lost its data",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: madvise fork advice (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux madvise fork advice (ring 3: the child got the wiped page zeroed, \
+         the copied page intact and no don't-fork page; the parent kept both): OK"
     );
     Ok(())
 }

@@ -1152,6 +1152,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
                 end: base_vaddr.saturating_add(size_aligned),
                 kind: VmaKind::Anonymous,
                 flags: page_flags,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             };
 
             if let Err(e) = pcb::add_vma(pid, vma) {
@@ -1198,6 +1199,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
                 end: base_vaddr.saturating_add(size_aligned),
                 kind: VmaKind::Anonymous,
                 flags: page_flags,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             };
 
             if let Err(e) = pcb::add_vma(pid, vma) {
@@ -3039,6 +3041,7 @@ fn shm_reserve_at(
             end,
             kind: VmaKind::Fixed,
             flags: page_flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     ) {
         Ok(()) => Ok(addr),

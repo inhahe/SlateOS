@@ -17031,6 +17031,7 @@ pub fn self_test() -> KernelResult<()> {
                     | PageFlags::USER_ACCESSIBLE
                     | PageFlags::WRITABLE
                     | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // Stack: present, user, writable, no-exec → "rw-p [stack]".
             Vma {
@@ -17041,6 +17042,7 @@ pub fn self_test() -> KernelResult<()> {
                     | PageFlags::USER_ACCESSIBLE
                     | PageFlags::WRITABLE
                     | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // Guard: never mapped → "---p [guard]".
             Vma {
@@ -17048,6 +17050,7 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x10_0000,
                 kind: VmaKind::Guard,
                 flags: PageFlags::empty(),
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // Large (>32-bit) address: must print natural width, NOT padded
             // beyond its own digits — verifies the {:08x} minimum-width does
@@ -17057,6 +17060,7 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x5555_5556_0000,
                 kind: VmaKind::Anonymous,
                 flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // PROT_NONE anonymous: PRESENT but NOT user-accessible → "---p"
             // (real guard/trap region; the 'r' bit must drop, design-decisions
@@ -17067,6 +17071,7 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x21_0000,
                 kind: VmaKind::Anonymous,
                 flags: PageFlags::PRESENT | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // File-backed: the offset it maps and the file's inode. The
             // handle names nothing and the filesystem id no mount, so the
@@ -17084,6 +17089,7 @@ pub fn self_test() -> KernelResult<()> {
                     }),
                 },
                 flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
         ];
         let rendered = render_maps(&vmas);

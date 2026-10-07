@@ -1383,9 +1383,17 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
         if let Ok(phys4k) = unsafe { page_table::unmap_4k(pml4, VirtAddr::new(va)) } {
             unmapped = unmapped.saturating_add(1);
             let frame_va = va & !frame_mask;
+            // Still mapped *into this frame* by a sibling sub-page. The
+            // sub-pages of one group can point into different frames (a
+            // partial copy-on-write break; a sub-page filled beside a shared
+            // sibling's frame), so "a sibling is present" is not the
+            // question: until 2026-10-07 it was, and unmapping the last
+            // sub-page in its own frame kept that frame's reference forever.
+            let unmapped_frame = phys4k & !frame_mask;
             let still_mapped = (0..HW_PAGES_PER_FRAME).any(|i| {
                 let sibling = frame_va.saturating_add((i as u64).saturating_mul(hw));
-                page_table::translate(pml4, VirtAddr::new(sibling)).is_some()
+                page_table::translate(pml4, VirtAddr::new(sibling))
+                    .is_some_and(|p| p & !frame_mask == unmapped_frame)
             });
             let frame = PhysFrame::from_addr(phys4k & !frame_mask);
             match frame {
@@ -1754,6 +1762,7 @@ fn unmap_user_range_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<(
             end,
             kind: VmaKind::Anonymous,
             flags: rw,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     )?;
     for va in [base, base.wrapping_add(frame_size)] {
@@ -1848,6 +1857,7 @@ fn cross_as_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
                 end: start.wrapping_add(frame_size),
                 kind: VmaKind::Anonymous,
                 flags,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
         )?;
     }
@@ -1954,7 +1964,7 @@ fn cross_as_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
     // Fork the address space for real: this is what makes the page shared.
     // SAFETY: `target_pml4` is a live PML4 owned by a process that has never
     // run — nothing can be mutating its page tables concurrently.
-    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(target_pml4)? };
+    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(target_pml4, &[])? };
     let verdict = cross_as_cow_test(target_pml4, child_pml4, cow_va, orig_phys, hhdm);
     // SAFETY: `child_pml4` came from `clone_address_space_cow`, is loaded in no
     // CR3, and belongs to no process — nothing else can be using it.

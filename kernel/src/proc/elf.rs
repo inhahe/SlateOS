@@ -1806,6 +1806,250 @@ pub fn build_linux_fork_wait_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF for `madvise`'s fork advice:
+/// `MADV_WIPEONFORK` and `MADV_DONTFORK`, end to end through a real `fork`.
+///
+/// It maps three private anonymous pages and writes a secret into each:
+/// A is marked wipe-on-fork, B is left alone (the control), C is marked
+/// don't-fork. It checks that wipe-on-fork on *shared* memory is `EINVAL`,
+/// forks, and the child checks what it got: A reads zero, B the secret, and
+/// C is not mapped at all (`mprotect` on it is `ENOMEM` -- a check that does
+/// not fault). The child then writes A. The parent reaps the child and checks
+/// that its own A and C still hold the secret.
+///
+/// The parent's A matters as much as the child's. A is one 4 KiB page of a
+/// 16 KiB frame whose other sub-pages *are* copied, so the child's first touch
+/// of A takes the sub-page fault path beside a frame it shares with the parent
+/// -- the path that, before 2026-10-07, zeroed the slice of that shared frame
+/// and so wiped the *parent's* secret instead of giving the child a page.
+///
+/// Exit codes: `0x2A` pass. The parent's: `0x30` mmap failed, `0x31` / `0x32`
+/// the wipe / don't-fork advice failed, `0x36` wipe of shared memory was not
+/// `EINVAL`, `0x33` fork failed, `0x34` wait4 failed, `0x35` the child did not
+/// exit normally, `0x51` / `0x52` the parent's A / C lost its secret. The
+/// child's, passed through as the parent's: `0x41` A was not zero, `0x42` B
+/// was not the secret, `0x43` C was mapped, `0x44` A was not writable.
+///
+/// The bytes are GNU `as` output for this source (no relocations; every
+/// branch is relative), assembled with `as --64` and taken with
+/// `objcopy -O binary -j .text`:
+///
+/// ```text
+/// .intel_syntax noprefix
+/// .globl _start
+/// _start:
+///     call map_page               # page A: wiped across fork
+///     mov r12, rax
+///     call map_page               # page B: copied (the control)
+///     mov r13, rax
+///     call map_page               # page C: not copied at all
+///     mov r14, rax
+///     movabs rax, 0x5EC2E75EC2E7
+///     mov [r12], rax
+///     mov [r13], rax
+///     mov [r14], rax
+///     mov rdi, r12                # madvise(A, 4096, MADV_WIPEONFORK)
+///     mov edx, 18
+///     call advise
+///     mov edi, 0x31
+///     test rax, rax
+///     jnz exit
+///     mov rdi, r14                # madvise(C, 4096, MADV_DONTFORK)
+///     mov edx, 10
+///     call advise
+///     mov edi, 0x32
+///     test rax, rax
+///     jnz exit
+///     mov eax, 9                  # D = mmap(.., MAP_SHARED|MAP_ANONYMOUS)
+///     xor edi, edi
+///     mov esi, 4096
+///     mov edx, 3
+///     mov r10d, 0x21
+///     mov r8, -1
+///     xor r9d, r9d
+///     syscall
+///     mov edi, 0x30
+///     cmp rax, -4096
+///     ja exit
+///     mov rdi, rax                # wipe of shared memory: EINVAL
+///     mov edx, 18
+///     call advise
+///     mov edi, 0x36
+///     cmp rax, -22
+///     jne exit
+///     mov eax, 57                 # fork
+///     syscall
+///     mov edi, 0x33
+///     test rax, rax
+///     js exit
+///     jz child
+///     sub rsp, 16                 # parent: wait4(-1, &status, 0, NULL)
+///     mov edi, -1
+///     mov rsi, rsp
+///     xor edx, edx
+///     xor r10d, r10d
+///     mov eax, 61
+///     syscall
+///     mov edi, 0x34
+///     test rax, rax
+///     jle exit
+///     mov eax, [rsp]
+///     mov edi, 0x35
+///     test eax, 0x7f              # WIFEXITED
+///     jnz exit
+///     movzx edi, ah               # WEXITSTATUS
+///     cmp edi, 0x5A
+///     jne exit                    # the child's own failure code
+///     movabs rax, 0x5EC2E75EC2E7  # the parent's pages are still its own
+///     mov edi, 0x51
+///     cmp [r12], rax
+///     jne exit
+///     mov edi, 0x52
+///     cmp [r14], rax
+///     jne exit
+///     mov edi, 0x2A               # pass
+///     jmp exit
+/// child:
+///     mov edi, 0x41               # wiped: the child sees zeros
+///     cmp qword ptr [r12], 0
+///     jne exit
+///     movabs rax, 0x5EC2E75EC2E7
+///     mov edi, 0x42               # copied: the child sees the secret
+///     cmp [r13], rax
+///     jne exit
+///     mov rdi, r14                # not copied: no mapping, so mprotect is ENOMEM
+///     mov esi, 4096
+///     mov edx, 1
+///     mov eax, 10
+///     syscall
+///     mov edi, 0x43
+///     cmp rax, -12
+///     jne exit
+///     mov qword ptr [r12], 7      # the wiped page is the child's own, writable
+///     mov edi, 0x44
+///     cmp qword ptr [r12], 7
+///     jne exit
+///     mov edi, 0x5A               # child: all checks passed
+/// exit:
+///     mov eax, 231                # exit_group(edi)
+///     syscall
+///     int3
+/// map_page:                       # rax = mmap(NULL, 4096, RW, PRIVATE|ANON, -1, 0)
+///     mov eax, 9
+///     xor edi, edi
+///     mov esi, 4096
+///     mov edx, 3
+///     mov r10d, 0x22
+///     mov r8, -1
+///     xor r9d, r9d
+///     syscall
+///     cmp rax, -4096
+///     ja map_fail
+///     ret
+/// map_fail:
+///     mov edi, 0x30
+///     jmp exit
+/// advise:                         # rax = madvise(rdi, 4096, edx)
+///     mov esi, 4096
+///     mov eax, 28
+///     syscall
+///     ret
+/// ```
+///
+/// Paired with [`crate::proc::spawn::self_test_linux_madvise_fork`]. Tagged
+/// `ELFOSABI_GNU` so `spawn_process` routes it through the Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_madvise_fork_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    const CODE: [u8; 466] = [
+        0xE8, 0x8D, 0x01, 0x00, 0x00, 0x49, 0x89, 0xC4, 0xE8, 0x85, 0x01, 0x00, 0x00, 0x49, 0x89,
+        0xC5, 0xE8, 0x7D, 0x01, 0x00, 0x00, 0x49, 0x89, 0xC6, 0x48, 0xB8, 0xE7, 0xC2, 0x5E, 0xE7,
+        0xC2, 0x5E, 0x00, 0x00, 0x49, 0x89, 0x04, 0x24, 0x49, 0x89, 0x45, 0x00, 0x49, 0x89, 0x06,
+        0x4C, 0x89, 0xE7, 0xBA, 0x12, 0x00, 0x00, 0x00, 0xE8, 0x8B, 0x01, 0x00, 0x00, 0xBF, 0x31,
+        0x00, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x0F, 0x85, 0x42, 0x01, 0x00, 0x00, 0x4C, 0x89, 0xF7,
+        0xBA, 0x0A, 0x00, 0x00, 0x00, 0xE8, 0x70, 0x01, 0x00, 0x00, 0xBF, 0x32, 0x00, 0x00, 0x00,
+        0x48, 0x85, 0xC0, 0x0F, 0x85, 0x27, 0x01, 0x00, 0x00, 0xB8, 0x09, 0x00, 0x00, 0x00, 0x31,
+        0xFF, 0xBE, 0x00, 0x10, 0x00, 0x00, 0xBA, 0x03, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x21, 0x00,
+        0x00, 0x00, 0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0x45, 0x31, 0xC9, 0x0F, 0x05, 0xBF,
+        0x30, 0x00, 0x00, 0x00, 0x48, 0x3D, 0x00, 0xF0, 0xFF, 0xFF, 0x0F, 0x87, 0xF3, 0x00, 0x00,
+        0x00, 0x48, 0x89, 0xC7, 0xBA, 0x12, 0x00, 0x00, 0x00, 0xE8, 0x21, 0x01, 0x00, 0x00, 0xBF,
+        0x36, 0x00, 0x00, 0x00, 0x48, 0x83, 0xF8, 0xEA, 0x0F, 0x85, 0xD7, 0x00, 0x00, 0x00, 0xB8,
+        0x39, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xBF, 0x33, 0x00, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x0F,
+        0x88, 0xC2, 0x00, 0x00, 0x00, 0x74, 0x67, 0x48, 0x83, 0xEC, 0x10, 0xBF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0x48, 0x89, 0xE6, 0x31, 0xD2, 0x45, 0x31, 0xD2, 0xB8, 0x3D, 0x00, 0x00, 0x00, 0x0F,
+        0x05, 0xBF, 0x34, 0x00, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x0F, 0x8E, 0x9A, 0x00, 0x00, 0x00,
+        0x8B, 0x04, 0x24, 0xBF, 0x35, 0x00, 0x00, 0x00, 0xA9, 0x7F, 0x00, 0x00, 0x00, 0x0F, 0x85,
+        0x87, 0x00, 0x00, 0x00, 0x0F, 0xB6, 0xFC, 0x83, 0xFF, 0x5A, 0x75, 0x7F, 0x48, 0xB8, 0xE7,
+        0xC2, 0x5E, 0xE7, 0xC2, 0x5E, 0x00, 0x00, 0xBF, 0x51, 0x00, 0x00, 0x00, 0x49, 0x39, 0x04,
+        0x24, 0x75, 0x6A, 0xBF, 0x52, 0x00, 0x00, 0x00, 0x49, 0x39, 0x06, 0x75, 0x60, 0xBF, 0x2A,
+        0x00, 0x00, 0x00, 0xEB, 0x59, 0xBF, 0x41, 0x00, 0x00, 0x00, 0x49, 0x83, 0x3C, 0x24, 0x00,
+        0x75, 0x4D, 0x48, 0xB8, 0xE7, 0xC2, 0x5E, 0xE7, 0xC2, 0x5E, 0x00, 0x00, 0xBF, 0x42, 0x00,
+        0x00, 0x00, 0x49, 0x39, 0x45, 0x00, 0x75, 0x38, 0x4C, 0x89, 0xF7, 0xBE, 0x00, 0x10, 0x00,
+        0x00, 0xBA, 0x01, 0x00, 0x00, 0x00, 0xB8, 0x0A, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xBF, 0x43,
+        0x00, 0x00, 0x00, 0x48, 0x83, 0xF8, 0xF4, 0x75, 0x19, 0x49, 0xC7, 0x04, 0x24, 0x07, 0x00,
+        0x00, 0x00, 0xBF, 0x44, 0x00, 0x00, 0x00, 0x49, 0x83, 0x3C, 0x24, 0x07, 0x75, 0x05, 0xBF,
+        0x5A, 0x00, 0x00, 0x00, 0xB8, 0xE7, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xCC, 0xB8, 0x09, 0x00,
+        0x00, 0x00, 0x31, 0xFF, 0xBE, 0x00, 0x10, 0x00, 0x00, 0xBA, 0x03, 0x00, 0x00, 0x00, 0x41,
+        0xBA, 0x22, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0x45, 0x31, 0xC9,
+        0x0F, 0x05, 0x48, 0x3D, 0x00, 0xF0, 0xFF, 0xFF, 0x77, 0x01, 0xC3, 0xBF, 0x30, 0x00, 0x00,
+        0x00, 0xEB, 0xC5, 0xBE, 0x00, 0x10, 0x00, 0x00, 0xB8, 0x1C, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0xC3,
+    ];
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size = CODE.len() as u64;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the full
 /// `fork(2)` → child `execve(2)` → parent `wait4(2)` reap cycle in ring 3
 /// and exits with the **exec target's** `WEXITSTATUS`.

@@ -407,6 +407,7 @@ pub fn probe_demand_page() -> Result<(), DemandPageFailure> {
         end: DEMAND_PAGE_TEST_BASE + DEMAND_PAGE_TEST_SIZE,
         kind: VmaKind::Anonymous,
         flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE,
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     add_kernel_vma(vma).map_err(|_| DemandPageFailure::VmaRejected)?;
 

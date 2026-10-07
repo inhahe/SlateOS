@@ -42,6 +42,7 @@ pub mod linux_fd;
 pub mod linux_sigframe;
 pub mod linux_stack;
 pub mod pcb;
+pub mod posix_timer;
 pub mod priority;
 pub mod signal;
 pub mod spawn;
@@ -72,6 +73,8 @@ pub fn self_test() -> KernelResult<()> {
     signal::self_test()?;
     serial_println!("[proc] Running ITIMER_REAL self-test...");
     itimer::self_test()?;
+    serial_println!("[proc] Running POSIX timer self-test...");
+    posix_timer::self_test()?;
     serial_println!("[proc] Running nice-authority self-test...");
     priority::self_test()?;
     serial_println!("[proc] Running fork self-test...");

@@ -199,6 +199,55 @@ impl LinuxSiginfo {
         info
     }
 
+    /// Build the `siginfo_t` of an asynchronous signal from the record it was
+    /// posted with ([`crate::proc::signal::SigInfo`]).
+    ///
+    /// Every record the kernel keeps fills the same three slots of the union,
+    /// which is what lets one builder serve them all: the `_rt` member's pid
+    /// (offset 16), uid (20) and `sigval` (24) for `kill`, `tkill`, `sigqueue`
+    /// and the kernel's signals (whose value is 0); `_timer`'s timer id,
+    /// overrun and `sigval` for a POSIX timer (`SI_TIMER`) at the same three
+    /// offsets; and `_sigchld`'s pid, uid and `si_status` -- the value's low
+    /// half, at 24 -- for a `SIGCHLD`.
+    #[must_use]
+    pub fn from_record(signo: i32, info: &crate::proc::signal::SigInfo) -> Self {
+        let mut out = Self {
+            si_signo: signo,
+            si_errno: 0,
+            si_code: info.code,
+            _pad0: 0,
+            sifields: [0u8; 112],
+        };
+        let slots = info
+            .sender_pid
+            .to_ne_bytes()
+            .into_iter()
+            .chain(info.sender_uid.to_ne_bytes())
+            .chain(info.value.to_ne_bytes());
+        for (dst, byte) in out.sifields.iter_mut().zip(slots) {
+            *dst = byte;
+        }
+        out
+    }
+
+    /// The structure's 128 bytes, as user memory holds them.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; 128] {
+        let mut b = [0u8; 128];
+        let bytes = self
+            .si_signo
+            .to_ne_bytes()
+            .into_iter()
+            .chain(self.si_errno.to_ne_bytes())
+            .chain(self.si_code.to_ne_bytes())
+            .chain(self._pad0.to_ne_bytes())
+            .chain(self.sifields);
+        for (dst, byte) in b.iter_mut().zip(bytes) {
+            *dst = byte;
+        }
+        b
+    }
+
     /// Build a `siginfo_t` for a **fault** signal (`SIGSEGV`/`SIGBUS`/
     /// `SIGFPE`/`SIGILL`/`SIGTRAP`).  The `_sigfault` union member is
     /// `struct { void *_addr; ... }`, so `si_addr` sits at offset 16.
@@ -253,22 +302,30 @@ pub struct FrameLayout {
     pub info_addr: u64,
 }
 
+/// The System V x86-64 red zone: the 128 bytes below `%rsp` a leaf function
+/// may keep data in without moving `%rsp`, which nothing else may write.
+pub const RED_ZONE: u64 = 128;
+
 /// Compute where on the user stack to place an `rt_sigframe`, given the
 /// pre-signal `%rsp`.
 ///
-/// Linux's `align_sigframe` (x86_64) does `sp = round_down(sp - size, 16) - 8`,
-/// so the frame begins at an address `≡ 8 (mod 16)`.  Because `pretcode`
-/// occupies that first word and acts as the handler's return address, the
-/// handler sees `%rsp ≡ 8 (mod 16)` at its first instruction — exactly the
-/// state a `call`ed function expects under the System V ABI.
+/// Linux's `get_sigframe` (x86_64) first steps over the 128-byte red zone --
+/// the interrupted code may hold live data there, a leaf function around its
+/// `syscall` instruction above all -- and then `align_sigframe` does
+/// `sp = round_down(sp - size, 16) - 8`, so the frame begins at an address
+/// `≡ 8 (mod 16)`.  Because `pretcode` occupies that first word and acts as
+/// the handler's return address, the handler sees `%rsp ≡ 8 (mod 16)` at its
+/// first instruction — exactly the state a `call`ed function expects under the
+/// System V ABI. (Until 2026-10-07 the red zone was not skipped, so a signal
+/// could overwrite the locals of the function it interrupted.)
 ///
 /// Returns `None` if the subtraction would underflow the address space
 /// (a degenerate `%rsp` near 0), so callers map that to a delivery failure.
 #[must_use]
 pub fn compute_layout(user_rsp: u64) -> Option<FrameLayout> {
     let size = RT_SIGFRAME_SIZE as u64;
-    // round_down(sp - size, 16) - 8
-    let lowered = user_rsp.checked_sub(size)?;
+    // round_down(sp - 128 - size, 16) - 8
+    let lowered = user_rsp.checked_sub(RED_ZONE)?.checked_sub(size)?;
     let frame_addr = (lowered & !0xFu64).checked_sub(8)?;
     let uc_addr = frame_addr.checked_add(8)?;
     let info_addr = uc_addr.checked_add(core::mem::size_of::<LinuxUcontext>() as u64)?;
@@ -422,6 +479,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
+    // ---- from_record: a POSIX timer's and a child's record ----
+    // SI_TIMER: si_timerid at 16, si_overrun at 20, si_value at 24.
+    let mut timer = crate::proc::signal::SigInfo::timer(3, 0xAB_CDEF);
+    timer.sender_uid = 9;
+    let t = LinuxSiginfo::from_record(34, &timer).to_bytes();
+    let word = |b: &[u8; 128], o: usize| {
+        b.get(o..o.saturating_add(4))
+            .and_then(|s| s.try_into().ok())
+            .map_or(0, u32::from_ne_bytes)
+    };
+    let quad = |b: &[u8; 128], o: usize| {
+        b.get(o..o.saturating_add(8))
+            .and_then(|s| s.try_into().ok())
+            .map_or(0, u64::from_ne_bytes)
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let si_timer = crate::proc::signal::si_code::SI_TIMER as u32;
+    if word(&t, 0) != 34
+        || word(&t, 8) != si_timer
+        || word(&t, 16) != 3
+        || word(&t, 20) != 9
+        || quad(&t, 24) != 0xAB_CDEF
+    {
+        serial_println!("[sigframe]   FAIL: from_record SI_TIMER: timerid/overrun/value offsets");
+        return Err(KernelError::InvalidArgument);
+    }
+    // SIGCHLD: si_pid 16, si_uid 20, si_status 24 (the record's value).
+    let child = crate::proc::signal::SigInfo::child(41, 1000, (1, 3));
+    let c = LinuxSiginfo::from_record(17, &child).to_bytes();
+    if word(&c, 8) != 1 || word(&c, 16) != 41 || word(&c, 20) != 1000 || word(&c, 24) != 3 {
+        serial_println!("[sigframe]   FAIL: from_record SIGCHLD: pid/uid/status offsets");
+        return Err(KernelError::InvalidArgument);
+    }
+
     // ---- frame layout / alignment ----
     // For any 16-aligned input rsp, the frame must end up ≡ 8 (mod 16) and
     // strictly below rsp - RT_SIGFRAME_SIZE region.
@@ -445,6 +536,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             layout.uc_addr,
             layout.info_addr,
             layout.frame_addr
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+    // The red zone is left alone: nothing of the frame lies in the 128 bytes
+    // below the interrupted rsp.
+    let rsp = 0x0000_7fff_ffff_0000u64;
+    if layout.frame_addr.saturating_add(RT_SIGFRAME_SIZE as u64) > rsp.saturating_sub(RED_ZONE) {
+        serial_println!(
+            "[sigframe]   FAIL: frame [{:#x}, +{}) reaches into the red zone below {:#x}",
+            layout.frame_addr,
+            RT_SIGFRAME_SIZE,
+            rsp
         );
         return Err(KernelError::InvalidArgument);
     }

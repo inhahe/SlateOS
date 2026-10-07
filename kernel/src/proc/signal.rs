@@ -327,6 +327,12 @@ impl SignalInfoTail {
 pub mod si_code {
     /// Sent by `kill(2)` from a user process.
     pub const SI_USER: i32 = 0;
+    /// A POSIX timer expired (`timer_create(2)`): the record's `sender_pid`
+    /// is the timer id (`si_timerid`), `sender_uid` the overrun count
+    /// (`si_overrun`) and `value` the timer's `sigev_value` -- the offsets
+    /// `siginfo_t`'s `_timer` member gives them, the same as `_rt`'s pid, uid
+    /// and value.
+    pub const SI_TIMER: i32 = -2;
     /// Sent by the kernel itself (timer expiry, kernel-injected signals).
     pub const SI_KERNEL: i32 = 0x80;
     /// Sent by `sigqueue(3)` / `rt_sigqueueinfo(2)` (carries an `si_value`).
@@ -432,12 +438,72 @@ impl SigInfo {
             value,
         }
     }
+
+    /// A POSIX timer's expiry: `SI_TIMER`, the timer id where a sender's pid
+    /// goes, the overrun count (0 until delivery says otherwise) where its uid
+    /// goes, and the timer's `sigev_value`. See [`si_code::SI_TIMER`].
+    #[must_use]
+    pub const fn timer(timer_id: i32, value: u64) -> Self {
+        // Reinterpreted, not converted: `si_timerid` is an `int` in the slot
+        // `si_pid` uses, and timer ids are never negative.
+        #[allow(clippy::cast_sign_loss)]
+        let sender_pid = timer_id as u32;
+        Self {
+            code: si_code::SI_TIMER,
+            sender_pid,
+            sender_uid: 0,
+            value,
+        }
+    }
+}
+
+/// A POSIX timer's signal waiting in its process's queue -- Linux's
+/// preallocated per-timer `sigqueue`, linked into the shared pending list.
+///
+/// Unlike the one record a standard signal coalesces to, every timer has a
+/// queue entry of its own: two timers that name the same signal deliver twice,
+/// as on Linux (`send_sigqueue` never applies the legacy one-instance rule),
+/// and a dequeued entry tells [`crate::proc::posix_timer`] which timer to
+/// re-arm and charge the overrun to.
+#[derive(Debug, Clone, Copy)]
+struct QueuedTimerSignal {
+    /// The signal it raises.
+    sig: u32,
+    /// Its timer, within the process.
+    timer_id: i32,
+    /// The arming that queued it ([`crate::proc::posix_timer`]'s generation):
+    /// a timer re-set or deleted since makes the entry stale, and the timer
+    /// module drops a stale entry when it is dequeued (Linux 6.13's rule).
+    token: u64,
+    /// Its record.
+    info: SigInfo,
+}
+
+/// What [`post_timer_signal`] did with a timer's expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerPost {
+    /// Queued; the signal is pending.
+    Queued,
+    /// The timer already had an entry queued, which now stands for this
+    /// expiry (its token is refreshed).
+    AlreadyQueued,
+    /// The signal is ignored and not blocked, so nothing was queued
+    /// (Linux's `prepare_signal`): the timer re-arms itself if periodic.
+    Ignored,
+    /// The process has no signal state (it is exiting), or no room was
+    /// reserved for the entry; nothing was queued.
+    Gone,
 }
 
 /// Per-process signal bookkeeping.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Copy`: the timer queue is a `Vec`. Nothing needs a copy of the whole
+/// state -- `fork` builds the child's field by field, and starts its queue
+/// empty as it starts everything pending empty.
+#[derive(Debug, Clone)]
 struct SignalState {
-    /// Pending set: bit `n-1` set means signal `n` is pending.
+    /// Pending set: bit `n-1` set means signal `n` is pending -- its standard
+    /// record (`infos`), one or more timer entries (`timer_queue`), or both.
     pending: u64,
     /// Blocked mask: bit `n-1` set means signal `n` is blocked.
     blocked: u64,
@@ -447,11 +513,21 @@ struct SignalState {
     /// the signal's `siginfo` ([`SignalInfoTail`]). Goes with the trampoline:
     /// kept across fork, dropped at exec.
     extended_frame: bool,
-    /// Per-signal source metadata (`siginfo`), indexed by `sig - 1`. A slot is
-    /// `Some` only while the corresponding `pending` bit is set: recorded on the
-    /// clear→set transition and taken at delivery. Standard-signal coalescing
-    /// means at most one record is kept per signal number.
+    /// Per-signal source metadata (`siginfo`), indexed by `sig - 1`: the one
+    /// instance a signal sent by `kill`, `sigqueue` or the kernel coalesces
+    /// to. `Some` exactly while that instance is pending -- recorded when the
+    /// signal was posted with its bit clear, taken at delivery. A post that
+    /// finds the bit already set (by this record or a timer entry) is merged
+    /// into what is there, Linux's `legacy_queue`.
     infos: [Option<SigInfo>; NSIG as usize],
+    /// POSIX timers' signals, oldest first ([`QueuedTimerSignal`]). At most one
+    /// entry per timer, so it never holds more entries than the process has
+    /// timers -- and [`reserve_timer_signals`] keeps its capacity at least
+    /// that, which is what lets a timer's expiry queue its signal from the
+    /// timer interrupt without allocating. For a given signal, the standard
+    /// instance (if any) is older than every timer entry: it can only be
+    /// recorded while the bit is clear.
+    timer_queue: Vec<QueuedTimerSignal>,
     /// Saved blocked mask awaiting restore, set by `sigsuspend`/`rt_sigsuspend`
     /// (Linux's `saved_sigmask` + `TIF_RESTORE_SIGMASK`). While `Some`, the
     /// process is running under a *temporary* blocked mask; the saved mask is
@@ -508,6 +584,7 @@ impl Default for SignalState {
             trampoline: 0,
             extended_frame: false,
             infos: [None; NSIG as usize],
+            timer_queue: Vec::new(),
             saved_sigmask: None,
             altstack_sp: 0,
             altstack_size: 0,
@@ -515,6 +592,64 @@ impl Default for SignalState {
             ignored: 0,
             nocldwait: false,
         }
+    }
+}
+
+/// One pending instance of a signal, taken out of a [`SignalState`].
+enum Taken {
+    /// The standard record -- a signal sent by `kill`, `sigqueue` or the kernel.
+    Record(SigInfo),
+    /// A POSIX timer's entry, which its timer must see before it is delivered.
+    Timer(QueuedTimerSignal),
+}
+
+impl SignalState {
+    /// Whether signal `sig` (slot `idx = sig - 1`) still has an instance
+    /// pending: its standard record or a timer entry.
+    fn has_instance(&self, idx: usize, sig: u32) -> bool {
+        self.infos.get(idx).is_some_and(Option::is_some)
+            || self.timer_queue.iter().any(|q| q.sig == sig)
+    }
+
+    /// Clear `sig`'s pending bit `bit` -- and take it off the global count --
+    /// once no instance of it is left. The bit means "some instance is
+    /// pending", so every path that removes an instance ends here.
+    fn settle_bit(&mut self, sig: u32, bit: u64) {
+        let idx = bit.trailing_zeros() as usize;
+        if self.pending & bit != 0 && !self.has_instance(idx, sig) {
+            self.pending &= !bit;
+            PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// [`Self::settle_bit`] for every signal in `mask`.
+    fn settle_bits(&mut self, mask: u64) {
+        let mut rem = mask;
+        while rem != 0 {
+            let bit = rem & rem.wrapping_neg(); // lowest set bit
+            // trailing_zeros is 0..=63, so the signal number is 1..=64.
+            self.settle_bit(bit.trailing_zeros().saturating_add(1), bit);
+            rem &= !bit;
+        }
+    }
+
+    /// Take the oldest pending instance of signal `sig` (pending bit `bit`):
+    /// its standard record if it has one -- which is always older than any
+    /// timer entry of the same signal, see [`Self::timer_queue`] -- else its
+    /// oldest timer entry. A bit set with neither (which no path leaves) yields
+    /// a generic `SI_USER` record and is cleared.
+    fn take_instance(&mut self, sig: u32, bit: u64) -> Taken {
+        let idx = bit.trailing_zeros() as usize;
+        let taken = if let Some(info) = self.infos.get_mut(idx).and_then(Option::take) {
+            Taken::Record(info)
+        } else if let Some(pos) = self.timer_queue.iter().position(|q| q.sig == sig) {
+            // `remove` shifts the tail down; it never allocates.
+            Taken::Timer(self.timer_queue.remove(pos))
+        } else {
+            Taken::Record(SigInfo::user(0, 0))
+        };
+        self.settle_bit(sig, bit);
+        taken
     }
 }
 
@@ -625,31 +760,61 @@ pub fn deregister_signalfd_waiter(pid: ProcessId, task: TaskId) {
     });
 }
 
-/// Remove and return every `signalfd` waiter of `pid` whose mask intersects
-/// `bit`, leaving non-matching waiters registered.
+/// How many waiters one pass of [`wake_signalfd_waiters`] takes out of the
+/// registry; it repeats until a pass comes back short.
+const WAKE_BATCH: usize = 16;
+
+/// Move up to `out.len()` waiters of `pid` whose mask intersects `bit` out of
+/// the registry into `out`, returning how many, and leave the rest registered.
 ///
-/// Pure registry mutation (no scheduler interaction), split out from
-/// [`wake_signalfd_waiters`] so the partition logic is unit-testable without a
-/// live scheduler.
-fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
+/// Allocation-free -- it neither grows nor frees anything, not even a list it
+/// empties (`deregister_signalfd_waiter` and [`remove`] drop that, in process
+/// context) -- because it runs in the timer interrupt when an `ITIMER_REAL` or
+/// POSIX timer expiry posts a signal, and the heap's lock is not one an
+/// interrupt may wait for: the code it interrupted may hold it.
+fn take_matching_signalfd_waiters_into(pid: ProcessId, bit: u64, out: &mut [TaskId]) -> usize {
     with_waiters(|waiters| {
         let Some(list) = waiters.get_mut(&pid) else {
-            return Vec::new();
+            return 0;
         };
-        let mut matched = Vec::new();
+        let mut taken = 0usize;
         list.retain(|w| {
             if w.mask & bit != 0 {
-                matched.push(w.task);
-                false
-            } else {
-                true
+                if let Some(slot) = out.get_mut(taken) {
+                    *slot = w.task;
+                    taken = taken.saturating_add(1);
+                    return false;
+                }
             }
+            true
         });
-        if list.is_empty() {
+        taken
+    })
+}
+
+/// Remove and return every `signalfd` waiter of `pid` whose mask intersects
+/// `bit`, leaving non-matching waiters registered, and drop the registry's
+/// entry for `pid` if that empties it.
+///
+/// Pure registry mutation (no scheduler interaction), for the self-tests of
+/// the partition logic [`wake_signalfd_waiters`] uses; it allocates, so the
+/// wake path itself uses [`take_matching_signalfd_waiters_into`].
+fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
+    let mut matched = Vec::new();
+    let mut batch: [TaskId; WAKE_BATCH] = [0; WAKE_BATCH];
+    loop {
+        let n = take_matching_signalfd_waiters_into(pid, bit, &mut batch);
+        matched.extend_from_slice(batch.get(..n).unwrap_or(&[]));
+        if n < WAKE_BATCH {
+            break;
+        }
+    }
+    with_waiters(|waiters| {
+        if waiters.get(&pid).is_some_and(Vec::is_empty) {
             waiters.remove(&pid);
         }
-        matched
-    })
+    });
+    matched
 }
 
 /// Wake every `signalfd` reader of `pid` whose mask intersects `bit` (a single
@@ -658,12 +823,21 @@ fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
 ///
 /// Uses the `try_wake`/`defer_wake` idiom so it is safe to call from any
 /// context (it never blocks and never directly enters the scheduler's
-/// run-queue manipulation if the target is not currently parked).
+/// run-queue manipulation if the target is not currently parked), and takes
+/// the waiters out in fixed-size batches so it never allocates (see
+/// [`take_matching_signalfd_waiters_into`]).
 fn wake_signalfd_waiters(pid: ProcessId, bit: u64) {
-    // Take the matching waiters out, then wake outside the registry lock.
-    for task in take_matching_signalfd_waiters(pid, bit) {
-        if !sched::try_wake(task) {
-            sched::defer_wake(task);
+    let mut batch: [TaskId; WAKE_BATCH] = [0; WAKE_BATCH];
+    loop {
+        // Take a batch out, then wake it outside the registry lock.
+        let n = take_matching_signalfd_waiters_into(pid, bit, &mut batch);
+        for &task in batch.get(..n).unwrap_or(&[]) {
+            if !sched::try_wake(task) {
+                sched::defer_wake(task);
+            }
+        }
+        if n < WAKE_BATCH {
+            break;
         }
     }
 }
@@ -858,7 +1032,14 @@ pub fn remove(pid: ProcessId) {
 /// and it is why the set is the kernel's (see [`SignalState::ignored`]).
 /// **Cleared:** `SA_NOCLDWAIT`, which is a handler's flag, and goes where the
 /// new image's handler table does.
+///
+/// **Deleted:** the process's POSIX timers ([`crate::proc::posix_timer`]),
+/// with any signal of theirs still queued -- POSIX: "timers created by the
+/// calling process ... shall be deleted before replacing the current process
+/// image" (Linux's `exit_itimers` in `begin_new_exec`). `ITIMER_REAL` is a
+/// different timer and survives, as POSIX requires.
 pub fn on_exec(pid: ProcessId) {
+    crate::proc::posix_timer::on_exec(pid);
     with_states(|states| {
         if let Some(state) = states.get_mut(&pid) {
             state.nocldwait = false;
@@ -896,7 +1077,23 @@ pub fn on_exec(pid: ProcessId) {
 /// there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
     with_states(|states| {
-        let inherited = states.get(&parent).copied().unwrap_or_default();
+        // What the child takes from the parent; everything else starts empty
+        // -- the pending set and the timer queue among it (the parent's POSIX
+        // timers are not inherited either, so nothing of theirs belongs here).
+        let inherited = states
+            .get(&parent)
+            .map(|s| SignalState {
+                blocked: s.blocked,
+                trampoline: s.trampoline,
+                extended_frame: s.extended_frame,
+                altstack_sp: s.altstack_sp,
+                altstack_size: s.altstack_size,
+                onstack_mask: s.onstack_mask,
+                ignored: s.ignored,
+                nocldwait: s.nocldwait,
+                ..SignalState::default()
+            })
+            .unwrap_or_default();
         // If the child somehow already had pending signals recorded, drop
         // them from the global counter before overwriting.
         if let Some(existing) = states.get(&child) {
@@ -916,6 +1113,9 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                 // POSIX: the child starts with no pending signals, so no
                 // per-signal siginfo records carry over.
                 infos: [None; NSIG as usize],
+                // Nor timer signals: the child has no POSIX timers (they are
+                // not inherited), so it reserves room as it creates its own.
+                timer_queue: Vec::new(),
                 // No sigsuspend in flight in a freshly-forked child.
                 saved_sigmask: None,
                 // Inherited, per sigaltstack(2): "a child created via fork(2)
@@ -1216,7 +1416,11 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
 ///
 /// On a clear→set transition the `info` is recorded and `true` is returned.
 /// Re-posting an already-pending standard signal keeps the **first** `info`
-/// (Linux standard-signal coalescing) and returns `false`. Like
+/// (Linux standard-signal coalescing) and returns `false` -- so does posting
+/// a signal that is pending only through a POSIX timer's entry, as Linux's
+/// `legacy_queue` drops a `kill` of a signal any instance of which is queued.
+/// (A real-time signal coalesces here too, where Linux would queue it: the
+/// standard record is one per signal.) Like
 /// [`set_pending`], this is a pure state operation and makes no delivery or
 /// termination decision.
 pub fn set_pending_info(pid: ProcessId, sig: u32, info: SigInfo) -> bool {
@@ -1250,36 +1454,72 @@ pub fn set_pending_info(pid: ProcessId, sig: u32, info: SigInfo) -> bool {
     newly
 }
 
-/// Clear the given pending-signal bits for a process.
+/// How many timer entries one pass of [`clear_pending`] takes out under the
+/// lock; it repeats until a pass comes back short.
+const CLEAR_BATCH: usize = 16;
+
+/// Discard every pending instance of the signals in `mask` for a process.
 ///
 /// Used for stop/continue mutual cancellation (a `SIGCONT` discards pending
-/// stop signals and a stop discards a pending `SIGCONT`). Decrements the
-/// global pending counter by the number of bits actually cleared so the
-/// fast-path gate in the delivery checkpoint stays accurate.
+/// stop signals and a stop discards a pending `SIGCONT`), and when a signal
+/// becomes ignored ([`set_ignored`], [`record_disposition`]). Takes each
+/// cleared bit off the global pending counter so the fast-path gate in the
+/// delivery checkpoint stays accurate.
+///
+/// A POSIX timer's entry among them is handed to its timer as dequeued --
+/// outside the lock, which the timer module must not be called under -- so a
+/// periodic timer re-arms rather than waiting for ever on a signal that is
+/// gone (the hole Linux 6.6's `flush_sigqueue_mask` leaves, which 6.13 closed
+/// with its ignored list).
 pub fn clear_pending(pid: ProcessId, mask: u64) {
     if mask == 0 {
         return;
     }
-    with_states(|states| {
-        if let Some(state) = states.get_mut(&pid) {
+    loop {
+        let mut batch: [Option<QueuedTimerSignal>; CLEAR_BATCH] = [None; CLEAR_BATCH];
+        let taken = with_states(|states| {
+            let Some(state) = states.get_mut(&pid) else {
+                return 0;
+            };
             let cleared = state.pending & mask;
-            if cleared != 0 {
-                state.pending &= !mask;
-                // Drop the recorded siginfo for every signal whose pending bit
-                // just cleared (mutual stop/cont cancellation, etc.).
-                let mut rem = cleared;
-                while rem != 0 {
-                    let idx = rem.trailing_zeros() as usize;
-                    if let Some(slot) = state.infos.get_mut(idx) {
-                        *slot = None;
-                    }
-                    rem &= rem.wrapping_sub(1); // clear lowest set bit
-                }
-                // `count_ones()` is 0..=64 — fits usize without arithmetic.
-                PENDING_COUNT.fetch_sub(cleared.count_ones() as usize, Ordering::Relaxed);
+            if cleared == 0 {
+                return 0;
             }
+            // Drop the standard record of every signal being cleared.
+            let mut rem = cleared;
+            while rem != 0 {
+                let idx = rem.trailing_zeros() as usize;
+                if let Some(slot) = state.infos.get_mut(idx) {
+                    *slot = None;
+                }
+                rem &= rem.wrapping_sub(1); // clear lowest set bit
+            }
+            // Take their timer entries, a batch at a time (no allocation).
+            let mut taken = 0usize;
+            state.timer_queue.retain(|q| {
+                let hit = signal_bit(q.sig).is_some_and(|b| cleared & b != 0);
+                if hit {
+                    if let Some(slot) = batch.get_mut(taken) {
+                        *slot = Some(*q);
+                        taken = taken.saturating_add(1);
+                        return false;
+                    }
+                }
+                true
+            });
+            // A bit stays set only while entries beyond this batch remain.
+            state.settle_bits(cleared);
+            taken
+        });
+        for q in batch.iter().take(taken).flatten() {
+            // Discarded, not delivered: what the timer answers does not
+            // matter, only that it re-arms a periodic timer.
+            let _ = crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info);
         }
-    });
+        if taken < CLEAR_BATCH {
+            break;
+        }
+    }
 }
 
 /// Bit mask of the stop-class signals (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`,
@@ -1476,78 +1716,263 @@ pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
     take_deliverable_info(pid).map(|(sig, _)| sig)
 }
 
+/// What one pass of [`take_deliverable_info`] found under the lock.
+enum DeliveryStep {
+    /// A standard instance to deliver.
+    Deliver(u32, SigInfo),
+    /// A timer entry to deliver, once its timer has seen it.
+    Timer(QueuedTimerSignal),
+    /// A timer entry of an ignored signal, discarded -- its timer still has to
+    /// see it, so a periodic one re-arms.
+    Discarded(QueuedTimerSignal),
+}
+
 /// Like [`take_deliverable`], but also returns the recorded source metadata
 /// ([`SigInfo`]) so the Linux `rt_sigframe` delivery path can fill a faithful
-/// `siginfo_t`. The chosen signal's pending bit **and** its info slot are
-/// cleared. Falls back to a generic `SI_USER`/0/0 record if (unexpectedly) no
-/// info was recorded for the pending bit.
+/// `siginfo_t`. The chosen instance is removed, and the signal's pending bit
+/// cleared once no instance of it is left. Falls back to a generic
+/// `SI_USER`/0/0 record if (unexpectedly) a bit is set with no instance.
+///
+/// A POSIX timer's entry is handed to its timer first, outside the lock
+/// ([`crate::proc::posix_timer::signal_dequeued`]): that re-arms a periodic
+/// timer and stamps the overrun count into the record, as Linux's
+/// `dequeue_signal` does -- or drops an entry its timer has been re-set or
+/// deleted since, in which case this looks again.
 #[must_use]
 pub fn take_deliverable_info(pid: ProcessId) -> Option<(u32, SigInfo)> {
-    with_states(|states| {
-        let state = states.get_mut(&pid)?;
-        // Ignored and deliverable: discarded, with their records (see
-        // `take_deliverable`).
-        let discard = state.pending & !state.blocked & state.ignored;
-        if discard != 0 {
-            state.pending &= !discard;
-            let mut rem = discard;
-            while rem != 0 {
-                if let Some(slot) = state.infos.get_mut(rem.trailing_zeros() as usize) {
-                    *slot = None;
+    loop {
+        let step = with_states(|states| {
+            let state = states.get_mut(&pid)?;
+            // Ignored and deliverable: discarded, with their records (see
+            // `take_deliverable`).
+            let discard = state.pending & !state.blocked & state.ignored;
+            if discard != 0 {
+                let mut rem = discard;
+                while rem != 0 {
+                    if let Some(slot) = state.infos.get_mut(rem.trailing_zeros() as usize) {
+                        *slot = None;
+                    }
+                    rem &= rem.wrapping_sub(1); // clear lowest set bit
                 }
-                rem &= rem.wrapping_sub(1); // clear lowest set bit
+                // Their timer entries go one per pass, each to its timer.
+                let pos = state
+                    .timer_queue
+                    .iter()
+                    .position(|q| signal_bit(q.sig).is_some_and(|b| discard & b != 0));
+                let gone = pos.map(|p| state.timer_queue.remove(p));
+                state.settle_bits(discard);
+                if let Some(q) = gone {
+                    return Some(DeliveryStep::Discarded(q));
+                }
             }
-            // `count_ones()` is 0..=64 — fits usize without arithmetic.
-            PENDING_COUNT.fetch_sub(discard.count_ones() as usize, Ordering::Relaxed);
+            let deliverable = state.pending & !state.blocked;
+            if deliverable == 0 {
+                return None;
+            }
+            // Lowest set bit = lowest-numbered signal (POSIX delivers low first).
+            let bit_index = deliverable.trailing_zeros();
+            let bit = 1u64 << bit_index;
+            // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+            // `saturating_add` keeps this arithmetic-side-effect free.
+            let sig = bit_index.saturating_add(1);
+            Some(match state.take_instance(sig, bit) {
+                Taken::Record(info) => DeliveryStep::Deliver(sig, info),
+                Taken::Timer(q) => DeliveryStep::Timer(q),
+            })
+        })?;
+        match step {
+            DeliveryStep::Deliver(sig, info) => return Some((sig, info)),
+            DeliveryStep::Timer(q) => {
+                if let Some(info) =
+                    crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info)
+                {
+                    return Some((q.sig, info));
+                }
+                // Stale (its timer re-set or deleted since): dropped; look again.
+            }
+            DeliveryStep::Discarded(q) => {
+                // Ignored, so discarded whatever the timer answers -- Linux's
+                // `get_signal` drops it after `dequeue_signal` re-armed the
+                // timer, which is the part that matters here.
+                let _ = crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info);
+            }
         }
-        let deliverable = state.pending & !state.blocked;
-        if deliverable == 0 {
-            return None;
-        }
-        // Lowest set bit = lowest-numbered signal (POSIX delivers low first).
-        let bit_index = deliverable.trailing_zeros();
-        let bit = 1u64 << bit_index;
-        state.pending &= !bit;
-        let info = state
-            .infos
-            .get_mut(bit_index as usize)
-            .and_then(Option::take)
-            .unwrap_or_else(|| SigInfo::user(0, 0));
-        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-        // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
-        // `saturating_add` keeps this arithmetic-side-effect free.
-        Some((bit_index.saturating_add(1), info))
-    })
+    }
 }
 
 /// Pick and consume the lowest-numbered pending signal that is also in
-/// `mask`, for a `signalfd` read.
+/// `mask`, for a `signalfd` read or a `sigtimedwait`, and return it with its
+/// record.
 ///
 /// Unlike [`take_deliverable`], this does **not** consult the blocked
 /// mask: a `signalfd` consumes any pending signal that is in the fd's
 /// acceptance mask (the process is expected to have blocked those signals
 /// so they aren't first delivered to a handler, but the dequeue itself is
 /// gated only by the fd mask, matching Linux's `signalfd_dequeue`). The
-/// chosen signal's pending bit is cleared. Returns the signal number, or
-/// `None` if no pending signal falls within `mask`.
+/// chosen instance is removed, and the bit cleared once no instance is left.
+/// Returns `None` if no pending signal falls within `mask`.
+///
+/// A POSIX timer's entry goes through its timer first, as in
+/// [`take_deliverable_info`].
+#[must_use]
+pub fn take_pending_info_in_mask(pid: ProcessId, mask: u64) -> Option<(u32, SigInfo)> {
+    loop {
+        let (sig, taken) = with_states(|states| {
+            let state = states.get_mut(&pid)?;
+            let eligible = state.pending & mask;
+            if eligible == 0 {
+                return None;
+            }
+            let bit_index = eligible.trailing_zeros();
+            let bit = 1u64 << bit_index;
+            // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+            let sig = bit_index.saturating_add(1);
+            Some((sig, state.take_instance(sig, bit)))
+        })?;
+        match taken {
+            Taken::Record(info) => return Some((sig, info)),
+            Taken::Timer(q) => {
+                if let Some(info) =
+                    crate::proc::posix_timer::signal_dequeued(pid, q.timer_id, q.token, q.info)
+                {
+                    return Some((q.sig, info));
+                }
+                // Stale: dropped; look again.
+            }
+        }
+    }
+}
+
+/// [`take_pending_info_in_mask`] without the record.
 #[must_use]
 pub fn take_pending_in_mask(pid: ProcessId, mask: u64) -> Option<u32> {
+    take_pending_info_in_mask(pid, mask).map(|(sig, _)| sig)
+}
+
+// ---------------------------------------------------------------------------
+// POSIX timers' signals
+// ---------------------------------------------------------------------------
+
+/// Make room in `pid`'s timer queue for one entry per timer of a process
+/// that will have `timers` POSIX timers, creating its signal state if it has
+/// none. Called as a timer is created, in process context, so that the
+/// expiry -- in the timer interrupt -- never allocates ([`post_timer_signal`]).
+///
+/// # Errors
+///
+/// `OutOfMemory` if the room cannot be had; nothing is changed.
+pub fn reserve_timer_signals(pid: ProcessId, timers: usize) -> KernelResult<()> {
     with_states(|states| {
-        let state = states.get_mut(&pid)?;
-        let eligible = state.pending & mask;
-        if eligible == 0 {
-            return None;
+        let state = states.entry(pid).or_default();
+        if state.timer_queue.capacity() < timers {
+            let more = timers.saturating_sub(state.timer_queue.len());
+            state
+                .timer_queue
+                .try_reserve_exact(more)
+                .map_err(|_| KernelError::OutOfMemory)?;
         }
-        let bit_index = eligible.trailing_zeros();
-        let bit = 1u64 << bit_index;
-        state.pending &= !bit;
-        // Consuming the signal drops its recorded siginfo too.
-        if let Some(slot) = state.infos.get_mut(bit_index as usize) {
-            *slot = None;
+        Ok(())
+    })
+}
+
+/// Queue POSIX timer `timer_id`'s signal `sig` on `pid` with record `info`,
+/// for the arming `token` names -- Linux's `send_sigqueue` of the timer's
+/// preallocated entry. Safe in the timer interrupt: it never allocates (see
+/// [`reserve_timer_signals`]) and wakes with `try_wake`/`defer_wake`.
+///
+/// - The timer's entry already queued: it now stands for this expiry too (its
+///   token and record refreshed), [`TimerPost::AlreadyQueued`].
+/// - The signal ignored and not blocked: nothing queued, Linux's
+///   `prepare_signal` -- [`TimerPost::Ignored`]. (A blocked signal is queued
+///   even if ignored: the action may change before it is unblocked.)
+/// - Otherwise queued behind every older instance, whether or not the signal
+///   was already pending -- each timer's expiry is delivered on its own.
+///
+/// Wakes the process's signal waiters when the signal's bit goes from clear
+/// to set, as [`set_pending_info`] does.
+pub fn post_timer_signal(
+    pid: ProcessId,
+    sig: u32,
+    timer_id: i32,
+    token: u64,
+    info: SigInfo,
+) -> TimerPost {
+    let Some(bit) = signal_bit(sig) else {
+        return TimerPost::Gone;
+    };
+    let mut newly = false;
+    let result = with_states(|states| {
+        let Some(state) = states.get_mut(&pid) else {
+            return TimerPost::Gone;
+        };
+        if let Some(q) = state
+            .timer_queue
+            .iter_mut()
+            .find(|q| q.timer_id == timer_id)
+        {
+            q.sig = sig;
+            q.token = token;
+            q.info = info;
+            return TimerPost::AlreadyQueued;
         }
-        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-        // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
-        Some(bit_index.saturating_add(1))
+        if state.ignored & bit != 0 && state.blocked & bit == 0 {
+            return TimerPost::Ignored;
+        }
+        if state.timer_queue.len() >= state.timer_queue.capacity() {
+            // Never, while every timer reserves its room; refuse rather than
+            // allocate here.
+            return TimerPost::Gone;
+        }
+        state.timer_queue.push(QueuedTimerSignal {
+            sig,
+            timer_id,
+            token,
+            info,
+        });
+        if state.pending & bit == 0 {
+            state.pending |= bit;
+            PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
+            newly = true;
+        }
+        TimerPost::Queued
+    });
+    if newly {
+        wake_signalfd_waiters(pid, bit);
+    }
+    result
+}
+
+/// Take timer `timer_id`'s queued signal off `pid`'s queue, if it has one --
+/// for a timer being re-set or deleted, whose pending expiry Linux 6.13 no
+/// longer delivers. Answers whether there was one.
+pub fn remove_timer_signal(pid: ProcessId, timer_id: i32) -> bool {
+    with_states(|states| {
+        let Some(state) = states.get_mut(&pid) else {
+            return false;
+        };
+        let Some(pos) = state
+            .timer_queue
+            .iter()
+            .position(|q| q.timer_id == timer_id)
+        else {
+            return false;
+        };
+        let q = state.timer_queue.remove(pos);
+        if let Some(bit) = signal_bit(q.sig) {
+            state.settle_bit(q.sig, bit);
+        }
+        true
+    })
+}
+
+/// How many POSIX timer signals `pid` has queued, and the room reserved for
+/// them -- for the self-tests and `/proc`.
+#[must_use]
+pub fn timer_signals(pid: ProcessId) -> (usize, usize) {
+    with_states(|states| {
+        states
+            .get(&pid)
+            .map_or((0, 0), |s| (s.timer_queue.len(), s.timer_queue.capacity()))
     })
 }
 

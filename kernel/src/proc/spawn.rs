@@ -22865,6 +22865,111 @@ pub fn self_test_linux_dev_stdin() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of POSIX timers through the Linux ABI:
+/// [`elf::build_linux_posix_timers_test_elf`] creates timers on several
+/// clocks and sigevents, takes their signals with `rt_sigtimedwait`, a
+/// `signalfd` and an `SA_SIGINFO` handler -- checking each `siginfo`'s code,
+/// timer id, value and overrun -- and forks a child that must have none. It
+/// exits `0x2A` on success; any other code names the check that failed.
+///
+/// The program sleeps (about 200 ms in all) while its timers run, so the wait
+/// is bounded by time, not yields: generously, since a guest second can take
+/// several host seconds under emulation.
+pub fn self_test_linux_posix_timers() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux POSIX timers (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_posix_timers_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-posix-timers"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-posix-timers",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: POSIX timers spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: POSIX timers (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "blocking the test's signals failed",
+            Some(0x31 | 0x32) => "the first two timers were not ids 0 and 1",
+            Some(0x33) => "a deleted timer could be deleted again",
+            Some(0x34) => "an unknown timer id was not EINVAL",
+            Some(0x35) => "an unknown clock was not EINVAL",
+            Some(0x36) => "CLOCK_MONOTONIC_RAW was not EOPNOTSUPP",
+            Some(0x37) => "CLOCK_REALTIME_ALARM was not EPERM",
+            Some(0x38) => "a CPU-time clock was not EOPNOTSUPP",
+            Some(0x39) => "a bad sigev_notify was not EINVAL",
+            Some(0x3A) => "SIGEV_THREAD_ID naming no thread of ours was not EINVAL",
+            Some(0x3B) => "SIGEV_THREAD_ID naming our own thread failed",
+            Some(0x3C | 0x3D) => "a fired one-shot did not read 0",
+            Some(0x3E | 0x3F) => "the default SIGALRM did not carry SI_TIMER and the timer id",
+            Some(0x40 | 0x41) => "arming the periodic timer failed",
+            Some(0x42) => "the periodic timer's gettime was not within an interval",
+            Some(0x43) => "timer_getoverrun was not 0 before any delivery",
+            Some(0x44 | 0x45) => "the periodic signal's record was wrong",
+            Some(0x46) => "si_overrun did not count the skipped expiries",
+            Some(0x47) => "timer_getoverrun did not match si_overrun",
+            Some(0x48 | 0x49) => "disarming did not report the old setting or read zero",
+            Some(0x4A) => "settime did not reset the overrun",
+            Some(0x4B..=0x50) => "two timers on one signal did not each deliver, in order",
+            Some(0x51..=0x54) => "SIGEV_NONE did not keep time",
+            Some(0x55..=0x57) => "an absolute CLOCK_REALTIME time in the past did not fire",
+            Some(0x58..=0x5B) => "a signalfd read did not report the timer's fields",
+            Some(0x5C..=0x61) => "the SA_SIGINFO handler did not see the timer's record",
+            Some(0x62 | 0x63) => "fork or wait4 failed",
+            Some(0x64) => "the forked child had timers, or its ids did not start at 0",
+            Some(0x65 | 0x66) => "the parent's timers did not survive its fork",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: POSIX timers (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux POSIX timers (ring 3: ids, clocks and sigevents; SI_TIMER records \
+         through rt_sigtimedwait, signalfd and a handler; a periodic timer's overrun; two \
+         timers on one signal; SIGEV_NONE; an absolute wall-clock time; none in a fork \
+         child): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the SlateOS channel descriptors from a real
 /// Linux-ABI process: [`elf::build_linux_slate_channel_test_elf`] makes a
 /// channel with `slate_channel_create` (1000), round-trips a message, forks

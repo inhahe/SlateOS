@@ -2521,30 +2521,14 @@ pub fn build_linux_rt_frame(
     };
 
     // Async (process-directed) signal: fill siginfo from the recorded source
-    // metadata (si_code + sender pid/uid captured at post time). A queued
-    // signal (`sigqueue`/`rt_sigqueueinfo`, SI_QUEUE) additionally carries the
-    // user-supplied `si_value` payload at union+8; every other class leaves it
-    // zero, so we use the `_rt`-layout builder only for SI_QUEUE.
+    // metadata -- si_code, then the pid, uid and value slots, which carry a
+    // sender's pid/uid and sigqueue value, a POSIX timer's id/overrun/sigval,
+    // or a child's pid/uid/status (`LinuxSiginfo::from_record`). Until
+    // 2026-10-07 the value was written only for SI_QUEUE, so a SIGCHLD
+    // handler read si_status 0 and a timer's si_value was lost.
     #[allow(clippy::cast_possible_wrap)]
     let signo_i = sig as i32;
-    #[allow(clippy::cast_possible_wrap)]
-    let sender_pid_i = info.sender_pid as i32;
-    let siginfo = if info.code == crate::proc::signal::si_code::SI_QUEUE {
-        crate::proc::linux_sigframe::LinuxSiginfo::queue(
-            signo_i,
-            info.code,
-            sender_pid_i,
-            info.sender_uid,
-            info.value,
-        )
-    } else {
-        crate::proc::linux_sigframe::LinuxSiginfo::kill(
-            signo_i,
-            info.code,
-            sender_pid_i,
-            info.sender_uid,
-        )
-    };
+    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::from_record(signo_i, &info);
 
     match emit_linux_rt_frame(pid, sig, act, &regs, siginfo) {
         Some(entry) => {
@@ -4643,6 +4627,58 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 /// returns from a signalfd).  128 bytes on every Linux ABI.
 const SIGNALFD_SIGINFO_SIZE: usize = 128;
 
+/// A signal's `struct signalfd_siginfo` (128 bytes), from its record -- Linux's
+/// `signalfd_copyinfo`, which picks the fields by the record's layout
+/// (`siginfo_layout`):
+///
+/// | record | fields |
+/// |---|---|
+/// | `kill`, the kernel's (`SI_USER`, `SI_KERNEL`) | `ssi_pid`, `ssi_uid` |
+/// | a POSIX timer's (`SI_TIMER`) | `ssi_tid` (the timer id), `ssi_overrun`, `ssi_int`, `ssi_ptr` |
+/// | `sigqueue`, `tkill` and the other negative codes | `ssi_pid`, `ssi_uid`, `ssi_int`, `ssi_ptr` |
+/// | a child's `SIGCHLD` (`CLD_*`) | `ssi_pid`, `ssi_uid`, `ssi_status` |
+///
+/// Offsets: `ssi_signo` 0, `ssi_errno` 4, `ssi_code` 8, `ssi_pid` 12,
+/// `ssi_uid` 16, `ssi_tid` 24, `ssi_overrun` 32, `ssi_status` 40, `ssi_int`
+/// 44, `ssi_ptr` 48. The CPU times of a `SIGCHLD` are not recorded, so they
+/// read 0.
+fn signalfd_record(sig: u32, info: &crate::proc::signal::SigInfo) -> [u8; SIGNALFD_SIGINFO_SIZE] {
+    use crate::proc::signal::si_code;
+    const SIGCHLD: u32 = 17;
+    // CLD_EXITED (1) ... CLD_CONTINUED (6): NSIGCHLD.
+    const NSIGCHLD: i32 = 6;
+    let mut rec = [0u8; SIGNALFD_SIGINFO_SIZE];
+    let mut put = |off: usize, bytes: &[u8]| {
+        if let Some(dst) = rec.get_mut(off..off.saturating_add(bytes.len())) {
+            dst.copy_from_slice(bytes);
+        }
+    };
+    put(0, &sig.to_ne_bytes());
+    put(8, &info.code.to_ne_bytes());
+    // The value's low half is `si_int` (and a child's `si_status`).
+    #[allow(clippy::cast_possible_truncation)]
+    let low = info.value as u32;
+    if info.code == si_code::SI_TIMER {
+        put(24, &info.sender_pid.to_ne_bytes());
+        put(32, &info.sender_uid.to_ne_bytes());
+        put(44, &low.to_ne_bytes());
+        put(48, &info.value.to_ne_bytes());
+    } else if info.code < 0 {
+        put(12, &info.sender_pid.to_ne_bytes());
+        put(16, &info.sender_uid.to_ne_bytes());
+        put(44, &low.to_ne_bytes());
+        put(48, &info.value.to_ne_bytes());
+    } else if sig == SIGCHLD && (1..=NSIGCHLD).contains(&info.code) {
+        put(12, &info.sender_pid.to_ne_bytes());
+        put(16, &info.sender_uid.to_ne_bytes());
+        put(40, &low.to_ne_bytes());
+    } else {
+        put(12, &info.sender_pid.to_ne_bytes());
+        put(16, &info.sender_uid.to_ne_bytes());
+    }
+    rec
+}
+
 /// signalfd read: drain pending signals that are in the fd's acceptance
 /// mask into one or more `struct signalfd_siginfo` records (128 bytes
 /// each), exactly as Linux's `signalfd_read`.
@@ -4650,10 +4686,11 @@ const SIGNALFD_SIGINFO_SIZE: usize = 128;
 /// Semantics:
 ///   * `cap < 128` → EINVAL (Linux requires room for at least one record).
 ///   * For each consumable masked-pending signal (up to `cap / 128`
-///     records), emit a record whose `ssi_signo` is the signal number;
-///     all other fields are zeroed (signalfd does not yet surface the
-///     recorded siginfo source class/sender/`si_value` — a separate
-///     enhancement from the `rt_sigframe` delivery path, which does).
+///     records), emit its `struct signalfd_siginfo` ([`signalfd_record`]):
+///     the signal, its code, and the fields its record carries -- sender
+///     pid and uid, a `sigqueue` or POSIX timer's value, a timer's id and
+///     overrun, a child's status -- as Linux's `signalfd_copyinfo` lays
+///     them out. (Until 2026-10-07 only `ssi_signo` was filled.)
 ///   * If no masked signal is pending: `O_NONBLOCK` → EAGAIN.  A blocking read
 ///     instead parks the caller until a masked signal arrives, via the
 ///     per-process `signalfd` wait queue: it registers in
@@ -4697,14 +4734,15 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         };
         let mut produced = 0usize;
         while produced < max_records {
-            let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) else {
+            let Some((sig, info)) = crate::proc::signal::take_pending_info_in_mask(caller, mask)
+            else {
                 break;
             };
             let off = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
-            // ssi_signo is the first u32 of the record; the rest stay zero.
-            let bytes = sig.to_le_bytes();
-            // off + 4 <= total_bytes since produced < max_records.
-            out[off..off.saturating_add(4)].copy_from_slice(&bytes);
+            // off + 128 <= total_bytes since produced < max_records.
+            if let Some(dst) = out.get_mut(off..off.saturating_add(SIGNALFD_SIGINFO_SIZE)) {
+                dst.copy_from_slice(&signalfd_record(sig, &info));
+            }
             produced = produced.saturating_add(1);
         }
 
@@ -37769,22 +37807,27 @@ fn read_timespec64_ns(ptr: u64) -> u64 {
     sec_ns.saturating_add(nsec_u)
 }
 
-/// Deliver a dequeued signal as the result of `rt_sigtimedwait`: optionally
-/// fill the user `uinfo` siginfo (best-effort: `si_signo` in the first u32,
-/// remaining fields zero, matching what our signal queue carries), then
-/// return the signal number.  Mirrors Linux's
-/// `copy_siginfo_to_user(uinfo)` + `return info.si_signo`.
-fn sigtimedwait_deliver(uinfo: u64, sig: u32) -> SyscallResult {
+/// Deliver a dequeued signal as the result of `rt_sigtimedwait`: fill the
+/// user `uinfo` (if given) with the signal's whole `siginfo_t` -- its code and
+/// the record's pid, uid and value slots, which is how a POSIX timer's id,
+/// overrun and `sigev_value` reach glibc's `SIGEV_THREAD` helper -- then
+/// return the signal number. Mirrors Linux's `copy_siginfo_to_user(uinfo)` +
+/// `return info.si_signo`.
+fn sigtimedwait_deliver(
+    uinfo: u64,
+    sig: u32,
+    info: &crate::proc::signal::SigInfo,
+) -> SyscallResult {
     if uinfo != 0 {
-        let mut info = [0u8; 128];
-        if let Some(dst) = info.get_mut(0..4) {
-            dst.copy_from_slice(&sig.to_ne_bytes());
-        }
-        if let Err(e) = crate::mm::user::validate_user_write(uinfo, 128) {
+        #[allow(clippy::cast_possible_wrap)]
+        let bytes =
+            crate::proc::linux_sigframe::LinuxSiginfo::from_record(sig as i32, info).to_bytes();
+        if let Err(e) = crate::mm::user::validate_user_write(uinfo, bytes.len()) {
             return linux_err(linux_errno_for(e));
         }
         // SAFETY: validate_user_write confirmed [uinfo, +128) is writable.
-        if let Err(e) = unsafe { crate::mm::user::copy_to_user(info.as_ptr(), uinfo, 128) } {
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), uinfo, bytes.len()) }
+        {
             return linux_err(linux_errno_for(e));
         }
     }
@@ -37922,8 +37965,8 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
     } else {
         let ns = read_timespec64_ns(args.arg2);
         if ns == 0 {
-            return match crate::proc::signal::take_pending_in_mask(caller, mask) {
-                Some(sig) => sigtimedwait_deliver(args.arg1, sig),
+            return match crate::proc::signal::take_pending_info_in_mask(caller, mask) {
+                Some((sig, info)) => sigtimedwait_deliver(args.arg1, sig, &info),
                 None => linux_err(errno::EAGAIN),
             };
         }
@@ -37932,8 +37975,8 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
 
     let task = crate::sched::current_task_id();
     loop {
-        if let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) {
-            return sigtimedwait_deliver(args.arg1, sig);
+        if let Some((sig, info)) = crate::proc::signal::take_pending_info_in_mask(caller, mask) {
+            return sigtimedwait_deliver(args.arg1, sig, &info);
         }
         // A signal outside the set that would *do* something when delivered
         // ends the wait with EINTR, and the delivery on the way out does it:
@@ -38114,184 +38157,395 @@ fn sys_rt_tgsigqueueinfo(args: &SyscallArgs) -> SyscallResult {
     tgkill_common_value(&tgkill_args, user_code, user_value)
 }
 
-/// `timer_create(clockid, sigevent*, timerid_t*)`.
-fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
-    // Mirror Linux's `SYSCALL_DEFINE3(timer_create)` and `do_timer_create`
-    // (kernel/time/posix-timers.c) gate order:
-    //   1. if (timer_event_spec) copy_from_user(...) -> EFAULT on fail
-    //   2. clockid_to_kclock(which_clock) == NULL                 -> EINVAL
-    //      (rejects clockids outside the table, including SGI_CYCLE=10
-    //       which has no k_clock entry)
-    //   3. !kc->timer_create                                      -> EOPNOTSUPP
-    //      (MONOTONIC_RAW=4, REALTIME_COARSE=5, MONOTONIC_COARSE=6 are
-    //       reader-only clocks: their k_clock has no .timer_create)
-    //   4. ... timer creation work; copy_to_user(created_timer_id)
-    //                                                             -> EFAULT
-    //
-    // Pre-batch we (a) checked clockid before sigevent (mismatch when both
-    // are bad — Linux returns EFAULT, we returned EINVAL), (b) accepted
-    // SGI_CYCLE=10 as valid (would have entered the table on Linux but
-    // there's no entry → EINVAL), and (c) returned ENOSYS for clockids
-    // 4/5/6 where Linux returns EOPNOTSUPP.
-    if args.arg1 != 0 {
-        // sigevent on x86_64 Linux is 64 bytes (union sigval inside).
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let clockid = args.arg0 as i32;
-    // Linux clockids 0..=11; SGI_CYCLE(10) has no entry in posix_clocks[].
-    if !(0..=11).contains(&clockid) || clockid == 10 {
-        return linux_err(errno::EINVAL);
-    }
-    // Reader-only clocks have no .timer_create — Linux returns EOPNOTSUPP.
-    if matches!(clockid, 4..=6) {
-        return linux_err(errno::EOPNOTSUPP);
-    }
-    // Batch 206: good_sigevent content validation.  Linux's
-    // do_timer_create allocates a posix timer, then calls
-    // good_sigevent(event) which returns NULL (-> EINVAL) when:
-    //   * sigev_notify ∉ {SIGEV_SIGNAL=0, SIGEV_NONE=1, SIGEV_THREAD=2,
-    //                     SIGEV_SIGNAL|SIGEV_THREAD_ID=4}
-    //   * For sigev_notify != SIGEV_NONE: sigev_signo ∉ 1..=SIGRTMAX (64
-    //     on x86_64).
-    // Pre-batch we returned ENOSYS for any bad-shape sigevent; Linux
-    // returns EINVAL.  Apply the check ahead of the timerid EFAULT
-    // gate so probes that pass (sevp={bad}, timerid=NULL) see EINVAL
-    // first — Linux's order is good_sigevent (EINVAL) followed by
-    // copy_to_user(timerid) (EFAULT).
-    if args.arg1 != 0 {
-        // SIGEV_* constants (include/uapi/asm-generic/siginfo.h).
-        const SIGEV_SIGNAL: i32 = 0;
-        const SIGEV_NONE: i32 = 1;
-        const SIGEV_THREAD: i32 = 2;
-        const SIGEV_THREAD_ID_BIT: i32 = 4;
-        // x86_64 SIGRTMAX = 64.
-        const SIGRTMAX: i32 = 64;
+// ---------------------------------------------------------------------------
+// POSIX per-process timers -- timer_create / timer_settime / timer_gettime /
+// timer_getoverrun / timer_delete (`proc::posix_timer`).
+//
+// Each body is Linux's (kernel/time/posix-timers.c), check for check and in
+// its order, and returns the Linux errno; the native `SYS_POSIX_TIMER`
+// (`handlers::sys_posix_timer`) calls the same `timer_*_common` functions, so
+// the two ABIs cannot disagree. In kernel context (no calling process) there
+// is nothing to own a timer: every argument check still runs, and then
+// `timer_create` answers ENOSYS and the others EINVAL (no such timer).
+// ---------------------------------------------------------------------------
 
-        let mut buf = [0u8; 16];
-        // SAFETY: validate_user_read above confirmed 64 bytes readable.
-        if let Err(e) = unsafe { crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 16) }
-        {
-            return linux_err(linux_errno_for(e));
-        }
-        let read_i32 = |o: usize| -> i32 {
-            match <[u8; 4]>::try_from(&buf[o..o + 4]) {
-                Ok(b) => i32::from_ne_bytes(b),
-                Err(_) => 0,
-            }
-        };
-        let sigev_signo = read_i32(8);
-        let sigev_notify = read_i32(12);
-        let notify_ok = matches!(sigev_notify, SIGEV_SIGNAL | SIGEV_NONE | SIGEV_THREAD)
-            || sigev_notify == (SIGEV_SIGNAL | SIGEV_THREAD_ID_BIT);
-        if !notify_ok {
-            return linux_err(errno::EINVAL);
-        }
-        if sigev_notify != SIGEV_NONE && !(1..=SIGRTMAX).contains(&sigev_signo) {
-            return linux_err(errno::EINVAL);
-        }
-    }
-    // timerid_t output ptr is required (4 bytes for a kernel_timer_t).
-    // Linux only touches it via copy_to_user after creation succeeds, so
-    // a NULL/bad ptr surfaces as EFAULT only when everything above passes.
-    if args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
-        return linux_err(linux_errno_for(e));
-    }
-    linux_err(errno::ENOSYS)
+/// `NSEC_PER_SEC`.
+const TIMER_NSEC_PER_SEC: i64 = 1_000_000_000;
+
+/// A `struct sigevent` as `timer_create` reads it (x86_64, 64 bytes):
+/// `sigev_value` at 0, `sigev_signo` at 8, `sigev_notify` at 12, and
+/// `sigev_notify_thread_id` (the union's first `int`) at 16.
+#[derive(Debug, Clone, Copy)]
+struct TimerSigevent {
+    value: u64,
+    signo: i32,
+    notify: i32,
+    tid: i32,
 }
 
-/// `timer_delete(timerid)`.
-fn sys_timer_delete(_args: &SyscallArgs) -> SyscallResult {
-    // No timers exist in our kernel — any timerid is bogus.
-    linux_err(errno::EINVAL)
-}
-
-/// `timer_settime(timerid, flags, new_value*, old_value*)`.
-fn sys_timer_settime(args: &SyscallArgs) -> SyscallResult {
-    // Linux's `SYSCALL_DEFINE4(timer_settime)` (kernel/time/posix-timers.c):
-    //   1. `if (!new_setting) return -EINVAL;`  (NULL → EINVAL, NOT EFAULT)
-    //   2. `if (get_itimerspec64(&new_spec, new_setting)) return -EFAULT;`
-    //   3. `do_timer_settime` → `timespec64_valid` on both halves → EINVAL.
-    //   4. Timer lookup → EINVAL if not found.
-    //   5. `common_timer_set` → `if (flags & ~TIMER_ABSTIME)` → EINVAL,
-    //      enforced AFTER the lookup.
-    // Pre-batch gates returned EFAULT for NULL new_setting and rejected
-    // bad flags BEFORE the user-pointer copy, so a probe passing
-    // (flags=0xff, new=NULL) saw EINVAL where Linux returns EINVAL too,
-    // but (flags=0xff, new=bad_ptr) saw EINVAL where Linux returns EFAULT
-    // (the copy_from_user fails before flags are touched). Reorder to
-    // match Linux.
-    if args.arg2 == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // struct itimerspec is 32 bytes (two timespecs).
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 32) {
-        return linux_err(linux_errno_for(e));
-    }
-    let mut buf = [0u8; 32];
-    // SAFETY: validate_user_read confirmed [args.arg2, +32) is readable;
-    // copy_from_user re-checks under SMAP.
-    let r = unsafe { crate::mm::user::copy_from_user(args.arg2, buf.as_mut_ptr(), 32) };
-    if let Err(e) = r {
-        return linux_err(linux_errno_for(e));
-    }
-    // timespec64_valid (include/linux/time64.h): tv_sec >= 0 AND
-    // tv_nsec in [0, NSEC_PER_SEC).  Apply to both interval and value.
-    const NSEC_PER_SEC: i64 = 1_000_000_000;
-    let parse_i64 = |off: usize| -> i64 {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&buf[off..off + 8]);
-        i64::from_ne_bytes(bytes)
+/// Copy a `struct sigevent` in, all 64 bytes as Linux's `copy_from_user`
+/// does, or `EFAULT`.
+fn read_timer_sigevent(ptr: u64) -> Result<TimerSigevent, i32> {
+    let mut buf = [0u8; 64];
+    // SAFETY: `buf` is a writable 64-byte kernel buffer; copy_from_user checks
+    // the user range and accesses it under SMAP.
+    unsafe { crate::mm::user::copy_from_user(ptr, buf.as_mut_ptr(), buf.len()) }
+        .map_err(linux_errno_for)?;
+    let word = |o: usize| -> [u8; 4] {
+        buf.get(o..o.saturating_add(4))
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 4])
     };
-    let interval_sec = parse_i64(0);
-    let interval_nsec = parse_i64(8);
-    let value_sec = parse_i64(16);
-    let value_nsec = parse_i64(24);
-    if interval_sec < 0
-        || !(0..NSEC_PER_SEC).contains(&interval_nsec)
-        || value_sec < 0
-        || !(0..NSEC_PER_SEC).contains(&value_nsec)
-    {
-        return linux_err(errno::EINVAL);
+    let value = buf
+        .get(0..8)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u64::from_ne_bytes);
+    Ok(TimerSigevent {
+        value,
+        signo: i32::from_ne_bytes(word(8)),
+        notify: i32::from_ne_bytes(word(12)),
+        tid: i32::from_ne_bytes(word(16)),
+    })
+}
+
+/// What kind of clock `timer_create` was asked for -- Linux's
+/// `clockid_to_kclock` and whether that clock has a `timer_create`.
+#[derive(Debug, Clone, Copy)]
+enum TimerClockKind {
+    /// A clock timers run on here.
+    Timeable(crate::proc::posix_timer::TimerClock),
+    /// A CPU-time clock -- `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`
+    /// or a process's or thread's (a negative id, as glibc passes them). Linux
+    /// times them; this kernel keeps no per-task CPU time to fire on, so once
+    /// the id is found valid the answer is `EOPNOTSUPP`.
+    CpuTime(i32),
+    /// `CLOCK_REALTIME_ALARM` / `CLOCK_BOOTTIME_ALARM`: need `CAP_WAKE_ALARM`.
+    Alarm,
+}
+
+/// Classify `clockid` for `timer_create`, refusing as Linux does before it
+/// allocates anything: `EINVAL` for an id that names no clock, `EOPNOTSUPP`
+/// for one whose clock cannot be timed (the coarse and raw clocks, and a
+/// file-descriptor clock).
+fn timer_clock_kind(clockid: i32) -> Result<TimerClockKind, i32> {
+    use crate::proc::posix_timer::TimerClock;
+    // CLOCKFD (3 in the low three bits of a negative id): a dynamic clock,
+    // whose k_clock has no timer_create.
+    const CLOCKFD: i32 = 3;
+    const CLOCKFD_MASK: i32 = 7;
+    if let Some(clock) = TimerClock::from_linux(clockid) {
+        return Ok(TimerClockKind::Timeable(clock));
     }
-    if args.arg3 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
-            return linux_err(linux_errno_for(e));
+    match clockid {
+        2 | 3 => Ok(TimerClockKind::CpuTime(clockid)),
+        4..=6 => Err(errno::EOPNOTSUPP),
+        8 | 9 => Ok(TimerClockKind::Alarm),
+        c if c < 0 && c & CLOCKFD_MASK == CLOCKFD => Err(errno::EOPNOTSUPP),
+        c if c < 0 => Ok(TimerClockKind::CpuTime(c)),
+        _ => Err(errno::EINVAL),
+    }
+}
+
+/// Whether CPU-time clock `clockid` names something a timer of `caller`'s
+/// could measure -- Linux's `pid_for_clock(clock, false)`: a valid clock kind,
+/// and for a nonzero pid a thread of the caller's own (per-thread clocks) or a
+/// live process.
+fn cpu_clock_target_ok(clockid: i32, caller: Option<u64>) -> bool {
+    // CPUCLOCK_WHICH: PROF 0, VIRT 1, SCHED 2; 3 is no clock.
+    const CPUCLOCK_CLOCK_MASK: i32 = 3;
+    const CPUCLOCK_MAX: i32 = 3;
+    const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
+    if clockid >= 0 {
+        // CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID: the caller's.
+        return true;
+    }
+    if clockid & CPUCLOCK_CLOCK_MASK >= CPUCLOCK_MAX {
+        return false;
+    }
+    // CPUCLOCK_PID: the pid is the id's complement, shifted down three.
+    let upid = !(clockid >> 3);
+    if upid == 0 {
+        return true;
+    }
+    let Ok(target) = u64::try_from(upid) else {
+        return false;
+    };
+    if clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
+        caller.is_some() && crate::proc::thread::owner_process(target) == caller
+    } else {
+        crate::proc::pcb::state(target).is_some()
+    }
+}
+
+/// Linux's `good_sigevent` for `caller`'s new timer `id`: what its expiry
+/// does, or `EINVAL`. No sigevent means `SIGALRM` carrying the timer's id.
+fn timer_notify(
+    event: Option<TimerSigevent>,
+    caller: Option<u64>,
+    id: i32,
+) -> Result<crate::proc::posix_timer::Notify, i32> {
+    use crate::proc::posix_timer::{
+        Notify, SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD, SIGEV_THREAD_ID,
+    };
+    const SIGALRM: u32 = 14;
+    // x86_64 SIGRTMAX.
+    const SIGRTMAX: i32 = 64;
+    let Some(ev) = event else {
+        // memset(si_value, 0) then sival_int = id: the low half, zero above.
+        #[allow(clippy::cast_sign_loss)]
+        let value = u64::from(id as u32);
+        return Ok(Notify::Signal {
+            signo: SIGALRM,
+            value,
+            thread: None,
+        });
+    };
+    let thread = match ev.notify {
+        SIGEV_NONE => return Ok(Notify::None),
+        SIGEV_SIGNAL | SIGEV_THREAD => None,
+        // SIGEV_SIGNAL | SIGEV_THREAD_ID: the thread must be one of the
+        // caller's (`same_thread_group`).
+        SIGEV_THREAD_ID => {
+            let tid = u64::try_from(ev.tid).ok().filter(|&t| t != 0);
+            match tid {
+                Some(t) if caller.is_some() && crate::proc::thread::owner_process(t) == caller => {
+                    Some(t)
+                }
+                _ => return Err(errno::EINVAL),
+            }
+        }
+        _ => return Err(errno::EINVAL),
+    };
+    if !(1..=SIGRTMAX).contains(&ev.signo) {
+        return Err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let signo = ev.signo as u32;
+    Ok(Notify::Signal {
+        signo,
+        value: ev.value,
+        thread,
+    })
+}
+
+/// `timer_create`'s body for both ABIs -- Linux's `do_timer_create`, in its
+/// order: copy the sigevent in (`EFAULT`); the clock (`EINVAL`,
+/// `EOPNOTSUPP`); an id (`EAGAIN`, from `RLIMIT_SIGPENDING` or the ids
+/// running out); the sigevent's content (`EINVAL`); the id out to `out`, for
+/// the Linux call (`EFAULT`); then the clock's own refusals (`EPERM` for an
+/// alarm clock, `EINVAL` / `EOPNOTSUPP` for a CPU-time one). An id taken and
+/// then refused is used up, as on Linux. Answers the new timer's id.
+pub(crate) fn timer_create_common(clock_arg: u64, sevp: u64, out: Option<u64>) -> Result<i32, i32> {
+    use crate::proc::posix_timer;
+    let event = if sevp == 0 {
+        None
+    } else {
+        Some(read_timer_sigevent(sevp)?)
+    };
+    // clockid_t is an int: the register's low half.
+    #[allow(clippy::cast_possible_truncation)]
+    let clockid = clock_arg as i32;
+    let kind = timer_clock_kind(clockid)?;
+    let caller = caller_pid();
+    let reserved = match caller {
+        Some(pid) => Some((pid, posix_timer::reserve(pid).map_err(|_| errno::EAGAIN)?)),
+        None => None,
+    };
+    let refuse = |errno_val: i32| {
+        if let Some((pid, id)) = reserved {
+            posix_timer::release(pid, id);
+        }
+        Err(errno_val)
+    };
+    let id = reserved.map_or(0, |(_, id)| id);
+    let notify = match timer_notify(event, caller, id) {
+        Ok(n) => n,
+        Err(e) => return refuse(e),
+    };
+    if let Some(ptr) = out {
+        if ptr == 0 {
+            return refuse(errno::EFAULT);
+        }
+        if reserved.is_some() {
+            if let Err(e) = crate::mm::user::validate_user_write(ptr, 4) {
+                return refuse(linux_errno_for(e));
+            }
+            // SAFETY: validate_user_write confirmed [ptr, ptr + 4) writable;
+            // copy_to_user re-checks under SMAP.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(id.to_ne_bytes().as_ptr(), ptr, 4) }
+            {
+                return refuse(linux_errno_for(e));
+            }
         }
     }
-    // flags & ~TIMER_ABSTIME is checked inside `common_timer_set` AFTER
-    // the timer is locked.  We have no timers, so the lookup terminal
-    // (EINVAL) subsumes any flags-based EINVAL.  Don't gate on flags
-    // here — that would mismatch Linux when the caller passes a bad
-    // user pointer alongside bad flags (Linux returns EFAULT).
-    let _ = args.arg1;
-    linux_err(errno::EINVAL)
+    let clock = match kind {
+        TimerClockKind::Timeable(clock) => clock,
+        TimerClockKind::Alarm => return refuse(errno::EPERM),
+        TimerClockKind::CpuTime(c) => {
+            return refuse(if cpu_clock_target_ok(c, caller) {
+                errno::EOPNOTSUPP
+            } else {
+                errno::EINVAL
+            });
+        }
+    };
+    let Some((pid, id)) = reserved else {
+        // The kernel itself owns no POSIX timers.
+        return Err(errno::ENOSYS);
+    };
+    posix_timer::commit(pid, id, clock, notify).map_err(|_| errno::EAGAIN)?;
+    Ok(id)
 }
 
-/// `timer_gettime(timerid, curr_value*)`.
+/// A `struct itimerspec` (`it_interval`, then `it_value`, each a
+/// `struct timespec` of two `i64`s), in nanoseconds: `(value, interval)`.
+type TimerSpecNs = (u64, u64);
+
+/// Copy a `struct itimerspec` in (`EFAULT`) and check both halves are valid
+/// timespecs (`EINVAL`) -- `get_itimerspec64` then `timespec64_valid` -- as
+/// nanoseconds, saturating at `KTIME_MAX` as `timespec64_to_ktime` does.
+fn read_timer_itimerspec(ptr: u64) -> Result<TimerSpecNs, i32> {
+    let mut buf = [0u8; 32];
+    // SAFETY: `buf` is a writable 32-byte kernel buffer; copy_from_user checks
+    // the user range and accesses it under SMAP.
+    unsafe { crate::mm::user::copy_from_user(ptr, buf.as_mut_ptr(), buf.len()) }
+        .map_err(linux_errno_for)?;
+    let field = |o: usize| -> i64 {
+        buf.get(o..o.saturating_add(8))
+            .and_then(|s| s.try_into().ok())
+            .map_or(0, i64::from_ne_bytes)
+    };
+    let to_ns = |sec: i64, nsec: i64| -> Result<u64, i32> {
+        if sec < 0 || !(0..TIMER_NSEC_PER_SEC).contains(&nsec) {
+            return Err(errno::EINVAL);
+        }
+        let ns = sec
+            .checked_mul(TIMER_NSEC_PER_SEC)
+            .and_then(|s| s.checked_add(nsec))
+            .unwrap_or(i64::MAX);
+        Ok(u64::try_from(ns).unwrap_or(crate::proc::posix_timer::KTIME_MAX))
+    };
+    let interval = to_ns(field(0), field(8))?;
+    let value = to_ns(field(16), field(24))?;
+    Ok((value, interval))
+}
+
+/// Copy `(value, interval)` out as a `struct itimerspec`, or `EFAULT`.
+fn write_timer_itimerspec(ptr: u64, spec: TimerSpecNs) -> Result<(), i32> {
+    let (value, interval) = spec;
+    let mut buf = [0u8; 32];
+    let mut put = |o: usize, v: u64| {
+        if let Some(dst) = buf.get_mut(o..o.saturating_add(8)) {
+            dst.copy_from_slice(&v.to_ne_bytes());
+        }
+    };
+    const NS: u64 = 1_000_000_000;
+    put(0, interval / NS);
+    put(8, interval % NS);
+    put(16, value / NS);
+    put(24, value % NS);
+    if ptr == 0 {
+        return Err(errno::EFAULT);
+    }
+    crate::mm::user::validate_user_write(ptr, buf.len()).map_err(linux_errno_for)?;
+    // SAFETY: validate_user_write confirmed [ptr, ptr + 32) writable;
+    // copy_to_user re-checks under SMAP.
+    unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), ptr, buf.len()) }.map_err(linux_errno_for)
+}
+
+/// A timer id argument: `timer_t` is an `int`, the register's low half.
+#[allow(clippy::cast_possible_truncation)]
+const fn timer_id_arg(arg: u64) -> i32 {
+    arg as i32
+}
+
+/// `timer_settime`'s body for both ABIs -- Linux's order: no new setting is
+/// `EINVAL`; copy it in (`EFAULT`); both halves valid (`EINVAL`); the timer
+/// (`EINVAL`); set it; then the old setting out (`EFAULT`, the change made).
+/// Only `TIMER_ABSTIME` of `flags` means anything; Linux checks no others.
+pub(crate) fn timer_settime_common(
+    id_arg: u64,
+    flags: u64,
+    new_ptr: u64,
+    old_ptr: u64,
+) -> Result<(), i32> {
+    use crate::proc::posix_timer;
+    if new_ptr == 0 {
+        return Err(errno::EINVAL);
+    }
+    let (value, interval) = read_timer_itimerspec(new_ptr)?;
+    let pid = caller_pid().ok_or(errno::EINVAL)?;
+    let abstime = flags & u64::from(posix_timer::TIMER_ABSTIME) != 0;
+    let old = posix_timer::settime(pid, timer_id_arg(id_arg), abstime, value, interval)
+        .map_err(|_| errno::EINVAL)?;
+    if old_ptr != 0 {
+        write_timer_itimerspec(old_ptr, old)?;
+    }
+    Ok(())
+}
+
+/// `timer_gettime`'s body for both ABIs: the timer (`EINVAL`), then its
+/// setting out (`EFAULT`).
+pub(crate) fn timer_gettime_common(id_arg: u64, cur_ptr: u64) -> Result<(), i32> {
+    let pid = caller_pid().ok_or(errno::EINVAL)?;
+    let cur =
+        crate::proc::posix_timer::gettime(pid, timer_id_arg(id_arg)).map_err(|_| errno::EINVAL)?;
+    write_timer_itimerspec(cur_ptr, cur)
+}
+
+/// `timer_getoverrun`'s body for both ABIs: the last delivery's overrun, or
+/// `EINVAL` for no such timer.
+pub(crate) fn timer_getoverrun_common(id_arg: u64) -> Result<i32, i32> {
+    let pid = caller_pid().ok_or(errno::EINVAL)?;
+    crate::proc::posix_timer::getoverrun(pid, timer_id_arg(id_arg)).map_err(|_| errno::EINVAL)
+}
+
+/// `timer_delete`'s body for both ABIs: `EINVAL` for no such timer.
+pub(crate) fn timer_delete_common(id_arg: u64) -> Result<(), i32> {
+    let pid = caller_pid().ok_or(errno::EINVAL)?;
+    crate::proc::posix_timer::delete(pid, timer_id_arg(id_arg)).map_err(|_| errno::EINVAL)
+}
+
+/// `timer_create(clockid, sigevent*, timer_t*)`. See [`timer_create_common`].
+fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
+    match timer_create_common(args.arg0, args.arg1, Some(args.arg2)) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `timer_delete(timerid)`. See [`timer_delete_common`].
+fn sys_timer_delete(args: &SyscallArgs) -> SyscallResult {
+    match timer_delete_common(args.arg0) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `timer_settime(timerid, flags, new_value*, old_value*)`. See
+/// [`timer_settime_common`].
+fn sys_timer_settime(args: &SyscallArgs) -> SyscallResult {
+    match timer_settime_common(args.arg0, args.arg1, args.arg2, args.arg3) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `timer_gettime(timerid, curr_value*)`. See [`timer_gettime_common`].
 fn sys_timer_gettime(args: &SyscallArgs) -> SyscallResult {
-    // Linux's `SYSCALL_DEFINE2(timer_gettime)` (kernel/time/posix-timers.c):
-    //   int ret = do_timer_gettime(timer_id, &cur_setting);
-    //   if (!ret) { if (put_itimerspec64(...)) ret = -EFAULT; }
-    //   return ret;
-    // `do_timer_gettime` looks up the timer first and returns EINVAL when
-    // the timer id is unknown — BEFORE put_itimerspec64 ever touches the
-    // user pointer.  Our pre-batch gate returned EFAULT for NULL/bad
-    // curr_value, but with no POSIX timers in this kernel every timer id
-    // is unknown, so Linux returns EINVAL regardless of the user ptr.
-    // Drop the upfront pointer checks so the terminal EINVAL fires first.
-    let _ = args.arg1;
-    linux_err(errno::EINVAL)
+    match timer_gettime_common(args.arg0, args.arg1) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
 }
 
-/// `timer_getoverrun(timerid)`.
-fn sys_timer_getoverrun(_args: &SyscallArgs) -> SyscallResult {
-    linux_err(errno::EINVAL)
+/// `timer_getoverrun(timerid)`. See [`timer_getoverrun_common`].
+fn sys_timer_getoverrun(args: &SyscallArgs) -> SyscallResult {
+    match timer_getoverrun_common(args.arg0) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => linux_err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96010,7 +96264,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: timer_create NULL not EFAULT");
                 return Err(KernelError::InternalError);
             }
-            // timer_create valid -> ENOSYS.
+            // timer_create valid -> ENOSYS: every check passes, and then the
+            // kernel itself owns no POSIX timers (a process's call creates
+            // one; see spawn::self_test_linux_posix_timers).
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0,
@@ -96102,7 +96358,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   * SIGEV_SIGNAL + signo=0   -> EINVAL.
             //   * SIGEV_NONE   + signo=99  -> ENOSYS (signo not checked).
             //   * SIGEV_THREAD + signo=99  -> EINVAL.
-            //   * SIGEV_THREAD_ID (=4) + signo=10 -> ENOSYS (4 accepted).
+            //   * SIGEV_THREAD_ID (=4) + signo=10, thread id 0 -> EINVAL
+            //     (the thread must be one of the caller's; kernel context has
+            //     none, and Linux's find_vpid(0) finds nothing either).
             //   * (sevp={bad notify}, timerid=NULL) -> EINVAL not EFAULT
             //     (Linux's good_sigevent EINVAL beats copy_to_user EFAULT).
             #[repr(C)]
@@ -96194,7 +96452,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            let sev_tid = mk(10, 4); // SIGEV_SIGNAL|SIGEV_THREAD_ID, signo=10.
+            let sev_tid = mk(10, 4); // SIGEV_SIGNAL|SIGEV_THREAD_ID, signo=10, tid 0.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: (&raw const sev_tid) as u64,
@@ -96203,8 +96461,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::ENOSYS) {
-                serial_println!("[syscall/linux]   FAIL: timer_create SIGEV_THREAD_ID not ENOSYS");
+            if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: timer_create SIGEV_THREAD_ID, no such thread, not EINVAL"
+                );
                 return Err(KernelError::InternalError);
             }
             // (sevp={bad}, timerid=NULL) -> EINVAL beats EFAULT.
@@ -96225,7 +96485,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   timer_create sigevent/clockid/EOPNOTSUPP/good_sigevent: OK"
             );
-            // timer_delete -> EINVAL (no timers).
+            // timer_delete -> EINVAL (kernel context owns no timers).
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0,
@@ -96238,8 +96498,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: timer_delete not EINVAL");
                 return Err(KernelError::InternalError);
             }
-            // timer_settime bad flags + valid itimerspec -> EINVAL (terminal:
-            // timer lookup fails; flags would also EINVAL after lookup).
+            // timer_settime junk flags + valid itimerspec -> EINVAL, from the
+            // timer lookup (kernel context owns no timers). Linux checks no
+            // flag but TIMER_ABSTIME's, and neither does the real call: the
+            // flags-last order below is still the one Linux runs.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0xff,

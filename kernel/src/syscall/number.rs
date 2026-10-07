@@ -6604,6 +6604,61 @@ pub const SYS_POWER_RELOAD: u64 = 1139;
 /// `requests/d-a-a-native-program-has-no-madvise.md`.
 pub const SYS_MEMORY_ADVISE: u64 = 1140;
 
+/// `SYS_POSIX_TIMER(op, a, b, c, d)` -- the per-process POSIX timers
+/// (`timer_create(2)` and family) for native programs: the Linux ABI's own
+/// calls, answering Linux's errnos as `-errno` (the device door's convention,
+/// [`SYS_MEMORY_ADVISE`]'s), so the C library passes them through. Lane D's
+/// request `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`.
+///
+/// | `op` | call | arguments | answer |
+/// |---|---|---|---|
+/// | [`POSIX_TIMER_CREATE`] | `timer_create` | `a` clock id, `b` `struct sigevent *` or 0 | the new timer's id |
+/// | [`POSIX_TIMER_SETTIME`] | `timer_settime` | `a` id, `b` flags, `c` new `struct itimerspec *`, `d` old one or 0 | 0 |
+/// | [`POSIX_TIMER_GETTIME`] | `timer_gettime` | `a` id, `b` `struct itimerspec *` | 0 |
+/// | [`POSIX_TIMER_GETOVERRUN`] | `timer_getoverrun` | `a` id | the overrun count |
+/// | [`POSIX_TIMER_DELETE`] | `timer_delete` | `a` id | 0 |
+///
+/// The structures are Linux's x86-64 ones: `struct sigevent` 64 bytes
+/// (`sigev_value` at 0, `sigev_signo` at 8, `sigev_notify` at 12, the thread
+/// id at 16), `struct itimerspec` 32 (`it_interval`, then `it_value`, each two
+/// `int64_t`s). Clocks `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`
+/// and `CLOCK_TAI` (`TIMER_ABSTIME` on the wall clocks follows clock steps);
+/// the CPU-time clocks are `-EOPNOTSUPP` here, the alarm clocks `-EPERM`.
+/// `SIGEV_SIGNAL`, `SIGEV_NONE`, and `SIGEV_THREAD_ID` naming one of the
+/// caller's threads (the signal goes to the process, as every signal does
+/// here). An expiry's signal is delivered with `si_code` `SI_TIMER` (-2), and
+/// the frame's `si_pid`, `si_uid` and `si_value` slots hold the timer id, the
+/// overrun count and the `sigev_value` -- the offsets `siginfo_t`'s `_timer`
+/// member gives `si_timerid`, `si_overrun` and `si_value`. Two timers on one
+/// signal each deliver; a periodic timer's skipped expiries are its overrun.
+/// Timers are not inherited by `fork` and are deleted by `exec`. An unknown
+/// `op` is `-EINVAL`. No capability: a process's own timers only.
+pub const SYS_POSIX_TIMER: u64 = 1141;
+/// [`SYS_POSIX_TIMER`] operation: `timer_create`.
+pub const POSIX_TIMER_CREATE: u64 = 0;
+/// [`SYS_POSIX_TIMER`] operation: `timer_settime`.
+pub const POSIX_TIMER_SETTIME: u64 = 1;
+/// [`SYS_POSIX_TIMER`] operation: `timer_gettime`.
+pub const POSIX_TIMER_GETTIME: u64 = 2;
+/// [`SYS_POSIX_TIMER`] operation: `timer_getoverrun`.
+pub const POSIX_TIMER_GETOVERRUN: u64 = 3;
+/// [`SYS_POSIX_TIMER`] operation: `timer_delete`.
+pub const POSIX_TIMER_DELETE: u64 = 4;
+
+/// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
+/// `prctl(PR_SET_DUMPABLE)` sets for Linux programs and `/proc` consults (a
+/// process that is not dumpable can be inspected only by root or a holder of
+/// a capability for it). [`DUMPABLE_GET`] answers the flag (0 or 1, or 2 if
+/// the kernel set it so); [`DUMPABLE_SET`] sets it to `value`, which must be
+/// 0 (`SUID_DUMP_DISABLE`) or 1 (`SUID_DUMP_USER`) -- anything else is
+/// `-EINVAL`, as Linux's `prctl` answers. Linux errnos as `-errno`, like
+/// [`SYS_POSIX_TIMER`]. `fork` copies the flag and `exec` resets it to 1.
+pub const SYS_PROCESS_DUMPABLE: u64 = 1142;
+/// [`SYS_PROCESS_DUMPABLE`] operation: read the flag.
+pub const DUMPABLE_GET: u64 = 0;
+/// [`SYS_PROCESS_DUMPABLE`] operation: set the flag.
+pub const DUMPABLE_SET: u64 = 1;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

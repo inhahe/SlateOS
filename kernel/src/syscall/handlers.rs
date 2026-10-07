@@ -8077,6 +8077,65 @@ pub fn sys_memory_advise(args: &SyscallArgs) -> SyscallResult {
     super::linux::sys_madvise(args)
 }
 
+/// `SYS_POSIX_TIMER(op, a, b, c, d)` (1141): the POSIX per-process timers for
+/// native programs -- the Linux ABI's `timer_*` bodies, answering Linux's
+/// errnos as `-errno` (the device door's convention). `timer_create` answers
+/// the new id rather than writing it through a pointer. See
+/// [`SYS_POSIX_TIMER`](super::number::SYS_POSIX_TIMER).
+pub fn sys_posix_timer(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{self, errno, linux_err};
+    use super::number::{
+        POSIX_TIMER_CREATE, POSIX_TIMER_DELETE, POSIX_TIMER_GETOVERRUN, POSIX_TIMER_GETTIME,
+        POSIX_TIMER_SETTIME,
+    };
+    let answer = match args.arg0 {
+        POSIX_TIMER_CREATE => linux::timer_create_common(args.arg1, args.arg2, None).map(i64::from),
+        POSIX_TIMER_SETTIME => {
+            linux::timer_settime_common(args.arg1, args.arg2, args.arg3, args.arg4).map(|()| 0)
+        }
+        POSIX_TIMER_GETTIME => linux::timer_gettime_common(args.arg1, args.arg2).map(|()| 0),
+        POSIX_TIMER_GETOVERRUN => linux::timer_getoverrun_common(args.arg1).map(i64::from),
+        POSIX_TIMER_DELETE => linux::timer_delete_common(args.arg1).map(|()| 0),
+        _ => Err(errno::EINVAL),
+    };
+    match answer {
+        Ok(v) => SyscallResult::ok(v),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SYS_PROCESS_DUMPABLE(op, value)` (1142): read or set the caller's
+/// dumpable flag -- the one `prctl(PR_SET_DUMPABLE)` sets for Linux programs,
+/// so the two ABIs share it. Setting takes 0 or 1 only, `-EINVAL` otherwise,
+/// as Linux's `prctl` answers; Linux errnos as `-errno`. See
+/// [`SYS_PROCESS_DUMPABLE`](super::number::SYS_PROCESS_DUMPABLE).
+pub fn sys_process_dumpable(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{errno, linux_err};
+    use super::number::{DUMPABLE_GET, DUMPABLE_SET};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        // The kernel has no flag of its own.
+        return linux_err(errno::EINVAL);
+    };
+    match args.arg0 {
+        DUMPABLE_GET => match crate::proc::pcb::get_dumpable(pid) {
+            Some(v) => SyscallResult::ok(i64::from(v)),
+            None => linux_err(errno::ESRCH),
+        },
+        DUMPABLE_SET => {
+            // SUID_DUMP_DISABLE (0) and SUID_DUMP_USER (1); SUID_DUMP_ROOT
+            // (2) is the kernel's to set, not a process's.
+            let Ok(value @ (0 | 1)) = u32::try_from(args.arg1) else {
+                return linux_err(errno::EINVAL);
+            };
+            match crate::proc::pcb::set_dumpable(pid, value) {
+                Some(_) => SyscallResult::ok(0),
+                None => linux_err(errno::ESRCH),
+            }
+        }
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
 /// Copy a `len`-byte argument of at most `max` bytes out of user memory.
 fn read_bounded_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
     let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
@@ -10024,9 +10083,26 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // The signal and its record -- sender, code, value -- which the extended
     // frame hands on and every re-arm below puts back, so a retried delivery
     // still says who sent it.
-    let (sig, info) = match signal::take_deliverable_info(pid) {
-        Some(taken) => taken,
-        None => return false,
+    //
+    // SIGKILL and SIGSTOP never reach a handler. A send of either is acted on
+    // when it is posted (`classify_post_info`), so neither is normally ever
+    // pending -- but a POSIX timer may name either, and its expiry, in the
+    // timer interrupt, can only queue it (`posix_timer`). Here is where that
+    // queued one takes effect, as Linux's `get_signal` does for both.
+    let (sig, info) = loop {
+        match signal::take_deliverable_info(pid) {
+            Some((signal::SIGKILL, _)) => {
+                terminate_current_process_for_signal(pid, task_id, signal::SIGKILL);
+                // Unreachable: task_exit never returns.
+            }
+            Some((signal::SIGSTOP, _)) => {
+                signal::discard_pending_cont(pid);
+                stop_process_for_signal(pid, signal::SIGSTOP, Some(task_id));
+                // Continued: look for the next one.
+            }
+            Some(taken) => break taken,
+            None => return false,
+        }
     };
 
     // Compute the placement of the frame on the user stack.
@@ -10060,7 +10136,15 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // Everything after this line is unchanged, including the alignment contract
     // and the validate_user_write below, which now checks the alternate stack
     // when that is where the frame is going.
-    let frame_base = signal::altstack_top_for(pid, sig, frame.user_rsp).unwrap_or(frame.user_rsp);
+    //
+    // On the interrupted stack the frame goes below the 128-byte red zone,
+    // which the interrupted code may be using (Linux's `get_sigframe`); the
+    // alternate stack's top has nothing live above it.
+    let frame_base = signal::altstack_top_for(pid, sig, frame.user_rsp).unwrap_or(
+        frame
+            .user_rsp
+            .wrapping_sub(crate::proc::linux_sigframe::RED_ZONE),
+    );
     let (ctx_addr, new_rsp) = signal::frame_placement(frame_base, ctx_size);
 
     // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a
@@ -10661,6 +10745,8 @@ pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     // The realtime clock was discontinuously stepped: wake any timerfd reader
     // parked on a TFD_TIMER_CANCEL_ON_SET timer so it returns ECANCELED.
     crate::ipc::timerfd::clock_was_set();
+    // And re-program the POSIX timers armed for a wall-clock time.
+    crate::proc::posix_timer::clock_was_set();
 
     SyscallResult::ok(0)
 }
@@ -10700,6 +10786,8 @@ pub fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
     // A relative step (ADJ_SETOFFSET) is a clock discontinuity too: notify
     // timerfd so CANCEL_ON_SET readers are woken to return ECANCELED.
     crate::ipc::timerfd::clock_was_set();
+    // And re-program the POSIX timers armed for a wall-clock time.
+    crate::proc::posix_timer::clock_was_set();
 
     SyscallResult::ok(0)
 }

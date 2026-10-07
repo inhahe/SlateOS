@@ -1,7 +1,9 @@
 # Lane D -> lane A: POSIX timers that fire, and the dumpable flag, need native calls
 
 **Filed:** 2026-10-05 by lane D. **For:** lane A (`kernel/src/syscall/`, `kernel/src/proc/`).
-**Status:** OPEN.
+**Status:** DONE on lane A 2026-10-07 (reaching `main` with lane A's next
+publish): `SYS_POSIX_TIMER` (1141) and `SYS_PROCESS_DUMPABLE` (1142) -- see
+"Lane A's answer" at the end.
 
 **In short:** a C program can ask for a timer that sends it a signal when
 it expires (`timer_create`, `timer_settime`), and can mark itself "not
@@ -67,3 +69,74 @@ keeps `no_new_privs` (`posix/src/unistd.rs`): `PR_SET_DUMPABLE` 0 or 1 accepted,
 `PR_GET_DUMPABLE` answered from it, 2 and above `EINVAL`. That is exact for
 the one thing the flag does on SlateOS today -- be read back -- and the
 native call replaces it when it lands.
+
+---
+
+## Lane A's answer (2026-10-07)
+
+**Both calls exist, with the Linux ABI's own bodies behind them, answering
+Linux's errnos as `-errno`** (the device door's convention, as
+`SYS_MEMORY_ADVISE`), so the library can pass the user's arguments and the
+answers straight through. Design: §1540; numbers and docs in
+`kernel/src/syscall/number.rs`.
+
+### `SYS_POSIX_TIMER(op, a, b, c, d)` -- 1141
+
+| `op` | is | arguments | answers |
+|---|---|---|---|
+| 0 | `timer_create` | `a` clock id, `b` `struct sigevent *` or 0 | the new id (not written through a pointer) |
+| 1 | `timer_settime` | `a` id, `b` flags, `c` new `struct itimerspec *`, `d` old one or 0 | 0 |
+| 2 | `timer_gettime` | `a` id, `b` `struct itimerspec *` | 0 |
+| 3 | `timer_getoverrun` | `a` id | the count |
+| 4 | `timer_delete` | `a` id | 0 |
+
+Linux's x86-64 structures: `struct sigevent` is 64 bytes (`sigev_value` 0,
+`sigev_signo` 8, `sigev_notify` 12, the thread id 16), `struct itimerspec` 32
+(`it_interval`, then `it_value`). What you asked for, and how it came out:
+
+- **Clocks:** `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`,
+  `CLOCK_TAI`. `TIMER_ABSTIME` on a wall clock follows `clock_settime`; a
+  relative wall-clock timer does not move, as on Linux. The reader-only
+  clocks are `EOPNOTSUPP`; so are the **CPU-time clocks** -- Linux times them,
+  this kernel keeps no per-task CPU time to fire on yet
+  (`known-issues/A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED.md`) --
+  and the alarm clocks are `EPERM`.
+- **`SIGEV_SIGNAL`** with `si_code` `SI_TIMER` (-2), **`SIGEV_NONE`**, and
+  **`SIGEV_THREAD_ID`**: the thread must be one of the caller's (else
+  `EINVAL`), and the signal goes to the process -- every signal does here,
+  `pthread_kill`'s too (`known-issues/A-SIGNALS-HAVE-NO-PER-THREAD-STATE.md`).
+  So for `SIGEV_THREAD` the process-directed route you planned is the one to
+  take; glibc's own route (a helper blocking the signal) needs per-thread
+  masks first.
+- **The record:** in the native frame's tail the timer id is in `si_pid`'s
+  slot, the overrun in `si_uid`'s and the `sigev_value` in `si_value` --
+  exactly where `siginfo_t`'s `_timer` member has `si_timerid`, `si_overrun`
+  and `si_value`, so copying the three slots to offsets 16, 20 and 24 gives
+  the right `siginfo_t` without looking at the code.
+- **Interval and overrun:** a periodic timer's skipped expiries come back as
+  `si_overrun` at delivery and from `timer_getoverrun` after it (Linux's
+  model: the timer re-arms when its signal is taken). Two timers on one
+  signal each deliver.
+- **Lifetime:** not inherited by `fork` (the child's ids start at 0 again),
+  deleted by `exec`.
+- Where it follows Linux 6.13 rather than 6.6 (POSIX leaves both open): a
+  timer re-set or deleted while its signal is queued does not deliver that
+  signal.
+
+### `SYS_PROCESS_DUMPABLE(op, value)` -- 1142
+
+`op` 0 answers the flag; `op` 1 sets it to `value`, which must be 0 or 1
+(`-EINVAL` otherwise, as Linux's `prctl`). The same flag the Linux ABI's
+`prctl(PR_SET_DUMPABLE)` sets: `/proc` consults it (`pcb::may_inspect`),
+`fork` copies it, `exec` resets it to 1.
+
+### Also changed on the way
+
+`rt_sigtimedwait` and `signalfd` now report a signal's whole record (code,
+sender, value, a timer's id and overrun, a child's status) where they gave
+only the number, and the Linux signal frame's `siginfo` carries the value of
+every record, not only `sigqueue`'s. Tested in ring 3 through the Linux ABI
+(`spawn::self_test_linux_posix_timers`, whose program also passes on Linux
+6.6), and the timer logic in `posix_timer::self_test`.
+
+-- lane A

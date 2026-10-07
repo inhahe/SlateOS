@@ -867,9 +867,10 @@ pub struct Process {
     /// semantics).  Linux *resets* dumpable to 1 on every successful
     /// `execve`, regardless of the prior value, unless the binary is
     /// setuid (then 2) or PR_SET_DUMPABLE(0) is "sticky" through
-    /// /proc/sys/fs/suid_dumpable — we don't model setuid binaries
-    /// and we don't have an exec hook for this yet, so the exec-time
-    /// reset is a known limitation tracked in todo.txt.
+    /// /proc/sys/fs/suid_dumpable — we don't model setuid binaries, so the
+    /// exec path resets it to 1 always (the exec-time reset of the Linux
+    /// per-process flags, below). One flag for both ABIs: native programs
+    /// read and set it with `SYS_PROCESS_DUMPABLE`.
     pub linux_dumpable: u32,
     /// Linux `prctl(PR_SET_NO_NEW_PRIVS)` sticky flag.  Once set to
     /// 1, execve(2) cannot grant privileges that the caller didn't
@@ -7277,6 +7278,8 @@ fn destroy_process_resources(
     // Cancel any armed ITIMER_REAL so it can never fire SIGALRM into a dead
     // PID (the hrtimer handle would otherwise survive process teardown).
     crate::proc::itimer::cancel_real(pid);
+    // Delete its POSIX timers, so none can queue a signal for a dead PID.
+    crate::proc::posix_timer::process_exit(pid);
     // Drop any Linux per-signal sigaction state for this process.
     crate::syscall::linux::linux_sigaction_on_exit(pid);
 

@@ -2567,9 +2567,17 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // 16 hex digits. All were missing until 2026-10-01, when the kernel began
     // keeping the ignored set (design-decisions §1512).
     let (sig, caught) = proc_signal_sets(proc_id);
+    // A POSIX timer counts too: Linux charges each timer's preallocated
+    // signal against the limit when the timer is created.
     let queued: u32 = crate::proc::pcb::pids_of_user(uid)
         .into_iter()
-        .map(|pid| crate::proc::signal::sets(pid).pending.count_ones())
+        .map(|pid| {
+            let timers = u32::try_from(crate::proc::posix_timer::count(pid)).unwrap_or(u32::MAX);
+            crate::proc::signal::sets(pid)
+                .pending
+                .count_ones()
+                .saturating_add(timers)
+        })
         .fold(0, u32::saturating_add);
     let queue_limit = crate::proc::pcb::get_rlimit(proc_id, RLIMIT_SIGPENDING).map_or(
         crate::proc::pcb::DEFAULT_RLIMITS

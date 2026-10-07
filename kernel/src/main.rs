@@ -3480,6 +3480,16 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_dev_stdin(),
     );
 
+    // Ring-3 end-to-end test of POSIX timers: timer_create and family, their
+    // SI_TIMER signals through sigtimedwait, signalfd and a handler, a
+    // periodic timer's overrun, and a fork child without timers. Bounded by
+    // time (the program sleeps while its timers run).
+    selftest::dispatch_debug(
+        "Linux POSIX timers (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_posix_timers(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

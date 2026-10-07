@@ -19958,7 +19958,50 @@ pub fn sys_mmap_file(args: &SyscallArgs) -> SyscallResult {
     if require_file_handle_owner(handle).is_err() {
         return linux_err(errno::EBADF);
     }
-    super::linux::native_file_mmap(handle, args)
+    let pid = crate::proc::thread::owner_process(sched::current_task_id());
+    let result = super::linux::native_file_mmap(handle, args);
+    // `MAP_LOCKED`, or under `MCL_FUTURE` (`SYS_MEMORY_LOCK`): locked, and
+    // faulted in. The limit was asked inside, as the Linux arm asks it.
+    if result.value > 0
+        && let Some(pid) = pid
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let start = result.value as u64;
+        let end = start.saturating_add(args.arg1.saturating_add(4095) & !4095);
+        let map_locked = args.arg3 & super::linux::MAP_LOCKED != 0;
+        crate::mm::mlock::after_new_mapping(pid, start, end, map_locked);
+    }
+    result
+}
+
+/// `SYS_MMAP` as a native program calls it: [`sys_mmap`], and under
+/// `mlockall(MCL_FUTURE)` (`SYS_MEMORY_LOCK`) refused past `RLIMIT_MEMLOCK`
+/// with `ResourceExhausted`, or locked and faulted in. (The Linux arm calls
+/// [`sys_mmap`] itself, and asks and populates on its own terms.)
+pub fn sys_mmap_native(args: &SyscallArgs) -> SyscallResult {
+    let pid = crate::proc::thread::owner_process(sched::current_task_id());
+    if let Some(pid) = pid
+        && crate::mm::mlock::new_mapping_allowed(pid, args.arg1, false).is_err()
+    {
+        return SyscallResult::err(KernelError::ResourceExhausted);
+    }
+    let result = sys_mmap(args);
+    if result.value > 0
+        && let Some(pid) = pid
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let start = result.value as u64;
+        let end = start.saturating_add(args.arg1.saturating_add(4095) & !4095);
+        crate::mm::mlock::after_new_mapping(pid, start, end, false);
+    }
+    result
+}
+
+/// `SYS_MEMORY_LOCK` (1145) — Linux's `mlock` family behind one number, with
+/// its arguments and errnos. See
+/// [`SYS_MEMORY_LOCK`](super::number::SYS_MEMORY_LOCK).
+pub fn sys_memory_lock(args: &SyscallArgs) -> SyscallResult {
+    super::linux::native_memory_lock(args.arg0, args.arg1, args.arg2, args.arg3)
 }
 
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem

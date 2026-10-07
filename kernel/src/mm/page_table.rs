@@ -333,6 +333,20 @@ impl PageFlags {
     /// never copied, so it has no copy-on-write state to be in.
     pub const SHARED: Self = Self(1 << 10);
 
+    /// Locked in memory (software-defined, bit 11): `mlock`, `mlockall`.
+    ///
+    /// A frame any of whose four entries carries it is never swapped out
+    /// ([`crate::mm::swap::try_reclaim`] passes it by, `swap_out_page`
+    /// refuses it). A VMA's flags carry it too, so a page faulted into a
+    /// locked range is mapped locked. `mprotect` keeps it, a copy-on-write
+    /// break keeps it, and `fork` clears it in the child, whose memory Linux
+    /// does not lock. See [`crate::mm::mlock`]. The last of the three PTE
+    /// bits the hardware leaves to the OS (9 [`Self::COW`], 10
+    /// [`Self::SHARED`]). A swap entry has its own copy
+    /// (`swap::SWAP_KEPT_LOCKED`), which locking a range sets on the pages of
+    /// it that are swapped out, so they come back locked.
+    pub const MLOCKED: Self = Self(1 << 11);
+
     /// No-execute: instruction fetches cause a page fault.  Requires
     /// `IA32_EFER.NXE` to be enabled (Limine does this).
     pub const NO_EXECUTE: Self = Self(1 << 63);
@@ -2065,6 +2079,162 @@ pub unsafe fn exchange_frame_pte(
     // SAFETY: as `read_frame_ptes`: inside the table; the caller may write.
     let entry = unsafe { entry_atomic(pt, base.saturating_add(part), hhdm) };
     Ok(PageTableEntry(entry.swap(new.raw(), Ordering::AcqRel)))
+}
+
+/// Whether the 16 KiB frame at `virt` was used since this was last asked:
+/// clear the accessed bit of each of its present 4 KiB entries, and answer
+/// whether any had it -- `None` when none is present.
+///
+/// Each bit goes with a compare-and-swap of the entry as it was read, so
+/// nothing else in any entry changes, whatever another CPU (or the CPU's own
+/// page walker) does to it meanwhile, and an entry no longer present is left
+/// alone. This is the reclaimer's clock test. Until 2026-10-07 it read the first
+/// entry and wrote that entry's flags, less accessed, into all four
+/// ([`change_flags`], which is for kernel mappings): a part that still
+/// shared its frame copy-on-write with another process took the first
+/// part's writable flags and wrote into that process's memory, any other
+/// per-part difference (read-only, no-execute, locked) was lost too, a frame
+/// with an absent part was given no second chance, and an entry another CPU
+/// replaced between the read and the write got its old frame back.
+///
+/// The caller flushes the TLB, so that the CPU sets the bit again on the
+/// next use.
+///
+/// # Safety
+///
+/// `pml4_phys` must be a valid PML4 whose tables are not freed during the
+/// call.
+#[must_use]
+pub unsafe fn frame_test_and_clear_accessed(pml4_phys: u64, virt: VirtAddr) -> Option<bool> {
+    let hhdm = hhdm()?;
+    let (pt, base) = frame_group(pml4_phys, virt, hhdm)?;
+    let accessed = PageFlags::ACCESSED.bits();
+    let mut any_present = false;
+    let mut any_accessed = false;
+    for i in 0..HW_PAGES_PER_FRAME {
+        // SAFETY: `pt` is the table a present PD entry names, and `base` is a
+        // multiple of 4 below 512, so `base + i` stays inside it.
+        let entry = unsafe { entry_atomic(pt, base.saturating_add(i), hhdm) };
+        let mut now = entry.load(Ordering::Acquire);
+        // Only ever on a present entry: in a swap entry bit 5 is part of
+        // the slot number.
+        while PageTableEntry(now).is_present() {
+            if now & accessed == 0 {
+                any_present = true;
+                break;
+            }
+            match entry.compare_exchange_weak(
+                now,
+                now & !accessed,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    any_present = true;
+                    any_accessed = true;
+                    break;
+                }
+                Err(changed) => now = changed,
+            }
+        }
+    }
+    any_present.then_some(any_accessed)
+}
+
+/// Visit the 4 KiB leaf entries of `[start, end)` that hold anything --
+/// present, or not present but not empty (a swap entry) -- in address order,
+/// and set or clear the bits each visit names, in place.
+///
+/// `visit(virt, entry)` answers `Some((mask, on))` to set (`on`) or clear the
+/// bits of `mask` in that entry, `None` to leave it. The change is a
+/// compare-and-swap of the entry `visit` saw, so an accessed or dirty bit
+/// the CPU sets meanwhile is kept, which an exchange of a value read earlier
+/// would lose; when the entry changed under it, `visit` is asked again about
+/// what it is now, so it must not count what it is shown when it answers
+/// `Some`. Absent tables and huge pages are skipped, and each level is read
+/// only for the indices the range reaches, so a small range costs a few
+/// reads however much else is mapped (`pt_walk::walk_range` walks every
+/// table under the top-level slot).
+///
+/// # Safety
+///
+/// `pml4_phys` must be a valid PML4 the caller may change, with its
+/// page-table lock held (`mm::as_lock`), so no table is freed under the
+/// walk. The bits must be ones the hardware ignores in the entry they go in
+/// -- software bits of a present entry, any bit of a non-present one --
+/// since nothing is flushed.
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe fn update_leaf_bits(
+    pml4_phys: u64,
+    start: u64,
+    end: u64,
+    mut visit: impl FnMut(u64, PageTableEntry) -> Option<(u64, bool)>,
+) {
+    /// The first address past the `1 << shift`-byte block holding `va`:
+    /// `None` at the top of the address space.
+    fn next_block(va: u64, shift: u32) -> Option<u64> {
+        (va | ((1u64 << shift) - 1)).checked_add(1)
+    }
+    let Some(hhdm) = hhdm() else {
+        return;
+    };
+    let page = HW_PAGE_SIZE as u64;
+    let mut va = start & !(page - 1);
+    while va < end {
+        let v = VirtAddr::new(va);
+        if !v.is_canonical() {
+            return;
+        }
+        // SAFETY for the three reads: `pml4_phys` is valid (the caller's
+        // contract), each table is the one its present, non-huge parent
+        // entry names, and indices taken from a `VirtAddr` are below 512.
+        let pml4e = unsafe { read_entry(pml4_phys, v.pml4_index(), hhdm) };
+        if !pml4e.is_present() {
+            let Some(next) = next_block(va, 39) else {
+                return;
+            };
+            va = next;
+            continue;
+        }
+        let pdpte = unsafe { read_entry(pml4e.phys_addr(), v.pdpt_index(), hhdm) };
+        if !pdpte.is_present() || pdpte.is_huge() {
+            let Some(next) = next_block(va, 30) else {
+                return;
+            };
+            va = next;
+            continue;
+        }
+        let pde = unsafe { read_entry(pdpte.phys_addr(), v.pd_index(), hhdm) };
+        if !pde.is_present() || pde.is_huge() {
+            let Some(next) = next_block(va, 21) else {
+                return;
+            };
+            va = next;
+            continue;
+        }
+        let pt = pde.phys_addr();
+        let table_end = next_block(va, 21).map_or(end, |n| n.min(end));
+        while va < table_end {
+            // SAFETY: `pt` is the table a present PD entry names, and the
+            // index is below 512; the caller may write it.
+            let entry = unsafe { entry_atomic(pt, VirtAddr::new(va).pt_index(), hhdm) };
+            let mut now = entry.load(Ordering::Acquire);
+            while now != 0 {
+                let Some((mask, on)) = visit(va, PageTableEntry(now)) else {
+                    break;
+                };
+                let new = if on { now | mask } else { now & !mask };
+                if new == now {
+                    break;
+                }
+                match entry.compare_exchange_weak(now, new, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => break,
+                    Err(changed) => now = changed,
+                }
+            }
+            va += page;
+        }
+    }
 }
 
 /// The physical address of the byte at `virt` in the address space

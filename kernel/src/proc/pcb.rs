@@ -769,6 +769,11 @@ pub struct Process {
     /// (`membarrier_exec_mmap`); [`reset_linux_state_for_exec`] mirrors
     /// this, clearing the registration mask on every successful exec.
     pub membarrier_state: u32,
+    /// `mlockall(MCL_FUTURE)`: lock every mapping made from now on (and
+    /// fault it in, unless `MCL_ONFAULT`). `None` until asked; neither
+    /// inherited by `fork` nor kept by `exec`, as Linux's `mm->def_flags`
+    /// is not (`crate::mm::mlock`).
+    pub mlock_future: Option<crate::mm::mlock::FutureLock>,
     /// Linux `prctl(PR_SET_PDEATHSIG)` — signal to deliver to this
     /// process when its parent exits.  `0` means "disabled" (the
     /// default and what every freshly-forked process starts with).
@@ -1473,6 +1478,7 @@ impl Process {
             // A fresh mm has no membarrier registrations (Linux's
             // `mm->membarrier_state` starts at 0).
             membarrier_state: 0,
+            mlock_future: None,
             // PR_SET_PDEATHSIG default is "disabled".  Inherited
             // across fork as zero per Linux: see the explicit reset
             // in `kernel/copy_process` for the same reason
@@ -1784,11 +1790,18 @@ pub fn fork_create(
             .fold(0u64, |sum, v| {
                 sum.saturating_add(v.end.saturating_sub(v.start))
             });
+        // Locks are not inherited, so the child's VMAs are not locked
+        // (and `clone_frame_group` clears the bit on its entries).
         let child_vmas: Vec<Vma> = parent
             .vmas
             .iter()
             .filter(|v| !v.fork.dont_copy)
-            .copied()
+            .map(|v| Vma {
+                flags: crate::mm::page_table::PageFlags::from_bits(
+                    v.flags.bits() & !crate::mm::page_table::PageFlags::MLOCKED.bits(),
+                ),
+                ..*v
+            })
             .collect();
         (
             parent.name.clone(),
@@ -1978,6 +1991,8 @@ pub fn fork_create(
         // registrations.  Linux resets it on execve; we lack an exec-time
         // hook (see the field doc / todo.txt).
         membarrier_state,
+        // Not inherited: a child's memory is not locked (Linux).
+        mlock_future: None,
         // Linux: PR_SET_PDEATHSIG is reset across fork.  A parent
         // who has PDEATHSIG armed does not pass that arming to its
         // children; each child starts with no death signal and must
@@ -2896,8 +2911,13 @@ pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
     //                      256-slot table and a 1 MiB path buffer sized
     //                      from it) — see known-issues.md.
     (linux_fd::MAX_FDS_U64, linux_fd::MAX_FDS_U64),
-    // 8  RLIMIT_MEMLOCK:    mlock()'d memory.  No tracker.
-    (RLIM_INFINITY, RLIM_INFINITY),
+    // 8  RLIMIT_MEMLOCK:    bytes in locked VMAs (`mm::mlock`). Linux's
+    //                      default since 5.16, 8 MiB, soft and hard: a
+    //                      process without the `MEMORY_LOCK` right may pin
+    //                      that much and no more. It was infinity while
+    //                      nothing was locked, which as a limit on real
+    //                      pinning would let any process hold every frame.
+    (8 * 1024 * 1024, 8 * 1024 * 1024),
     // 9  RLIMIT_AS:         address-space size.  No tracker.
     (RLIM_INFINITY, RLIM_INFINITY),
     // 10 RLIMIT_LOCKS:      fcntl(F_SETLK) lock count.  No tracker.
@@ -5524,9 +5544,173 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
         .vmas
         .binary_search_by_key(&vma.start, |v| v.start)
         .unwrap_or_else(|p| p);
-    proc.vmas.insert(pos, vma);
+    let flags = future_lock_flags(proc, vma.flags);
+    proc.vmas.insert(pos, Vma { flags, ..vma });
 
     Ok(())
+}
+
+/// `flags`, locked if the process asked `mlockall(MCL_FUTURE)`: what every
+/// new mapping of it is made with.
+fn future_lock_flags(
+    proc: &Process,
+    flags: crate::mm::page_table::PageFlags,
+) -> crate::mm::page_table::PageFlags {
+    if proc.mlock_future.is_some() {
+        flags | crate::mm::page_table::PageFlags::MLOCKED
+    } else {
+        flags
+    }
+}
+
+/// `pid`'s `mlockall(MCL_FUTURE)`, if it asked.
+#[must_use]
+pub fn mlock_future(pid: ProcessId) -> Option<crate::mm::mlock::FutureLock> {
+    PROCESS_TABLE.lock().get(&pid).and_then(|p| p.mlock_future)
+}
+
+/// Set or clear `pid`'s `mlockall(MCL_FUTURE)`.
+pub fn set_mlock_future(pid: ProcessId, future: Option<crate::mm::mlock::FutureLock>) {
+    if let Some(p) = PROCESS_TABLE.lock().get_mut(&pid) {
+        p.mlock_future = future;
+    }
+}
+
+/// Bytes of `pid`'s VMAs that are locked, within `range` if one is given:
+/// Linux's `mm->locked_vm` (`VmLck`), and `count_mm_mlocked_page_nr` over a
+/// range.
+#[must_use]
+pub fn vma_locked_bytes(pid: ProcessId, range: Option<(u64, u64)>) -> u64 {
+    let (lo, hi) = range.unwrap_or((0, u64::MAX));
+    PROCESS_TABLE.lock().get(&pid).map_or(0, |p| {
+        p.vmas
+            .iter()
+            .filter(|v| v.flags.contains(crate::mm::page_table::PageFlags::MLOCKED))
+            .map(|v| v.end.min(hi).saturating_sub(v.start.max(lo)))
+            .fold(0u64, u64::saturating_add)
+    })
+}
+
+/// Bytes of all `pid`'s VMAs: what `mlockall(MCL_CURRENT)` would lock,
+/// which Linux compares with the limit (`mm->total_vm`).
+#[must_use]
+pub fn vma_total_bytes(pid: ProcessId) -> u64 {
+    PROCESS_TABLE.lock().get(&pid).map_or(0, |p| {
+        p.vmas
+            .iter()
+            .map(|v| v.end.saturating_sub(v.start))
+            .fold(0u64, u64::saturating_add)
+    })
+}
+
+/// Lock (`lock`) or unlock `pid`'s VMAs over `[start, end)`: split at the
+/// edges as [`protect_vma_range`] splits, the covered middle given or
+/// stripped [`PageFlags::MLOCKED`](crate::mm::page_table::PageFlags::MLOCKED),
+/// every other flag kept. The entries of the pages already present are
+/// `crate::mm::mlock`'s to change.
+pub fn set_vma_lock_range(pid: ProcessId, start: u64, end: u64, lock: bool) {
+    use crate::mm::page_table::PageFlags;
+    if end <= start {
+        return;
+    }
+    let mut retains: Vec<u64> = Vec::new();
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get_mut(&pid) else {
+            return;
+        };
+        let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len().saturating_add(2));
+        for vma in proc.vmas.drain(..) {
+            let locked_now = vma.flags.contains(PageFlags::MLOCKED);
+            if vma.end <= start || vma.start >= end || locked_now == lock {
+                kept.push(vma);
+                continue;
+            }
+            let mut pieces = 0u32;
+            if vma.start < start {
+                kept.push(vma_subrange(&vma, vma.start, start, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            let mid_start = core::cmp::max(start, vma.start);
+            let mid_end = core::cmp::min(end, vma.end);
+            let flags = if lock {
+                vma.flags | PageFlags::MLOCKED
+            } else {
+                PageFlags::from_bits(vma.flags.bits() & !PageFlags::MLOCKED.bits())
+            };
+            kept.push(vma_subrange(&vma, mid_start, mid_end, flags));
+            pieces = pieces.saturating_add(1);
+            if vma.end > end {
+                kept.push(vma_subrange(&vma, end, vma.end, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            // A file-backed VMA's one backing reference becomes one per piece.
+            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                for _ in 1..pieces {
+                    retains.push(handle);
+                }
+            }
+        }
+        kept.sort_unstable_by_key(|v| v.start);
+        proc.vmas = kept;
+    }
+    // Outside the process table, which the open-file lock never nests under.
+    for handle in retains {
+        // The pieces' extra references: a failure to take one leaves that
+        // piece's unmap releasing a reference the file no longer counts,
+        // which `dup_shared` cannot fail to give for a handle a VMA holds.
+        let _ = crate::fs::handle::dup_shared(handle);
+    }
+}
+
+/// Lock or unlock every VMA of `pid`: `mlockall(MCL_CURRENT)` and
+/// `munlockall`.
+pub fn set_all_vma_locks(pid: ProcessId, lock: bool) {
+    use crate::mm::page_table::PageFlags;
+    if let Some(p) = PROCESS_TABLE.lock().get_mut(&pid) {
+        for v in &mut p.vmas {
+            v.flags = if lock {
+                v.flags | PageFlags::MLOCKED
+            } else {
+                PageFlags::from_bits(v.flags.bits() & !PageFlags::MLOCKED.bits())
+            };
+        }
+    }
+}
+
+/// The parts of `[start, end)` that `pid`'s VMAs cover, in address order,
+/// each with how locking it faults it in ([`crate::mm::mlock::Populate`],
+/// Linux's `populate_vma_page_range`): a writable private mapping for
+/// writing, a read-only or shared one for reading, a `PROT_NONE` one or a
+/// guard not at all, and what the loader mapped whole needs nothing.
+#[must_use]
+pub fn vma_populate_parts(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+) -> Vec<(u64, u64, crate::mm::mlock::Populate)> {
+    use crate::mm::mlock::Populate;
+    use crate::mm::page_table::PageFlags;
+    PROCESS_TABLE.lock().get(&pid).map_or(Vec::new(), |p| {
+        p.vmas
+            .iter()
+            .filter(|v| v.end > start && v.start < end)
+            .map(|v| {
+                let how = match v.kind {
+                    VmaKind::Fixed => Populate::Present,
+                    VmaKind::Guard => Populate::Inaccessible,
+                    _ if !v.flags.contains(PageFlags::USER_ACCESSIBLE) => Populate::Inaccessible,
+                    _ if v.flags.contains(PageFlags::WRITABLE)
+                        && !v.flags.contains(PageFlags::SHARED) =>
+                    {
+                        Populate::Write
+                    }
+                    _ => Populate::Read,
+                };
+                (v.start.max(start), v.end.min(end), how)
+            })
+            .collect()
+    })
 }
 
 /// [`add_vma`], but when the VMA ending exactly at `vma.start` is the same
@@ -5545,9 +5729,15 @@ pub fn add_vma_merging(pid: ProcessId, vma: Vma) -> KernelResult<()> {
     use crate::mm::page_table::VirtAddr;
 
     let mergeable_kind = matches!(vma.kind, VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk);
+    let mut vma = vma;
     {
         let mut table = PROCESS_TABLE.lock();
         let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+        // Locked if `mlockall(MCL_FUTURE)` asks, before the flags are
+        // compared: heap grown under it is a locked VMA beside an unlocked
+        // heap, not more of the unlocked one (Linux's `def_flags` in
+        // `do_brk_flags`, which keeps such a VMA from merging).
+        vma.flags = future_lock_flags(proc, vma.flags);
         if !VirtAddr::new(vma.start).is_hw_page_aligned()
             || !VirtAddr::new(vma.end).is_hw_page_aligned()
         {
@@ -5701,6 +5891,7 @@ pub fn reserve_unmapped_area(
         .vmas
         .binary_search_by_key(&base, |v| v.start)
         .unwrap_or_else(|p| p);
+    let flags = future_lock_flags(proc, flags);
     proc.vmas.insert(
         pos,
         Vma {
@@ -6295,6 +6486,7 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
         return;
     };
     proc.membarrier_state = 0;
+    proc.mlock_future = None;
     proc.linux_dumpable = 1; // SUID_DUMP_USER
     // Clear only SECBIT_KEEP_CAPS (bit 4); preserve the lock bit and all
     // other securebits, matching cap_bprm_creds_from_file.  This bit is the

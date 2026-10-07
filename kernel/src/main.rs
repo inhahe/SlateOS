@@ -3524,6 +3524,14 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_sigpipe(),
     );
 
+    // Locked memory: mlock, mlock2, munlock, mlockall, MAP_LOCKED and
+    // RLIMIT_MEMLOCK, as Linux answers them (mm::mlock).
+    selftest::dispatch_debug(
+        "Linux mlock (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mlock(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same
@@ -7623,6 +7631,12 @@ extern "C" fn kernel_main() -> ! {
     // Verifies refcount API and COW PTE flag manipulation.
     selftest::dispatch_debug("Cow", selftest::Severity::Integrity, || {
         mm::cow::self_test()
+    });
+
+    // Locked memory (mm::mlock): the lock bit on entries and swap entries,
+    // the reclaimer's frame test, stack growth under a locked page.
+    selftest::dispatch_debug("Mlock", selftest::Severity::Integrity, || {
+        mm::mlock::self_test()
     });
 
     // Step 22e½: Huge page (2 MiB) self-test.

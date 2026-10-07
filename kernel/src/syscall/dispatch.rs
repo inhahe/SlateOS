@@ -61,18 +61,18 @@ use super::number::{
     SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
     SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
     SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
-    SYS_MEMORY_ADVISE, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MMAP_FILE,
-    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
-    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
-    SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
-    SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH,
-    SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
-    SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
-    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
-    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
-    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER, SYS_POWER_RELOAD,
-    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_DUMPABLE,
-    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
+    SYS_MEMORY_ADVISE, SYS_MEMORY_LOCK, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
+    SYS_MMAP_FILE, SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE,
+    SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO,
+    SYS_NET_RAW_CLOSE, SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX,
+    SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY,
+    SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND,
+    SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE,
+    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
+    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
+    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER,
+    SYS_POWER_RELOAD, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO,
+    SYS_PROCESS_DUMPABLE, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
     SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR,
     SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_GETGROUPS,
     SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
@@ -280,7 +280,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_EXIT as usize] = Some(handlers::sys_exit);
     handlers[SYS_TASK_ID as usize] = Some(handlers::sys_task_id);
     handlers[SYS_DEBUG_PRINT as usize] = Some(handlers::sys_debug_print);
-    handlers[SYS_MMAP as usize] = Some(handlers::sys_mmap);
+    handlers[SYS_MMAP as usize] = Some(handlers::sys_mmap_native);
     handlers[SYS_MUNMAP as usize] = Some(handlers::sys_munmap);
     handlers[SYS_MPROTECT as usize] = Some(handlers::sys_mprotect);
     handlers[SYS_IRQ_REGISTER as usize] = Some(handlers::sys_irq_register);
@@ -776,6 +776,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_DUMPABLE as usize] = Some(handlers::sys_process_dumpable);
     handlers[SYS_PROCESS_GETGROUPS as usize] = Some(handlers::sys_process_getgroups);
     handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
+    handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -5423,6 +5424,47 @@ fn test_dispatch_getgroups() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_MMAP_FILE: OK");
+
+    // SYS_MEMORY_LOCK answers Linux errnos: an unknown op and a bad
+    // mlockall are EINVAL, a range that wraps EINVAL too; from a kernel
+    // context there is nothing to lock, which is success.
+    let call = |op: u64, a: u64, b: u64| {
+        let args = SyscallArgs {
+            arg0: op,
+            arg1: a,
+            arg2: b,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_MEMORY_LOCK, &args).value
+    };
+    let einval = i64::from(super::linux::errno::EINVAL).wrapping_neg();
+    let checks = [
+        (call(99, 0, 0), einval),
+        (call(super::number::MEMORY_LOCK_ALL, 0, 0), einval),
+        (call(super::number::MEMORY_LOCK_ALL, 4, 0), einval),
+        (call(super::number::MEMORY_LOCK_ALL, 1, 0), 0),
+        (call(super::number::MEMORY_UNLOCK_ALL, 0, 0), 0),
+        (
+            call(
+                super::number::MEMORY_LOCK_RANGE,
+                0xFFFF_FFFF_FFFF_F000,
+                0x2000,
+            ),
+            einval,
+        ),
+        (call(super::number::MEMORY_UNLOCK_RANGE, 0x1000, 0), 0),
+    ];
+    if let Some((got, want)) = checks.iter().find(|(got, want)| got != want) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_MEMORY_LOCK answered {} where {} was due",
+            got,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_MEMORY_LOCK: OK");
     Ok(())
 }
 

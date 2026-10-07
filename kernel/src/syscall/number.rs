@@ -6694,6 +6694,35 @@ pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
 /// all (requests/d-a-a-native-program-cannot-map-a-file.md).
 pub const SYS_MMAP_FILE: u64 = 1144;
 
+/// `SYS_MEMORY_LOCK(op, a, b, c)` -- keep memory in RAM: Linux's `mlock`
+/// family behind one number, with its arguments, and its errnos as `-errno`.
+/// A locked page is never swapped out (`crate::mm::mlock`).
+///
+/// | `op` | Linux call | `a`, `b`, `c` |
+/// |---|---|---|
+/// | [`MEMORY_LOCK_RANGE`] | `mlock2` | `addr`, `len`, `flags` (`MLOCK_ONFAULT` 1) |
+/// | [`MEMORY_UNLOCK_RANGE`] | `munlock` | `addr`, `len` |
+/// | [`MEMORY_LOCK_ALL`] | `mlockall` | `flags` (`MCL_CURRENT` 1, `MCL_FUTURE` 2, `MCL_ONFAULT` 4) |
+/// | [`MEMORY_UNLOCK_ALL`] | `munlockall` | -- |
+///
+/// Locking needs a non-zero `RLIMIT_MEMLOCK` (8 MiB by default) or the
+/// `MEMORY_LOCK` right on a `ResourceLimit` capability (`EPERM`), and stays
+/// within the limit without that right (`ENOMEM`). After `MCL_FUTURE`, a
+/// `SYS_MMAP` or `SYS_MMAP_FILE` past the limit is refused (with
+/// `ResourceExhausted` and `-EAGAIN` respectively), and one within it is
+/// locked and faulted in. Until 2026-10-07 a native program had no call,
+/// and its library's `mlock` locked nothing
+/// (requests/d-a-mlock-locks-nothing.md).
+pub const SYS_MEMORY_LOCK: u64 = 1145;
+/// [`SYS_MEMORY_LOCK`] operation: lock a range (`mlock2`).
+pub const MEMORY_LOCK_RANGE: u64 = 0;
+/// [`SYS_MEMORY_LOCK`] operation: unlock a range (`munlock`).
+pub const MEMORY_UNLOCK_RANGE: u64 = 1;
+/// [`SYS_MEMORY_LOCK`] operation: lock every mapping (`mlockall`).
+pub const MEMORY_LOCK_ALL: u64 = 2;
+/// [`SYS_MEMORY_LOCK`] operation: unlock every mapping (`munlockall`).
+pub const MEMORY_UNLOCK_ALL: u64 = 3;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

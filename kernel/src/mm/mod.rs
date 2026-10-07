@@ -51,6 +51,7 @@ pub mod kvspace;
 pub mod mempool;
 pub mod memtype;
 pub mod migrate_type;
+pub mod mlock;
 pub mod oom;
 pub mod page_age;
 pub mod page_cache;

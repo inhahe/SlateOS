@@ -4176,11 +4176,17 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
         }
     };
 
-    // Map the frame with user read/write/no-execute permissions.
-    let flags = PageFlags::PRESENT
+    // Map the frame with user read/write/no-execute permissions -- and
+    // locked, when the page it grows from is (`mlock`): Linux's stack VMA
+    // grows keeping its flags, and this stack has no VMA to keep them.
+    let locked = mm::mlock::stack_growth_locked(pml4_phys, page_addr, USER_STACK_TOP);
+    let mut flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
         | PageFlags::USER_ACCESSIBLE
         | PageFlags::NO_EXECUTE;
+    if locked {
+        flags |= PageFlags::MLOCKED;
+    }
 
     let virt = VirtAddr::new(page_addr);
     // SAFETY: pml4_phys is the current CR3 (valid), phys_frame is
@@ -4189,7 +4195,8 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     match unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) } {
         Ok(()) => {
             // Register the new page as reclaimable so the Clock algorithm
-            // can swap it out under memory pressure.
+            // can swap it out under memory pressure (a locked one it passes
+            // by until it is unlocked).
             mm::swap::register_reclaimable(pml4_phys, virt.as_u64(), flags);
             true
         }

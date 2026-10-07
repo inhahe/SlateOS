@@ -3780,6 +3780,17 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
     };
     account_io_syscall(nr, result.value);
     log_stat_family_anomaly(nr, args, result.value);
+    if nr == nr::MMAP
+        && result.value > 0
+        && let Some(pid) = caller_pid()
+    {
+        // `MAP_LOCKED`, or `mlockall(MCL_FUTURE)`: lock the new mapping and
+        // fault it in (Linux's `mm_populate` at the end of `vm_mmap_pgoff`).
+        #[allow(clippy::cast_sign_loss)]
+        let start = result.value as u64;
+        let end = start.saturating_add(args.arg1.saturating_add(4095) & !4095);
+        crate::mm::mlock::after_new_mapping(pid, start, end, args.arg3 & MAP_LOCKED != 0);
+    }
     result
 }
 
@@ -7427,6 +7438,9 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             Some(p) => p,
             None => return linux_err(errno::ENOMEM),
         };
+        if let Err(e) = mmap_lock_gate(pid, length, flags) {
+            return linux_err(e);
+        }
         return linux_anon_mmap_fixed(pid, addr_hint, length, prot);
     }
 
@@ -7438,6 +7452,11 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         Some(a) => a,
         None => return linux_err(errno::EINVAL),
     };
+    if let Some(pid) = caller_pid()
+        && let Err(e) = mmap_lock_gate(pid, length, flags)
+    {
+        return linux_err(e);
+    }
 
     // Round the request up to the 16 KiB frame size to match what the
     // native mmap path actually allocates.  RLIMIT_AS is documented as
@@ -8630,6 +8649,13 @@ fn sys_brk(args: &SyscallArgs) -> SyscallResult {
         if linux_vma_overlap_bytes(pid, old_top, new_top) > 0 {
             return unchanged;
         }
+        // Under `mlockall(MCL_FUTURE)` the new heap is locked: it must fit
+        // within `RLIMIT_MEMLOCK` (Linux's `check_brk_limits`).
+        if crate::mm::mlock::new_mapping_allowed(pid, new_top.saturating_sub(old_top), false)
+            .is_err()
+        {
+            return unchanged;
+        }
         // Charge RLIMIT_AS for the newly added virtual span (committed
         // accounting; frames are demand-paged).
         let added = new_top.saturating_sub(old_top);
@@ -8657,6 +8683,9 @@ fn sys_brk(args: &SyscallArgs) -> SyscallResult {
             pcb::linux_as_release(pid, added);
             return unchanged;
         }
+        // Locked under `mlockall(MCL_FUTURE)`: faulted in now, as Linux's
+        // `brk` populates a `VM_LOCKED` heap.
+        crate::mm::mlock::after_new_mapping(pid, old_top, new_top, false);
     } else if new_top < old_top {
         // ---- Shrink ----
         let Some(pml4) = pcb::get_pml4(pid).filter(|p| *p != 0) else {
@@ -13533,6 +13562,11 @@ fn linux_file_mmap(
     let private = (flags & MAP_PRIVATE) != 0;
     if shared == private {
         return linux_err(errno::EINVAL);
+    }
+
+    // `MAP_LOCKED` / `mlockall(MCL_FUTURE)`: allowed, and within the limit.
+    if let Err(e) = mmap_lock_gate(pid, length, flags) {
+        return linux_err(e);
     }
 
     // The open file description must allow what the mapping does, before
@@ -18780,177 +18814,165 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
 // EFAULT/EINVAL as Linux would.
 // ---------------------------------------------------------------------------
 
-/// `mlock(addr, len)` — accept after validating the page-aligned range.
+/// `mlock(addr, len)`, `munlock`, `mlock2` -- one body, Linux's `do_mlock`
+/// and `munlock` ([`crate::mm::mlock`]).
 ///
-/// Linux's `mm/mlock.c::do_mlock()` (called by both `SYSCALL_DEFINE2(mlock)`
-/// and `SYSCALL_DEFINE2(munlock)` via the `vm_flags_t` flags arg):
+/// `len = PAGE_ALIGN(len + offset_in_page(addr))`, `start = addr & PAGE_MASK`,
+/// at C unsigned-long width (`wrapping_add`, so a `len` near `u64::MAX`
+/// collapses to an empty range, as Linux's wraps), with Linux's 4 KiB page --
+/// the page the ABI sees, not this kernel's 16 KiB frame.
 ///
-/// ```c
-/// static __must_check int do_mlock(unsigned long start, size_t len,
-///                                  vm_flags_t flags)
-/// {
-///     unsigned long locked;
-///     unsigned long lock_limit;
-///     int error = -ENOMEM;
-///
-///     start = untagged_addr(start);
-///
-///     if (!can_do_mlock())
-///         return -EPERM;
-///
-///     len = PAGE_ALIGN(len + (offset_in_page(start)));
-///     start &= PAGE_MASK;
-///
-///     lock_limit = rlimit(RLIMIT_MEMLOCK);
-///     ...
-///     mmap_write_lock(current->mm);
-///     error = apply_vma_lock_flags(start, len, flags);
-///     mmap_write_unlock(current->mm);
-///     ...
-/// }
-/// ```
-///
-/// Two divergences pre-batch:
-///
-///   1. `len == 0` short-circuited BEFORE Linux's `len += offset_in_page(start)`
-///      rewrite.  Calling `mlock(0x4001, 0)` on Linux rounds to one page
-///      (start=0x4000, len=4096) and proceeds to walk that page; we
-///      returned `0` unconditionally even when the call would have spanned
-///      a real VMA on Linux.
-///   2. We range-checked the *raw* `(addr, len)` the caller passed rather
-///      than the page-aligned `(start, len_aligned)` pair Linux's
-///      `apply_vma_lock_flags` walks.  A caller passing `(0x4000, 8191)`
-///      locks 8192 bytes on Linux (`PAGE_ALIGN(8191)`); we ranged 8191.
-///      A caller passing `(0xFFFF_FFFF_FFFF_F001, 0x1000)` has Linux's
-///      `start + len_aligned` overflow (start=0xFFFF_FFFF_FFFF_F000,
-///      len_aligned=0x2000, end=0x1000), which goes to `-ENOMEM`; we
-///      passed it through `validate_user_read` and (in kernel-context
-///      self-test, with `is_kernel_context()` bypass active) silently
-///      returned `0`.
-///
-/// Linux's `PAGE_ALIGN` macro is `(addr + PAGE_SIZE - 1) & PAGE_MASK`
-/// at C unsigned-long width, which wraps silently on overflow.  Mirror
-/// that with `wrapping_add` so `len = u64::MAX` (with any `offset_in_page`)
-/// collapses to `len_aligned = 0` and the routine exits via `end == start`
-/// (success), matching Linux's wrap-to-zero exactly.  A true overflow
-/// of `start + len_aligned` (with non-zero `len_aligned`) is the
-/// genuine `-ENOMEM` case Linux's `end < start` gate catches.
-///
-/// Linux's `PAGE_SIZE` on x86_64 is 4096 — that is what userspace
-/// observes via `sysconf(_SC_PAGESIZE)`.  Our kernel uses 16 KiB
-/// internal frames, but the ABI page boundary visible through this
-/// syscall is 4 KiB.
-///
-/// `can_do_mlock` (CAP_IPC_LOCK || RLIMIT_MEMLOCK > 0) and the
-/// per-process locked-pages accounting against RLIMIT_MEMLOCK are
-/// not gated yet; when wired they go before the `PAGE_ALIGN`
-/// rewrite to match Linux's gate order.
-fn sys_mlock(args: &SyscallArgs) -> SyscallResult {
-    // Linux ABI page size on x86_64 (sysconf(_SC_PAGESIZE)); the
-    // internal frame size of this kernel is larger but is not
-    // observable through this syscall.
+/// For a process, in Linux's order: locking needs a non-zero
+/// `RLIMIT_MEMLOCK` or the `MEMORY_LOCK` right (`EPERM`) and must stay within
+/// the limit (`ENOMEM`); a range that wraps past the top is `EINVAL`, an
+/// empty one 0; locking or unlocking stops at the first page with no mapping
+/// (`ENOMEM`, the part before it changed); locking then faults the range in
+/// unless `onfault` (`ENOMEM` at a `PROT_NONE` part, `EAGAIN` at a page that
+/// cannot be had, the lock staying). Unlocking needs no permission. A caller
+/// with no process -- the kernel's self-tests -- has the arguments checked
+/// and nothing locked. Until 2026-10-07 every call answered 0 and locked
+/// nothing while user memory was swapped (requests/d-a-mlock-locks-nothing.md),
+/// and a range that wraps answered `ENOMEM` (Linux's `apply_vma_lock_flags`:
+/// `EINVAL`; checked against Linux 6.6).
+fn mlock_family(addr: u64, len: u64, lock: bool, onfault: bool) -> SyscallResult {
     const ABI_PAGE_SIZE: u64 = 4096;
-
-    let addr = args.arg0;
-    let len = args.arg1;
-
-    // Linux: `len = PAGE_ALIGN(len + offset_in_page(start)); start &= PAGE_MASK;`
-    // Both arithmetic operations use C unsigned-long wrap.
     let offset_in_page = addr & (ABI_PAGE_SIZE - 1);
     let len_aligned = len
         .wrapping_add(offset_in_page)
         .wrapping_add(ABI_PAGE_SIZE - 1)
         & !(ABI_PAGE_SIZE - 1);
     let start = addr & !(ABI_PAGE_SIZE - 1);
-
-    let end = start.wrapping_add(len_aligned);
-    if end < start {
-        return linux_err(errno::ENOMEM);
-    }
-    if end == start {
-        // Either the caller asked for len==0 with a page-aligned start,
-        // or Linux's PAGE_ALIGN wrapped to 0 on len near u64::MAX.  Both
-        // exit via Linux's "len_aligned == 0 → apply_vma_lock_flags is a
-        // no-op" path, which returns 0.
+    let Some(pid) = caller_pid() else {
+        // No process: the range is checked, and there is nothing to lock.
+        let end = start.wrapping_add(len_aligned);
+        if end < start {
+            return linux_err(errno::EINVAL);
+        }
+        if end == start {
+            return SyscallResult::ok(0);
+        }
+        let len_usize = match usize::try_from(len_aligned) {
+            Ok(v) => v,
+            Err(_) => return linux_err(errno::ENOMEM),
+        };
+        if let Err(e) = crate::mm::user::validate_user_read(start, len_usize) {
+            return linux_err(linux_errno_for(e));
+        }
         return SyscallResult::ok(0);
-    }
-    let len_usize = match usize::try_from(len_aligned) {
-        Ok(v) => v,
-        Err(_) => return linux_err(errno::ENOMEM),
     };
-    if let Err(e) = crate::mm::user::validate_user_read(start, len_usize) {
-        return linux_err(linux_errno_for(e));
+    match crate::mm::mlock::lock_range(pid, start, len_aligned, lock, onfault) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(mlock_errno(e)),
     }
-    SyscallResult::ok(0)
 }
 
-/// `munlock(addr, len)` — accept after validating the page-aligned range.
-///
-/// Linux routes `munlock()` through the same `do_mlock()` path as
-/// `mlock()` (with `VM_LOCKED` cleared instead of set in `vm_flags_t`);
-/// the gate order — including `PAGE_ALIGN(len + offset_in_page(start))`
-/// and `start &= PAGE_MASK` — is identical.  Reuse the mlock translator
-/// directly.
+/// The Linux errno for a refused `mlock`: `EPERM` (may not lock at all),
+/// `ENOMEM` (past the limit, unmapped, `PROT_NONE`), `EINVAL` (the range
+/// wraps), `EAGAIN` (could not fault it in -- `__mlock_posix_error_return`).
+const fn mlock_errno(e: crate::mm::mlock::MlockError) -> i32 {
+    use crate::mm::mlock::MlockError;
+    match e {
+        MlockError::NotPermitted => errno::EPERM,
+        MlockError::NoMemory => errno::ENOMEM,
+        MlockError::Invalid => errno::EINVAL,
+        MlockError::CouldNotPopulate => errno::EAGAIN,
+    }
+}
+
+/// `mlock(addr, len)`: see [`mlock_family`].
+fn sys_mlock(args: &SyscallArgs) -> SyscallResult {
+    mlock_family(args.arg0, args.arg1, true, false)
+}
+
+/// `munlock(addr, len)`: see [`mlock_family`].
 fn sys_munlock(args: &SyscallArgs) -> SyscallResult {
-    sys_mlock(args)
+    mlock_family(args.arg0, args.arg1, false, false)
 }
 
-/// `mlockall(flags)` — accept if flags are in the documented set.
+/// `mlockall(flags)`.
 ///
-/// Linux's `mm/mlock.c::SYSCALL_DEFINE1(mlockall)` rejects three
-/// distinct shapes in a single combined gate:
-///   * `flags == 0`               — no operation requested.
-///   * `flags & ~MCL_ALL`         — unknown bits set.
-///   * `flags == MCL_ONFAULT`     — ONFAULT alone is meaningless: it's
-///     a *modifier* that says "treat the
-///     page as resident on first fault
-///     rather than pre-populating", and
-///     needs CURRENT or FUTURE to say
-///     *which* set of pages.
+/// Linux's `mm/mlock.c::SYSCALL_DEFINE1(mlockall)` rejects three shapes in
+/// one gate, on the `int` the C signature narrows the register to (so
+/// high-half garbage is ignored, as glibc and musl leave it):
+///   * `flags == 0` -- no operation requested;
+///   * `flags & ~MCL_ALL` -- unknown bits;
+///   * `flags == MCL_ONFAULT` -- a modifier alone, saying neither which pages.
 ///
-/// Pre-batch we omitted the MCL_ONFAULT-alone check, so
-/// `mlockall(MCL_ONFAULT)` silently succeeded where Linux returns
-/// EINVAL.  glibc's `mallopt(M_TRIM_THRESHOLD)` tuning helper and
-/// systemd's `MemoryLockingPolicy` validator both probe with
-/// `MCL_ONFAULT` alone to detect "kernel supports ONFAULT" — a false
-/// success teaches them to set ONFAULT without CURRENT/FUTURE on
-/// later real calls, which then never actually locks anything.
+/// Then, for a process ([`crate::mm::mlock::lock_all`]): `EPERM` without the
+/// right to lock at all, `ENOMEM` for `MCL_CURRENT` when the whole address
+/// space is past the limit; `MCL_CURRENT` locks every mapping now, faulted in
+/// unless `MCL_ONFAULT`, and `MCL_FUTURE` every later one -- each call
+/// replacing what the last asked for later, as Linux's `def_flags` is
+/// replaced. A caller with no process has nothing to lock.
 fn sys_mlockall(args: &SyscallArgs) -> SyscallResult {
-    // Linux ABI: `int mlockall(int flags)`.  The high 32 bits of the
-    // syscall register are unobservable to the kernel function body
-    // because the C signature is `int`; glibc/musl place the flag bits
-    // in the low 32 bits but the high 32 bits are caller-uninitialised
-    // garbage from the surrounding x86_64 register state.  Linux's
-    // SYSCALL_DEFINE1(mlockall, int, flags) macro generates a function
-    // that takes `int flags`, which truncates on entry; the mask check
-    // `flags & ~MCL_VALID_MASK` then operates on the 32-bit value.
-    //
-    // Pre-batch we held `flags` as `u64` and ran the mask check at
-    // 64-bit width, so a caller passing e.g. `0x1_0000_0001` (high-half
-    // garbage + valid MCL_CURRENT) saw EINVAL where Linux returns 0.
-    // The `flags == 0` short-circuit was also at 64-bit width, so a
-    // caller passing `0x1_0000_0000` (high-half garbage, low-half zero)
-    // saw success(0)→EINVAL? Actually it would hit the mask check via
-    // !MCL_ALL — the bug surfaced as EINVAL where Linux returns EINVAL
-    // too (for the wrong reason: low-half int truncates to 0).  Probe
-    // (c) below locks in the *correct* error path (low-half==0).
     const MCL_CURRENT: u32 = 1;
     const MCL_FUTURE: u32 = 2;
     const MCL_ONFAULT: u32 = 4;
     const MCL_ALL: u32 = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let flags_i32 = args.arg0 as i32;
-    #[allow(clippy::cast_sign_loss)]
-    let flags = flags_i32 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg0 as u32;
     if flags == 0 || (flags & !MCL_ALL) != 0 || flags == MCL_ONFAULT {
         return linux_err(errno::EINVAL);
+    }
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    match crate::mm::mlock::lock_all(
+        pid,
+        flags & MCL_CURRENT != 0,
+        flags & MCL_FUTURE != 0,
+        flags & MCL_ONFAULT != 0,
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(mlock_errno(e)),
+    }
+}
+
+/// `munlockall()`: unlock every mapping, and stop locking later ones.
+fn sys_munlockall(_args: &SyscallArgs) -> SyscallResult {
+    if let Some(pid) = caller_pid() {
+        crate::mm::mlock::unlock_all(pid);
     }
     SyscallResult::ok(0)
 }
 
-/// `munlockall()` — always succeeds.
-fn sys_munlockall(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::ok(0)
+/// The native ABI's `SYS_MEMORY_LOCK(op, a, b, c)`: the four Linux calls
+/// behind one number, with their arguments and their errnos.
+pub(crate) fn native_memory_lock(op: u64, a: u64, b: u64, c: u64) -> SyscallResult {
+    use crate::syscall::number::{
+        MEMORY_LOCK_ALL, MEMORY_LOCK_RANGE, MEMORY_UNLOCK_ALL, MEMORY_UNLOCK_RANGE,
+    };
+    let args = SyscallArgs {
+        arg0: a,
+        arg1: b,
+        arg2: c,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    match op {
+        MEMORY_LOCK_RANGE => sys_mlock2(&args),
+        MEMORY_UNLOCK_RANGE => sys_munlock(&args),
+        MEMORY_LOCK_ALL => sys_mlockall(&args),
+        MEMORY_UNLOCK_ALL => sys_munlockall(&args),
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// Linux's `MAP_LOCKED`: lock the mapping as `mlock` would, faulting it in.
+pub(crate) const MAP_LOCKED: u64 = 0x2000;
+
+/// Before `pid` maps `len` bytes: when the mapping will be locked
+/// (`MAP_LOCKED` in `flags`, or `mlockall(MCL_FUTURE)`), `EPERM` for
+/// `MAP_LOCKED` without the right to lock, `EAGAIN` past `RLIMIT_MEMLOCK` --
+/// Linux's `do_mmap`, after it has placed the mapping and before it looks at
+/// the file.
+fn mmap_lock_gate(pid: u64, len: u64, flags: u64) -> Result<(), i32> {
+    let len = len.saturating_add(4095) & !4095;
+    crate::mm::mlock::new_mapping_allowed(pid, len, flags & MAP_LOCKED != 0).map_err(|e| match e {
+        crate::mm::mlock::MlockError::NotPermitted => errno::EPERM,
+        _ => errno::EAGAIN,
+    })
 }
 
 /// `msync(addr, len, flags)` — accept after validating shape.
@@ -45546,100 +45568,156 @@ fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `mincore(addr, length, vec*)` — report which pages of the mapping
-/// at `[addr, addr+length)` are resident in physical memory.
+/// `mincore(addr, length, vec*)` — which pages of `[addr, addr + length)`
+/// are in memory: one byte per 4 KiB page, bit 0 set for a resident one, as
+/// Linux's `mm/mincore.c` answers.
 ///
-/// Pre-batch this validated args and returned -ENOSYS.  The old
-/// comment justified that with "we don't track resident-vs-swapped
-/// state; without a user-write copy path we can't fill `vec`."  Both
-/// halves of that excuse are obsolete: we *do* have copy_to_user
-/// (used by sys_cachestat, sys_sched_getattr, and friends), and we
-/// have no swap or demand paging, so every mapped page is *always*
-/// resident.  The honest mincore answer is therefore one byte of
-/// 0x01 (bit 0 set = resident) for every page in the range.
+/// In Linux's order: `addr` not 4 KiB-aligned is `EINVAL`; a range past the
+/// top of user space (or wrapping) `ENOMEM`; `length == 0` is 0; a `vec` the
+/// caller cannot write `EFAULT`. Then the pages are answered in chunks, each
+/// copied out before the next: a present page is resident, a swapped-out one
+/// or one never touched is not, a page of a file mapping not mapped yet is
+/// as the page cache holds it -- for a file the mapping may write, else
+/// resident, which is Linux's answer where its page cache would be a side
+/// channel (`can_do_mincore`). The first page with no mapping (no VMA and no
+/// entry) ends the call with `ENOMEM`, the bytes before it written.
 ///
-/// Linux's mincore vec layout: one byte per page, where bit 0 set
-/// means the page is in core (resident) and the remaining bits are
-/// reserved (zero).  Callers (libgc, glibc malloc trim heuristics,
-/// PostgreSQL's pg_prewarm) use the bit-0 information; bits 1..7
-/// must be zero to avoid future-reservation surprises.
+/// Until 2026-10-07 this took this kernel's 16 KiB frame for the page --
+/// `EINVAL` for a 4 KiB-aligned `addr`, a quarter of the bytes a Linux
+/// caller sized `vec` for -- and answered every page resident, mapped or
+/// not, from when the kernel had neither demand paging nor swap.
+///
+/// A caller with no process (the kernel's self-tests) gets every page
+/// resident, there being no address space to ask.
 fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
+    const ABI_PAGE: u64 = 4096;
+    /// Pages answered per round, the bytes copied out after each.
+    const CHUNK: usize = 256;
     let addr = args.arg0;
     let length = args.arg1;
     let vec_ptr = args.arg2;
-    // (1) addr must be page-aligned (16 KiB here).  Linux: `start &
-    // ~PAGE_MASK → -EINVAL` is the first gate.
-    if !addr.is_multiple_of(0x4000) {
+    if addr & (ABI_PAGE - 1) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // (2) Backing range [addr, addr+length) must lie inside user
-    // address space.  Linux's mm/mincore.c::SYSCALL_DEFINE3(mincore)
-    // runs `!access_ok((void __user *) start, len) → -ENOMEM` BEFORE
-    // it checks the `vec` pointer; a probe with `(addr=TASK_SIZE,
-    // len=0x4000, vec=NULL)` therefore sees ENOMEM on Linux, not
-    // EFAULT.  Pre-batch we deferred the backing-range test until
-    // AFTER the NULL-vec gate (and used validate_user_read, which the
-    // kernel-context bypass turns into a no-op for self-tests, so the
-    // ENOMEM path could never fire from in-kernel probes at all).
-    // Switch to an explicit checked-add bound against USER_SPACE_END
-    // (= 0x0000_8000_0000_0000, our x86_64 TASK_SIZE equivalent):
-    //   - addr.checked_add(length) overflowing past u64::MAX → ENOMEM
-    //   - addr + length > USER_SPACE_END                       → ENOMEM
-    // This gate is pre-bypass (it doesn't go through validate_user_*),
-    // so kernel-context self-tests can drive it.  length==0 is
-    // explicitly allowed through (matches Linux access_ok semantics
-    // and the short-circuit below).
+    // `access_ok(start, len)`, ahead of the `vec` check.
     if length != 0 {
-        let fits = match addr.checked_add(length) {
-            Some(end) => end <= crate::mm::page_table::USER_SPACE_END,
-            None => false,
-        };
+        let fits = addr
+            .checked_add(length)
+            .is_some_and(|end| end <= crate::mm::page_table::USER_SPACE_END);
         if !fits {
             return linux_err(errno::ENOMEM);
         }
     }
-    // (3) length == 0 short-circuit.  Linux: pages = 0 → both access_ok
-    // calls trivially succeed → returns 0.  Pull it out as an explicit
-    // gate so the rest of the routine doesn't have to reason about
-    // div_ceil(0) corner cases.
     if length == 0 {
         return SyscallResult::ok(0);
     }
-    // (4) vec is one byte per page; pages = ceil(length / 16 KiB).
-    let pages = length.div_ceil(0x4000);
-    // (5) NULL vec → EFAULT (matches Linux's access_ok(vec, pages)
-    // failure for the NULL case, where pages > 0 here).  Explicit
-    // because validate_user_write below is a no-op in kernel context.
+    let pages = length.div_ceil(ABI_PAGE);
     if vec_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(vec_ptr, pages as usize) {
+    let Ok(pages_usize) = usize::try_from(pages) else {
+        return linux_err(errno::EFAULT);
+    };
+    if let Err(e) = crate::mm::user::validate_user_write(vec_ptr, pages_usize) {
         return linux_err(linux_errno_for(e));
     }
-    // Write one byte of 0x01 (bit 0 = resident, bits 1..7 = reserved)
-    // per page.  We have no swap and no demand paging, so every page
-    // in a validated mapping is unconditionally resident — that's the
-    // truth of this kernel, not a heuristic.  Use a 256-byte stack
-    // chunk to bound the per-call kernel-stack footprint; the largest
-    // realistic call (a 4 GiB mapping) is 256 KiB of `vec` bytes
-    // which we stream in 256-byte writes.
-    const RESIDENT_CHUNK: [u8; 256] = [0x01u8; 256];
-    let mut written: u64 = 0;
-    while written < pages {
-        let remaining = pages - written;
-        #[allow(clippy::cast_possible_truncation)]
-        let n = core::cmp::min(remaining, RESIDENT_CHUNK.len() as u64) as usize;
-        // SAFETY: validate_user_write above confirmed the full
-        // `pages`-byte user buffer is writable.  We are writing a
-        // sub-range of that confirmed window.
-        let r =
-            unsafe { crate::mm::user::copy_to_user(RESIDENT_CHUNK.as_ptr(), vec_ptr + written, n) };
-        if let Err(e) = r {
+    let pid = caller_pid();
+    let mut chunk = [0u8; CHUNK];
+    let mut done: u64 = 0;
+    while done < pages {
+        let n = usize::try_from(pages.saturating_sub(done)).map_or(CHUNK, |left| left.min(CHUNK));
+        let Some(out) = chunk.get_mut(..n) else {
+            return linux_err(errno::EFAULT);
+        };
+        let start = addr.saturating_add(done.saturating_mul(ABI_PAGE));
+        let answered = match pid {
+            Some(pid) => match mincore_pages(pid, start, out) {
+                Ok(k) => k,
+                Err(e) => return linux_err(e),
+            },
+            None => {
+                out.fill(1);
+                n
+            }
+        };
+        // SAFETY: `validate_user_write` above confirmed the whole `pages`-byte
+        // `vec`; this writes `answered <= n` bytes at offset `done` of it.
+        let copied = unsafe {
+            crate::mm::user::copy_to_user(chunk.as_ptr(), vec_ptr.saturating_add(done), answered)
+        };
+        if let Err(e) = copied {
             return linux_err(linux_errno_for(e));
         }
-        written += n as u64;
+        done = done.saturating_add(answered as u64);
+        if answered < n {
+            // A page with no mapping: the next round would start there.
+            return linux_err(errno::ENOMEM);
+        }
     }
     SyscallResult::ok(0)
+}
+
+/// [`sys_mincore`]'s answer for `out.len()` 4 KiB pages of `pid` from
+/// `start`: how many it answered, stopping before the first page with no
+/// mapping -- `ENOMEM` when that is the first.
+fn mincore_pages(pid: u64, start: u64, out: &mut [u8]) -> Result<usize, i32> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::mm::vma::VmaKind;
+    const ABI_PAGE: u64 = 4096;
+    let frame = FRAME_SIZE as u64;
+    let pml4 = pcb::get_pml4(pid)
+        .filter(|&p| p != 0)
+        .ok_or(errno::ENOMEM)?;
+    let vmas = pcb::list_vmas(pid).unwrap_or_default();
+    // Sorted by start, so one cursor serves the whole range.
+    let mut cursor = 0usize;
+    for (i, byte) in out.iter_mut().enumerate() {
+        let va = start.saturating_add((i as u64).saturating_mul(ABI_PAGE));
+        while vmas.get(cursor).is_some_and(|v| v.end <= va) {
+            cursor = cursor.saturating_add(1);
+        }
+        let vma = vmas.get(cursor).filter(|v| v.start <= va);
+        let frame_va = va & !frame.wrapping_sub(1);
+        let part = usize::try_from(va.wrapping_sub(frame_va) / ABI_PAGE).unwrap_or(0);
+        let entry = page_table::read_frame_ptes(pml4, VirtAddr::new(frame_va))
+            .and_then(|parts| parts.get(part).copied());
+        let present = entry.is_some_and(|e| e.is_present());
+        let swapped = entry.is_some_and(|e| {
+            !e.is_present() && crate::mm::swap::SwapEntry::from_pte_raw(e.raw()).is_some()
+        });
+        if vma.is_none() && !present && !swapped {
+            // No mapping: Linux's `vma_lookup` failing.
+            return if i == 0 { Err(errno::ENOMEM) } else { Ok(i) };
+        }
+        *byte = u8::from(
+            present
+                || (!swapped
+                    && vma.is_some_and(|v| match v.kind {
+                        VmaKind::FileBacked {
+                            handle,
+                            file_offset,
+                            file_id,
+                            ..
+                        } => {
+                            // Linux reveals the page cache only for a file the
+                            // mapping could write; for any other it answers
+                            // resident, so the cache is no side channel.
+                            let may_write = crate::fs::handle::open_flags(handle)
+                                .is_ok_and(|f| f.is_writable());
+                            if !may_write {
+                                return true;
+                            }
+                            let off = file_offset.saturating_add(va.saturating_sub(v.start));
+                            file_id.is_some_and(|id| {
+                                crate::mm::page_cache::is_resident(id, off & !frame.wrapping_sub(1))
+                            })
+                        }
+                        _ => false,
+                    })),
+        );
+    }
+    Ok(out.len())
 }
 
 /// `mremap(old_addr, old_size, new_size, flags, new_addr)`.
@@ -46242,7 +46320,9 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EOPNOTSUPP)
 }
 
-/// `mlock2(addr, len, flags)`.
+/// `mlock2(addr, len, flags)`: `mlock`, faulting nothing in with
+/// `MLOCK_ONFAULT` -- each page is locked as it is touched (see
+/// [`mlock_family`]).
 fn sys_mlock2(args: &SyscallArgs) -> SyscallResult {
     // Linux ABI: `int mlock2(const void *addr, size_t len, int flags)`.
     // SYSCALL_DEFINE3(mlock2, unsigned long, start, size_t, len, int,
@@ -46266,18 +46346,7 @@ fn sys_mlock2(args: &SyscallArgs) -> SyscallResult {
     if flags & !1 != 0 {
         return linux_err(errno::EINVAL);
     }
-    if len == 0 {
-        return SyscallResult::ok(0);
-    }
-    let len_usize = match usize::try_from(len) {
-        Ok(v) => v,
-        Err(_) => return linux_err(errno::ENOMEM),
-    };
-    if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
-        return linux_err(linux_errno_for(e));
-    }
-    // No swap → all memory is implicitly locked; accept.
-    SyscallResult::ok(0)
+    mlock_family(addr, len, true, flags & 1 != 0)
 }
 
 /// `acct(filename*)`.
@@ -75117,17 +75186,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   mlockall ONFAULT-modifier gate: OK");
 
             // Batch 449: mlock / munlock PAGE_ALIGN(len + offset_in_page(start))
-            // and start &= PAGE_MASK fidelity.  See sys_mlock doc comment for
-            // the per-input divergence table.
+            // and start &= PAGE_MASK fidelity (see `mlock_family`).
             //
             // Probe (a): mlock(start = u64::MAX & ~0xFFF | 1, len = 0x1000)
             // — start = 0xFFFF_FFFF_FFFF_F001, offset_in_page = 1, so
             //   len_aligned = PAGE_ALIGN(0x1000 + 1) = 0x2000, start &=
-            //   PAGE_MASK = 0xFFFF_FFFF_FFFF_F000, end = start + 0x2000 = 0
-            //   (wraps), end < start, so Linux returns -ENOMEM.  Pre-batch we
-            //   handed (raw_addr=0xFFFF_FFFF_FFFF_F001, raw_len=0x1000) to
-            //   validate_user_read, which under is_kernel_context() bypass
-            //   returns Ok, so the self-test saw 0 where Linux returns ENOMEM.
+            //   PAGE_MASK = 0xFFFF_FFFF_FFFF_F000, end = start + 0x2000 =
+            //   0x1000 (wraps), end < start: Linux's `apply_vma_lock_flags`
+            //   answers -EINVAL, for both calls (checked on Linux 6.6,
+            //   2026-10-07; this probe asserted ENOMEM until then, which no
+            //   Linux answers).
             let a = SyscallArgs {
                 arg0: 0xFFFF_FFFF_FFFF_F001,
                 arg1: 0x1000,
@@ -75136,12 +75204,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::MLOCK, &a).value != -i64::from(errno::ENOMEM) {
-                serial_println!("[syscall/linux]   FAIL: mlock(end-wrap) not ENOMEM");
+            if dispatch_linux(nr::MLOCK, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: mlock(end-wrap) not EINVAL");
                 return Err(KernelError::InternalError);
             }
-            if dispatch_linux(nr::MUNLOCK, &a).value != -i64::from(errno::ENOMEM) {
-                serial_println!("[syscall/linux]   FAIL: munlock(end-wrap) not ENOMEM");
+            if dispatch_linux(nr::MUNLOCK, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: munlock(end-wrap) not EINVAL");
                 return Err(KernelError::InternalError);
             }
 
@@ -102721,16 +102789,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             serial_println!("[syscall/linux]   mincore addr+len ENOMEM gating: OK");
-            // mincore(addr, 1 page, vec) -> 0 with vec[0] == 0x01
-            // (batch 109 upgrade: pre-batch returned -ENOSYS
-            // unconditionally; post-batch returns "page resident" because
-            // this kernel has no swap and no demand paging so every
-            // mapped page is unconditionally resident).  We also assert
-            // the bytes beyond the single requested page retain the
-            // 0xCC sentinel — proves we didn't overwrite past the vec.
+            // mincore(addr, 1 page, vec) -> 0 with vec[0] == 0x01: from a
+            // kernel context, with no address space to ask, every page is
+            // resident. The page is Linux's 4 KiB (16 KiB until 2026-10-07).
+            // We also assert the bytes beyond the single requested page
+            // retain the 0xCC sentinel — proves we didn't overwrite past
+            // the vec.
             let a = SyscallArgs {
                 arg0: 0x4000,
-                arg1: 0x4000,
+                arg1: 0x1000,
                 arg2: vec_ptr,
                 arg3: 0,
                 arg4: 0,
@@ -102751,12 +102818,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: mincore wrote past requested page count",);
                 return Err(KernelError::InternalError);
             }
-            // mincore(addr, 5 pages, vec) -> 0 with vec[0..5] all 0x01.
-            // Reset the sentinel first.
+            // mincore(addr, 5 pages, vec) -> 0 with vec[0..5] all 0x01;
+            // a length short of a whole page counts the page. Reset the
+            // sentinel first.
             vec_buf = [0xCCu8; 16];
             let a = SyscallArgs {
                 arg0: 0x4000,
-                arg1: 5 * 0x4000,
+                arg1: 4 * 0x1000 + 1,
                 arg2: vec_ptr,
                 arg3: 0,
                 arg4: 0,

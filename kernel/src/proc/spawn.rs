@@ -23159,6 +23159,107 @@ pub fn self_test_linux_sigpipe() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of locked memory ([`crate::mm::mlock`]):
+/// [`elf::build_linux_mlock_test_elf`] checks that `mlock`, `munlock` and
+/// `mlock2` lock and unlock 4 KiB-page ranges (`VmLck` counts them), fault a
+/// range in unless `MLOCK_ONFAULT`, stop at the first unmapped page, answer
+/// `ENOMEM` for `PROT_NONE` and `EINVAL` for a range that wraps; that
+/// `mlockall` locks every mapping now or every later one, `MAP_LOCKED` one
+/// mapping, and a forked child inherits no lock; and that `RLIMIT_MEMLOCK`
+/// bounds all of it, a limit of 0 refusing every lock. Exits `0x2A` on
+/// success; the same program passes on Linux 6.6.
+pub fn self_test_linux_mlock() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mlock (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mlock_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mlock"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mlock",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mlock spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mlock (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "giving up root or setting RLIMIT_MEMLOCK failed",
+            Some(0x31) => "VmLck is missing from /proc/self/status, or not 0 at the start",
+            Some(0x32..=0x35) => "mlock/munlock of a 4 KiB-page range did not lock what it should",
+            Some(0x36 | 0x37) => "mlock2's flags were not checked as an int, or it did not lock",
+            Some(0x38) => "a range that wraps past the top was not EINVAL",
+            Some(0x39 | 0x3C) => "a range with nothing mapped was not ENOMEM",
+            Some(0x3A) => "a length that wraps to 0 was not an empty success",
+            Some(0x3B) => "a range past RLIMIT_MEMLOCK was not ENOMEM",
+            Some(0x3D) => "MLOCK_ONFAULT faulted pages in",
+            Some(0x3E) => "mlock did not fault its range in (mincore)",
+            Some(0x3F) => "VmLck after an ONFAULT and a plain lock was wrong",
+            Some(0x40..=0x42) => "a hole did not stop the lock at it with ENOMEM",
+            Some(0x43) => "PROT_NONE was not locked with ENOMEM (or ONFAULT not 0)",
+            Some(0x44) => "a PROT_NONE part did not stop the faulting in at it",
+            Some(0x45) => "mlockall's flag gate was wrong",
+            Some(0x46 | 0x47) => "mlockall(MCL_CURRENT) or munlockall did not lock or unlock all",
+            Some(0x48 | 0x49) => "a mapping made under MCL_FUTURE was not locked and faulted in",
+            Some(0x4A) => "mlockall(MCL_CURRENT) did not forget MCL_FUTURE",
+            Some(0x4B) => "MCL_FUTURE | MCL_ONFAULT faulted a new mapping in, or did not lock it",
+            Some(0x4C) => "MAP_LOCKED did not lock and fault in its mapping",
+            Some(0x4D) => "a forked child inherited a lock",
+            Some(0x50..=0x55) => "RLIMIT_MEMLOCK did not bound mlock as Linux's does",
+            Some(0x56) => "mlockall(MCL_CURRENT) past the limit was not ENOMEM",
+            Some(0x57 | 0x58) => "an mmap under MCL_FUTURE past the limit was not EAGAIN",
+            Some(0x59) => "MAP_LOCKED past the limit was not EAGAIN",
+            Some(0x5A) => "brk under MCL_FUTURE moved past the limit",
+            Some(0x5C) => "a limit of 0 did not refuse every lock with EPERM",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mlock (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mlock (ring 3: ranges, ONFAULT, holes, PROT_NONE, wrap; mlockall \
+         current and future; MAP_LOCKED; fork; RLIMIT_MEMLOCK on mlock, mlockall, mmap and \
+         brk; EPERM at 0): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

@@ -2561,6 +2561,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
             const ABI_PAGE_SIZE: u64 = 4096;
             let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
             let _ = writeln!(s, "VmSize:\t{kb} kB");
+            // Locked memory (`mlock`, `mlockall`, `MAP_LOCKED`): Linux's
+            // `mm->locked_vm`. Absent until 2026-10-07.
+            let locked_kb = crate::mm::mlock::locked_bytes(proc_id)
+                .div_ceil(ABI_PAGE_SIZE)
+                .saturating_mul(4);
+            let _ = writeln!(s, "VmLck:\t{locked_kb} kB");
             let _ = writeln!(s, "VmRSS:\t{kb} kB");
         }
     }

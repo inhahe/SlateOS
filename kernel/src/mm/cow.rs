@@ -615,8 +615,15 @@ unsafe fn clone_frame_group(
         }
 
         // Compute child flags and, for private writable pages, downgrade the
-        // parent to CoW as well.
-        let child_entry = if shared {
+        // parent to CoW as well. A child's memory is not locked (Linux's
+        // fork), so the child's entry drops `MLOCKED`; the parent keeps it.
+        let unlocked = |e: PageTableEntry| {
+            PageTableEntry::new(
+                e.phys_addr(),
+                PageFlags::from_bits(e.flags().bits() & !PageFlags::MLOCKED.bits()),
+            )
+        };
+        let child_entry = unlocked(if shared {
             // Shared by design: the child sees the same frame with the same
             // permissions, and the parent keeps its writable mapping.
             PageTableEntry::new(phys, pte.flags())
@@ -636,7 +643,7 @@ unsafe fn clone_frame_group(
         } else {
             // Read-only page: share identically, no COW bit.
             PageTableEntry::new(phys, pte.flags())
-        };
+        });
 
         let hw_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
         // SAFETY: child_pml4 is a valid PML4 owned by the caller; hw_virt is

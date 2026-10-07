@@ -89,6 +89,15 @@ const SWAP_KEPT_SHIFT: u32 = 32;
 const SWAP_KEPT_LOW: u64 = 0x7FF & !((1 << 5) | (1 << 6));
 /// Where a swap entry keeps its page's `NO_EXECUTE` (PTE bit 63).
 const SWAP_KEPT_NX: u64 = 1 << 43;
+/// Where a swap entry keeps its page's [`PageFlags::MLOCKED`] (PTE bit 11).
+///
+/// A locked page is never swapped out, so no entry is made with it; it is
+/// set on an entry already made, when a range holding a swapped-out page is
+/// locked (`mm::mlock`), so the page comes back locked -- whichever path
+/// brings it back: a fault, `mlock`'s own populating, `fork`. Without it an
+/// `MLOCK_ONFAULT` lock, which brings nothing back itself, would leave such a
+/// page unlocked for good.
+pub(crate) const SWAP_KEPT_LOCKED: u64 = 1 << 44;
 
 /// Maximum number of swap slots (30 bits = ~1 billion).
 /// Actual capacity is set at init time based on backend size.
@@ -144,7 +153,12 @@ impl SwapEntry {
         } else {
             0
         };
-        self.to_pte_raw() | low | nx
+        let locked = if kept.bits() & PageFlags::MLOCKED.bits() != 0 {
+            SWAP_KEPT_LOCKED
+        } else {
+            0
+        };
+        self.to_pte_raw() | low | nx | locked
     }
 
     /// The flags a swap entry kept for its 4 KiB page
@@ -158,7 +172,12 @@ impl SwapEntry {
         } else {
             0
         };
-        PageFlags::from_bits(low | nx)
+        let locked = if raw & SWAP_KEPT_LOCKED != 0 {
+            PageFlags::MLOCKED.bits()
+        } else {
+            0
+        };
+        PageFlags::from_bits(low | nx | locked)
     }
 
     /// Decode a swap entry from a raw PTE value.
@@ -960,32 +979,35 @@ pub fn try_reclaim(target: usize) -> usize {
                 _ => continue,
             };
 
-            // Check the ACCESSED bit in the PTE.
             let virt = VirtAddr::new(entry.vaddr);
-            let pte = page_table::read_leaf_pte(entry.pml4_phys, virt);
 
-            match pte {
-                Some(pte) if pte.is_present() => {
-                    if pte.flags().contains(PageFlags::ACCESSED) {
-                        // Second chance: clear the ACCESSED bit and
-                        // move on.  The CPU will re-set it on next access.
-                        // SAFETY: pml4_phys is valid, page is present.
-                        let _ = unsafe {
-                            page_table::change_flags(
-                                entry.pml4_phys,
-                                virt,
-                                pte.flags() & !PageFlags::ACCESSED,
-                            )
-                        };
-                        unsafe {
-                            page_table::flush_frame(virt);
-                        }
-                    } else {
-                        // Not recently accessed — select as victim.
-                        victims.push((idx, entry));
+            // Locked (`mlock`): never a victim, and passed by rather than
+            // taken off the list, so it is a candidate again the moment
+            // `munlock` comes, with nothing to put back. (Linux moves such
+            // pages to a list the reclaimer does not scan; here a sweep pays
+            // a look at each, which with the default 8 MiB `RLIMIT_MEMLOCK`
+            // is a few hundred frames a process.)
+            if super::mlock::frame_is_locked(entry.pml4_phys, entry.vaddr) {
+                continue;
+            }
+
+            // The clock test: used since the last sweep (any of its four
+            // entries)? Each entry's accessed bit is cleared on its own,
+            // nothing else in it touched.
+            // SAFETY: the reclaim list names live address spaces: an exiting
+            // process's entries go before its tables (`unregister_*`).
+            match unsafe { page_table::frame_test_and_clear_accessed(entry.pml4_phys, virt) } {
+                Some(true) => {
+                    // Second chance. The CPU sets the bit again on the next
+                    // use once the stale translation is gone.
+                    // SAFETY: invlpg is always safe in ring 0.
+                    unsafe {
+                        page_table::flush_frame(virt);
                     }
                 }
-                _ => {
+                // Not used since the last sweep: a victim.
+                Some(false) => victims.push((idx, entry)),
+                None => {
                     // Page is not present (already swapped or unmapped).
                     // Mark inactive.
                     if let Some(e) = state.pages.get_mut(idx) {
@@ -1431,8 +1453,16 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
         if !part.is_present() {
             continue;
         }
+        // Shared by design: not this path's to swap, ever.
         if part.flags().contains(PageFlags::SHARED) {
             return Err(KernelError::NotSupported);
+        }
+        // Locked (`mlock`): not while it is. `WouldBlock`, which leaves the
+        // frame on the reclaim list for when `munlock` comes, not
+        // `NotSupported`, which takes it off for good. A lock set after this
+        // read changes the entry, which step 4 notices and gives up on.
+        if part.flags().contains(PageFlags::MLOCKED) {
+            return Err(KernelError::WouldBlock);
         }
         let base = part.phys_addr() & !frame_mask;
         match frame_base {

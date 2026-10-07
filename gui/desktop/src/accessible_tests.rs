@@ -9,7 +9,9 @@
 use guitk::widget::automation::Query;
 
 use super::*;
+use crate::hotkeys::HotkeyAction;
 use crate::notif_pane::QuickSetting;
+use crate::shortcut_editor::CardButton;
 use crate::volume::Output;
 use crate::volume::volume_tests::card;
 use crate::widgets::WidgetKind;
@@ -1449,6 +1451,195 @@ fn a_popped_up_notification_a_click_cannot_reach_is_refused() {
                 role: Role::ListItem,
                 action: "toggle"
             })
+        );
+    });
+}
+
+/// The part `part` of the card of keyboard shortcuts.
+fn card_part(part: CardPart) -> ShellPart {
+    ShellPart::Shortcuts(part)
+}
+
+fn act(
+    shell: &mut DesktopShell,
+    part: ShellPart,
+    action: Action,
+) -> Result<Option<ShellAction>, Refusal> {
+    shell.invoke(&part, action, 0.0, 0.0)
+}
+
+/// **The card of keyboard shortcuts is seen while it is up, and used as its
+/// user uses it**: a row chosen and pressed as clicked, new keys given to the
+/// line that takes them as they are pressed -- keys that name nothing
+/// refused -- a button pressed as clicked, the action list searched and an
+/// entry taken, a greyed button refused, a label not typed into.
+#[test]
+fn the_shortcut_card_is_seen_and_used_as_its_user_uses_it() {
+    settingsfile::testing::with_scratch_config("ax-the-shortcut-card-is-seen-and-used", |_root| {
+        let mut s = shell();
+        assert!(
+            tree(&s)
+                .walk()
+                .all(|n| !matches!(n.id, ShellPart::Shortcuts(_))),
+            "seen while shut"
+        );
+        s.toggle_shortcut_card();
+        let card = node(&s, card_part(CardPart::Card));
+        assert_eq!(
+            (card.role, card.name.as_str()),
+            (Role::Dialog, "Keyboard Shortcuts")
+        );
+        let second = node(&s, card_part(CardPart::Bindings)).children[1].clone();
+        let ShellPart::Shortcuts(CardPart::Binding(old)) = second.id else {
+            panic!("a row is named by its keys: {:?}", second.id)
+        };
+        let action = s.hotkeys.conflicts_with(&old).cloned().expect("bound");
+
+        // A menu open over the card takes a click before it does: a click on
+        // a row or a button is refused. (Opening the menu closes the card;
+        // the card is put back up under it, a state the shell does not reach
+        // by itself, to ask the question.)
+        s.open_desktop_menu(5.0, 5.0);
+        assert!(s.desktop_menu.is_visible());
+        s.shortcut_card_open = true;
+        assert_eq!(act(&mut s, second.id, Action::Choose), Err(Refusal::Hidden));
+        assert_eq!(
+            act(
+                &mut s,
+                card_part(CardPart::Button(CardButton::Close)),
+                Action::Press
+            ),
+            Err(Refusal::Hidden)
+        );
+        s.desktop_menu.hide();
+
+        assert_eq!(act(&mut s, second.id, Action::Choose), Ok(None));
+        assert_eq!(node(&s, second.id).value, Some(Value::Chosen(true)));
+        let line = card_part(CardPart::Message);
+        assert_eq!(
+            act(&mut s, line, Action::SetText("Ctrl+Alt+F9".to_owned())),
+            Err(Refusal::NotApplicable {
+                role: Role::Label,
+                action: "set the text of"
+            }),
+            "keys given to the card while it records none"
+        );
+
+        // Pressed, the row asks for its new keys, and the line takes them.
+        assert_eq!(act(&mut s, second.id, Action::Press), Ok(None));
+        assert_eq!(node(&s, line).role, Role::TextField);
+        assert_eq!(
+            act(&mut s, line, Action::SetText("Ctrl+Nonsense".to_owned())),
+            Err(Refusal::NotAKey)
+        );
+        assert_eq!(
+            act(&mut s, line, Action::SetText("Ctrl+Alt+F9".to_owned())),
+            Ok(None)
+        );
+        let new = Hotkey::parse("Ctrl+Alt+F9").expect("keys");
+        assert_eq!(s.hotkeys.conflicts_with(&new), Some(&action));
+        assert!(s.hotkeys.conflicts_with(&old).is_none());
+
+        // Add: the action list, searched, an entry taken -- then its keys.
+        assert_eq!(
+            act(
+                &mut s,
+                card_part(CardPart::Button(CardButton::Add)),
+                Action::Press
+            ),
+            Ok(None)
+        );
+        let field = card_part(CardPart::Field);
+        assert_eq!(
+            act(&mut s, field, Action::SetText("lock".to_owned())),
+            Ok(None)
+        );
+        // Set again, the text is replaced, not added to.
+        assert_eq!(
+            act(&mut s, field, Action::SetText("show desktop".to_owned())),
+            Ok(None)
+        );
+        assert_eq!(
+            node(&s, field).value,
+            Some(Value::Text("show desktop".to_owned()))
+        );
+        let entries = node(&s, card_part(CardPart::Entries)).children;
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(act(&mut s, entries[0].id, Action::Press), Ok(None));
+        assert_eq!(
+            act(&mut s, line, Action::SetText("Ctrl+Alt+F10".to_owned())),
+            Ok(None)
+        );
+        assert_eq!(
+            s.hotkeys
+                .conflicts_with(&Hotkey::parse("Ctrl+Alt+F10").expect("keys")),
+            Some(&HotkeyAction::ShowDesktop)
+        );
+
+        // An entry scrolled out of the list is walked to with the keys.
+        assert_eq!(
+            act(
+                &mut s,
+                card_part(CardPart::Button(CardButton::Add)),
+                Action::Press
+            ),
+            Ok(None)
+        );
+        let last = node(&s, card_part(CardPart::Entries))
+            .children
+            .last()
+            .cloned()
+            .expect("entries");
+        let area = node(&s, card_part(CardPart::Entries)).bounds;
+        assert!(
+            last.bounds.y >= area.y + area.h,
+            "the last entry is not scrolled out of the list, so nothing is walked to"
+        );
+        assert_eq!(act(&mut s, last.id, Action::Choose), Ok(None));
+        assert_eq!(node(&s, last.id).value, Some(Value::Chosen(true)));
+        // And back up to the first, scrolled out above now.
+        let first = node(&s, card_part(CardPart::Entries)).children[0].clone();
+        assert!(first.bounds.y < area.y, "the first entry is still on show");
+        assert_eq!(act(&mut s, first.id, Action::Choose), Ok(None));
+        assert_eq!(node(&s, first.id).value, Some(Value::Chosen(true)));
+
+        // Nothing left to choose: Choose is greyed, and refused.
+        assert_eq!(
+            act(
+                &mut s,
+                field,
+                Action::SetText("no action is called this".to_owned())
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            act(
+                &mut s,
+                card_part(CardPart::Button(CardButton::Choose)),
+                Action::Press
+            ),
+            Err(Refusal::Disabled)
+        );
+        assert_eq!(
+            act(
+                &mut s,
+                card_part(CardPart::Button(CardButton::Cancel)),
+                Action::Press
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            act(
+                &mut s,
+                card_part(CardPart::Button(CardButton::Close)),
+                Action::Press
+            ),
+            Ok(None)
+        );
+        assert!(!s.shortcut_card_open, "Close closes the card");
+        assert_eq!(
+            act(&mut s, card_part(CardPart::Card), Action::Press),
+            Err(Refusal::NoSuchWidget)
         );
     });
 }

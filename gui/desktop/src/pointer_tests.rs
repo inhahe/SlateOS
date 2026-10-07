@@ -4317,14 +4317,22 @@ fn the_start_menus_places_open_folders_and_start_settings_and_the_terminal() {
 /// it open: the place asks for the card, it does not toggle it. (Opening the
 /// menu closes the card, so this is reached only by a state the shell is not
 /// meant to get into -- which is exactly when "toggle" would do the opposite
-/// of what the user clicked.)
+/// of what the user clicked.) On a display wide enough that the card, drawn
+/// over the menu and taking a press on itself, is not over the place.
 #[test]
 fn the_keyboard_shortcuts_place_opens_the_card_and_never_closes_it() {
-    let mut shell = shell();
+    let mut shell = DesktopShell::new(1920, 1080);
     shell.toggle_start_menu();
     let rect = shell.start_shortcut_rect(crate::StartShortcut::KeyboardShortcuts);
-    assert!(rect.w > 0.0, "the place has no room on a 1000x800 display");
+    assert!(rect.w > 0.0, "the place has no room on a 1920x1080 display");
     shell.shortcut_card_open = true;
+    let (x, y) = rect.centre();
+    assert!(
+        shell
+            .shortcut_card_layout()
+            .is_some_and(|card| card.at(x, y).is_none()),
+        "the card is over the place, and takes the press"
+    );
     assert!(matches!(click_at(&mut shell, rect), ShellAction::Consumed));
     assert!(
         shell.shortcut_card_open,

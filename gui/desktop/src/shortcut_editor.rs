@@ -29,6 +29,22 @@
 //! card names what holds them and offers to move them — the "shows you the
 //! function that's already taken … and lets you modify" clause.
 //!
+//! # The pointer, too
+//!
+//! Every key above is a button along the card's foot as well
+//! ([`CardButton`]): New keys, Change action, Remove, Add and Close on the
+//! list; Cancel while keys are recorded; Move and Keep for the question;
+//! Choose and Cancel over the action list, OK and Cancel under the program
+//! field. A button's press *is* its key, handed to
+//! [`ShortcutEditor::handle_key`], so the two cannot come to differ. A click
+//! chooses a row of the list or an entry of the action list, as Up and Down
+//! do, and a double click is that and Enter; the wheel scrolls the action
+//! list. Until 2026-10-06 the card answered no press at all, so a user who
+//! cannot press F2 or Insert -- with a switch, a pointer, a voice --
+//! could read the shortcuts and change none (`design-decisions.md` §1494).
+//! Where everything is, for the drawing, a press and tools alike, is one
+//! answer: [`ShortcutEditor::layout`].
+//!
 //! # A program, not a command line
 //!
 //! `design.txt` says "an arbitrary command", and the entry asks for a
@@ -58,13 +74,17 @@
 //! whatever slid into the old position.
 
 use appearance::Palette;
+use guitk::button;
 use guitk::event::{Key, KeyEvent};
+use guitk::frame::Rect;
 use guitk::listview::{ListKey, ListViewport};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textedit::{self, SingleLine};
 use guitk::textfind::{Case, contains};
 use guitk::textinput::{KeyEdit, TextInput};
+use guitk::widget::automation::{Node, Role, Value};
+use guitk::widget_style::ButtonStyle;
 
 use crate::hotkeys::{self, Hotkey, HotkeyAction, HotkeyRegistry};
 
@@ -164,9 +184,12 @@ pub struct Context {
     /// How many virtual desktops exist — one "Switch to Desktop N" each.
     pub desktops: u8,
     /// How many rows of the action list fit on screen; from [`picker_rows`],
-    /// given the same height the card is drawn in.
+    /// given the same height the card is drawn in and the same foot
+    /// ([`picker_foot_height`]).
     pub picker_rows: usize,
-    /// How many rows each column of the card's own list holds: its page.
+    /// How many rows each column of the card's own list holds: its page --
+    /// from `hotkeys::rows_per_column`, given the same height and foot
+    /// ([`list_foot_height`]).
     pub list_rows: usize,
 }
 
@@ -241,6 +264,114 @@ impl ShortcutEditor {
     pub fn reset(&mut self) {
         self.mode = Mode::List;
         self.message = None;
+    }
+
+    /// The row whose keys are `keys` chosen by a press, as Up and Down choose
+    /// one: the keyboard goes to it, and what the last edit said goes, as it
+    /// does for a step. Only on the plain list -- while keys are recorded or
+    /// a question is asked, a row is not what the card is waiting for.
+    /// Whether it was.
+    pub fn choose_row(&mut self, registry: &HotkeyRegistry, keys: Hotkey) -> bool {
+        if !matches!(self.mode, Mode::List) {
+            return false;
+        }
+        let Some(row) = registry
+            .all_bindings()
+            .position(|(h, _)| same_binding(h, &keys))
+        else {
+            return false;
+        };
+        self.selected = row;
+        self.message = None;
+        true
+    }
+
+    /// The entry at `index` among those the search leaves chosen by a press,
+    /// as Up and Down choose one. Only while an action is chosen. Whether it
+    /// was.
+    pub fn choose_entry(&mut self, index: usize, cx: Context) -> bool {
+        let Mode::Pick { query, view, .. } = &mut self.mode else {
+            return false;
+        };
+        let len = filtered(&choices(cx.desktops), query.text()).len();
+        if index >= len {
+            return false;
+        }
+        view.set_height(cx.picker_rows, len);
+        view.select(Some(index), len);
+        true
+    }
+
+    /// The action list scrolled `rows` rows, down for a positive count, as
+    /// the wheel scrolls it: what is chosen stays chosen. Whether it moved.
+    pub fn scroll_entries(&mut self, rows: isize, cx: Context) -> bool {
+        let Mode::Pick { query, view, .. } = &mut self.mode else {
+            return false;
+        };
+        let len = filtered(&choices(cx.desktops), query.text()).len();
+        view.set_height(cx.picker_rows, len);
+        let before = view.visible_range(len);
+        view.scroll_by(rows, len);
+        view.visible_range(len) != before
+    }
+
+    /// Where entry `id` -- its place among every entry ([`choices`]) -- is
+    /// among those the search leaves, and which of those is chosen: `None`
+    /// with no action list up, or with the search leaving it out.
+    #[must_use]
+    pub fn entry_place(&self, id: usize, cx: Context) -> Option<(usize, Option<usize>)> {
+        let Mode::Pick { query, view, .. } = &self.mode else {
+            return None;
+        };
+        let all = choices(cx.desktops);
+        let wanted = all.get(id)?;
+        let index = filtered(&all, query.text())
+            .iter()
+            .position(|choice| choice == wanted)?;
+        Some((index, view.selected()))
+    }
+
+    /// The buttons along the card's foot as the editor stands, each with
+    /// whether it can be pressed now: the list's five, a row's three greyed
+    /// with no row to act on; Cancel while keys are recorded; the question's
+    /// two answers; Choose -- greyed while the search leaves nothing to
+    /// choose -- and Cancel over the action list; OK and Cancel under the
+    /// program field. Each does what its key does, here, now.
+    #[must_use]
+    pub fn buttons(&self, registry: &HotkeyRegistry, cx: Context) -> Vec<(CardButton, bool)> {
+        match &self.mode {
+            Mode::List => {
+                let rows = !registry.is_empty();
+                vec![
+                    (CardButton::NewKeys, rows),
+                    (CardButton::ChangeAction, rows),
+                    (CardButton::Remove, rows),
+                    (CardButton::Add, true),
+                    (CardButton::Close, true),
+                ]
+            }
+            Mode::Rechord { .. } | Mode::Record { .. } => vec![(CardButton::Cancel, true)],
+            Mode::Steal { .. } => vec![(CardButton::Move, true), (CardButton::Keep, true)],
+            Mode::Pick { query, .. } => vec![
+                (
+                    CardButton::Choose,
+                    !filtered(&choices(cx.desktops), query.text()).is_empty(),
+                ),
+                (CardButton::Cancel, true),
+            ],
+            Mode::Command { .. } => vec![(CardButton::Ok, true), (CardButton::Cancel, true)],
+        }
+    }
+
+    /// What the foot's line says now: what the last edit did; on the plain
+    /// list with nothing to report, the keys the card answers; nothing else.
+    #[must_use]
+    pub fn foot_line(&self) -> Option<&str> {
+        match self.message.as_deref() {
+            Some(message) => Some(message),
+            None if !self.owns_keyboard() => Some(HINT),
+            None => None,
+        }
     }
 
     /// Act on one keystroke.
@@ -711,31 +842,299 @@ impl ShortcutEditor {
     // Drawing
     // ------------------------------------------------------------------
 
-    /// Width and height of the action-list card, for centring it.
+    /// Where everything on the card is as the editor stands -- what its
+    /// drawing, a press on it and tools all go by, so none of the three can
+    /// put a part somewhere the others do not.
     ///
-    /// The same function [`render_picker`](Self::render_picker) sizes itself
-    /// with, given the same `max_height`, so the card is centred on the size it
-    /// is actually drawn at.
+    /// The card is centred on a `screen` of that size and is at most
+    /// `max_height` tall, its buttons in `style`: the list's card while the
+    /// bindings are shown, the action list's while an action is chosen or a
+    /// program typed. `cx` must have been worked out for the same height and
+    /// style ([`Context::picker_rows`] and [`Context::list_rows`]).
     #[must_use]
-    pub fn picker_size(&self, max_height: f32) -> (f32, f32) {
-        let rows = picker_rows(max_height);
-        (PICKER_WIDTH, picker_height(rows))
+    pub fn layout(
+        &self,
+        registry: &HotkeyRegistry,
+        cx: Context,
+        screen: (f32, f32),
+        max_height: f32,
+        style: &ButtonStyle,
+    ) -> CardLayout {
+        let buttons = self.buttons(registry, cx);
+        if self.is_picking() {
+            let foot = picker_foot_height(style);
+            let rows = picker_rows(max_height, foot);
+            let card = centred(screen, PICKER_WIDTH, picker_height(rows, foot));
+            let field = Rect::new(
+                card.x + hotkeys::PADDING,
+                card.y + hotkeys::HEADER_HEIGHT,
+                card.w - hotkeys::PADDING * 2.0,
+                FIELD_HEIGHT,
+            );
+            let mut entries = Vec::new();
+            let mut list = None;
+            if let Mode::Pick { query, view, .. } = &self.mode {
+                let len = filtered(&choices(cx.desktops), query.text()).len();
+                #[expect(clippy::cast_precision_loss, reason = "at most MAX_PICKER_ROWS rows")]
+                let tall = rows as f32 * hotkeys::ROW_HEIGHT;
+                let area = Rect::new(
+                    card.x + hotkeys::PADDING / 2.0,
+                    field.y + FIELD_HEIGHT + hotkeys::PADDING / 2.0,
+                    card.w - hotkeys::PADDING,
+                    tall,
+                );
+                // A copy, sized to the card being laid out: the stored one
+                // was sized at the last keystroke, and the display may have
+                // changed since.
+                let mut view = *view;
+                view.set_height(rows, len);
+                let top = view.visible_range(len).start;
+                entries = view
+                    .visible_range(len)
+                    .map(|index| (index, entry_rect(area, index, top)))
+                    .collect();
+                list = Some(area);
+            }
+            let (message, buttons) = foot_places(
+                card,
+                foot,
+                &buttons,
+                style,
+                PICKER_WIDTH - hotkeys::PADDING * 2.0,
+            );
+            CardLayout {
+                card,
+                rows: Vec::new(),
+                list,
+                field: Some(field),
+                entries,
+                message,
+                buttons,
+                foot,
+            }
+        } else {
+            let foot = list_foot_height(style);
+            let (width, height) = hotkeys::settings_panel_size(registry, max_height, foot);
+            let card = centred(screen, width, height);
+            let rows = hotkeys::row_rects(registry, (card.x, card.y), max_height, foot);
+            let list = Rect::new(
+                card.x,
+                card.y + hotkeys::HEADER_HEIGHT,
+                card.w,
+                (card.h - hotkeys::HEADER_HEIGHT - foot).max(0.0),
+            );
+            let (message, buttons) = foot_places(
+                card,
+                foot,
+                &buttons,
+                style,
+                hotkeys::PANEL_WIDTH - hotkeys::PADDING * 2.0,
+            );
+            CardLayout {
+                card,
+                rows,
+                list: Some(list),
+                field: None,
+                entries: Vec::new(),
+                message,
+                buttons,
+                foot,
+            }
+        }
     }
 
-    /// Draw the action list, or the program field, as a card at `(x, y)`.
+    /// Draw the card's foot, where `layout` has it: the line saying what the
+    /// last edit did -- or, on the plain list with nothing to report, the keys
+    /// the card answers -- `font_size` high, and the buttons, `hovered` lit
+    /// where it can be pressed.
+    pub fn render_foot(
+        &self,
+        tree: &mut RenderTree,
+        p: &Palette,
+        layout: &CardLayout,
+        font_size: f32,
+        hovered: Option<CardButton>,
+        focus_ring: f32,
+    ) {
+        if let Some(line) = self.foot_line() {
+            let tall = guitk::text::line_height(font_size, FontWeightHint::Regular);
+            tree.push(RenderCommand::Text {
+                x: layout.message.x,
+                y: layout.message.y + (layout.message.h - tall) / 2.0,
+                text: line.to_string(),
+                // `subtext0` and not the accent: an outcome, not an
+                // invitation, and the accent is what the card already uses for
+                // where the keyboard is.
+                color: p.subtext0,
+                font_size,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(layout.message.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        for &(which, enabled, at) in &layout.buttons {
+            button::draw(
+                tree,
+                p,
+                (at.x, at.y, at.w, at.h),
+                which.label(),
+                which.kind(),
+                button::State {
+                    hovered: enabled && hovered == Some(which),
+                    disabled: !enabled,
+                    ..button::State::default()
+                },
+                p.panel_bg(),
+                focus_ring,
+            );
+        }
+    }
+
+    /// The card as tools see it, where `layout` has it: a dialog named by its
+    /// heading. On the list's card, the bindings -- each row named by what it
+    /// does, described by its keys (and the program it starts, where it
+    /// starts one), chosen where the keyboard is, usable on the plain list
+    /// alone. On the action list's, its field holding what is typed, and the
+    /// entries the search leaves -- each described by the keys it already
+    /// has, one scrolled out of the list told above or below it, where the
+    /// user would find it scrolling. Then the foot's line: a label saying
+    /// what it says, and, while keys are recorded, the field that takes them.
+    /// Then the buttons, each described by its key -- or, greyed, by why.
+    #[must_use]
+    pub fn automation(
+        &self,
+        registry: &HotkeyRegistry,
+        cx: Context,
+        layout: &CardLayout,
+    ) -> Node<CardPart> {
+        let heading = match &self.mode {
+            Mode::Pick { .. } => "Choose an action",
+            Mode::Command { .. } => "Run a program",
+            _ => "Keyboard Shortcuts",
+        };
+        let mut card = Node::new(CardPart::Card, Role::Dialog, heading, layout.card);
+        match &self.mode {
+            Mode::Pick { query, view, .. } => {
+                card.children.push(field_node(
+                    "Search",
+                    query.text(),
+                    layout.field.unwrap_or_default(),
+                ));
+                let area = layout.list.unwrap_or_default();
+                let all = choices(cx.desktops);
+                let shown = filtered(&all, query.text());
+                let mut view = *view;
+                view.set_height(cx.picker_rows, shown.len());
+                let top = view.visible_range(shown.len()).start;
+                let mut list = Node::new(CardPart::Entries, Role::List, "Actions", area);
+                for (index, choice) in shown.iter().enumerate() {
+                    let Some(id) = all.iter().position(|c| c == choice) else {
+                        continue;
+                    };
+                    let mut entry = Node::new(
+                        CardPart::Entry(id),
+                        Role::ListItem,
+                        choice.label(),
+                        entry_rect(area, index, top),
+                    );
+                    if let Choice::Action(action) = choice {
+                        let keys = chords_of(registry, action);
+                        if !keys.is_empty() {
+                            entry.description = Some(keys.join(", "));
+                        }
+                    }
+                    entry.value = Some(Value::Chosen(view.selected() == Some(index)));
+                    list.children.push(entry);
+                }
+                card.children.push(list);
+            }
+            Mode::Command { input, .. } => {
+                card.children.push(field_node(
+                    "Program",
+                    input.text(),
+                    layout.field.unwrap_or_default(),
+                ));
+            }
+            _ => {
+                let on_list = matches!(self.mode, Mode::List);
+                let selected = self.selected.min(registry.len().saturating_sub(1));
+                let mut list = Node::new(
+                    CardPart::Bindings,
+                    Role::List,
+                    "Shortcuts",
+                    layout.list.unwrap_or_default(),
+                );
+                for (row, ((keys, action), (_, at))) in
+                    registry.all_bindings().zip(&layout.rows).enumerate()
+                {
+                    let mut node = Node::new(
+                        CardPart::Binding(*keys),
+                        Role::ListItem,
+                        action.display_label(),
+                        *at,
+                    );
+                    node.description = Some(match action.launch() {
+                        Some(launch) => {
+                            format!("{}, {}", keys.display_name(), launch.display_line())
+                        }
+                        None => keys.display_name(),
+                    });
+                    node.value = Some(Value::Chosen(row == selected));
+                    node.focused = on_list && row == selected;
+                    node.focusable = on_list;
+                    node.enabled = on_list;
+                    list.children.push(node);
+                }
+                card.children.push(list);
+            }
+        }
+        if self.is_recording() {
+            // What the card waits for while it says "Press the new keys": a
+            // field the keys go into, as a key capture is to every tool.
+            let mut keys = Node::new(
+                CardPart::Message,
+                Role::TextField,
+                self.foot_line().unwrap_or("Press the new keys"),
+                layout.message,
+            );
+            keys.value = Some(Value::Text(String::new()));
+            keys.focused = true;
+            keys.focusable = true;
+            card.children.push(keys);
+        } else if let Some(line) = self.foot_line() {
+            card.children.push(Node::new(
+                CardPart::Message,
+                Role::Label,
+                line,
+                layout.message,
+            ));
+        }
+        for &(which, enabled, at) in &layout.buttons {
+            let mut node = Node::new(CardPart::Button(which), Role::Button, which.label(), at);
+            node.enabled = enabled;
+            node.description = Some(if enabled {
+                hotkeys::Hotkey::new(which.key(), guitk::event::Modifiers::NONE).display_name()
+            } else {
+                which.why_disabled().to_owned()
+            });
+            card.children.push(node);
+        }
+        card
+    }
+
+    /// Draw the action list, or the program field, as a card where `layout`
+    /// has it.
     pub fn render_picker(
         &self,
         tree: &mut RenderTree,
         registry: &HotkeyRegistry,
         p: &Palette,
-        x: f32,
-        y: f32,
-        max_height: f32,
+        layout: &CardLayout,
         cx: Context,
         caret_width: f32,
         focus_ring: f32,
     ) {
-        let (width, height) = self.picker_size(max_height);
+        let (x, y, width, height) = (layout.card.x, layout.card.y, layout.card.w, layout.card.h);
         hotkeys::push_card(&mut tree.commands, p, x, y, width, height);
         tree.clip(x, y, width, height);
 
@@ -761,9 +1160,8 @@ impl ShortcutEditor {
 
         // The field: the toolkit's (`guitk::field`), in the theme's shape,
         // with the keyboard -- what is typed goes into it.
-        let field_x = x + hotkeys::PADDING;
-        let field_y = y + hotkeys::HEADER_HEIGHT;
-        let field_w = width - hotkeys::PADDING * 2.0;
+        let field_rect = layout.field.unwrap_or_default();
+        let (field_x, field_y, field_w) = (field_rect.x, field_rect.y, field_rect.w);
         guitk::field::draw(
             tree,
             p,
@@ -815,26 +1213,24 @@ impl ShortcutEditor {
             );
         }
 
-        // The list, for picking; nothing below the field for a program.
+        // The list, for picking; nothing below the field for a program. Its
+        // rows where the layout has them, which sized its copy of the view to
+        // the card being drawn.
         if let Mode::Pick { query, view, .. } = &self.mode {
             let shown = filtered(&choices(cx.desktops), query.text());
-            let list_top = field_y + FIELD_HEIGHT + hotkeys::PADDING / 2.0;
             let content_w = width - hotkeys::PADDING * 2.0;
-            let mut row_y = list_top;
-            // A copy, sized to the card being drawn: the stored one was sized at
-            // the last keystroke, and the display may have changed since.
-            let mut view = *view;
-            view.set_height(picker_rows(max_height), shown.len());
-            for index in view.visible_range(shown.len()) {
+            let mut row_y = layout.list.map_or(field_y + FIELD_HEIGHT, |list| list.y);
+            for &(index, at) in &layout.entries {
                 let Some(choice) = shown.get(index) else {
                     break;
                 };
+                row_y = at.y;
                 let picked = view.selected() == Some(index);
                 if picked {
                     tree.push(RenderCommand::FillRect {
-                        x: x + hotkeys::PADDING / 2.0,
+                        x: at.x,
                         y: row_y + 2.0,
-                        width: content_w + hotkeys::PADDING,
+                        width: at.w,
                         height: hotkeys::ROW_HEIGHT - 4.0,
                         color: p.surface0,
                         corner_radii: CornerRadii::all(6.0),
@@ -876,7 +1272,6 @@ impl ShortcutEditor {
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
-                row_y += hotkeys::ROW_HEIGHT;
             }
             if shown.is_empty() {
                 tree.push(RenderCommand::Text {
@@ -908,25 +1303,26 @@ const MIN_PICKER_ROWS: usize = 3;
 /// Rows it never grows past: a list taller than this is scanned, not read.
 const MAX_PICKER_ROWS: usize = 12;
 
-/// The card height for `rows` visible rows.
-fn picker_height(rows: usize) -> f32 {
+/// The card height for `rows` visible rows over a foot `foot` tall.
+fn picker_height(rows: usize, foot: f32) -> f32 {
     #[expect(clippy::cast_precision_loss, reason = "at most MAX_PICKER_ROWS rows")]
     let rows = rows as f32;
     hotkeys::HEADER_HEIGHT
         + FIELD_HEIGHT
         + hotkeys::PADDING / 2.0
         + rows * hotkeys::ROW_HEIGHT
-        + hotkeys::PADDING
-        // The message line the shell draws along the bottom.
-        + hotkeys::ROW_HEIGHT
+        + hotkeys::PADDING / 2.0
+        // The line saying what the last edit did, and the buttons.
+        + foot
 }
 
-/// How many rows of the action list fit in `max_height`.
+/// How many rows of the action list fit in `max_height` over a foot `foot`
+/// tall ([`picker_foot_height`]).
 #[must_use]
-pub fn picker_rows(max_height: f32) -> usize {
+pub fn picker_rows(max_height: f32, foot: f32) -> usize {
     (MIN_PICKER_ROWS..=MAX_PICKER_ROWS)
         .rev()
-        .find(|&rows| picker_height(rows) <= max_height)
+        .find(|&rows| picker_height(rows, foot) <= max_height)
         .unwrap_or(MIN_PICKER_ROWS)
 }
 
@@ -1016,6 +1412,367 @@ pub fn filtered(all: &[Choice], query: &str) -> Vec<Choice> {
         .collect()
 }
 
+// ----------------------------------------------------------------------
+// The card's foot, and where everything on the card is
+// ----------------------------------------------------------------------
+
+/// What the foot's line says on the plain list with nothing to report: the
+/// keys the card answers -- each a button below it too. Without it the
+/// editor's keys are discoverable only by reading the source, which is the
+/// fate of every keyboard feature nobody is told about.
+pub(crate) const HINT: &str = "Enter: new keys \u{b7} F2: change action \u{b7} Insert: add \u{b7} Delete: remove \u{b7} Esc: close";
+
+/// A button along the card's foot. Each *is* one of the card's keys: a press
+/// on it hands that key to [`ShortcutEditor::handle_key`] as the keyboard
+/// does, so a click and a keystroke cannot come to mean different things.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CardButton {
+    /// Enter on the list: record new keys for the chosen row.
+    NewKeys,
+    /// F2: choose what the chosen row's keys do.
+    ChangeAction,
+    /// Delete: take the chosen row off.
+    Remove,
+    /// Insert: add a shortcut.
+    Add,
+    /// Escape on the list: close the card.
+    Close,
+    /// Escape while keys are recorded, an action chosen or a program typed.
+    Cancel,
+    /// Enter on the question whether to take keys from what holds them:
+    /// take them.
+    Move,
+    /// Escape on that question: leave them where they are.
+    Keep,
+    /// Enter over the action list: the chosen entry.
+    Choose,
+    /// Enter under the program field.
+    Ok,
+}
+
+impl CardButton {
+    /// What it says.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NewKeys => "New keys",
+            Self::ChangeAction => "Change action",
+            Self::Remove => "Remove",
+            Self::Add => "Add",
+            Self::Close => "Close",
+            Self::Cancel => "Cancel",
+            Self::Move => "Move",
+            Self::Keep => "Keep",
+            Self::Choose => "Choose",
+            Self::Ok => "OK",
+        }
+    }
+
+    /// The key it is.
+    #[must_use]
+    pub const fn key(self) -> Key {
+        match self {
+            Self::NewKeys | Self::Move | Self::Choose | Self::Ok => Key::Enter,
+            Self::ChangeAction => Key::F2,
+            Self::Remove => Key::Delete,
+            Self::Add => Key::Insert,
+            Self::Close | Self::Cancel | Self::Keep => Key::Escape,
+        }
+    }
+
+    /// How it is drawn: the one Enter presses as what the card is there for,
+    /// the one that takes a shortcut off in red, the rest plain.
+    #[must_use]
+    pub const fn kind(self) -> button::Kind {
+        match self {
+            Self::NewKeys | Self::Move | Self::Choose | Self::Ok => button::Kind::Primary,
+            Self::Remove => button::Kind::Destructive,
+            Self::ChangeAction | Self::Add | Self::Close | Self::Cancel | Self::Keep => {
+                button::Kind::Plain
+            }
+        }
+    }
+
+    /// Why it cannot be pressed, for the time it cannot (`design-decisions.md`
+    /// §1473): a row's buttons with no row to act on, Choose with nothing
+    /// left to choose. The others can always be pressed.
+    #[must_use]
+    pub const fn why_disabled(self) -> &'static str {
+        match self {
+            Self::NewKeys | Self::ChangeAction | Self::Remove => "There are no shortcuts to change",
+            Self::Choose => "No action matches what is typed",
+            Self::Add | Self::Close | Self::Cancel | Self::Move | Self::Keep | Self::Ok => "",
+        }
+    }
+
+    /// Whether it acts on the list's chosen row: laid out at the left of its
+    /// line, apart from those acting on the card, at the right.
+    const fn on_the_row(self) -> bool {
+        matches!(self, Self::NewKeys | Self::ChangeAction | Self::Remove)
+    }
+}
+
+/// Every button the list's card shows in any of its modes, the most it
+/// shows at once: its foot is laid out for these whatever the card is
+/// doing, so the card keeps its size while keys are recorded or a question
+/// is asked.
+const LIST_BUTTONS: [CardButton; 5] = [
+    CardButton::NewKeys,
+    CardButton::ChangeAction,
+    CardButton::Remove,
+    CardButton::Add,
+    CardButton::Close,
+];
+/// The same for the action list's card: two buttons in either of its modes.
+const PICKER_BUTTONS: [CardButton; 2] = [CardButton::Choose, CardButton::Cancel];
+
+/// Height of the foot's line saying what the last edit did.
+const MESSAGE_HEIGHT: f32 = hotkeys::ROW_HEIGHT;
+/// Space between two buttons side by side, and between two lines of them.
+const BUTTON_GAP: f32 = 8.0;
+
+/// The lines `buttons` take across `room`, as many on each as fit, in order,
+/// at their widths in `style`. A button wider than all the room has a line
+/// of its own.
+fn button_lines(buttons: &[CardButton], style: &ButtonStyle, room: f32) -> Vec<Vec<CardButton>> {
+    let mut lines: Vec<Vec<CardButton>> = Vec::new();
+    let mut used = 0.0_f32;
+    for &which in buttons {
+        let wide = button::width(style, which.label());
+        match lines.last_mut() {
+            Some(line) if used + BUTTON_GAP + wide <= room => {
+                line.push(which);
+                used += BUTTON_GAP + wide;
+            }
+            _ => {
+                lines.push(vec![which]);
+                used = wide;
+            }
+        }
+    }
+    lines
+}
+
+/// How tall a foot is whose buttons take `lines` lines: the line saying what
+/// the last edit did, the buttons' lines and the gaps between them, and the
+/// card's padding under the last.
+fn foot_height_for(lines: usize) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a line per button at most, and there are five"
+    )]
+    let lines = lines.max(1) as f32;
+    MESSAGE_HEIGHT + lines * button::height() + (lines - 1.0) * BUTTON_GAP + hotkeys::PADDING
+}
+
+/// How tall the list's card's foot is, its buttons in `style`: what
+/// [`hotkeys::render_settings_panel`] leaves under the rows. Laid out for
+/// every button the list shows (`LIST_BUTTONS`) across one column -- the
+/// narrowest the card is -- so the room holds them on a card of any width,
+/// at any text size.
+#[must_use]
+pub fn list_foot_height(style: &ButtonStyle) -> f32 {
+    foot_height_for(
+        button_lines(
+            &LIST_BUTTONS,
+            style,
+            hotkeys::PANEL_WIDTH - hotkeys::PADDING * 2.0,
+        )
+        .len(),
+    )
+}
+
+/// The same for the action list's card.
+#[must_use]
+pub fn picker_foot_height(style: &ButtonStyle) -> f32 {
+    foot_height_for(
+        button_lines(
+            &PICKER_BUTTONS,
+            style,
+            PICKER_WIDTH - hotkeys::PADDING * 2.0,
+        )
+        .len(),
+    )
+}
+
+/// Where the foot of `card` -- the bottom `foot` of it -- puts its line and
+/// `buttons`: the line across the top of the foot, inside the card's
+/// padding; the buttons in the lines they take across `room`, the last line
+/// on the card's bottom padding -- where a dialog's buttons are -- and in
+/// each line those acting on the chosen row at its left, the rest at its
+/// right. In the order `buttons` gives them.
+fn foot_places(
+    card: Rect,
+    foot: f32,
+    buttons: &[(CardButton, bool)],
+    style: &ButtonStyle,
+    room: f32,
+) -> (Rect, Vec<(CardButton, bool, Rect)>) {
+    let inner_x = card.x + hotkeys::PADDING;
+    let inner_w = (card.w - hotkeys::PADDING * 2.0).max(0.0);
+    let message = Rect::new(inner_x, card.y + card.h - foot, inner_w, MESSAGE_HEIGHT);
+    let which: Vec<CardButton> = buttons.iter().map(|&(b, _)| b).collect();
+    let tall = button::height();
+    let mut placed: Vec<(CardButton, Rect)> = Vec::with_capacity(which.len());
+    let mut top = card.y + card.h - hotkeys::PADDING - tall;
+    for line in button_lines(&which, style, room).iter().rev() {
+        let mut left = inner_x;
+        for &b in line.iter().filter(|b| b.on_the_row()) {
+            let wide = button::width(style, b.label());
+            placed.push((b, Rect::new(left, top, wide, tall)));
+            left += wide + BUTTON_GAP;
+        }
+        let mut right = inner_x + inner_w;
+        for &b in line.iter().rev().filter(|b| !b.on_the_row()) {
+            let wide = button::width(style, b.label());
+            right -= wide;
+            placed.push((b, Rect::new(right, top, wide, tall)));
+            right -= BUTTON_GAP;
+        }
+        top -= tall + BUTTON_GAP;
+    }
+    let buttons = buttons
+        .iter()
+        .filter_map(|&(b, enabled)| {
+            placed
+                .iter()
+                .find(|(p, _)| *p == b)
+                .map(|&(_, at)| (b, enabled, at))
+        })
+        .collect();
+    (message, buttons)
+}
+
+/// A card `width` by `height` centred on a `screen` of that size -- its
+/// top-left corner held on the screen, so a card larger than a small display
+/// shows its start rather than losing its heading off the top.
+fn centred((screen_w, screen_h): (f32, f32), width: f32, height: f32) -> Rect {
+    Rect::new(
+        ((screen_w - width) / 2.0).max(0.0),
+        ((screen_h - height) / 2.0).max(0.0),
+        width,
+        height,
+    )
+}
+
+/// Where entry `index` of the action list is while the list shows from entry
+/// `top`, in a list drawn in `area`: its row, or above or below the list for
+/// one scrolled out of it -- where the user would find it, scrolling.
+fn entry_rect(area: Rect, index: usize, top: usize) -> Rect {
+    let rows = |n: usize| f32::from(u16::try_from(n).unwrap_or(u16::MAX)) * hotkeys::ROW_HEIGHT;
+    let y = if index >= top {
+        area.y + rows(index.saturating_sub(top))
+    } else {
+        area.y - rows(top.saturating_sub(index))
+    };
+    Rect::new(area.x, y, area.w, hotkeys::ROW_HEIGHT)
+}
+
+/// The card's field as tools see it: named, holding what is typed, with the
+/// keyboard -- it has it whenever it is shown.
+fn field_node(name: &str, text: &str, at: Rect) -> Node<CardPart> {
+    let mut field = Node::new(CardPart::Field, Role::TextField, name, at);
+    field.value = Some(Value::Text(text.to_owned()));
+    field.focused = true;
+    field.focusable = true;
+    field
+}
+
+/// Where everything on the card is, as [`ShortcutEditor::layout`] works it
+/// out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CardLayout {
+    /// The card.
+    pub card: Rect,
+    /// Each binding's row, by its keys, on the list's card: as
+    /// `hotkeys::row_rects` has them.
+    pub rows: Vec<(Hotkey, Rect)>,
+    /// The bindings' area on the list's card, the action list's on the
+    /// other while an action is chosen.
+    pub list: Option<Rect>,
+    /// The search or program field, on the action list's card.
+    pub field: Option<Rect>,
+    /// Each entry of the action list on screen: its place among those the
+    /// search leaves, and its row.
+    pub entries: Vec<(usize, Rect)>,
+    /// The foot's line saying what the last edit did.
+    pub message: Rect,
+    /// The buttons along the foot, each with whether it can be pressed.
+    pub buttons: Vec<(CardButton, bool, Rect)>,
+    /// How tall the foot is.
+    pub foot: f32,
+}
+
+/// What a point on the card is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardSpot {
+    /// A binding's row, by its keys.
+    Row(Hotkey),
+    /// An entry of the action list, by its place among those the search
+    /// leaves.
+    Entry(usize),
+    /// The search or program field.
+    Field,
+    /// The action list, between or below its entries.
+    List,
+    /// A button, and whether it can be pressed.
+    Button(CardButton, bool),
+    /// The card, on none of the above.
+    Card,
+}
+
+impl CardLayout {
+    /// What is at `(x, y)`; `None` off the card.
+    #[must_use]
+    pub fn at(&self, x: f32, y: f32) -> Option<CardSpot> {
+        if !self.card.contains(x, y) {
+            return None;
+        }
+        if let Some(&(which, enabled, _)) = self.buttons.iter().find(|(_, _, at)| at.contains(x, y))
+        {
+            return Some(CardSpot::Button(which, enabled));
+        }
+        if let Some(&(keys, _)) = self.rows.iter().find(|(_, at)| at.contains(x, y)) {
+            return Some(CardSpot::Row(keys));
+        }
+        if let Some(&(index, _)) = self.entries.iter().find(|(_, at)| at.contains(x, y)) {
+            return Some(CardSpot::Entry(index));
+        }
+        if self.field.is_some_and(|field| field.contains(x, y)) {
+            return Some(CardSpot::Field);
+        }
+        if self.field.is_some() && self.list.is_some_and(|list| list.contains(x, y)) {
+            return Some(CardSpot::List);
+        }
+        Some(CardSpot::Card)
+    }
+}
+
+/// A part of the card, as tools name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardPart {
+    /// The card: the bindings, or the action list while one is chosen.
+    Card,
+    /// The bindings.
+    Bindings,
+    /// A binding's row, by its keys -- which, unlike its place, an edit does
+    /// not move.
+    Binding(Hotkey),
+    /// The foot's line saying what the last edit did; while keys are
+    /// recorded, the field they go into.
+    Message,
+    /// The search over the action list, or the program field.
+    Field,
+    /// The action list.
+    Entries,
+    /// An entry of the action list, by its place among every entry
+    /// ([`choices`]) -- not among those the search leaves, which change as it
+    /// is typed.
+    Entry(usize),
+    /// A button along the foot.
+    Button(CardButton),
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1034,6 +1791,11 @@ mod tests {
         picker_rows: 8,
         list_rows: 4,
     };
+
+    /// The built-in theme's buttons.
+    const STYLE: ButtonStyle = guitk::widget_style::WidgetStyle::AERO.button;
+    /// A display the card is laid out on.
+    const SCREEN: (f32, f32) = (1920.0, 1080.0);
 
     /// The card's list pages a column at a time and reaches its ends with Home
     /// and End, Ctrl or not (§1416); Ctrl+Page Down is not the card's.
@@ -1530,13 +2292,12 @@ mod tests {
         ed.handle_key(&press(Key::Insert), &mut reg, CX);
         feed(&mut ed, &mut reg, &typed("cycle windows"));
         let mut tree = RenderTree::new();
+        let layout = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
         ed.render_picker(
             &mut tree,
             &reg,
             &Palette::for_mode(false),
-            0.0,
-            0.0,
-            900.0,
+            &layout,
             CX,
             2.0,
             2.0,
@@ -1558,13 +2319,422 @@ mod tests {
 
     #[test]
     fn the_picker_fits_the_height_it_is_given() {
+        let foot = picker_foot_height(&STYLE);
         for h in [0.0, 200.0, 400.0, 800.0, 4000.0] {
-            let rows = picker_rows(h);
+            let rows = picker_rows(h, foot);
             assert!((MIN_PICKER_ROWS..=MAX_PICKER_ROWS).contains(&rows));
-            if picker_height(MIN_PICKER_ROWS) <= h {
-                assert!(picker_height(rows) <= h, "{rows} rows overflow {h}");
+            if picker_height(MIN_PICKER_ROWS, foot) <= h {
+                assert!(picker_height(rows, foot) <= h, "{rows} rows overflow {h}");
             }
         }
-        assert_eq!(picker_rows(10_000.0), MAX_PICKER_ROWS);
+        assert_eq!(picker_rows(10_000.0, foot), MAX_PICKER_ROWS);
+    }
+
+    // ---- the foot, the layout, and what tools see ----
+
+    /// Two bindings, on Ctrl+F1 and Ctrl+F2.
+    fn two() -> HotkeyRegistry {
+        registry(&[
+            (
+                hk(Key::F1, true, false, false, false),
+                HotkeyAction::ShowDesktop,
+            ),
+            (
+                hk(Key::F2, true, false, false, false),
+                HotkeyAction::ScreenLock,
+            ),
+        ])
+    }
+
+    /// **The foot offers the keys of the mode the card is in, each as a
+    /// button that is that key**: the list's five -- a row's three greyed
+    /// with no row -- Cancel while keys are recorded, Move and Keep for the
+    /// question, Choose (greyed with nothing to choose) and Cancel over the
+    /// action list, OK and Cancel under the program field.
+    #[test]
+    fn the_foot_offers_the_keys_of_the_mode_the_card_is_in() {
+        use CardButton::{Add, Cancel, ChangeAction, Choose, Close, Keep, Move, NewKeys, Remove};
+        let mut reg = two();
+        let mut ed = ShortcutEditor::new();
+        assert_eq!(
+            ed.buttons(&reg, CX),
+            [
+                (NewKeys, true),
+                (ChangeAction, true),
+                (Remove, true),
+                (Add, true),
+                (Close, true)
+            ]
+        );
+        assert_eq!(
+            ed.buttons(&HotkeyRegistry::new(), CX),
+            [
+                (NewKeys, false),
+                (ChangeAction, false),
+                (Remove, false),
+                (Add, true),
+                (Close, true)
+            ]
+        );
+        // Each is the key the module's table gives what it does.
+        let keys: Vec<Key> = [NewKeys, ChangeAction, Remove, Add, Close]
+            .iter()
+            .map(|b| b.key())
+            .collect();
+        assert_eq!(
+            keys,
+            [Key::Enter, Key::F2, Key::Delete, Key::Insert, Key::Escape]
+        );
+
+        ed.handle_key(&press(NewKeys.key()), &mut reg, CX);
+        assert!(ed.is_recording());
+        assert_eq!(ed.buttons(&reg, CX), [(Cancel, true)]);
+        // The second row's keys, pressed for the first: the question.
+        ed.handle_key(&chord(Key::F2, true, false, false, false), &mut reg, CX);
+        assert!(matches!(ed.mode(), Mode::Steal { .. }));
+        assert_eq!(ed.buttons(&reg, CX), [(Move, true), (Keep, true)]);
+        ed.handle_key(&press(Keep.key()), &mut reg, CX);
+        assert!(matches!(ed.mode(), Mode::List));
+
+        ed.handle_key(&press(Add.key()), &mut reg, CX);
+        assert_eq!(ed.buttons(&reg, CX), [(Choose, true), (Cancel, true)]);
+        feed(&mut ed, &mut reg, &typed("no action is called this"));
+        assert_eq!(ed.buttons(&reg, CX), [(Choose, false), (Cancel, true)]);
+        ed.handle_key(&press(Cancel.key()), &mut reg, CX);
+
+        ed.handle_key(&press(Add.key()), &mut reg, CX);
+        // "Run a program..." is first, and chosen.
+        ed.handle_key(&press(Choose.key()), &mut reg, CX);
+        assert!(matches!(ed.mode(), Mode::Command { .. }));
+        assert_eq!(
+            ed.buttons(&reg, CX),
+            [(CardButton::Ok, true), (Cancel, true)]
+        );
+        // Greyed buttons say why; the rest can always be pressed.
+        for b in [NewKeys, ChangeAction, Remove, Choose] {
+            assert!(!b.why_disabled().is_empty(), "{b:?}");
+        }
+    }
+
+    /// **The list's buttons fit one line of a one-column card at the
+    /// built-in size**, and the room under the rows is that line's.
+    #[test]
+    fn the_lists_buttons_fit_one_line_at_the_built_in_size() {
+        let room = hotkeys::PANEL_WIDTH - hotkeys::PADDING * 2.0;
+        assert_eq!(button_lines(&LIST_BUTTONS, &STYLE, room).len(), 1);
+        assert_eq!(button_lines(&PICKER_BUTTONS, &STYLE, room).len(), 1);
+        assert!((list_foot_height(&STYLE) - foot_height_for(1)).abs() < 0.01);
+        assert!(foot_height_for(2) > foot_height_for(1));
+    }
+
+    /// **Buttons that do not fit wrap onto more lines** rather than off the
+    /// card: in order, none lost, no line empty, none wider than the room
+    /// unless one button alone is.
+    #[test]
+    fn buttons_that_do_not_fit_wrap_onto_more_lines() {
+        for room in [500.0, 300.0, 150.0, 10.0] {
+            let lines = button_lines(&LIST_BUTTONS, &STYLE, room);
+            let flat: Vec<CardButton> = lines.iter().flatten().copied().collect();
+            assert_eq!(flat, LIST_BUTTONS, "at {room}");
+            for line in &lines {
+                assert!(!line.is_empty());
+                let wide: f32 = line
+                    .iter()
+                    .map(|b| button::width(&STYLE, b.label()))
+                    .sum::<f32>()
+                    + BUTTON_GAP * (line.len() - 1) as f32;
+                assert!(
+                    line.len() == 1 || wide <= room,
+                    "{line:?} is {wide} in {room}"
+                );
+            }
+        }
+        assert!(button_lines(&LIST_BUTTONS, &STYLE, 150.0).len() > 1);
+    }
+
+    /// **The list's foot puts what acts on the chosen row at the left and
+    /// what acts on the card at the right**, on the card's bottom padding,
+    /// under the line saying what the last edit did -- and every button
+    /// stays where it was whatever the card is doing, the card keeping its
+    /// size.
+    #[test]
+    fn the_foot_lays_the_rows_buttons_left_and_the_cards_right() {
+        let mut reg = two();
+        let mut ed = ShortcutEditor::new();
+        let laid = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        let at = |which: CardButton| {
+            laid.buttons
+                .iter()
+                .find(|(b, _, _)| *b == which)
+                .map(|&(_, _, r)| r)
+                .expect("shown")
+        };
+        let inner_left = laid.card.x + hotkeys::PADDING;
+        let inner_right = laid.card.x + laid.card.w - hotkeys::PADDING;
+        assert!((at(CardButton::NewKeys).x - inner_left).abs() < 0.01);
+        assert!((at(CardButton::Close).x + at(CardButton::Close).w - inner_right).abs() < 0.01);
+        assert!(at(CardButton::Remove).x + at(CardButton::Remove).w < at(CardButton::Add).x);
+        let bottom = laid.card.y + laid.card.h - hotkeys::PADDING;
+        for (which, _, r) in &laid.buttons {
+            assert!(
+                (r.y + r.h - bottom).abs() < 0.01,
+                "{which:?} is not on the foot"
+            );
+            assert!(
+                r.y >= laid.message.y + laid.message.h,
+                "{which:?} is over the line"
+            );
+            for (other, _, s) in &laid.buttons {
+                assert!(
+                    which == other || r.intersect(*s).is_none(),
+                    "{which:?} over {other:?}"
+                );
+            }
+        }
+        // Recording, the card keeps its size and Cancel takes Close's place.
+        ed.handle_key(&press(Key::Enter), &mut reg, CX);
+        let recording = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        assert_eq!(recording.card, laid.card);
+        assert_eq!(recording.buttons.len(), 1);
+        assert_eq!(
+            recording.buttons[0].2,
+            Rect::new(
+                inner_right - button::width(&STYLE, "Cancel"),
+                at(CardButton::Close).y,
+                button::width(&STYLE, "Cancel"),
+                button::height(),
+            )
+        );
+    }
+
+    /// **A point on the card is on what is drawn there**: a row by its keys,
+    /// a button and whether it can be pressed, the field, an entry of the
+    /// action list by its place among those the search leaves -- and off
+    /// the card, nothing.
+    #[test]
+    fn a_point_on_the_card_is_on_what_is_drawn_there() {
+        let mut reg = two();
+        let mut ed = ShortcutEditor::new();
+        let laid = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        for (keys, r) in &laid.rows {
+            let (x, y) = r.centre();
+            assert_eq!(laid.at(x, y), Some(CardSpot::Row(*keys)));
+        }
+        let (x, y) = laid.buttons[2].2.centre();
+        assert_eq!(
+            laid.at(x, y),
+            Some(CardSpot::Button(CardButton::Remove, true))
+        );
+        assert_eq!(
+            laid.at(laid.card.x + 2.0, laid.card.y + 2.0),
+            Some(CardSpot::Card)
+        );
+        assert_eq!(laid.at(laid.card.x - 2.0, laid.card.y), None);
+
+        ed.handle_key(&press(Key::Insert), &mut reg, CX);
+        let picking = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        let field = picking.field.expect("a search field");
+        assert_eq!(
+            picking.at(field.centre().0, field.centre().1),
+            Some(CardSpot::Field)
+        );
+        let (index, row) = picking.entries[1];
+        assert_eq!(
+            picking.at(row.centre().0, row.centre().1),
+            Some(CardSpot::Entry(index))
+        );
+        assert!(picking.rows.is_empty());
+    }
+
+    /// **A row or an entry is chosen as Up and Down choose one; the wheel
+    /// scrolls the action list without moving the choice.** A row only on
+    /// the plain list; an entry only while an action is chosen.
+    #[test]
+    fn rows_and_entries_are_chosen_as_the_keys_choose_them() {
+        let mut reg = two();
+        let mut ed = ShortcutEditor::new();
+        let second = hk(Key::F2, true, false, false, false);
+        ed.set_message(Some("Unchanged".to_string()));
+        assert!(ed.choose_row(&reg, second));
+        assert_eq!(ed.selected(), 1);
+        assert_eq!(ed.message(), None, "a step clears what the last edit said");
+        assert!(!ed.choose_row(&reg, hk(Key::F9, false, false, false, false)));
+        assert!(!ed.choose_entry(0, CX), "no action list up");
+
+        ed.handle_key(&press(Key::Enter), &mut reg, CX);
+        assert!(!ed.choose_row(&reg, hk(Key::F1, true, false, false, false)));
+        assert_eq!(ed.selected(), 1, "a row is not what a recording waits for");
+        ed.handle_key(&press(Key::Escape), &mut reg, CX);
+
+        ed.handle_key(&press(Key::Insert), &mut reg, CX);
+        assert!(ed.choose_entry(3, CX));
+        assert_eq!(ed.entry_place(3, CX), Some((3, Some(3))));
+        assert!(!ed.choose_entry(10_000, CX));
+        let before = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE).entries[0].0;
+        assert!(ed.scroll_entries(4, CX));
+        let after = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE).entries[0].0;
+        assert!(after > before, "{before} then {after}");
+        assert_eq!(
+            ed.entry_place(3, CX),
+            Some((3, Some(3))),
+            "the wheel moved the choice"
+        );
+        // Searched for, an entry is where the search leaves it.
+        feed(&mut ed, &mut reg, &typed("lock"));
+        let all = choices(CX.desktops);
+        let lock = all
+            .iter()
+            .position(|c| *c == Choice::Action(HotkeyAction::ScreenLock))
+            .expect("offered");
+        assert_eq!(ed.entry_place(lock, CX).map(|(at, _)| at), Some(0));
+        assert_eq!(ed.entry_place(0, CX), None, "Run a program is searched out");
+    }
+
+    /// **The card as tools see it**: a dialog named by its heading; the
+    /// rows named by what they do, described by their keys, the one with the
+    /// keyboard chosen; the foot's line as a label saying what it says; the
+    /// buttons, each described by its key, a greyed one by why.
+    #[test]
+    fn tools_see_the_list_its_line_and_its_buttons() {
+        let reg = two();
+        let ed = ShortcutEditor::new();
+        let laid = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        let card = ed.automation(&reg, CX, &laid);
+        assert_eq!(
+            (card.role, card.name.as_str(), card.bounds),
+            (Role::Dialog, "Keyboard Shortcuts", laid.card)
+        );
+        let list = &card.children[0];
+        assert_eq!((list.id, list.role), (CardPart::Bindings, Role::List));
+        let first = &list.children[0];
+        assert_eq!(
+            (
+                first.id,
+                first.role,
+                first.name.as_str(),
+                first.description.as_deref()
+            ),
+            (
+                CardPart::Binding(hk(Key::F1, true, false, false, false)),
+                Role::ListItem,
+                HotkeyAction::ShowDesktop.display_label(),
+                Some("Ctrl+F1")
+            )
+        );
+        assert_eq!(first.value, Some(Value::Chosen(true)));
+        assert!(first.focused && first.enabled);
+        assert_eq!(list.children[1].value, Some(Value::Chosen(false)));
+        assert_eq!(first.bounds, laid.rows[0].1);
+
+        let line = card
+            .walk()
+            .find(|n| n.id == CardPart::Message)
+            .expect("the line");
+        assert_eq!((line.role, line.name.as_str()), (Role::Label, HINT));
+        let change = card
+            .walk()
+            .find(|n| n.id == CardPart::Button(CardButton::ChangeAction))
+            .expect("Change action");
+        assert_eq!(
+            (change.role, change.enabled, change.description.as_deref()),
+            (Role::Button, true, Some("F2"))
+        );
+
+        let empty = HotkeyRegistry::new();
+        let laid = ed.layout(&empty, CX, SCREEN, 900.0, &STYLE);
+        let card = ed.automation(&empty, CX, &laid);
+        let greyed = card
+            .walk()
+            .find(|n| n.id == CardPart::Button(CardButton::Remove))
+            .expect("Remove");
+        assert!(!greyed.enabled);
+        assert_eq!(
+            greyed.description.as_deref(),
+            Some(CardButton::Remove.why_disabled())
+        );
+    }
+
+    /// **While keys are recorded the line is the field they go into**, named
+    /// by what it asks; the rows can be read and not used.
+    #[test]
+    fn tools_see_a_recording_as_a_field_for_the_keys() {
+        let mut reg = two();
+        let mut ed = ShortcutEditor::new();
+        ed.handle_key(&press(Key::Enter), &mut reg, CX);
+        let laid = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        let card = ed.automation(&reg, CX, &laid);
+        let keys = card
+            .walk()
+            .find(|n| n.id == CardPart::Message)
+            .expect("the line");
+        assert_eq!(keys.role, Role::TextField);
+        assert_eq!(Some(keys.name.as_str()), ed.message());
+        assert!(keys.focused);
+        assert_eq!(keys.bounds, laid.message);
+        let row = card
+            .walk()
+            .find(|n| matches!(n.id, CardPart::Binding(_)))
+            .expect("a row");
+        assert!(
+            !row.enabled && !row.focused,
+            "a row while keys are recorded"
+        );
+    }
+
+    /// **The action list as tools see it**: its field holding what is
+    /// typed; each entry the search leaves, named by its label, described by
+    /// the keys it has, by its place among every entry -- one scrolled out
+    /// told above the list, where scrolling finds it.
+    #[test]
+    fn tools_see_the_action_list_and_its_field() {
+        let mut reg = two();
+        let mut ed = ShortcutEditor::new();
+        ed.handle_key(&press(Key::Insert), &mut reg, CX);
+        feed(&mut ed, &mut reg, &typed("o"));
+        // Down past the visible rows, so the first entries scroll out.
+        for _ in 0..12 {
+            ed.handle_key(&press(Key::Down), &mut reg, CX);
+        }
+        let laid = ed.layout(&reg, CX, SCREEN, 900.0, &STYLE);
+        let card = ed.automation(&reg, CX, &laid);
+        assert_eq!(card.name, "Choose an action");
+        let field = card
+            .walk()
+            .find(|n| n.id == CardPart::Field)
+            .expect("the field");
+        assert_eq!(
+            (field.role, field.value.clone()),
+            (Role::TextField, Some(Value::Text("o".to_string())))
+        );
+        let list = card
+            .walk()
+            .find(|n| n.id == CardPart::Entries)
+            .expect("the list");
+        let all = choices(CX.desktops);
+        let shown = filtered(&all, "o");
+        assert_eq!(list.children.len(), shown.len());
+        let area = laid.list.expect("the list's area");
+        assert!(
+            list.children[0].bounds.y < area.y,
+            "the first entry, scrolled out, is not told above the list"
+        );
+        let lock = list
+            .children
+            .iter()
+            .find(|n| n.name == "Lock Screen")
+            .expect("Lock Screen is searched for");
+        let id = all
+            .iter()
+            .position(|c| *c == Choice::Action(HotkeyAction::ScreenLock))
+            .expect("offered");
+        assert_eq!(lock.id, CardPart::Entry(id));
+        assert_eq!(lock.description.as_deref(), Some("Ctrl+F2"));
+        let chosen: Vec<&str> = list
+            .children
+            .iter()
+            .filter(|n| n.value == Some(Value::Chosen(true)))
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
     }
 }

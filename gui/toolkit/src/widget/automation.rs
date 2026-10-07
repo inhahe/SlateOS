@@ -377,6 +377,11 @@ pub enum Refusal {
     },
     /// The value asked for is no number.
     NotANumber,
+    /// The text asked for names no keys: a field taking keys -- a shortcut
+    /// being recorded -- is given them as the user presses them, and a
+    /// name that is no key is nothing to press. Keys are named as a
+    /// shortcut is written, `Ctrl+Alt+T`.
+    NotAKey,
 }
 
 impl std::fmt::Display for Refusal {
@@ -389,6 +394,7 @@ impl std::fmt::Display for Refusal {
                 write!(f, "cannot {action} a {}", role.name())
             }
             Self::NotANumber => f.write_str("the value is not a number"),
+            Self::NotAKey => f.write_str("the value names no keys"),
         }
     }
 }

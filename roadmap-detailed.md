@@ -2715,7 +2715,12 @@ authors never wrote a single automation handler.
   notifications popped up in its corner (each named and described as its
   card is, opened or closed as clicked), the on-screen display and the card
   saying how to move the wallpaper (both only to be read: a level as a
-  progress bar, a lock key or a track by what it says) and every
+  progress bar, a lock key or a track by what it says), the card of
+  keyboard shortcuts (`desktop::shortcut_editor::CardPart`: each row by
+  what it does and its keys, chosen and pressed as clicked; its action
+  list and search field; its foot's line -- while keys are recorded, a
+  field they are given to as `Ctrl+Alt+T`, pressed as the user presses
+  them -- and its buttons, each one of its keys, §1494) and every
   menu open over everything (`desktop::accessible::ShellMenu`); a part
   pressed is the shell's own click on it, and one the click would not
   reach is refused (`design-decisions.md` §1491). The toolkit's context

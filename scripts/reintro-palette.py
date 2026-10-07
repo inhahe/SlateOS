@@ -114,6 +114,10 @@ TB = "gui/desktop/src/taskbar.rs"
 LANG = "gui/desktop/src/language_settings.rs"
 RESMON = "gui/desktop/src/resmon.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
+# The shortcut card's editor: its action list, and the card's foot -- the
+# line saying what the last edit did and the buttons that are its keys --
+# held by `shortcut_card_tests::everything_the_card_draws_is_the_users_theme`.
+SHORTCUT_ED = "gui/desktop/src/shortcut_editor.rs"
 SCRCAP = "gui/desktop/src/screen_capture.rs"
 SNAP = "gui/desktop/src/snap.rs"
 FOCUS = "gui/desktop/src/focus_assist.rs"
@@ -19211,6 +19215,54 @@ DEFECTS = [
         ["desktop"],
         [
             'desktop_navigation_stops_at_both_ends',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the shortcut card's foot says what the last edit did in Mocha's own subtext0",
+        SHORTCUT_ED,
+        [
+            ('                color: p.subtext0,\n                font_size,\n',
+             '                color: guitk::color::Color::from_hex(0xA6ADC8),\n                font_size,\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the shortcut card's buttons are blended against Mocha's panel, whatever the card is drawn on",
+        SHORTCUT_ED,
+        [
+            ('                p.panel_bg(),\n                focus_ring,\n',
+             '                guitk::color::Color::rgba(30, 30, 46, 240),\n                focus_ring,\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the action list's chosen entry is lit in Mocha's own surface0",
+        SHORTCUT_ED,
+        [
+            ('                        height: hotkeys::ROW_HEIGHT - 4.0,\n                        color: p.surface0,\n',
+             '                        height: hotkeys::ROW_HEIGHT - 4.0,\n                        color: guitk::color::Color::from_hex(0x313244),\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the action list's other entries are named in Mocha's own subtext1",
+        SHORTCUT_ED,
+        [
+            ('                    color: if picked { p.text } else { p.subtext1 },\n',
+             '                    color: if picked { p.text } else { guitk::color::Color::from_hex(0xBAC2DE) },\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_the_card_draws_is_the_users_theme',
         ],
     ),
 ]

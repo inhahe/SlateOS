@@ -72,6 +72,7 @@
 
 use appearance::Palette;
 use guitk::event::{Key, Modifiers};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -397,6 +398,18 @@ impl Hotkey {
     /// two keys that have a rule — which is a difference nobody would look for.
     pub fn matches(&self, key: Key, modifiers: &Modifiers) -> bool {
         Self::normalized(self.key, self.modifiers()) == Self::normalized(key, *modifiers)
+    }
+
+    /// The keys `name` names, written as a shortcut is written -- the
+    /// shortcuts file's way, `Ctrl+Alt+T`, which
+    /// [`display_name`](Self::display_name) writes too.
+    ///
+    /// # Errors
+    ///
+    /// [`HotkeyError::UnknownKey`] when a part of it is no key, or when it
+    /// is modifiers alone.
+    pub fn parse(name: &str) -> Result<Self, HotkeyError> {
+        parse_hotkey_string(name)
     }
 
     /// Human-readable name for display (e.g., "Ctrl+Alt+Delete").
@@ -1842,17 +1855,22 @@ fn parse_hotkey_string(s: &str) -> Result<Hotkey, HotkeyError> {
 /// because the user reads it, does not find the shortcut, and concludes there
 /// isn't one.
 ///
-/// Columns rather than scrolling because the card is read, not operated: it has
-/// no input handling at all (`DesktopShell` toggles a `bool` and nothing else),
-/// and a surface with a hidden region and no way to reach it has the same defect
-/// as the overflowing single column. Printed shortcut references are laid out in
-/// columns for the same reason.
+/// Columns rather than scrolling because the card is read at a glance: every
+/// row is on it at once, and a surface with a hidden region has the same
+/// defect as the overflowing single column -- a reader who does not scroll
+/// concludes the shortcut is not there. Printed shortcut references are laid
+/// out in columns for the same reason.
+///
+/// Below the rows is the card's foot -- the line saying what the last edit
+/// did, and the buttons that do what the card's keys do -- `foot` tall
+/// ([`crate::shortcut_editor::list_foot_height`]), reserved here so the rows
+/// fold into columns above it rather than under it.
 struct PanelLayout {
     /// How many rows each column holds. At least one.
     rows_per_column: usize,
     /// Total width, which is one `PANEL_WIDTH` per column.
     width: f32,
-    /// Total height: the header, the tallest column, and the bottom padding.
+    /// Total height: the header, the tallest column, and the foot.
     height: f32,
 }
 
@@ -1860,13 +1878,13 @@ struct PanelLayout {
 ///
 /// `max_height` is what the *caller* can spare, not what the card wants. A card
 /// that fits gets one column; one that does not gets as many as it needs, each
-/// no taller than `max_height`.
-fn panel_layout(registry: &HotkeyRegistry, max_height: f32) -> PanelLayout {
+/// no taller than `max_height`. `foot` is the room under the rows.
+fn panel_layout(registry: &HotkeyRegistry, max_height: f32, foot: f32) -> PanelLayout {
     // Floored at one row: a `max_height` smaller than a single row would
     // otherwise ask for a column per binding and a card wider than any screen.
     // One row that overflows by a few units is the better failure — the card
     // still reads top-down.
-    let usable = (max_height - HEADER_HEIGHT - PADDING).max(ROW_HEIGHT);
+    let usable = (max_height - HEADER_HEIGHT - foot).max(ROW_HEIGHT);
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -1895,8 +1913,67 @@ fn panel_layout(registry: &HotkeyRegistry, max_height: f32) -> PanelLayout {
     PanelLayout {
         rows_per_column,
         width: PANEL_WIDTH * columns_f,
-        height: HEADER_HEIGHT + rows_f * ROW_HEIGHT + PADDING,
+        height: HEADER_HEIGHT + rows_f * ROW_HEIGHT + foot,
     }
+}
+
+/// Where each row of the card goes, in the order the card draws them -- down
+/// each column and then across, the order a reference is read: the left edge
+/// of its column and its top. One walk for the drawing and for
+/// [`row_rects`], so a press and a row cannot disagree about where it is.
+fn row_places(layout: &PanelLayout, panel_x: f32, panel_y: f32, count: usize) -> Vec<(f32, f32)> {
+    // Stepped rather than divided out of the index, so there is no division
+    // by a count a future edit could let reach zero.
+    let mut places = Vec::with_capacity(count);
+    let mut row_in_column: usize = 0;
+    let mut column_x = panel_x;
+    for _ in 0..count {
+        if row_in_column == layout.rows_per_column {
+            row_in_column = 0;
+            column_x += PANEL_WIDTH;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a row index within one column is bounded by the rows that \
+                      fit on a display; see `panel_layout`"
+        )]
+        let row_y = panel_y + HEADER_HEIGHT + row_in_column as f32 * ROW_HEIGHT;
+        row_in_column = row_in_column.saturating_add(1);
+        places.push((column_x, row_y));
+    }
+    places
+}
+
+/// Each binding's row on a card drawn at `(panel_x, panel_y)` in
+/// `max_height`: its keys, and the box the row fills -- its column's width
+/// less half the padding either side, where the selection is drawn, and the
+/// row's whole height, so the rows of a column meet and a press between two
+/// is on one of them. In the order the card draws them.
+///
+/// Rows are named by their keys, not their places: every edit can re-sort
+/// the list (`crate::shortcut_editor`, "Addressed by chord, not by row").
+pub(crate) fn row_rects(
+    registry: &HotkeyRegistry,
+    (panel_x, panel_y): (f32, f32),
+    max_height: f32,
+    foot: f32,
+) -> Vec<(Hotkey, Rect)> {
+    let layout = panel_layout(registry, max_height, foot);
+    registry
+        .all_bindings()
+        .zip(row_places(&layout, panel_x, panel_y, registry.len()))
+        .map(|((keys, _), (column_x, row_y))| {
+            (
+                *keys,
+                Rect::new(
+                    column_x + PADDING / 2.0,
+                    row_y,
+                    PANEL_WIDTH - PADDING,
+                    ROW_HEIGHT,
+                ),
+            )
+        })
+        .collect()
 }
 
 /// How large the card will be, before it is drawn.
@@ -1909,24 +1986,26 @@ fn panel_layout(registry: &HotkeyRegistry, max_height: f32) -> PanelLayout {
 /// asks this same function.
 ///
 /// `max_height` is the room the caller has; see `panel_layout` for what
-/// happens when the bindings need more than that. Pass the caller the *same*
-/// number here and to [`render_settings_panel`], or the two will disagree about
-/// how many columns there are.
+/// happens when the bindings need more than that. `foot` is the room under the
+/// rows for the card's foot. Pass the caller the *same* numbers here and to
+/// [`render_settings_panel`], or the two will disagree about how many columns
+/// there are.
 ///
 /// Returned as `(width, height)` in the caller's own units, which are the
 /// units the panel is drawn in.
 #[must_use]
-pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32) -> (f32, f32) {
-    let layout = panel_layout(registry, max_height);
+pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32, foot: f32) -> (f32, f32) {
+    let layout = panel_layout(registry, max_height, foot);
     (layout.width, layout.height)
 }
 
-/// How many rows each of the card's columns holds at `max_height` -- the page
-/// its list moves by under Page Up and Page Down. Every row is on the screen,
-/// folded into columns, so a page is a column.
+/// How many rows each of the card's columns holds at `max_height`, with
+/// `foot` under them -- the page its list moves by under Page Up and Page
+/// Down. Every row is on the screen, folded into columns, so a page is a
+/// column.
 #[must_use]
-pub(crate) fn rows_per_column(registry: &HotkeyRegistry, max_height: f32) -> usize {
-    panel_layout(registry, max_height).rows_per_column
+pub(crate) fn rows_per_column(registry: &HotkeyRegistry, max_height: f32, foot: f32) -> usize {
+    panel_layout(registry, max_height, foot).rows_per_column
 }
 
 /// The card's shadow, background and edge.
@@ -1988,13 +2067,17 @@ pub(crate) fn push_card(
 ///
 /// Produces a self-contained list of `RenderCommand`s that can be composited
 /// on top of the desktop. The panel is positioned at `(panel_x, panel_y)`.
+/// Its foot -- the line saying what the last edit did, and the buttons -- is
+/// room on the card left for the editor's drawing
+/// (`crate::shortcut_editor::ShortcutEditor::render_foot`).
 ///
 /// `selected_index` optionally highlights one row (for keyboard navigation).
 ///
 /// `max_height` is how tall the caller can let the card be; past that it grows
 /// into a second column rather than off the bottom of the screen. See
-/// `panel_layout`. Whatever is passed here must also be passed to
-/// [`settings_panel_size`], or the placement and the drawing will disagree.
+/// `panel_layout`. `foot` is the room left under the rows for the foot.
+/// Whatever is passed here must also be passed to [`settings_panel_size`], or
+/// the placement and the drawing will disagree.
 ///
 /// `p` supplies every colour drawn; see this module's `# Colour` section for
 /// the four judgements that decide which role goes where.
@@ -2005,9 +2088,10 @@ pub fn render_settings_panel(
     panel_y: f32,
     selected_index: Option<usize>,
     max_height: f32,
+    foot: f32,
 ) -> Vec<RenderCommand> {
     let binding_count = registry.len();
-    let layout = panel_layout(registry, max_height);
+    let layout = panel_layout(registry, max_height, foot);
     let (panel_width, panel_height) = (layout.width, layout.height);
     let mut cmds: Vec<RenderCommand> =
         Vec::with_capacity(binding_count.saturating_mul(6).saturating_add(8));
@@ -2045,26 +2129,15 @@ pub fn render_settings_panel(
     });
 
     // Rows, filled down each column and then across — the order a reference is
-    // read. `content_width` stays *one column* wide, because every measurement
-    // inside the loop is relative to the column its row is in and not to the
-    // card as a whole; `panel_x` is shadowed below for the same reason.
+    // read (`row_places`, which `row_rects` walks too). `content_width` stays
+    // *one column* wide, because every measurement inside the loop is relative
+    // to the column its row is in and not to the card as a whole; `panel_x` is
+    // shadowed below for the same reason.
     let content_width = PANEL_WIDTH - PADDING * 2.0;
-    // Stepped rather than divided out of `i`, so there is no division by a
-    // count a future edit could let reach zero.
-    let mut row_in_column: usize = 0;
-    let mut column_x = panel_x;
-    for (i, (hotkey, action)) in registry.all_bindings().enumerate() {
-        if row_in_column == layout.rows_per_column {
-            row_in_column = 0;
-            column_x += PANEL_WIDTH;
-        }
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a row index within one column is bounded by the rows that \
-                      fit on a display; see `panel_layout`"
-        )]
-        let row_y = panel_y + HEADER_HEIGHT + row_in_column as f32 * ROW_HEIGHT;
-        row_in_column = row_in_column.saturating_add(1);
+    let places = row_places(&layout, panel_x, panel_y, binding_count);
+    for (i, ((hotkey, action), (column_x, row_y))) in
+        registry.all_bindings().zip(places).enumerate()
+    {
         // Shadowing the parameter is deliberate: everything below places itself
         // against the left edge of *its column*, and a stray `panel_x` reaching
         // past this point would silently draw a second column's row on top of
@@ -2224,6 +2297,12 @@ mod tests {
     /// they are asserting about. The tests that *are* about the fold pass a real
     /// display height instead.
     const ROOMY: f32 = 100_000.0;
+
+    /// The room under the rows: the card's padding, as before it had a foot.
+    /// The tests here are about the rows; the foot's own room is the
+    /// editor's (`crate::shortcut_editor::list_foot_height`), and tested
+    /// with it.
+    const FOOT: f32 = PADDING;
 
     /// No default binding names a key by its raw code.
     ///
@@ -2554,7 +2633,7 @@ mod tests {
     fn the_card_folds_into_columns_rather_than_running_off_the_screen() {
         let reg = HotkeyRegistry::defaults();
         for screen_h in [1080.0_f32, 800.0, 600.0, 480.0] {
-            let (width, height) = settings_panel_size(&reg, screen_h);
+            let (width, height) = settings_panel_size(&reg, screen_h, FOOT);
             assert!(
                 height <= screen_h,
                 "on a {screen_h}-line display the card is {height} tall, so its \
@@ -2563,8 +2642,15 @@ mod tests {
             // And it is *drawn* the size it was measured, not merely measured
             // small: a fold that only the size function knows about would put
             // every row past the first column back in one long line.
-            let cmds =
-                render_settings_panel(&reg, &Palette::for_mode(false), 0.0, 0.0, None, screen_h);
+            let cmds = render_settings_panel(
+                &reg,
+                &Palette::for_mode(false),
+                0.0,
+                0.0,
+                None,
+                screen_h,
+                FOOT,
+            );
             let lowest = cmds
                 .iter()
                 .filter_map(|c| match c {
@@ -2598,7 +2684,7 @@ mod tests {
     /// A card that fits is left alone: the fold is for the case that needs it.
     #[test]
     fn a_card_that_fits_stays_one_column_wide() {
-        let (width, _) = settings_panel_size(&HotkeyRegistry::defaults(), ROOMY);
+        let (width, _) = settings_panel_size(&HotkeyRegistry::defaults(), ROOMY, FOOT);
         assert_eq!(
             width, PANEL_WIDTH,
             "the card grew a second column with the whole screen to itself"
@@ -2614,8 +2700,9 @@ mod tests {
     #[test]
     fn the_card_is_as_tall_as_it_was_measured_to_be() {
         let reg = HotkeyRegistry::defaults();
-        let (width, height) = settings_panel_size(&reg, ROOMY);
-        let cmds = render_settings_panel(&reg, &Palette::for_mode(false), 0.0, 0.0, None, ROOMY);
+        let (width, height) = settings_panel_size(&reg, ROOMY, FOOT);
+        let cmds =
+            render_settings_panel(&reg, &Palette::for_mode(false), 0.0, 0.0, None, ROOMY, FOOT);
         let Some(RenderCommand::FillRect {
             width: bg_width,
             height: bg_height,
@@ -2643,7 +2730,7 @@ mod tests {
                 HotkeyAction::ShowDesktop,
             )
             .expect("Ctrl+F9 is unbound in the defaults");
-        let (_, taller) = settings_panel_size(&bigger, ROOMY);
+        let (_, taller) = settings_panel_size(&bigger, ROOMY, FOOT);
         assert!(
             taller > height,
             "one more binding did not make the card any taller ({taller} vs {height})"
@@ -3434,7 +3521,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_nonempty() {
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, &accented(false), 100.0, 100.0, None, ROOMY);
+        let cmds = render_settings_panel(&reg, &accented(false), 100.0, 100.0, None, ROOMY, FOOT);
         // Should produce a non-trivial number of render commands:
         // shadow + bg + border + clip + header text + separator + rows.
         assert!(cmds.len() > 10);
@@ -3443,7 +3530,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_empty_registry() {
         let reg = HotkeyRegistry::new();
-        let cmds = render_settings_panel(&reg, &accented(false), 0.0, 0.0, None, ROOMY);
+        let cmds = render_settings_panel(&reg, &accented(false), 0.0, 0.0, None, ROOMY, FOOT);
         // Should still render header (shadow + bg + border + clip + header + sep + popclip).
         assert!(cmds.len() >= 6);
     }
@@ -3451,7 +3538,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_with_selection() {
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, &accented(false), 50.0, 50.0, Some(0), ROOMY);
+        let cmds = render_settings_panel(&reg, &accented(false), 50.0, 50.0, Some(0), ROOMY, FOOT);
         // Should have at least one extra FillRect for the selection highlight.
         let fill_rects = cmds
             .iter()
@@ -3562,14 +3649,22 @@ mod tests {
                 };
                 let last = reg.len().saturating_sub(1);
                 for sel in [None, Some(0), Some(last)] {
-                    let cmds = render_settings_panel(&reg, &p, 40.0, 60.0, sel, ROOMY);
+                    let cmds = render_settings_panel(&reg, &p, 40.0, 60.0, sel, ROOMY, FOOT);
                     assert_drawn_from(&p, &cmds, &[], "hotkeys settings panel");
                 }
             }
         }
         // A sweep over a panel that drew nothing would pass vacuously.
         let p = accented(true);
-        let cmds = render_settings_panel(&HotkeyRegistry::defaults(), &p, 0.0, 0.0, Some(3), ROOMY);
+        let cmds = render_settings_panel(
+            &HotkeyRegistry::defaults(),
+            &p,
+            0.0,
+            0.0,
+            Some(3),
+            ROOMY,
+            FOOT,
+        );
         assert!(cmds.len() > 40, "the fixture rendered almost nothing");
     }
 
@@ -3595,7 +3690,7 @@ mod tests {
         ];
         let p = accented(true);
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0), ROOMY);
+        let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0), ROOMY, FOOT);
         for cmd in &cmds {
             let Some(c) = color_of(cmd) else { continue };
             // `SHADOW` was black, and black stays black in both modes on
@@ -3628,7 +3723,7 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             let reg = HotkeyRegistry::defaults();
-            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0), ROOMY);
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0), ROOMY, FOOT);
 
             // Panel chrome, identified by the panel's own full width.
             let shadow = cmds
@@ -3789,7 +3884,7 @@ mod tests {
                 };
                 let last = reg.len().saturating_sub(1);
                 for sel in [None, Some(0), Some(last)] {
-                    let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, sel, ROOMY);
+                    let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, sel, ROOMY, FOOT);
                     let accented_count = cmds
                         .iter()
                         .filter_map(color_of)
@@ -3823,7 +3918,7 @@ mod tests {
             for alpha in [255_u8, 200, 160] {
                 let mut p = accented(light);
                 p.panel_alpha = alpha;
-                let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY);
+                let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY, FOOT);
 
                 let bg = cmds
                     .iter()
@@ -3875,7 +3970,7 @@ mod tests {
         let p = accented(true);
 
         // With no selection at all, neither saying appears anywhere.
-        let none = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY);
+        let none = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY, FOOT);
         assert!(
             !none.iter().any(|c| matches!(
                 c,
@@ -3896,7 +3991,7 @@ mod tests {
         );
 
         for sel in [0, 1, rows / 2, rows - 1] {
-            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(sel), ROOMY);
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(sel), ROOMY, FOOT);
 
             // Saying one: exactly one highlight, at the selected row's y.
             let highlights: Vec<(f32, Color)> = cmds
@@ -3929,7 +4024,7 @@ mod tests {
         }
 
         // An out-of-range selection selects nothing rather than the last row.
-        let over = render_settings_panel(&reg, &p, 0.0, 0.0, Some(rows), ROOMY);
+        let over = render_settings_panel(&reg, &p, 0.0, 0.0, Some(rows), ROOMY, FOOT);
         assert!(
             !over.iter().any(|c| matches!(
                 c,
@@ -3952,7 +4047,7 @@ mod tests {
         let reg = HotkeyRegistry::defaults();
         for light in [false, true] {
             let p = accented(light);
-            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY);
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY, FOOT);
             let mode = if light { "light" } else { "dark" };
 
             let bg = cmds

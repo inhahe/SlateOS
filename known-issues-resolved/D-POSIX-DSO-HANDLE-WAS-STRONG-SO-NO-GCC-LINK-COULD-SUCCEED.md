@@ -28,11 +28,16 @@ SlateOS ABI note. `check-libc-shape.py` gained CHECK 7, "what a compiler's own
 startup objects define, the archive defines only weakly", with self-test
 cases for a strong and a weak definition and two mutants the sweep kills.
 
-**Also looked at, and not a clash.** The C++ ABI stand-ins
+**Also looked at, and wrongly called not a clash.** The C++ ABI stand-ins
 (`__cxa_throw`, `__gxx_personality_v0`, `_Unwind_Resume` ...) are strong,
 but sit in a member of their own, which a GCC link does not extract:
 libstdc++ and libgcc_eh come before `-lc` in its link line and define them
-first.
+first. *Corrected the same day:* that holds only while nothing extracts the
+member for another of its names, and the same was true of the compiler
+builtins' member, which was not looked at. Building GCC for SlateOS
+extracted that one for another of its names and failed -- see
+`D-POSIX-COMPILER-RUNTIME-NAMES-WERE-STRONG-SO-GCC-LINKS-FAILED.md`, which
+made all 48 such names weak.
 
 **What it could have cost.** Every program compiled by GCC for SlateOS --
 on Linux by the cross compiler, or on SlateOS itself -- and the

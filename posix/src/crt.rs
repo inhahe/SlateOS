@@ -1655,6 +1655,15 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
 /// so that C++ compiled with exceptions enabled *links*, which is all they
 /// ever claimed — see the section header inside. What is new is that a link
 /// which brings a real implementation now silently gets it.
+///
+/// **And they are weak** (`weak_c_exports!`, at the end of the module), which
+/// declining the member alone could not make safe. A GCC link names
+/// `libstdc++`, `libgcc` and `libgcc_eh` beside `libc.a`, inside one
+/// `--start-group`, and the member is extracted whenever any one of these
+/// names is still undefined when the linker reaches it: the member then
+/// defined all eleven strongly, and `libgcc_eh`'s `_Unwind_Resume` or
+/// `libsupc++`'s `__cxa_throw` was a second definition. Weak, the runtime's
+/// definition wins and ours stands in only where there is none.
 pub mod cxx_abi {
 
     // ---------------------------------------------------------------------------
@@ -1666,7 +1675,6 @@ pub mod cxx_abi {
     /// This should never happen in correct code.  It means a base class
     /// constructor called a pure virtual method, or a dangling vtable
     /// reference was followed.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_pure_virtual() -> ! {
         let msg = b"pure virtual method called\n";
         let _ = crate::file::write(2, msg.as_ptr(), msg.len());
@@ -1677,7 +1685,6 @@ pub mod cxx_abi {
     ///
     /// Similar to `__cxa_pure_virtual` but for functions marked `= delete`.
     /// Prints a diagnostic and aborts.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_deleted_virtual() -> ! {
         let msg = b"deleted virtual method called\n";
         let _ = crate::file::write(2, msg.as_ptr(), msg.len());
@@ -1704,7 +1711,6 @@ pub mod cxx_abi {
     ///
     /// Returns 1 if the caller should perform initialization (guard was
     /// uninitialized), or 0 if initialization already completed.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
         if guard.is_null() {
             return 0;
@@ -1717,7 +1723,6 @@ pub mod cxx_abi {
     }
 
     /// Release the initialization guard (mark as initialized).
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
         if guard.is_null() {
             return;
@@ -1732,7 +1737,6 @@ pub mod cxx_abi {
     /// Abort initialization (exception during construction).
     ///
     /// Resets the guard so a future attempt can retry.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
         if guard.is_null() {
             return;
@@ -1757,7 +1761,6 @@ pub mod cxx_abi {
     /// Stub: always returns a pointer to a static buffer (only one
     /// exception can be in-flight at a time, but since we abort on throw
     /// this doesn't matter).
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_allocate_exception(_thrown_size: usize) -> *mut u8 {
         static mut EXCEPTION_BUF: [u8; 128] = [0; 128];
         // SAFETY: Single-threaded; exceptions abort anyway.
@@ -1767,7 +1770,6 @@ pub mod cxx_abi {
     /// C++ ABI: Throw an exception.
     ///
     /// Stub: aborts the process.  We don't support exception unwinding.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_throw(
         _thrown_exception: *mut u8,
         _tinfo: *mut u8,
@@ -1781,7 +1783,6 @@ pub mod cxx_abi {
     /// C++ ABI: Begin catching an exception.
     ///
     /// Stub: returns the exception object pointer (or null).
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_begin_catch(exception_object: *mut u8) -> *mut u8 {
         exception_object
     }
@@ -1789,14 +1790,12 @@ pub mod cxx_abi {
     /// C++ ABI: End catching an exception.
     ///
     /// Stub: no-op.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __cxa_end_catch() {}
 
     /// GCC C++ personality routine for exception handling.
     ///
     /// Stub: always returns `_URC_FATAL_PHASE1_ERROR` (8) to indicate
     /// we can't handle exceptions.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __gxx_personality_v0() -> i32 {
         8 // _URC_FATAL_PHASE1_ERROR
     }
@@ -1804,12 +1803,27 @@ pub mod cxx_abi {
     /// Unwind library: Resume exception propagation.
     ///
     /// Stub: aborts.  We don't support stack unwinding.
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
         let msg = b"_Unwind_Resume called (not supported)\n";
         let _ = crate::file::write(2, msg.as_ptr(), msg.len());
         crate::unistd::abort();
     }
+
+    // Inside this module, so that the thunks land in its archive member and
+    // declining the member declines them too.
+    weak_c_exports!(
+        __cxa_pure_virtual => __cxa_pure_virtual,
+        __cxa_deleted_virtual => __cxa_deleted_virtual,
+        __cxa_guard_acquire => __cxa_guard_acquire,
+        __cxa_guard_release => __cxa_guard_release,
+        __cxa_guard_abort => __cxa_guard_abort,
+        __cxa_allocate_exception => __cxa_allocate_exception,
+        __cxa_throw => __cxa_throw,
+        __cxa_begin_catch => __cxa_begin_catch,
+        __cxa_end_catch => __cxa_end_catch,
+        __gxx_personality_v0 => __gxx_personality_v0,
+        _Unwind_Resume => _Unwind_Resume,
+    );
 }
 
 // Re-exported so callers and tests inside this crate keep naming these

@@ -103,6 +103,13 @@ USAGE
 =====
 
     python scripts/check-libc-shape.py [path/to/libc.a] [-v]
+    python scripts/check-libc-shape.py path/to/libc.a --runtime-overlap FILE...
+
+The second form grades nothing about shape: it lists the names the archive
+shares with the given files of a compiler's runtime -- libgcc.a, crtbegin.o,
+libstdc++.a -- and fails if one is defined strong in the archive or is not in
+RUNTIME_PROVIDED (CHECK 7). scripts/gcc-spike/cross-check.sh runs it against
+the GCC it builds.
 
 Exit codes: 0 clean, 1 violation found, 2 could not run (missing/unparsable
 archive). Note that 2 is a failure too -- see `main()`.
@@ -529,22 +536,71 @@ ALIASES: list[tuple[str, ...]] = [
 # the program to define something else for it has a hole in it.
 LINK_SUPPLIED = frozenset({"main", "__ehdr_start"})
 
-# CHECK 7: what a compiler's own startup objects define, the archive defines
-# only weakly, if at all.
+# CHECK 7: what a compiler's own runtime defines, the archive defines only
+# weakly, if at all.
 #
-# GCC names crtbegin*.o and crtend.o in every link, and they define
-# `__dso_handle` -- glibc and musl leave it to them and define none. This
-# library defines it too, for the links that name no crtbegin (zig's), and in
-# the member every program extracts for `_start`. Strong, it was a second
-# definition in every program GCC linked against this archive ("multiple
-# definition of `__dso_handle'", measured 2026-10-07 with GCC's crtbeginT.o and
-# GNU ld; known-issues-resolved/
-# D-POSIX-DSO-HANDLE-WAS-STRONG-SO-NO-GCC-LINK-COULD-SUCCEED.md). Weak, it fills
-# in where no crtbegin is linked and yields where one is.
-CRT_PROVIDED = frozenset({"__dso_handle"})
+# A C compiler links files of its own beside the C library. GCC names
+# crtbegin*.o and crtend.o in every link, then libgcc.a and libgcc_eh.a (one
+# archive when GCC is built without shared libraries), and for C++ libstdc++.a,
+# which holds libsupc++; LLVM's are compiler-rt's builtins, libunwind and
+# libc++abi. This library defines some of the same names, for the links that
+# bring none (zig's): `__dso_handle`, compiler helpers such as `__popcountdi2`
+# and `__mulxc3`, the C++ ABI's stand-ins. A static link extracts a member for
+# any name it defines, so with both definitions strong, a link that extracted
+# both members failed: "multiple definition of `__dso_handle'" in every
+# program GCC linked against this archive (2026-10-07, known-issues-resolved/
+# D-POSIX-DSO-HANDLE-WAS-STRONG-SO-NO-GCC-LINK-COULD-SUCCEED.md), and then of
+# `__popcountdi2' in GCC's own link for SlateOS (known-issues-resolved/
+# D-POSIX-COMPILER-RUNTIME-NAMES-WERE-STRONG-SO-GCC-LINKS-FAILED.md). Weak,
+# ours fills in where the compiler's is absent and yields where it is present.
+#
+# The names: every one this archive shares with GCC 16.2.0's runtime as
+# scripts/gcc-spike/cross.sh builds it, measured with `--runtime-overlap`,
+# which scripts/gcc-spike/cross-check.sh runs on every check, so that a new
+# GCC or a new name here is found there; and the compiler-rt names that
+# posix/src/compiler_rt.rs implements and libgcc lacks. Each maps to the file
+# that defines it, which a violation names. (Rust's compiler_builtins defines
+# its share weak already; it is listed so that it stays so.)
+def _defined_by(where: str, names: str) -> dict[str, str]:
+    """`names`, whitespace-separated, each mapped to `where`."""
+    return dict.fromkeys(names.split(), where)
 
-#: ELF symbol bindings, as `st_info >> 4` holds them.
-STB_GLOBAL, STB_WEAK = 1, 2
+
+RUNTIME_PROVIDED: dict[str, str] = {
+    **_defined_by("GCC's crtbegin*.o", "__dso_handle"),
+    **_defined_by("libgcc.a", """
+        __absvdi2 __absvsi2 __absvti2 __addtf3 __addvdi3 __addvsi3 __addvti3
+        __ashlti3 __ashrti3 __bswapdi2 __bswapsi2 __clzdi2 __clzti2 __cmpti2
+        __ctzdi2 __ctzti2 __divdc3 __divmodti4 __divsc3 __divtf3 __divti3
+        __divxc3 __eqhf2 __eqtf2 __extenddftf2 __extendhfdf2 __extendhfsf2
+        __extendhftf2 __extendsfdf2 __extendsftf2 __ffsti2 __fixdfti __fixsfti
+        __fixtfdi __fixtfsi __fixtfti __fixunsdfdi __fixunsdfti __fixunssfdi
+        __fixunssfti __fixunstfdi __fixunstfsi __fixunstfti __floatditf
+        __floatsitf __floattidf __floattisf __floattitf __floatunditf
+        __floatunsitf __floatuntidf __floatuntisf __floatuntitf __getf2 __gttf2
+        __letf2 __lshrti3 __lttf2 __modti3 __muldc3 __mulsc3 __multf3 __multi3
+        __mulvdi3 __mulvsi3 __mulvti3 __mulxc3 __negti2 __negvdi2 __negvsi2
+        __negvti2 __nehf2 __netf2 __paritydi2 __parityti2 __popcountdi2
+        __popcountti2 __powidf2 __powisf2 __powitf2 __subtf3 __subvdi3
+        __subvsi3 __subvti3 __truncdfhf2 __truncdfsf2 __truncsfhf2 __trunctfdf2
+        __trunctfhf2 __trunctfsf2 __ucmpti2 __udivmodti4 __udivti3 __umodti3
+        __unordtf2
+    """),
+    **_defined_by("libgcc_eh.a", "_Unwind_Resume"),
+    **_defined_by("libsupc++.a", """
+        __cxa_allocate_exception __cxa_begin_catch __cxa_deleted_virtual
+        __cxa_end_catch __cxa_guard_abort __cxa_guard_acquire
+        __cxa_guard_release __cxa_pure_virtual __cxa_throw __gxx_personality_v0
+    """),
+    **_defined_by("compiler-rt", """
+        __cmpdi2 __compilerrt_abort_impl __negdf2 __negdi2 __negsf2
+        __paritysi2 __popcountsi2 __ucmpdi2
+    """),
+}
+
+#: ELF symbol bindings, as `st_info >> 4` holds them. STB_GNU_UNIQUE is GCC's
+#: for a C++ template's static data, which libstdc++.a has.
+STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE = 1, 2, 10
 
 #: What `scripts/mutate-gate.py` breaks to check that the floor above, and the
 #: shape checks below it, are load-bearing rather than decorative. Each row is
@@ -617,13 +673,27 @@ SELFTEST_MUTANTS = [
      'LINK_SUPPLIED = frozenset({"main", "__ehdr_start"})',
      "LINK_SUPPLIED = frozenset()"),
 
-    # CHECK 7: does it run, and does it tell strong from weak?
+    # CHECK 7: does it run, does it tell strong from weak, and does it hold
+    # more than the name it began with? And `--runtime-overlap`: does it find
+    # what is shared, and object to each thing it should?
     ("the crt check never runs",
-     "    for name in sorted(CRT_PROVIDED):\n",
+     "    for name in sorted(RUNTIME_PROVIDED):\n",
      "    for name in []:\n"),
     ("a strong definition of a crt name passes",
-     "            if bind != STB_WEAK:\n",
-     "            if False:\n"),
+     "        if elf_defined_symbols(obj).get(name, (0, 0, STB_WEAK))[2] != STB_WEAK:\n",
+     "        if False:\n"),
+    ("only __dso_handle is checked",
+     "RUNTIME_PROVIDED: dict[str, str] = {\n",
+     "RUNTIME_PROVIDED: dict[str, str] = {\"__dso_handle\": \"crtbegin\"} or {\n"),
+    ("a runtime object's local symbols count as shared",
+     "            if shndx != 0 and name and info >> 4 in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}",
+     "            if shndx != 0 and name}"),
+    ("a shared name strong here passes the overlap",
+     "        strong_here = strong_definers(path, data, members, name)\n",
+     "        strong_here = []\n"),
+    ("a shared name nobody pinned passes the overlap",
+     "        if name not in RUNTIME_PROVIDED:\n",
+     "        if False:\n"),
 
     # A breach must be a refusal, not a finding. `run-checker.sh` reads 1 as
     # "the checker found something" and prints a refusal naming code that is
@@ -1023,26 +1093,83 @@ def check(path: Path, verbose: bool) -> list[str]:
         print("  ok  every name a member refers to is in the archive or supplied by the "
               "link")
 
-    # --- CHECK 7: a name a compiler's crt objects define is weak here -------
-    for name in sorted(CRT_PROVIDED):
-        for off in sorted(o for o, syms in members.items() if name in syms):
-            obj = member_body(data, off)
-            if not obj:
-                continue  # an index-only fixture member, as in CHECK 5
-            bind = elf_defined_symbols(obj).get(name, (0, 0, STB_WEAK))[2]
-            if bind != STB_WEAK:
-                violations.append(
-                    f"[crt] member {member_name(path, off)} defines {name} strong: GCC's "
-                    f"crtbegin*.o, which every GCC link names, defines it too, so every "
-                    f"program GCC links against {path.name} fails with \"multiple "
-                    f"definition of `{name}'\". Define it weak, as posix/src/crt.rs does "
-                    f"(known-issues-resolved/"
-                    f"D-POSIX-DSO-HANDLE-WAS-STRONG-SO-NO-GCC-LINK-COULD-SUCCEED.md)."
-                )
-            elif verbose:
-                print(f"  ok  {name} is weak here, so a compiler's crtbegin may define it")
+    # --- CHECK 7: a name a compiler's runtime defines is weak here ---------
+    weak_here = 0
+    for name in sorted(RUNTIME_PROVIDED):
+        strong = strong_definers(path, data, members, name)
+        violations.extend(crt_violation(path, name, RUNTIME_PROVIDED[name], m) for m in strong)
+        weak_here += not strong and any(name in syms for syms in members.values())
+    if verbose:
+        print(f"  ok  {weak_here} name(s) a compiler's runtime also defines are defined "
+              f"here, and every one weak")
 
     return violations
+
+
+def strong_definers(path: Path, data: bytes, members: dict[int, set[str]],
+                    name: str) -> list[str]:
+    """The members of the archive at `path` (whose bytes are `data`) that
+    define `name` other than weakly."""
+    out = []
+    for off in sorted(o for o, syms in members.items() if name in syms):
+        obj = member_body(data, off)
+        if not obj:
+            continue  # an index-only fixture member, as in CHECK 5
+        if elf_defined_symbols(obj).get(name, (0, 0, STB_WEAK))[2] != STB_WEAK:
+            out.append(member_name(path, off))
+    return out
+
+
+def crt_violation(path: Path, name: str, where: str, member: str) -> str:
+    """CHECK 7's message: `member` defines `name` strong, and `where` -- a file
+    of a compiler's runtime -- defines it too."""
+    return (
+        f"[crt] member {member} defines {name} strong: {where} defines it too, "
+        f"and a C compiler links that beside {path.name}, so a program whose link "
+        f"extracts both fails with \"multiple definition of `{name}'\". Define it "
+        f"weak, with `weak_c_exports!` (posix/src/lib.rs) or as posix/src/crt.rs "
+        f"defines __dso_handle (known-issues-resolved/"
+        f"D-POSIX-COMPILER-RUNTIME-NAMES-WERE-STRONG-SO-GCC-LINKS-FAILED.md)."
+    )
+
+
+def runtime_names(path: Path) -> set[str]:
+    """The names a file of a compiler's runtime defines for a link: an archive's
+    from its symbol index, an object's from its symbol table."""
+    data = path.read_bytes()
+    if data.startswith(AR_MAGIC):
+        return set().union(*parse_symbol_index(path).values())
+    return {name for name, info, shndx, _value in elf_symbols(data)
+            if shndx != 0 and name and info >> 4 in (STB_GLOBAL, STB_WEAK, STB_GNU_UNIQUE)}
+
+
+def runtime_overlap(path: Path, runtime: list[Path]) -> tuple[list[str], list[str]]:
+    """`--runtime-overlap`: the names the archive at `path` shares with the
+    `runtime` files -- one report line each -- and the problems among them: a
+    name defined strong here (CHECK 7's violation), or one RUNTIME_PROVIDED
+    does not list, which CHECK 7 therefore cannot hold to weak where no
+    compiler is at hand to measure, as on every sysroot build."""
+    members = parse_symbol_index(path)
+    data = path.read_bytes()
+    here = set().union(*members.values())
+    shared: dict[str, list[str]] = {}
+    for rt in runtime:
+        for name in runtime_names(rt) & here:
+            shared.setdefault(name, []).append(rt.name)
+    lines, problems = [], []
+    for name in sorted(shared):
+        where = ", ".join(sorted(set(shared[name])))
+        strong_here = strong_definers(path, data, members, name)
+        lines.append(f"  {name:<28} {'STRONG' if strong_here else 'weak':<7} {where}")
+        problems.extend(crt_violation(path, name, where, m) for m in strong_here)
+        if name not in RUNTIME_PROVIDED:
+            problems.append(
+                f"[unpinned] {name}: {where} defines it and so does {path.name}, but "
+                f"RUNTIME_PROVIDED in scripts/check-libc-shape.py does not list it, so "
+                f"the check on every sysroot build, which has no compiler to measure, "
+                f"would not see it turn strong. Add it there, as defined by {where}."
+            )
+    return lines, problems
 
 
 def stale_against_sources(archive: Path) -> tuple[int, str | None]:
@@ -1448,17 +1575,60 @@ def _selftest() -> int:
         check_("...and rust_eh_personality's says where it comes from",
                tags(vs) == ["[unresolved]"] and "C-unwind" in vs[0])
 
-        # CHECK 7 [crt]: a name GCC's crtbegin defines, defined strong here.
-        # Named, not read from CRT_PROVIDED, for the reason the LINK_SUPPLIED
-        # case gives.
-        def crt_member(bind):
-            return ("crt", ["__dso_handle"], synth_elf([("__dso_handle", 1, 0, bind)]))
+        # CHECK 7 [crt]: a name a compiler's runtime defines, defined strong
+        # here. Named, not read from RUNTIME_PROVIDED, for the reason the
+        # LINK_SUPPLIED case gives.
+        def crt_member(bind, name="__dso_handle"):
+            return ("crt", [name], synth_elf([(name, 1, 0, bind)]))
 
         vs = graded(clean + [crt_member(STB_GLOBAL)])
-        check_("[crt] a strong __dso_handle is caught",
-               tags(vs) == ["[crt]"] and "__dso_handle" in vs[0])
+        check_("[crt] a strong __dso_handle is caught, naming crtbegin",
+               tags(vs) == ["[crt]"] and "__dso_handle" in vs[0] and "crtbegin" in vs[0])
         check_("...but not a weak one, which a compiler's crtbegin overrides",
                graded(clean + [crt_member(STB_WEAK)]) == [])
+        vs = graded(clean + [crt_member(STB_GLOBAL, "__popcountdi2")])
+        check_("[crt] a strong libgcc helper is caught, naming libgcc.a",
+               tags(vs) == ["[crt]"] and "__popcountdi2" in vs[0] and "libgcc.a" in vs[0])
+        vs = graded(clean + [crt_member(STB_GLOBAL, "__cxa_throw")])
+        check_("[crt] as is a strong C++ ABI stand-in, naming libsupc++.a",
+               tags(vs) == ["[crt]"] and "libsupc++.a" in vs[0])
+        check_("...but a weak one of each is not",
+               graded(clean + [crt_member(STB_WEAK, "__popcountdi2")]) == []
+               and graded(clean + [crt_member(STB_WEAK, "__cxa_throw")]) == [])
+
+        # --runtime-overlap: an archive sharing names with a runtime archive
+        # and a runtime object. `sharing` is libc's member, defining a pinned
+        # name, an unpinned one and one no runtime file has.
+        def overlap(bind_pinned, bind_unpinned):
+            here = tmp / "overlap-libc.a"
+            here.write_bytes(synth_archive(clean + [(
+                "sharing", ["__popcountdi2", "__slate_unpinned", "slate_own"],
+                synth_elf([("__popcountdi2", 1, 0, bind_pinned),
+                           ("__slate_unpinned", 1, 8, bind_unpinned),
+                           ("slate_own", 1, 16, STB_GLOBAL)]))]))
+            rt_archive = tmp / "overlap-libgcc.a"
+            rt_archive.write_bytes(synth_archive([(
+                "_popcountsi2.o", ["__popcountdi2"],
+                synth_elf([("__popcountdi2", 1, 0, STB_GLOBAL)]))]))
+            # An object: a global the archive shares, and a local of a name the
+            # archive defines, which a link never sees and so is not shared.
+            rt_object = tmp / "overlap-crtbegin.o"
+            rt_object.write_bytes(synth_elf([("__slate_unpinned", 1, 0, STB_GLOBAL),
+                                             ("slate_own", 1, 8, 0)]))
+            return runtime_overlap(here, [rt_archive, rt_object])
+
+        lines, problems = overlap(STB_WEAK, STB_WEAK)
+        check_("--runtime-overlap reports each shared name with where it is defined",
+               len(lines) == 2 and "__popcountdi2" in lines[0] and "overlap-libgcc.a" in lines[0]
+               and "__slate_unpinned" in lines[1] and "overlap-crtbegin.o" in lines[1])
+        check_("...but not a name only a runtime object's local symbol has",
+               not any("slate_own" in line for line in lines))
+        check_("...and a weak name RUNTIME_PROVIDED does not list is a problem",
+               tags(problems) == ["[unpinned]"] and "__slate_unpinned" in problems[0])
+        lines, problems = overlap(STB_GLOBAL, STB_WEAK)
+        check_("...as is a pinned one defined strong here, and the line says so",
+               tags(problems) == ["[crt]", "[unpinned]"] and "__popcountdi2" in problems[0]
+               and "STRONG" in lines[0])
 
         # --- is_collidable, which the two above depend on ----------------
         check_("C names are collidable", is_collidable("getopt"))
@@ -1565,12 +1735,20 @@ def main(argv: list[str] | None = None) -> int:
     # whose fixtures nothing runs.
     parser.add_argument("--selftest", "--self-test", action="store_true",
                         help="run this script's own fixtures (handled in __main__)")
+    parser.add_argument("--runtime-overlap", nargs="+", metavar="FILE", type=Path,
+                        help="instead of the shape checks: list the names the archive "
+                             "shares with these files of a compiler's runtime (libgcc.a, "
+                             "crtbegin.o, ...), and fail if one is strong in the archive "
+                             "or missing from RUNTIME_PROVIDED (CHECK 7)")
     args = parser.parse_args(argv)
 
     if args.archive:
         path = Path(args.archive)
     else:
         path = Path(__file__).resolve().parent.parent / "toolchain" / "sysroot" / "lib" / "libc.a"
+
+    if args.runtime_overlap:
+        return _main_runtime_overlap(path, args.runtime_overlap)
 
     if not path.is_file():
         # Exit 2, not 0. A sysroot that has not been built is a legitimate state
@@ -1651,14 +1829,17 @@ def main(argv: list[str] | None = None) -> int:
         for v in violations:
             print(f"  - {v}\n", file=sys.stderr)
         kinds = {v.split("]")[0] + "]" for v in violations}
-        if kinds <= {"[reached]", "[alias]", "[unresolved]"}:
+        if kinds <= {"[reached]", "[alias]", "[unresolved]", "[crt]"}:
             print("None of these is about codegen-units. A [reached] is one member calling",
                   file=sys.stderr)
             print("into a family's member through a helper the two share, an [alias] a",
                   file=sys.stderr)
-            print("variable whose names came apart, and an [unresolved] a name the archive",
+            print("variable whose names came apart, an [unresolved] a name the archive",
                   file=sys.stderr)
-            print("needs and lacks: each message above says what to do.", file=sys.stderr)
+            print("needs and lacks, and a [crt] a name a compiler's runtime defines that",
+                  file=sys.stderr)
+            print("the archive defines strong: each message above says what to do.",
+                  file=sys.stderr)
         elif any(v.startswith("[rider]") for v in violations):
             print("A [rider] means one module exports a replaceable name next to names a",
                   file=sys.stderr)
@@ -1683,6 +1864,33 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"libc.a shape OK: {path} ({len(members)} members, "
           f"{n_symbols} symbols)")
+    return 0
+
+
+def _main_runtime_overlap(path: Path, runtime: list[Path]) -> int:
+    """`--runtime-overlap`'s exit: 0 when every name the archive shares with
+    the runtime files is weak here and pinned, 1 when one is not, 2 when a file
+    cannot be read -- which is not a pass either, as `main()` says."""
+    for p in [path, *runtime]:
+        if not p.is_file():
+            print(f"ERROR: {p} does not exist. (This is exit 2, 'could not check', "
+                  "not a pass.)", file=sys.stderr)
+            return 2
+    try:
+        lines, problems = runtime_overlap(path, runtime)
+    except ArchiveError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"{path.name} shares {len(lines)} name(s) with {len(runtime)} runtime file(s):")
+    for line in lines:
+        print(line)
+    if problems:
+        print(f"\nRUNTIME OVERLAP CHECK FAILED -- {len(problems)} problem(s)\n",
+              file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}\n", file=sys.stderr)
+        return 1
+    print("every one weak here, and listed in RUNTIME_PROVIDED")
     return 0
 
 

@@ -20,6 +20,12 @@
 //! LLVM-exception); the complex ones follow C99 Annex G, as compiler-rt does,
 //! so that an infinite operand gives an infinite result rather than NaN.
 //!
+//! On SlateOS each is exported under its C name **weakly**, by
+//! `weak_c_exports!` at the end of this file: GCC's libgcc and LLVM's
+//! compiler-rt define the same names, and a program linked with either takes
+//! theirs rather than failing on two definitions, as GCC's own compilers did
+//! (`known-issues-resolved/D-POSIX-COMPILER-RUNTIME-NAMES-WERE-STRONG-SO-GCC-LINKS-FAILED.md`).
+//!
 //! On the host they are ordinary Rust functions: the host's own runtime
 //! already exports these names, and a second definition would clash.
 
@@ -45,7 +51,6 @@ pub struct Complex64 {
 
 /// compiler-rt's `compilerrt_abort`: an operation `-ftrapv` promised would
 /// not overflow did.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __compilerrt_abort_impl(
     _file: *const c_char,
     _line: i32,
@@ -63,7 +68,6 @@ fn trap() -> ! {
 macro_rules! trapping {
     ($(($abs:ident, $neg:ident, $add:ident, $sub:ident, $mul:ident, $t:ty)),* $(,)?) => {$(
         #[doc = concat!("`-ftrapv`'s `abs` for `", stringify!($t), "`: aborts on the minimum value.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $abs(a: $t) -> $t {
             match a.checked_abs() {
                 Some(v) => v,
@@ -72,7 +76,6 @@ macro_rules! trapping {
         }
 
         #[doc = concat!("`-ftrapv`'s negation for `", stringify!($t), "`: aborts on the minimum value.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $neg(a: $t) -> $t {
             match a.checked_neg() {
                 Some(v) => v,
@@ -81,7 +84,6 @@ macro_rules! trapping {
         }
 
         #[doc = concat!("`-ftrapv`'s addition for `", stringify!($t), "`: aborts on overflow.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $add(a: $t, b: $t) -> $t {
             match a.checked_add(b) {
                 Some(v) => v,
@@ -90,7 +92,6 @@ macro_rules! trapping {
         }
 
         #[doc = concat!("`-ftrapv`'s subtraction for `", stringify!($t), "`: aborts on overflow.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $sub(a: $t, b: $t) -> $t {
             match a.checked_sub(b) {
                 Some(v) => v,
@@ -99,7 +100,6 @@ macro_rules! trapping {
         }
 
         #[doc = concat!("`-ftrapv`'s multiplication for `", stringify!($t), "`: aborts on overflow.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $mul(a: $t, b: $t) -> $t {
             match a.checked_mul(b) {
                 Some(v) => v,
@@ -118,13 +118,11 @@ trapping!(
 // -- plain integer helpers ---------------------------------------------------------
 
 /// Two's-complement negation of a 64-bit integer (wraps, as C's does on this target).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __negdi2(a: i64) -> i64 {
     a.wrapping_neg()
 }
 
 /// Two's-complement negation of a 128-bit integer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __negti2(a: i128) -> i128 {
     a.wrapping_neg()
 }
@@ -139,25 +137,21 @@ fn three_way<T: Ord>(a: T, b: T) -> i32 {
 }
 
 /// Signed 64-bit three-way comparison (0, 1 or 2).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cmpdi2(a: i64, b: i64) -> i32 {
     three_way(a, b)
 }
 
 /// Signed 128-bit three-way comparison (0, 1 or 2).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cmpti2(a: i128, b: i128) -> i32 {
     three_way(a, b)
 }
 
 /// Unsigned 64-bit three-way comparison (0, 1 or 2).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __ucmpdi2(a: u64, b: u64) -> i32 {
     three_way(a, b)
 }
 
 /// Unsigned 128-bit three-way comparison (0, 1 or 2).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __ucmpti2(a: u128, b: u128) -> i32 {
     three_way(a, b)
 }
@@ -165,14 +159,12 @@ pub extern "C" fn __ucmpti2(a: u128, b: u128) -> i32 {
 macro_rules! bit_counts {
     ($(($parity:ident, $popcount:ident, $t:ty)),* $(,)?) => {$(
         #[doc = concat!("1 if an odd number of `", stringify!($t), "`'s bits are set, else 0.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $parity(a: $t) -> i32 {
             // The bits, not the value: reinterpreting the sign bit is the point.
             i32::from(a.cast_unsigned().count_ones() % 2 == 1)
         }
 
         #[doc = concat!("How many of `", stringify!($t), "`'s bits are set.")]
-        #[cfg_attr(target_os = "none", unsafe(no_mangle))]
         pub extern "C" fn $popcount(a: $t) -> i32 {
             // At most 128, which an i32 holds.
             i32::try_from(a.cast_unsigned().count_ones()).unwrap_or(i32::MAX)
@@ -188,7 +180,6 @@ bit_counts!(
 
 /// One more than the index of the least significant set bit of `a`, or 0 if
 /// no bit is set: C's `ffs` for a 128-bit integer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __ffsti2(a: i128) -> i32 {
     if a == 0 {
         0
@@ -201,13 +192,11 @@ pub extern "C" fn __ffsti2(a: i128) -> i32 {
 // -- floating point ------------------------------------------------------------------
 
 /// Negate a `float` by flipping its sign bit, NaN payloads included.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __negsf2(a: f32) -> f32 {
     f32::from_bits(a.to_bits() ^ 0x8000_0000)
 }
 
 /// Negate a `double` by flipping its sign bit, NaN payloads included.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __negdf2(a: f64) -> f64 {
     f64::from_bits(a.to_bits() ^ 0x8000_0000_0000_0000)
 }
@@ -224,7 +213,6 @@ fn zero_if_nan64(x: f64) -> f64 {
 
 /// `(a + bi) * (c + di)` for `double _Complex`, with C99 Annex G's recovery of
 /// infinities that the naive formula turns into NaN.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __muldc3(a: f64, b: f64, c: f64, d: f64) -> Complex64 {
     let (mut a, mut b, mut c, mut d) = (a, b, c, d);
     let ac = a * c;
@@ -274,7 +262,6 @@ pub extern "C" fn __muldc3(a: f64, b: f64, c: f64, d: f64) -> Complex64 {
 /// one sets `errno` on overflow, as glibc's does, and complex division must
 /// not -- compiler-rt's `__divdc3` scales with an internal `scalbn` that
 /// touches nothing.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __divdc3(a: f64, b: f64, c: f64, d: f64) -> Complex64 {
     let (mut a, mut b, mut c, mut d) = (a, b, c, d);
     let mut ilogbw = 0_i32;
@@ -323,7 +310,6 @@ fn zero_if_nan32(x: f32) -> f32 {
 }
 
 /// `(a + bi) * (c + di)` for `float _Complex`; see [`__muldc3`].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __mulsc3(a: f32, b: f32, c: f32, d: f32) -> Complex32 {
     let (mut a, mut b, mut c, mut d) = (a, b, c, d);
     let ac = a * c;
@@ -367,7 +353,6 @@ pub extern "C" fn __mulsc3(a: f32, b: f32, c: f32, d: f32) -> Complex32 {
 }
 
 /// `(a + bi) / (c + di)` for `float _Complex`; see [`__divdc3`].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __divsc3(a: f32, b: f32, c: f32, d: f32) -> Complex32 {
     let (mut a, mut b, mut c, mut d) = (a, b, c, d);
     let mut ilogbw = 0_i32;
@@ -406,6 +391,47 @@ pub extern "C" fn __divsc3(a: f32, b: f32, c: f32, d: f32) -> Complex32 {
     }
     z
 }
+
+// Every one of them under its C name, weak: libgcc and compiler-rt define the
+// same names, and a GCC link names libgcc in every program, so a strong
+// definition here was a second one there (`weak_c_exports!` says more).
+weak_c_exports!(
+    __compilerrt_abort_impl => __compilerrt_abort_impl,
+    __absvsi2 => __absvsi2,
+    __negvsi2 => __negvsi2,
+    __addvsi3 => __addvsi3,
+    __subvsi3 => __subvsi3,
+    __mulvsi3 => __mulvsi3,
+    __absvdi2 => __absvdi2,
+    __negvdi2 => __negvdi2,
+    __addvdi3 => __addvdi3,
+    __subvdi3 => __subvdi3,
+    __mulvdi3 => __mulvdi3,
+    __absvti2 => __absvti2,
+    __negvti2 => __negvti2,
+    __addvti3 => __addvti3,
+    __subvti3 => __subvti3,
+    __mulvti3 => __mulvti3,
+    __negdi2 => __negdi2,
+    __negti2 => __negti2,
+    __cmpdi2 => __cmpdi2,
+    __cmpti2 => __cmpti2,
+    __ucmpdi2 => __ucmpdi2,
+    __ucmpti2 => __ucmpti2,
+    __paritysi2 => __paritysi2,
+    __popcountsi2 => __popcountsi2,
+    __paritydi2 => __paritydi2,
+    __popcountdi2 => __popcountdi2,
+    __parityti2 => __parityti2,
+    __popcountti2 => __popcountti2,
+    __ffsti2 => __ffsti2,
+    __negsf2 => __negsf2,
+    __negdf2 => __negdf2,
+    __muldc3 => __muldc3,
+    __mulsc3 => __mulsc3,
+    __divdc3 => __divdc3,
+    __divsc3 => __divsc3,
+);
 
 #[cfg(test)]
 mod tests {

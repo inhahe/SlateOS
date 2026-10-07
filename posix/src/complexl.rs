@@ -1422,7 +1422,7 @@ unsafe extern "C" fn __slate_ld_mulxc3(
     // SAFETY: as in `export_cl_cl!`, four `long double` arguments.
     unsafe { out.write(mulxc3(a.read(), b.read(), c.read(), d.read())) }
 }
-crate::ld_c!(cl_llll "__mulxc3" => __slate_ld_mulxc3);
+crate::ld_c!(weak cl_llll "__mulxc3" => __slate_ld_mulxc3);
 
 /// `__divxc3(a, b, c, d)`, for its thunk.
 #[cfg(target_os = "none")]
@@ -1437,7 +1437,7 @@ unsafe extern "C" fn __slate_ld_divxc3(
     // SAFETY: as in `export_cl_cl!`, four `long double` arguments.
     unsafe { out.write(divxc3(a.read(), b.read(), c.read(), d.read())) }
 }
-crate::ld_c!(cl_llll "__divxc3" => __slate_ld_divxc3);
+crate::ld_c!(weak cl_llll "__divxc3" => __slate_ld_divxc3);
 
 // ===========================================================================
 // The licence the FreeBSD sources carry, which each section above names.

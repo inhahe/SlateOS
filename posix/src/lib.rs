@@ -340,6 +340,44 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     }
 }
 
+/// Export each C name as a **weak** symbol on SlateOS: a one-instruction
+/// thunk that `jmp`s to the Rust function implementing it.
+///
+/// For the names a C program's compiler brings its own definitions of --
+/// GCC's libgcc and libstdc++, LLVM's compiler-rt and libc++abi -- this
+/// library's are a fallback for the links that bring none (zig's C links):
+/// weak, so that a link holding the compiler's strong definition takes it and
+/// one holding none takes this. Defined strongly, the two were "multiple
+/// definition" errors in every GCC link that reached them
+/// (`known-issues-resolved/D-POSIX-COMPILER-RUNTIME-NAMES-WERE-STRONG-SO-GCC-LINKS-FAILED.md`).
+/// Rust makes a function weak only on nightly (`#[linkage = "weak"]`), and the
+/// library's configuration is type-checked on stable (`.cargo/config.toml`), so
+/// the weak symbol is assembly, as `crt.rs` makes `_start` and `__dso_handle`.
+/// The `jmp` leaves every argument register and the stack as the caller set
+/// them, and the implementation returns straight to the caller, whatever the
+/// signature: integers, `__int128`, `_Complex` returns in `xmm0`/`xmm1`.
+///
+/// On the host nothing is exported: the host's own runtime has these names,
+/// and the tests call the Rust functions directly.
+macro_rules! weak_c_exports {
+    ($($name:ident => $imp:path),* $(,)?) => {
+        #[cfg(target_os = "none")]
+        core::arch::global_asm!(
+            $(
+                concat!(".pushsection .text.slateos_weak.", stringify!($name), ",\"ax\",@progbits"),
+                concat!(".weak ", stringify!($name)),
+                concat!(".type ", stringify!($name), ", @function"),
+                ".p2align 4",
+                concat!(stringify!($name), ":"),
+                concat!("    jmp {", stringify!($name), "}"),
+                concat!(".size ", stringify!($name), ", . - ", stringify!($name)),
+                ".popsection",
+            )*
+            $($name = sym $imp,)*
+        );
+    };
+}
+
 // Emits C `_Static_assert`s for `scripts/check-libc-abi.py` to compile against
 // musl. Test-only: it is a checking apparatus, not part of the library.
 #[cfg(test)]

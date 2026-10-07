@@ -69,13 +69,21 @@
 /// imaginary part in `%st(1)`, which is why its thunks load the imaginary
 /// part first. A function of one returning a `long double` (`cabsl`) is
 /// `l_l`: its argument starts where a `long double`'s would.
+///
+/// `weak cl_llll` exports the name weakly. That is for the compiler's own
+/// helpers, `__mulxc3` and `__divxc3`, which libgcc and compiler-rt define
+/// too: a link that brings theirs takes theirs (`weak_c_exports!` in `lib.rs`
+/// says why). A C library function is strong.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! ld_c {
     (@thunk $c:literal, $($body:expr),* $(,)?) => {
+        $crate::ld_c!(@bound ".global ", $c, $($body),*);
+    };
+    (@bound $bind:literal, $c:literal, $($body:expr),* $(,)?) => {
         #[cfg(target_os = "none")]
         core::arch::global_asm!(
-            concat!(".global ", $c),
+            concat!($bind, $c),
             concat!(".type ", $c, ", @function"),
             concat!($c, ":"),
             $($body,)*
@@ -324,7 +332,13 @@ macro_rules! ld_c {
     };
     // __mulxc3(a, b, c, d) and __divxc3: four long doubles, 16 bytes apart.
     (cl_llll $c:literal => $rust:ident) => {
-        $crate::ld_c!(@thunk $c,
+        $crate::ld_c!(@cl_llll ".global ", $c => $rust);
+    };
+    (weak cl_llll $c:literal => $rust:ident) => {
+        $crate::ld_c!(@cl_llll ".weak ", $c => $rust);
+    };
+    (@cl_llll $bind:literal, $c:literal => $rust:ident) => {
+        $crate::ld_c!(@bound $bind, $c,
             "sub rsp, 40",
             "lea rdi, [rsp + 48]",
             "lea rsi, [rsp + 64]",

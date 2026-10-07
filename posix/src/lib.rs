@@ -402,6 +402,8 @@ pub mod fts;
 pub mod ftw;
 pub mod gai;
 pub mod gai_a;
+// libxcrypt's crypt_gensalt, crypt_checksalt and crypt_preferred_method.
+pub mod gensalt;
 pub mod getopt;
 pub mod getpass;
 pub mod glob;

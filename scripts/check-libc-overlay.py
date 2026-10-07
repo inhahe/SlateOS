@@ -8,11 +8,14 @@ lacks some of them (`-I posix/include` -- zig's driver searches its own libc
 headers before any `-isystem` directory); the overlay header includes musl's
 (`#include_next`) and declares the rest, under the feature macros
 glibc declares them under. It also has whole headers for the families musl
-has none of (<fts.h>, <error.h>, <execinfo.h> ...), and one in place of musl's:
-<glob.h>, whose glob_t must name the fields musl's hides (a struct is declared
-once, so it cannot be musl's with more after it). A C program written for
-glibc compiles against it, then, as it does against glibc -- which is the
-claim this gate holds it to.
+has none of (<fts.h>, <error.h>, <execinfo.h> ...), and two in place of
+musl's, because a struct is declared once and so cannot be musl's with more
+after it: <glob.h>, whose glob_t must name the fields musl's hides, and
+<crypt.h>, whose struct crypt_data is libxcrypt's 32 KiB rather than musl's
+260 bytes. (glibc 2.39 has no <crypt.h>: a glibc system's is libxcrypt's,
+and so is the reference's, below.) A C program written for glibc compiles
+against it, then, as it does against glibc -- which is the claim this gate
+holds it to.
 
 What it checks
 --------------
@@ -185,6 +188,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct printf_info": "printf.h",
     "struct mount_attr": "sys/mount.h",
     "struct prof": "sys/profil.h",
+    "struct crypt_data": "crypt.h",
 }
 
 # C type -> (glibc's layout as the reference has it, the overlay's, why), each

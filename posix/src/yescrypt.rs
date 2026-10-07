@@ -401,6 +401,118 @@ pub(crate) fn is_stored_hash(stored: &[u8], room: usize) -> bool {
 pub(crate) fn is_yescrypt_salt(salt: &[u8]) -> bool {
     !salt.is_empty() && decode64(&mut [0u8; 64], salt).is_some()
 }
+
+// ---------------------------------------------------------------------------
+// New settings (crypt_gensalt's)
+// ---------------------------------------------------------------------------
+
+/// `BASE64_LEN(bytes)`: the characters `bytes` bytes encode to.
+fn base64_len(bytes: usize) -> usize {
+    (bytes * 8).div_ceil(6)
+}
+
+/// `encode64_uint32(dst, dstlen, src, min)`: `src` in the variable-length
+/// code [`decode64_uint32`] reads.  The characters written, with room left
+/// for a NUL; `None` if there is not, or `src` is below `min` or past the
+/// code's reach.
+fn encode64_uint32(out: &mut [u8], src: u32, min: u32) -> Option<usize> {
+    let mut src = src.checked_sub(min)?;
+    let (mut start, mut end, mut chars, mut bits) = (0u32, 47u32, 1usize, 0u32);
+    loop {
+        let count = (end + 1 - start) << bits;
+        if src < count {
+            break;
+        }
+        if start >= 63 {
+            return None;
+        }
+        start = end + 1;
+        end = start + (62 - end) / 2;
+        src -= count;
+        chars += 1;
+        bits += 6;
+    }
+    if out.len() <= chars {
+        return None;
+    }
+    out[0] = ITOA64[(start + (src >> bits)) as usize];
+    for at in 1..chars {
+        bits -= 6;
+        out[at] = ITOA64[((src >> bits) & 0x3f) as usize];
+    }
+    Some(chars)
+}
+
+/// `gensalt_yescrypt_rn`: a new `$y$` setting at cost `count` -- 1 and 2 are
+/// N = 1024 and 2048 blocks of 1 KiB, 3 to 11 N = 1024 to 262144 of 4 KiB,
+/// and 0 is the default, 5 (`$y$j9T$`: 16 MiB) -- salted with up to 64 of
+/// `rbytes` (at least 16).  The characters written into `out`, with room
+/// left for a NUL.
+pub(crate) fn gensalt(
+    count: u64,
+    rbytes: &[u8],
+    out: &mut [u8],
+) -> Result<usize, crate::gensalt::Refused> {
+    use crate::gensalt::Refused;
+    let rbytes = &rbytes[..rbytes.len().min(64)];
+    if out.len() < 3 + 8 * 6 + 1 + base64_len(rbytes.len()) + 1 {
+        return Err(Refused::Range);
+    }
+    if count > 11 || rbytes.len() < 16 {
+        return Err(Refused::Invalid);
+    }
+    let count = if count == 0 { 5 } else { count as u32 };
+    let (r, n_log2) = if count < 3 {
+        (8, count + 9)
+    } else {
+        (32, count + 7)
+    };
+    // `yescrypt_encode_params_r` for libxcrypt's defaults: the RW flavour,
+    // p = 1, and no t, g or ROM -- so no `have` field.
+    let flavor = YESCRYPT_RW + (pwhash::yescrypt::YESCRYPT_DEFAULTS >> 2);
+    out[..3].copy_from_slice(b"$y$");
+    let mut n = 3;
+    for (value, min) in [(flavor, 0), (n_log2, 1), (r, 1)] {
+        n += encode64_uint32(&mut out[n..], value, min).ok_or(Refused::Range)?;
+    }
+    *out.get_mut(n).ok_or(Refused::Range)? = b'$';
+    n += 1;
+    n += encode64(&mut out[n..], rbytes).ok_or(Refused::Range)?;
+    if n >= out.len() {
+        return Err(Refused::Range);
+    }
+    Ok(n)
+}
+
+/// `gensalt_scrypt_rn`: a new `$7$` setting at cost `count` -- 6 to 11, N =
+/// 2^(count + 7) blocks of r = 32 (64 MiB at the default, 7) -- salted with
+/// up to 64 of `rbytes` (at least 16), their characters the salt as they
+/// stand.  The characters written into `out`, with room left for a NUL.
+pub(crate) fn gensalt_scrypt(
+    count: u64,
+    rbytes: &[u8],
+    out: &mut [u8],
+) -> Result<usize, crate::gensalt::Refused> {
+    use crate::gensalt::Refused;
+    let rbytes = &rbytes[..rbytes.len().min(64)];
+    if out.len() < 3 + 1 + 5 * 2 + base64_len(rbytes.len()) + 1 {
+        return Err(Refused::Range);
+    }
+    if (count > 0 && count < 6) || count > 11 || rbytes.len() < 16 {
+        return Err(Refused::Invalid);
+    }
+    let count = if count == 0 { 7 } else { count as usize };
+    out[..3].copy_from_slice(b"$7$");
+    out[3] = ITOA64[count + 7];
+    // r = 32 and p = 1, in five characters each, least significant first.
+    out[4..14].copy_from_slice(b"U..../....");
+    let n = 14 + encode64(&mut out[14..], rbytes).ok_or(Refused::Range)?;
+    if n >= out.len() {
+        return Err(Refused::Range);
+    }
+    Ok(n)
+}
+
 // The KDF has tests of its own (`pwhash`); these check the settings.
 #[cfg(test)]
 mod tests {

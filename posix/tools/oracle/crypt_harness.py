@@ -409,7 +409,175 @@ int main(void)
 '''
 
 
+GENSALT_OUT = POSIX_SRC / "gensalt_oracle.txt"
+
+# crypt_gensalt_rn, crypt_checksalt and crypt_preferred_method.  A probe a
+# line in, an answer a line out: the probe, " = ", what the call returned
+# (NULL, or the setting), errno's name or 0, and -- for crypt_gensalt_rn --
+# what the output buffer held after, up to its first NUL, as `out=...`.
+GENSALT_PROGRAM = r'''
+#include <crypt.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const char *en(int e)
+{
+    static char buf[16];
+    switch (e) {
+    case 0: return "0";
+    case EINVAL: return "EINVAL";
+    case ERANGE: return "ERANGE";
+    }
+    snprintf(buf, sizeof buf, "%d", e);
+    return buf;
+}
+
+static int unhex(const char *h, char *out)
+{
+    int n = 0;
+    for (; h[0] && h[1]; h += 2) {
+        unsigned v;
+        sscanf(h, "%2x", &v);
+        out[n++] = (char)v;
+    }
+    return n;
+}
+
+int main(void)
+{
+    static char line[4096];
+    while (fgets(line, sizeof line, stdin)) {
+        line[strcspn(line, "\n")] = 0;
+        char kind[16], a[1024], b[1024];
+        unsigned long count;
+        int nrbytes, size;
+        if (sscanf(line, "gensalt %1023s %lu %1023s %d %d", a, &count, b, &nrbytes, &size) == 5) {
+            static char rbytes[512], output[256];
+            const char *prefix = strcmp(a, "NULL") ? (strcmp(a, "-") ? a : "") : NULL;
+            const char *rb = NULL;
+            if (strcmp(b, "NULL") != 0) {
+                unhex(strcmp(b, "-") ? b : "", rbytes);
+                rb = rbytes;
+            }
+            memset(output, 'Q', sizeof output);
+            output[sizeof output - 1] = 0;
+            errno = 0;
+            char *r = crypt_gensalt_rn(prefix, count, rb, nrbytes, output, size);
+            int e = errno;
+            printf("%s = %s %s out=%s\n", line, r ? r : "NULL", en(e), size > 0 ? output : "");
+        } else if (sscanf(line, "checksalt %1023s", a) == 1) {
+            const char *setting = strcmp(a, "NULL") ? (strcmp(a, "-") ? a : "") : NULL;
+            printf("%s = %d\n", line, crypt_checksalt(setting));
+        } else if (strcmp(line, "preferred") == 0) {
+            printf("%s = %s\n", line, crypt_preferred_method());
+        } else {
+            (void)kind;
+            return 2;
+        }
+    }
+    return 0;
+}
+'''
+
+
+def gensalt_cases():
+    """Probes for crypt_gensalt_rn, crypt_checksalt and crypt_preferred_method.
+    A prefix or a setting is written as is, `-` for the empty string, NULL
+    for a null pointer; random bytes in hex, likewise."""
+    rb = bytes((i * 29 + 7) & 0xFF for i in range(255)).hex()
+
+    def rbytes(n):
+        return rb[:2 * n] or "-"
+
+    def aborts(prefix, count, size):
+        """Whether libxcrypt's gensalt_sha_rn aborts on this probe: its room
+        check lets through a buffer of the length it computes -- a byte too
+        few, or two for a power of ten -- which its salt loop's assertion
+        then refuses.  gensalt.rs answers ERANGE there, and its own tests
+        say so.  (MD5 refuses a nonzero count before it gets that far.)"""
+        tags = {"$6$": (5000, 1000, 999999999), "$5$": (5000, 1000, 999999999), "$1$": (1000, 1000, 1000)}
+        if prefix not in tags or (prefix == "$1$" and count != 0):
+            return False
+        default, low, high = tags[prefix]
+        count = min(max(count or default, low), high)
+        output_len = 8
+        if count != default:
+            output_len += 9
+            ceiling = 10
+            while ceiling < count:
+                output_len += 1
+                ceiling *= 10
+        if size < output_len:
+            return False
+        written = 3 if count == default else len(f"$x$rounds={count}$")
+        return not written + 5 < size
+
+    lines = []
+    prefixes = ["$y$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$1$"]
+    counts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 31, 32, 999, 1000, 4999, 5000,
+              5001, 999999999, 1000000000, 4294967296, 18446744073709551615]
+    # Every method at every cost, with the bytes it takes by default.
+    for p in prefixes:
+        for c in counts:
+            lines.append(f"gensalt {p} {c} {rbytes(16)} 16 192")
+    # Every method's byte counts, at its default cost.
+    for p in prefixes:
+        for n in [0, 2, 3, 4, 8, 9, 10, 14, 15, 16, 17, 22, 64, 65, 255]:
+            lines.append(f"gensalt {p} 0 {rbytes(n)} {n} 192")
+    # Every method's room, around its setting's length.
+    for p in prefixes:
+        for size in [0, 1, 2, 3, 4, 7, 8, 9, 16, 17, 18, 20, 21, 25, 26, 28, 29, 30, 31,
+                     39, 40, 44, 45, 74, 75, 76, 117, 138, 139, 140, 192]:
+            lines.append(f"gensalt {p} 0 {rbytes(64)} 64 {size}")
+    # Rounds fields, by size.
+    for size in [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]:
+        lines.append(f"gensalt $6$ 999999999 {rbytes(15)} 15 {size}")
+        lines.append(f"gensalt $5$ 1001 {rbytes(15)} 15 {size}")
+    # The default method, and prefixes that are more than a prefix, or none.
+    for p in ["NULL", "$6$rounds=9999$x", "$y$j9T$abc", "$2b$10$", "$gy$", "_", "-", "ab",
+              "$3$", "$md5", "$sha1", "$", "$2", "$2c$", "x", "$9$", "$Y$"]:
+        lines.append(f"gensalt {p} 0 {rbytes(16)} 16 192")
+    # crypt_checksalt: the prefix, the characters, nothing.
+    for s in ["NULL", "-", "$y$j9T$PKXc3hCOSyMqdaEQArI62/", "$y$", "$gy$j9T$abc", "$7$CU..../....",
+              "$2b$05$CCCCCCCCCCCCCCCCCCCCC.", "$2y$05$x", "$2a$05$x", "$2x$05$x", "$2c$05$x",
+              "$6$salt", "$6$rounds=1000$salt", "$5$salt", "$1$salt", "$3$$", "$md5$x", "$sha1$1$x",
+              "_J9..abcd", "ab", "a", "abc", "*0", "!$6$salt", "$6$sa:lt", "$6$sa*lt", "$",
+              "$y", "$9$x", "xyz$"]:
+        lines.append(f"checksalt {s}")
+    lines.append("preferred")
+
+    def kept(line):
+        words = line.split()
+        if words[0] != "gensalt":
+            return True
+        return not aborts(words[1], int(words[2]), int(words[5]))
+
+    return [line for line in lines if kept(line)]
+
+
+def gensalt_main() -> None:
+    lines = gensalt_cases()
+    with workdir() as t:
+        d = Path(t)
+        (d / "gs.c").write_text(GENSALT_PROGRAM, encoding="utf-8", newline="\n")
+        (d / "cases.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        r = run(f"cd {wsl_path(d)} && gcc -O2 -Wall -Werror -o gs gs.c -lcrypt && ./gs < cases.txt")
+        if r.returncode != 0:
+            sys.exit(f"the gensalt harness failed:\n{r.stderr}\n{r.stdout[-2000:]}")
+        body = r.stdout
+    if body.count("\n") != len(lines):
+        sys.exit(f"{len(lines)} gensalt probes but {body.count(chr(10))} answers")
+    head = ("# libxcrypt 4.4.36's crypt_gensalt_rn, crypt_checksalt and crypt_preferred_method\n"
+            "# (Ubuntu 24.04's libcrypt.so.1), for posix/src/gensalt.rs. Generated by\n"
+            "# posix/tools/oracle/crypt_harness.py; do not edit.\n")
+    GENSALT_OUT.write_text(head + body, encoding="utf-8", newline="\n")
+    print(f"{GENSALT_OUT.name}: {len(lines)} lines")
+
+
 def main() -> None:
+    gensalt_main()
     cases = [(p, s) for s in KA_SETTINGS for p in KA_PASSWORDS] + generated()
     lines = []
     for word, setting in cases:

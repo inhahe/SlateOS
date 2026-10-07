@@ -20,12 +20,21 @@
 //!
 //! ## Method strength
 //!
-//! `$6$` (SHA-512) is this system's default for new passwords.  `$y$`
-//! (yescrypt) is the stronger -- a guess costs 16 MiB of memory as well as
-//! time -- and is here first so that an `/etc/shadow` brought from Ubuntu
-//! verifies.  `$1$` (MD5) is cryptographically broken and is supported only
-//! so the OS can verify existing `$1$` entries in legacy `/etc/shadow`
-//! files — never use it for new passwords.
+//! `$y$` (yescrypt) is the strongest -- a guess costs 16 MiB of memory as
+//! well as time -- and, as in libxcrypt, the preferred method:
+//! `crypt_gensalt` makes a `$y$` setting when asked for no method in
+//! particular, and `crypt_preferred_method` answers `"$y$"` (`gensalt.rs`).
+//! `$1$` (MD5) is cryptographically broken and is supported only so the OS
+//! can verify existing `$1$` entries in legacy `/etc/shadow` files — never
+//! use it for new passwords.  `crypt_checksalt` answers
+//! `CRYPT_SALT_METHOD_LEGACY` for it, as for `$5$` and `$2x$`.
+//!
+//! ## The rest of libxcrypt's interface
+//!
+//! `crypt_rn` and `crypt_ra` are here, beside `crypt_r`; `crypt_gensalt`,
+//! its `_rn` and `_ra` forms, `crypt_checksalt` and `crypt_preferred_method`
+//! are `gensalt.rs`'s.  C reaches them through `posix/include/crypt.h`, which
+//! is libxcrypt's header in place of musl's.
 //!
 //! ## Failure: the failure token, as libxcrypt answers
 //!
@@ -53,10 +62,12 @@
 //!
 //! ## The output's room: 256 bytes, where libxcrypt has 384
 //!
-//! `crypt_r` writes into its caller's `struct crypt_data`, and C here is
-//! compiled against musl's `<crypt.h>`, whose `crypt_data` is 260 bytes
-//! (libxcrypt's is 32 KiB, its `output` 384).  So a result has 256 bytes,
-//! NUL included.  Every hash fits: the longest `$y$` one -- every parameter
+//! `crypt_r` writes into its caller's `struct crypt_data`.  C here is
+//! compiled against `posix/include/crypt.h`, whose `crypt_data` is
+//! libxcrypt's -- 32 KiB, its `output` 384 bytes -- but an object compiled
+//! against musl's header, whose `crypt_data` is 260 bytes, passes that, and
+//! the two layouts share only the start of the struct.  So a result has 256
+//! bytes, NUL included.  Every hash fits: the longest `$y$` one -- every parameter
 //! in six characters, a 64-byte salt -- is 182 bytes.  What differs is
 //! yescrypt's own test before hashing, which wants room for *all* of the
 //! setting given, plus `$`, 43 characters and a NUL: here it passes for a
@@ -81,8 +92,9 @@
 use crate::errno;
 
 /// The room for a crypt result, NUL included: what `crypt_r` may write into
-/// a C caller's `struct crypt_data`, whose size musl's `<crypt.h>` sets at
-/// 260 (see "The output's room" above).
+/// a C caller's `struct crypt_data` -- libxcrypt's 32 KiB as
+/// `posix/include/crypt.h` declares it, or musl's 260 bytes in an object
+/// compiled against musl's header (see "The output's room" above).
 ///
 /// The longest SHA result is 124 bytes (`"$6$rounds=999999999$"`, a 16-byte
 /// salt, `"$"`, 86 characters, NUL), the longest `$y$` one 183.  It was 128
@@ -379,7 +391,7 @@ fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Ref
 /// libxcrypt's `check_badsalt_chars`: a setting may hold only printable ASCII
 /// other than space and the five characters `passwd(5)` and `shadow(5)` use
 /// as delimiters and markers (`! * : ; \`).
-fn has_bad_setting_chars(setting: &[u8]) -> bool {
+pub(crate) fn has_bad_setting_chars(setting: &[u8]) -> bool {
     setting
         .iter()
         .any(|&b| b <= 0x20 || b >= 0x7f || b"!*:;\\".contains(&b))
@@ -393,6 +405,32 @@ fn failure_token(setting: Option<&[u8]>) -> [u8; 3] {
         Some([b'*', b'0', ..]) => *b"*1\0",
         _ => *b"*0\0",
     }
+}
+
+/// `make_failure_token(setting, output, size)` into `size` bytes at `out`:
+/// the token when there is room for it and its NUL, else as much as fits --
+/// `"*"` in two bytes, a NUL in one, nothing in none.
+///
+/// # Safety
+///
+/// `out` is writable for `size` bytes; when `size` is not positive it is
+/// not touched, and may be NULL.
+pub(crate) unsafe fn write_failure_token(setting: &[u8], out: *mut u8, size: i32) {
+    let token = failure_token(Some(setting));
+    let written: &[u8] = match size {
+        3.. => &token,
+        2 => b"*\0",
+        1 => b"\0",
+        _ => return,
+    };
+    // SAFETY: at most `size` bytes, which the caller vouches for.
+    unsafe { core::ptr::copy_nonoverlapping(written.as_ptr(), out, written.len()) };
+}
+
+/// Zero `bytes` where the compiler may not drop the stores: `explicit_bzero`.
+pub(crate) fn wipe(bytes: &mut [u8]) {
+    // SAFETY: the slice's own bytes, all writable.
+    unsafe { crate::string::explicit_bzero(bytes.as_mut_ptr(), bytes.len()) };
 }
 
 /// Why [`do_crypt`] refused -- libxcrypt's two failures, named here rather
@@ -431,7 +469,7 @@ fn do_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Refusal>
 /// # Safety
 ///
 /// `p` must be non-null and point to a valid NUL-terminated string.
-unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
+pub(crate) unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
     // SAFETY: caller guarantees `p` is a valid NUL-terminated C string.
     let len = unsafe { crate::string::strlen(p) };
     // SAFETY: `p` is valid for `len` bytes per the strlen scan above.
@@ -444,9 +482,10 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 
 /// `crypt` — one-way password hashing.
 ///
-/// Supports `$1$` (MD5), `$5$` (SHA-256), `$6$` (SHA-512), `$y$` (yescrypt)
-/// and `$7$` (scrypt) settings; the SHA methods accept an optional
-/// `rounds=N$`, and yescrypt's and scrypt's carry their own parameters.  A
+/// Supports `$1$` (MD5), `$5$` (SHA-256), `$6$` (SHA-512), `$y$` (yescrypt),
+/// `$7$` (scrypt) and `$2a$`/`$2b$`/`$2x$`/`$2y$` (bcrypt) settings; the
+/// SHA methods accept an optional `rounds=N$`, and the others carry their
+/// own parameters.  `crypt_gensalt` (`gensalt.rs`) makes new ones.  A
 /// yescrypt hash takes as much memory as its setting asks for -- 16 MiB for
 /// Ubuntu's `$y$j9T$` -- and fails if it cannot have it.  Returns a pointer to a
 /// static buffer, overwritten by each call: the hash, or on failure
@@ -505,6 +544,91 @@ pub extern "C" fn crypt_r(key: *const u8, salt: *const u8, data: *mut u8) -> *mu
     // is at most that.
     unsafe { core::ptr::copy_nonoverlapping(out.buf.as_ptr(), data, out.len) };
     data
+}
+
+/// `sizeof (struct crypt_data)` as `posix/include/crypt.h` declares it --
+/// libxcrypt's, 32 KiB: what `crypt_rn` asks for and `crypt_ra` allocates.
+/// (No C constant has the name: C says `sizeof`.)
+pub(crate) const CRYPT_DATA_SIZE: usize = 32768;
+
+/// `crypt_rn` — as [`crypt_r`], into `data`'s `size` bytes, which must be
+/// at least `sizeof (struct crypt_data)` ([`CRYPT_DATA_SIZE`]); and on
+/// failure NULL, with `errno` set, where `crypt_r` gives the failure token.
+/// The token is in `data` all the same, as much of it as `size` has room
+/// for, as libxcrypt's is.
+///
+/// A NULL `data` is NULL with `EFAULT`, where libxcrypt faults writing the
+/// token -- unless `size` gives it no room, when libxcrypt writes none and
+/// answers `ERANGE`, and so does this.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn crypt_rn(key: *const u8, salt: *const u8, data: *mut u8, size: i32) -> *mut u8 {
+    if data.is_null() && size > 0 {
+        errno::set_errno(errno::EFAULT);
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `salt` is NULL or, per the C contract, NUL-terminated.
+    let setting = (!salt.is_null()).then(|| unsafe { cstr_slice(salt) });
+    // SAFETY: the caller's `size` bytes at `data`, of which this writes at
+    // most three -- none when `size` is not positive, as when it is NULL.
+    unsafe { write_failure_token(setting.unwrap_or_default(), data, size) };
+    // Negative sizes included.
+    if size < CRYPT_DATA_SIZE as i32 {
+        errno::set_errno(errno::ERANGE);
+        return core::ptr::null_mut();
+    }
+    let result = crypt_r(key, salt, data);
+    // SAFETY: `crypt_r` returned `data`, whose first byte it wrote.
+    if unsafe { *result } == b'*' {
+        core::ptr::null_mut()
+    } else {
+        result
+    }
+}
+
+/// `crypt_ra` — as [`crypt_rn`], into memory from `malloc`: `*data` is NULL
+/// or `malloc`'s, `*size` its size, and either is made `CRYPT_DATA_SIZE`
+/// bytes if it is less.  The caller frees `*data`.  NULL on failure, with
+/// `errno` set, and `*data` still the caller's to free.
+///
+/// NULL `data` or `size` is NULL with `EFAULT`, where libxcrypt faults.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn crypt_ra(
+    key: *const u8,
+    salt: *const u8,
+    data: *mut *mut u8,
+    size: *mut i32,
+) -> *mut u8 {
+    if data.is_null() || size.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return core::ptr::null_mut();
+    }
+    // SAFETY: both non-NULL (checked), the caller's to read and write.
+    unsafe {
+        if (*data).is_null() {
+            let fresh = crate::malloc::malloc(CRYPT_DATA_SIZE);
+            if fresh.is_null() {
+                return core::ptr::null_mut();
+            }
+            *data = fresh;
+            *size = CRYPT_DATA_SIZE as i32;
+        }
+        if *size < CRYPT_DATA_SIZE as i32 {
+            let grown = crate::malloc::realloc(*data, CRYPT_DATA_SIZE);
+            if grown.is_null() {
+                return core::ptr::null_mut();
+            }
+            *data = grown;
+            *size = CRYPT_DATA_SIZE as i32;
+        }
+    }
+    // SAFETY: `*data` is now `CRYPT_DATA_SIZE` bytes of the caller's.
+    let result = crypt_r(key, salt, unsafe { *data });
+    // SAFETY: `crypt_r` returned `*data`, whose first byte it wrote.
+    if unsafe { *result } == b'*' {
+        core::ptr::null_mut()
+    } else {
+        result
+    }
 }
 
 /// `encrypt` — encrypt/decrypt a 64-bit block using DES.
@@ -1295,6 +1419,224 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // crypt_rn and crypt_ra, as libxcrypt 4.4.36's lib/crypt.c has them
+    // -----------------------------------------------------------------------
+
+    /// `bytes` up to its first NUL.
+    fn c_bytes(bytes: &[u8]) -> &[u8] {
+        &bytes[..bytes.iter().position(|&b| b == 0).unwrap()]
+    }
+
+    /// `sizeof (struct crypt_data)`, as the C `int` `crypt_rn` takes.
+    fn data_size() -> i32 {
+        i32::try_from(CRYPT_DATA_SIZE).unwrap()
+    }
+
+    /// `crypt_rn` is `crypt_r` into a whole `struct crypt_data`, but NULL
+    /// on failure where `crypt_r` returns the token -- which is in the
+    /// buffer all the same.
+    #[test]
+    fn crypt_rn_is_crypt_r_with_null_for_a_failure() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut data = std::vec![0x55u8; CRYPT_DATA_SIZE];
+        let got = crypt_rn(
+            b"pw\0".as_ptr(),
+            b"$6$salt$\0".as_ptr(),
+            data.as_mut_ptr(),
+            data_size(),
+        );
+        assert_eq!(got, data.as_mut_ptr());
+        let mut want = buf();
+        let want = hash_into(b"pw", b"$6$salt$", &mut want).unwrap();
+        assert_eq!(c_bytes(&data), want.as_bytes());
+
+        for (key, setting, token, why) in [
+            (&b"pw\0"[..], &b"ab\0"[..], "*0", crate::errno::EINVAL),
+            (b"pw\0", b"*0\0", "*1", crate::errno::EINVAL),
+            (b"pw\0", b"$6$a:b$\0", "*0", crate::errno::EINVAL),
+        ] {
+            data.fill(0x55);
+            crate::errno::set_errno(0);
+            let got = crypt_rn(
+                key.as_ptr(),
+                setting.as_ptr(),
+                data.as_mut_ptr(),
+                data_size(),
+            );
+            assert!(got.is_null(), "{setting:?}");
+            assert_eq!(crate::errno::get_errno(), why, "{setting:?}");
+            assert_eq!(c_bytes(&data), token.as_bytes(), "{setting:?}");
+        }
+        for (key, setting) in [
+            (core::ptr::null(), b"$6$salt$\0".as_ptr()),
+            (b"pw\0".as_ptr(), core::ptr::null()),
+        ] {
+            data.fill(0x55);
+            crate::errno::set_errno(0);
+            assert!(crypt_rn(key, setting, data.as_mut_ptr(), data_size()).is_null());
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!(c_bytes(&data), b"*0");
+        }
+    }
+
+    /// Less than `sizeof (struct crypt_data)` is `ERANGE` -- however little
+    /// the hash would need -- with as much of the token as there is room for.
+    #[test]
+    fn crypt_rn_wants_a_whole_crypt_data() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut data = std::vec![0x55u8; CRYPT_DATA_SIZE];
+        for (size, written) in [
+            (data_size() - 1, &b"*0\0"[..]),
+            (3, b"*0\0"),
+            (2, b"*\0"),
+            (1, b"\0"),
+            (0, b""),
+            (-1, b""),
+            (i32::MIN, b""),
+        ] {
+            data.fill(0x55);
+            crate::errno::set_errno(0);
+            let got = crypt_rn(
+                b"pw\0".as_ptr(),
+                b"$6$salt$\0".as_ptr(),
+                data.as_mut_ptr(),
+                size,
+            );
+            assert!(got.is_null(), "{size}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE, "{size}");
+            assert_eq!(&data[..written.len()], written, "{size}");
+            assert_eq!(data[written.len()], 0x55, "nothing more: {size}");
+        }
+    }
+
+    /// A NULL buffer: `ERANGE` where libxcrypt has no room to write its
+    /// token into and so writes none; `EFAULT` where it faults writing one.
+    #[test]
+    fn crypt_rn_into_null() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (size, want) in [
+            (0, crate::errno::ERANGE),
+            (-7, crate::errno::ERANGE),
+            (1, crate::errno::EFAULT),
+            (data_size(), crate::errno::EFAULT),
+        ] {
+            crate::errno::set_errno(0);
+            let got = crypt_rn(
+                b"pw\0".as_ptr(),
+                b"$6$salt$\0".as_ptr(),
+                core::ptr::null_mut(),
+                size,
+            );
+            assert!(got.is_null(), "{size}");
+            assert_eq!(crate::errno::get_errno(), want, "{size}");
+        }
+    }
+
+    /// `crypt_ra` allocates the `struct crypt_data` when given none, grows
+    /// one that is smaller (a negative size counting as smaller), keeps one
+    /// that is not, and leaves it the caller's to free whatever happens.
+    #[test]
+    fn crypt_ra_allocates_and_grows() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut want = buf();
+        let want = hash_into(b"pw", b"$5$salt$", &mut want)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let ra = |data: &mut *mut u8, size: &mut i32| {
+            crypt_ra(
+                b"pw\0".as_ptr(),
+                b"$5$salt$\0".as_ptr(),
+                core::ptr::from_mut(data),
+                core::ptr::from_mut(size),
+            )
+        };
+
+        let mut data: *mut u8 = core::ptr::null_mut();
+        let mut size = -99;
+        let got = ra(&mut data, &mut size);
+        assert!(!data.is_null());
+        assert_eq!(size, data_size());
+        assert_eq!(got, data);
+        // SAFETY: `got` is `data`'s C string, which crypt_ra wrote.
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(got.cast()) }.to_bytes(),
+            &want[..]
+        );
+        // Enough already: kept, not reallocated.
+        let kept = data;
+        let got = ra(&mut data, &mut size);
+        assert_eq!((data, size, got), (kept, data_size(), kept));
+        // SAFETY: crypt_ra's allocation, freed once.
+        unsafe { crate::malloc::free(data) };
+
+        for given in [16, -1] {
+            let mut data = crate::malloc::malloc(16);
+            assert!(!data.is_null());
+            let mut size = given;
+            let got = ra(&mut data, &mut size);
+            assert_eq!(size, data_size(), "{given}");
+            assert_eq!(got, data, "{given}");
+            // SAFETY: `got` is `data`'s C string, which crypt_ra wrote.
+            assert_eq!(
+                unsafe { core::ffi::CStr::from_ptr(got.cast()) }.to_bytes(),
+                &want[..]
+            );
+            // SAFETY: crypt_ra's reallocation of our allocation, freed once.
+            unsafe { crate::malloc::free(data) };
+        }
+    }
+
+    /// On failure `crypt_ra` is NULL with `errno`, the token in the memory,
+    /// which is still the caller's; NULL `data` or `size` is `EFAULT`, where
+    /// libxcrypt faults.
+    #[test]
+    fn crypt_ra_failures() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut data: *mut u8 = core::ptr::null_mut();
+        let mut size = 0;
+        crate::errno::set_errno(0);
+        let got = crypt_ra(
+            b"pw\0".as_ptr(),
+            b"*0\0".as_ptr(),
+            &raw mut data,
+            &raw mut size,
+        );
+        assert!(got.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert!(!data.is_null());
+        // SAFETY: crypt_ra allocated `size` bytes at `data` and wrote the
+        // token into them.
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(data.cast()) }.to_bytes(),
+            b"*1"
+        );
+        // SAFETY: crypt_ra's allocation, freed once.
+        unsafe { crate::malloc::free(data) };
+
+        crate::errno::set_errno(0);
+        let got = crypt_ra(
+            b"pw\0".as_ptr(),
+            b"$5$salt$\0".as_ptr(),
+            core::ptr::null_mut(),
+            &raw mut size,
+        );
+        assert!(got.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let mut data: *mut u8 = core::ptr::null_mut();
+        crate::errno::set_errno(0);
+        let got = crypt_ra(
+            b"pw\0".as_ptr(),
+            b"$5$salt$\0".as_ptr(),
+            &raw mut data,
+            core::ptr::null_mut(),
+        );
+        assert!(got.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert!(data.is_null(), "nothing allocated");
+    }
+
+    // -----------------------------------------------------------------------
     // MD5 ($1$) — vectors verified against OpenSSL 3.5 `passwd -1`
     // -----------------------------------------------------------------------
 
@@ -1732,6 +2074,36 @@ mod tests {
             setting_into(Method::Sha512, b"012345678", &mut b),
             Some("$6$012345678$")
         );
+    }
+
+    /// `setting_into`'s heads are `crypt_gensalt`'s defaults, so the Rust
+    /// API and the C one ask for the same cost for a new password: each
+    /// writes its own, and this keeps the two from drifting apart.
+    #[test]
+    fn setting_heads_are_gensalts_defaults() {
+        let bytes = [0x5au8; 16];
+        for method in [
+            Method::Md5,
+            Method::Sha256,
+            Method::Sha512,
+            Method::Yescrypt,
+            Method::Scrypt,
+            Method::Bcrypt,
+        ] {
+            let mut out = [0u8; crate::gensalt::CRYPT_GENSALT_OUTPUT_SIZE];
+            let n = crate::gensalt::gensalt_into(
+                Some(method.prefix().as_bytes()),
+                0,
+                Some(&bytes),
+                &mut out,
+            )
+            .unwrap();
+            assert!(
+                out[..n].starts_with(method.setting_head().as_bytes()),
+                "{method:?}: {:?}",
+                core::str::from_utf8(&out[..n])
+            );
+        }
     }
 
     #[test]

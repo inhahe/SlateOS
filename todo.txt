@@ -59113,19 +59113,17 @@ is already waiting, not whether the setter exists.
   into posix; extend crypt_harness.py's KA_SETTINGS with the method's rows
   of ka-table.inc.  (Replaces the DES follow-up of the 2026-05-29 crypt
   entry, deleted as done.)
-
-- **crypt: libxcrypt's API beyond crypt and crypt_r** (posix/src/crypt.rs).
-  crypt_rn, crypt_ra, crypt_gensalt (and _rn, _ra), crypt_checksalt and
-  crypt_preferred_method are missing, and C here sees musl's <crypt.h>, whose
-  struct crypt_data is 260 bytes and declares only the two.  Programs ported
-  from Ubuntu that make their own settings -- shadow-utils' passwd and
-  chpasswd, mkpasswd, PAM's pam_unix -- call crypt_gensalt.  The fix is an
-  overlay <crypt.h> in posix/include with libxcrypt's declarations and its
-  32 KiB struct crypt_data, and the functions; with that header in front,
-  crypt_r's room could become libxcrypt's 384 bytes (design-decisions
-  §1182 says why it is 256 now, and what changes it).  The Rust API's
-  setting_into already writes gensalt's default settings for $y$, $7$ and
-  $2b$.
+  Each method ported also gets its crypt_gensalt (posix/src/gensalt.rs,
+  since 2026-10-06 with crypt_rn, crypt_ra, crypt_checksalt,
+  crypt_preferred_method and posix/include/crypt.h): a row in METHODS with
+  hashes.conf's nrbytes and STRONG, and its gensalt function, from the
+  method's crypt-*.c.  Until then gensalt.rs refuses its prefix (EINVAL)
+  and crypt_checksalt calls its settings CRYPT_SALT_INVALID, which
+  gensalt.rs's libxcrypt_answers test allows for exactly the prefixes
+  METHODS lacks -- so the row is what makes the oracle's answers for it
+  binding.  DES needs more than a row: its prefix is empty, and libxcrypt's
+  get_hashfn matches it by the setting's first two characters being salt
+  characters (or the setting being empty), not by starts_with.
 
 - **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
   ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7

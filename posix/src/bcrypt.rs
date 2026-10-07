@@ -193,6 +193,39 @@ pub(crate) fn is_salt(salt: &[u8]) -> bool {
         && atoi64(salt[21]).is_some_and(|v| v.is_multiple_of(16))
 }
 
+/// `BF_gensalt`: a new `$2a$`, `$2b$` or `$2y$` setting at cost `count` (4
+/// to 31; 0 is the default, 5), salted with the first 16 of `rbytes`.  The
+/// characters written into `out`, with room left for a NUL.  No new `$2x$`:
+/// that is the bug's, kept only to verify.
+pub(crate) fn gensalt(
+    subtype: u8,
+    count: u64,
+    rbytes: &[u8],
+    out: &mut [u8],
+) -> Result<usize, crate::gensalt::Refused> {
+    use crate::gensalt::Refused;
+    let count = if count == 0 { 5 } else { count };
+    // libxcrypt asks for EINVAL's reasons before ERANGE's, here only.
+    if rbytes.len() < 16 || !(4..=31).contains(&count) || !matches!(subtype, b'a' | b'b' | b'y') {
+        return Err(Refused::Invalid);
+    }
+    if out.len() < SETTING_LEN + 1 {
+        return Err(Refused::Range);
+    }
+    let count = count as u8;
+    out[..7].copy_from_slice(&[
+        b'$',
+        b'2',
+        subtype,
+        b'$',
+        b'0' + count / 10,
+        b'0' + count % 10,
+        b'$',
+    ]);
+    encode(&mut out[7..SETTING_LEN], &rbytes[..16]);
+    Ok(SETTING_LEN)
+}
+
 // The hashes themselves are checked against libxcrypt through `crypt`
 // (`crypt.rs`, `libxcrypt_answers`); these check the parts.
 #[cfg(test)]

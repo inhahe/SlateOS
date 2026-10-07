@@ -3133,11 +3133,16 @@ D's to act on once answered).
   adopted from the same list). The Mono 6.14.1 runtime, `mono-sgen`, links
   against our `libc.a` with nothing missing (`scripts/mono-spike/`). It is
   built with cooperative GC suspend, since SlateOS has no per-thread signal
-  masks. Next: the class libraries (.NET assemblies, built by Mono's C#
-  compiler -- the same files on every system), then `mono` running a
-  program on SlateOS. The runtime turns a fault into an exception by
-  rewriting the faulting thread's signal context, which the boot has
-  not yet shown to work for a native program.
+  masks. The class libraries are built natively on the host by
+  `scripts/mono-spike/bcl.sh`. The image carries `/bin/mono`, `mscorlib.dll`,
+  Mono's library map and a test program. C called by name works through
+  `dlsym` over the symbols the runtime exports (design-decisions §1184).
+  **Not yet seen running on SlateOS:** `services/ctest-mono-runs` runs it
+  and waits on lane A's generic rung. The runtime turns a fault into an
+  exception by rewriting the faulting thread's signal context, which no
+  native program here has needed before. Next after it runs: the rest of
+  the class libraries (`System.dll`, `System.Core.dll` ...), and
+  `MonoPosixHelper` linked into the runtime.
 
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;

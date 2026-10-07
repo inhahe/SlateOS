@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**467 programs; 308 on the image, 6 carried inside the kernel.**
+**468 programs; 309 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -499,7 +499,7 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/`, the rootfs recipe's) -- 13
+## Ported programs (`scripts/`, the rootfs recipe's) -- 14
 
 Programs that are no cargo target, each built by its own scripts and
 staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs
@@ -518,6 +518,7 @@ when it has been built on the machine that makes it.
 | `ld.lld` | LLVM 20.1.8's linker, lld. | yes | `scripts/llvm-spike/` |  |
 | `llc` | LLVM 20.1.8's code generator: LLVM IR to an object file. | yes | `scripts/llvm-spike/` |  |
 | `make` | GNU make 4.4.1, the build tool. | yes | `scripts/make-spike/` |  |
+| `mono` | Mono 6.14.1, the .NET runtime: runs .NET programs, JIT-compiled. | yes | `scripts/mono-spike/` |  |
 | `oils-for-unix` | Oils 0.38.0: OSH, which runs bash scripts, and YSH, its newer language. | yes | `scripts/oils-spike/` | `ysh` |
 | `opt` | LLVM 20.1.8's IR optimizer. | yes | `scripts/llvm-spike/` |  |
 | `pkgconf` | pkgconf 2.3.0: the compiler and linker flags an installed library needs. | yes | `scripts/pkgconf-spike/` | `pkg-config` |

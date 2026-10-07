@@ -28,6 +28,36 @@ What configure decided, from its `config.h`: cooperative suspend on
 (`ENABLE_COOP_SUSPEND`), thread-local storage by `__thread`, and
 `sigaction`, `dl_iterate_phdr` and `pthread_attr_getstack` present.
 
+## On the image
+
+| Script | Does | When |
+|---|---|---|
+| `run.sh` | cross-compiles the runtime, then runs `slatelink.sh` | a new Mono version, or a header change |
+| `slatelink.sh` | relinks `mono-sgen` against the current `libc.a` and checks the link: nothing missing, ours not musl's, no interpreter, the SlateOS ABI note. Stages it `--strip-debug` in `build/spike/` | the rootfs recipe runs it when `libc.a` is newer |
+| `bcl.sh` | builds Mono natively on the host, once per version, for its class libraries; compiles `services/ctest-mono-runs/checks.cs` with that build's C# compiler and runs it there first; stages `mscorlib.dll`, `etc/mono/config` and `checks.exe` in `build/spike/mono/` | a new Mono version, or a change to `checks.cs` |
+
+The recipe stages them together as `/bin/mono`, `/lib/mono/4.5/mscorlib.dll`,
+`/etc/mono/config` and `/lib/mono/checks/checks.exe`, or not at all. mono
+finds `lib/` and `etc/` beside its own `bin/` (Mono's `set_dirs`), so the
+image works mounted at `/` or at `/mnt` with nothing set in the
+environment.
+
+`services/ctest-mono-runs` runs `mono --version` and then `checks.exe`. The
+program checks seven things the runtime needs, in order: the JIT, managed
+exceptions, faults turned into exceptions, a collection, a second thread,
+and C called by name. Its output is compared line for line with what the
+same program printed on Linux. It waits on lane A's generic rung
+(`requests/d-a-one-rung-for-every-c-fixture.md`).
+
+C called by name: `DllImport("libc")` is mapped by `/etc/mono/config` to
+`libc.so.6`. `dlopen` answers that name with the program itself, and
+`dlsym` finds the function in the symbol table `mono-sgen` exports, since
+it is linked with `--export-dynamic` (design-decisions §1184). A program can
+reach only the libc functions `mono-sgen` itself links in. They are many
+(4,730 exported symbols), but not all of libc.
+
+## Reproducing
+
 Run `./run.sh` from WSL to reproduce. It is the "try the port before you write
 a line" step from `roadmap-detailed.md`'s *Porting vs. Reimplementing* policy,
 applied to the .NET runtime the operator asked for in design-decisions.md 1050

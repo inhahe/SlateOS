@@ -1176,6 +1176,11 @@ else
     # stands for the two, which are always linked and staged together.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/gdb-slateos.elf" \
         scripts/gdb-spike/slatelink.sh
+    # Mono's relink is seconds: slatelink.sh links the runtime's objects
+    # against the new libc.a and stages mono-sgen again. Its class libraries
+    # are .NET bytecode, which no libc.a change makes stale.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/mono-sgen-slateos.elf" \
+        scripts/mono-spike/slatelink.sh
     # Oils' spec tests are behind when the harness they carry is not the
     # tree's (oils_spec_current). Rebuilding records the Linux expectations
     # again, about seven minutes, which is the point: expectations recorded by
@@ -1528,6 +1533,58 @@ elif [ -e "$GDB_SLATE" ] || [ -e "$GDBSERVER_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $GDB_SLATE not found — /bin/gnu-gdb and /bin/gdbserver will be absent"
     echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/gdb-spike/run.sh)"
+fi
+
+# --- Mono 6.14.1, the .NET runtime, linked against OUR OWN libc --------------
+# The .NET runtime the operator asked for (design-decisions.md §1050): the
+# JIT and virtual machine, mono-sgen, built by scripts/mono-spike/run.sh and
+# relinked against libc.a by its slatelink.sh -- nothing missing and nothing
+# duplicated -- and the class libraries it needs, which scripts/mono-spike/
+# bcl.sh builds on the host (they are .NET bytecode, the same on every
+# system):
+#   /bin/mono                   mono-sgen, without its DWARF (7.6 MB)
+#   /lib/mono/4.5/mscorlib.dll  the one assembly every program needs
+#   /etc/mono/config            Mono's library map: DllImport("libc") is
+#                               libc.so.6, which dlopen answers with the
+#                               program itself (design-decisions §1184)
+#   /lib/mono/checks/checks.exe what services/ctest-mono-runs runs
+# mono finds lib/ and etc/ beside its own bin/ (its set_dirs), so the image
+# works mounted at / or at /mnt with nothing set in the environment.
+#
+# Together or not at all, as CPython and its library are: a runtime without
+# mscorlib dies before running a line of anyone's program. The runtime is
+# judged against libc.a for staleness as bash's is; the libraries never go
+# stale against it.
+# PROGRAM: /bin/mono -- Mono 6.14.1, the .NET runtime: runs .NET programs, JIT-compiled. (scripts/mono-spike/)
+MONO_SLATE="$ROOT_DIR/build/spike/mono-sgen-slateos.elf"
+MONO_LIBS="$ROOT_DIR/build/spike/mono"
+MONO_STALE=0
+if [ -e "$MONO_SLATE" ] && [ -f "$MONO_LIBS/lib/mono/4.5/mscorlib.dll" ] \
+   && [ -f "$MONO_LIBS/etc/mono/config" ] && [ -f "$MONO_LIBS/lib/mono/checks/checks.exe" ]; then
+    mkdir -p "$STAGE/lib/mono/4.5" "$STAGE/lib/mono/checks" "$STAGE/etc/mono"
+    cp -L "$MONO_SLATE" "$STAGE/bin/mono"
+    chmod 0755 "$STAGE/bin/mono"
+    cp "$MONO_LIBS/lib/mono/4.5/mscorlib.dll" "$STAGE/lib/mono/4.5/mscorlib.dll"
+    cp "$MONO_LIBS/etc/mono/config" "$STAGE/etc/mono/config"
+    cp "$MONO_LIBS/lib/mono/checks/checks.exe" "$STAGE/lib/mono/checks/checks.exe"
+    echo "[rootfs] staged Mono 6.14.1 (linked against our libc.a): /bin/mono" \
+         "($(stat -c %s "$STAGE/bin/mono") bytes), mscorlib.dll" \
+         "($(stat -c %s "$STAGE/lib/mono/4.5/mscorlib.dll") bytes)"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$MONO_SLATE" ]; then
+        echo "[rootfs] WARNING: mono-sgen-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/mono-spike/slatelink.sh"
+        MONO_STALE=1
+    fi
+elif [ -e "$MONO_SLATE" ]; then
+    echo "[rootfs] WARNING: $MONO_SLATE is built but its class libraries are not --"
+    echo "[rootfs]          leaving /bin/mono off: without mscorlib.dll it runs nothing. Build them:"
+    echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/mono-spike/bcl.sh"
+else
+    echo "[rootfs] NOTE: $MONO_SLATE not found — /bin/mono will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/mono-spike/run.sh,"
+    echo "[rootfs]        then scripts/mono-spike/bcl.sh for its class libraries)"
 fi
 
 # --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
@@ -2459,6 +2516,22 @@ if [ "$OILS_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/oils-for-unix and /bin/ysh on the image would be built"
         echo "[rootfs]        against a libc that is no longer in the build. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$MONO_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: mono-sgen-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/mono-sgen-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/mono on the image would be built against a libc that"
+        echo "[rootfs]        is no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/mono-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1

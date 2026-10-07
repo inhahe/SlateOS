@@ -415,6 +415,14 @@ INPUT='alice:x\n'; xcheck "$why9" -e -R @ROOT@
 INPUT='alice:tab\there\n'; xcheck "$why9" -e -R @ROOT@
 # The failure token a passphrase of 512 bytes leaves under DES, `*0`.
 long_line 518 >"$DIFF_TMP/p512"; INPUT_FILE=$DIFF_TMP/p512; xcheck "$why9" -c DES -R @ROOT@
+# 8: a value upstream prints raw, ours prints with what is not printable
+# octal-escaped -- inside upstream's own quote marks where it has them -- so a
+# newline cannot forge a second line of diagnostics. A printable value prints
+# as upstream's does, which the cases above compare exactly.
+why8='an unprintable byte in a diagnostic is escaped (difference 8)'
+xcheck "$why8" -c SHA512 -s "$(printf '1\n2')"
+xcheck "$why8" -c "$(printf 'SHA\033[1m512')"
+xcheck "$why8" -R "$(printf 'rel\native')"
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

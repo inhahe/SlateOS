@@ -62,6 +62,11 @@
 //! 8. **Names in diagnostics are quoted for the terminal** (`quoting`), so a
 //!    line of input cannot put escape sequences on the operator's terminal
 //!    through an error message. An ordinary name prints as upstream's does.
+//!    What upstream prints between quote marks of its own -- `invalid numeric
+//!    argument '%s'`, `option '%s' requires an argument`, `invalid chroot path
+//!    '%s'` -- keeps those marks, with what is not printable inside them
+//!    octal-escaped, as `logger` does (design-decisions §1033); so does every
+//!    other value upstream prints bare, the program's own name included.
 //! 9. **A value that is not a hash** -- plain text given to `-e`, the password
 //!    `-c NONE` stores, the `*0` a passphrase of 512 bytes leaves under DES --
 //!    is kept in the database as given. `/etc/shadow`, generated from it,
@@ -77,7 +82,13 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{os_bytes, quoteaf};
+// Names and values from the command line, the environment and the input are
+// printed in upstream's own sentences, with upstream's own quote marks where
+// it has them, and with what is not printable octal-escaped: a name holding a
+// newline must not forge a second line of this program's output. That is
+// `logger`'s answer to the same question (design-decisions §1033), and the
+// only difference from shadow-utils', which prints them raw.
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes, quoteaf};
 use userdb::UserDb;
 
 /// shadow-utils' `E_USAGE`: a command line that cannot be run.
@@ -141,7 +152,7 @@ struct Config {
     /// `-m`: MD5, which `-c MD5` also asks for.
     md5: bool,
     /// `-c`: the method, exactly as typed. `None` without `-c`.
-    method: Option<String>,
+    method: Option<Vec<u8>>,
     /// `-s` was given, whatever became of its value. See [`parse`].
     sflg: bool,
     /// `-s`'s value for SHA-crypt, or upstream's starting value.
@@ -176,8 +187,17 @@ enum Stop {
 impl Config {
     /// Upstream's `IS_CRYPT_METHOD`: `-c` given, and exactly `name`.
     fn method_is(&self, name: &str) -> bool {
-        self.method.as_deref() == Some(name)
+        self.method.as_deref() == Some(name.as_bytes())
     }
+}
+
+/// The method `-c` named, as one of [`METHODS`], or `None` for a name upstream
+/// does not know -- which `check_flags` has refused before anything asks.
+fn known_method(typed: &[u8]) -> Option<&'static str> {
+    METHODS
+        .iter()
+        .copied()
+        .find(|name| name.as_bytes() == typed)
 }
 
 /// Upstream's `process_flags` and `check_flags`.
@@ -194,13 +214,8 @@ impl Config {
 fn parse(args: &[OsString], argv0: &[u8], prog: &[u8]) -> Result<Config, Stop> {
     let mut cfg = Config::default();
     for item in CHPASSWD.parse(args, SHORTS, LONGS) {
-        let item = item.map_err(|e| {
-            Stop::Usage(format!(
-                "{}: {}",
-                String::from_utf8_lossy(argv0),
-                e.sentence
-            ))
-        })?;
+        let item = item
+            .map_err(|e| Stop::Usage(format!("{}: {}", escape_unprintable(argv0), e.sentence)))?;
         let (letter, value) = match &item {
             // Operands are not looked at: upstream never reads past `optind`.
             Opt::Operand(_) => continue,
@@ -209,7 +224,7 @@ fn parse(args: &[OsString], argv0: &[u8], prog: &[u8]) -> Result<Config, Stop> {
         };
         let value = value.map(|v| os_bytes(v).into_owned()).unwrap_or_default();
         match letter {
-            b'c' => cfg.method = Some(String::from_utf8_lossy(&value).into_owned()),
+            b'c' => cfg.method = Some(value),
             b'e' => cfg.encrypted = true,
             b'h' => return Err(Stop::Help),
             b'm' => cfg.md5 = true,
@@ -227,9 +242,9 @@ fn parse(args: &[OsString], argv0: &[u8], prog: &[u8]) -> Result<Config, Stop> {
                 if let Some(target) = target {
                     let Some(n) = getlong(&value) else {
                         return Err(Stop::Usage(format!(
-                            "{}: invalid numeric argument '{}'",
-                            String::from_utf8_lossy(prog),
-                            String::from_utf8_lossy(&value)
+                            "{}: invalid numeric argument {}",
+                            escape_unprintable(prog),
+                            escaped_in_quotes(&value)
                         )));
                     };
                     *target = n;
@@ -257,7 +272,7 @@ fn long_letter(name: &str) -> u8 {
 
 /// Upstream's `check_flags`.
 fn check_flags(cfg: &Config, prog: &[u8]) -> Result<(), Stop> {
-    let prog = String::from_utf8_lossy(prog);
+    let prog = escape_unprintable(prog);
     let cflg = cfg.method.is_some();
     if cfg.sflg && !cflg {
         return Err(Stop::Usage(format!(
@@ -270,10 +285,11 @@ fn check_flags(cfg: &Config, prog: &[u8]) -> Result<(), Stop> {
         )));
     }
     if let Some(method) = &cfg.method
-        && !METHODS.contains(&method.as_str())
+        && known_method(method).is_none()
     {
         return Err(Stop::Usage(format!(
-            "{prog}: unsupported crypt method: {method}"
+            "{prog}: unsupported crypt method: {}",
+            escape_unprintable(method)
         )));
     }
     Ok(())
@@ -354,7 +370,7 @@ fn usage_text(prog: &[u8]) -> String {
          \x20 -s, --sha-rounds              number of rounds for the SHA, BCRYPT\n\
          \x20                               or YESCRYPT crypt algorithms\n\
          \n",
-        String::from_utf8_lossy(prog)
+        escape_unprintable(prog)
     )
 }
 
@@ -387,7 +403,7 @@ struct RootFailure {
 /// reads every word, `argv[0]` and those after `--` included. All of that is
 /// upstream's, and kept for the same reason as `-s`'s order.
 fn root_flag(args: &[OsString], prog: &[u8]) -> Result<Option<Vec<u8>>, RootFailure> {
-    let prog = String::from_utf8_lossy(prog);
+    let prog = escape_unprintable(prog);
     let mut newroot: Option<Vec<u8>> = None;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
@@ -407,8 +423,8 @@ fn root_flag(args: &[OsString], prog: &[u8]) -> Result<Option<Vec<u8>>, RootFail
                 let Some(next) = args.get(i) else {
                     return Err(RootFailure {
                         message: format!(
-                            "{prog}: option '{}' requires an argument",
-                            String::from_utf8_lossy(&arg)
+                            "{prog}: option {} requires an argument",
+                            escaped_in_quotes(&arg)
                         ),
                         status: E_BAD_ARG,
                     });
@@ -431,8 +447,8 @@ fn change_root(newroot: &[u8], prog: &[u8]) -> Result<(), RootFailure> {
         fn setreuid(ruid: u32, euid: u32) -> i32;
         fn setregid(rgid: u32, egid: u32) -> i32;
     }
-    let prog = String::from_utf8_lossy(prog);
-    let shown = String::from_utf8_lossy(newroot);
+    let prog = escape_unprintable(prog);
+    let shown = escape_unprintable(newroot);
     let bad_arg = |message: String| RootFailure {
         message,
         status: E_BAD_ARG,
@@ -452,7 +468,8 @@ fn change_root(newroot: &[u8], prog: &[u8]) -> Result<(), RootFailure> {
     }
     if newroot.first() != Some(&b'/') {
         return Err(bad_arg(format!(
-            "{prog}: invalid chroot path '{shown}', only absolute paths are supported."
+            "{prog}: invalid chroot path {}, only absolute paths are supported.",
+            escaped_in_quotes(newroot)
         )));
     }
     let path = Path::new(std::ffi::OsStr::from_bytes(newroot));
@@ -484,8 +501,8 @@ fn change_root(newroot: &[u8], prog: &[u8]) -> Result<(), RootFailure> {
     Err(RootFailure {
         message: format!(
             "{}: unable to chroot to directory {}: Function not implemented",
-            String::from_utf8_lossy(prog),
-            String::from_utf8_lossy(newroot)
+            escape_unprintable(prog),
+            escape_unprintable(newroot)
         ),
         status: E_BAD_ARG,
     })
@@ -520,6 +537,7 @@ fn setting_request(cfg: &Config) -> Option<SettingRequest> {
         // No `-c`: see deliberate difference 3.
         cfg.method
             .as_deref()
+            .and_then(known_method)
             .unwrap_or(match userdb::PASSWORD_METHOD {
                 posix::crypt::Method::Sha256 => "SHA256",
                 posix::crypt::Method::Yescrypt => "YESCRYPT",
@@ -700,7 +718,7 @@ fn hash_new(
         return Err(format!(
             "Unable to generate a salt from setting \"{}\", check your settings in \
              ENCRYPT_METHOD and the corresponding configuration for your selected hash method.",
-            String::from_utf8_lossy(&request.prefix)
+            escape_unprintable(&request.prefix)
         ));
     };
     let mut hash_buf = posix::crypt::buf();
@@ -761,11 +779,11 @@ fn gettime(now: u64, epoch_var: Option<&[u8]>, err: &mut dyn Write) -> u64 {
         Strtoull::Overflow => complain(err, "strtoull: Numerical result out of range".to_string()),
         Strtoull::NoDigits => complain(
             err,
-            format!("No digits were found: {}", String::from_utf8_lossy(text)),
+            format!("No digits were found: {}", escape_unprintable(text)),
         ),
         Strtoull::Trailing(rest) => complain(
             err,
-            format!("Trailing garbage: {}", String::from_utf8_lossy(rest)),
+            format!("Trailing garbage: {}", escape_unprintable(rest)),
         ),
         Strtoull::Value(epoch) if epoch > now => complain(
             err,
@@ -921,8 +939,8 @@ fn run(
     err: &mut dyn Write,
     world: &mut World<'_>,
 ) -> i32 {
-    let prog_text = String::from_utf8_lossy(prog).into_owned();
-    let db_name = world.db_path.display().to_string();
+    let prog_text = escape_unprintable(prog);
+    let db_name = escape_unprintable(&os_bytes(world.db_path.as_os_str()));
     let request = setting_request(cfg);
 
     // `open_files`: hold the database, then read it.
@@ -1041,7 +1059,7 @@ fn run(
             .get(userdb::field::LOCKED)
             .is_some_and(|v| v.trim() == "true")
         {
-            still_locked.push(String::from_utf8_lossy(name).into_owned());
+            still_locked.push(escape_unprintable(name));
         }
     }
 

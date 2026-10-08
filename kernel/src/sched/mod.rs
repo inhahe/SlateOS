@@ -2245,14 +2245,16 @@ fn spawn_inner(
         return Err(KernelError::InvalidArgument);
     }
 
-    // Cgroup inheritance (Q14 / design-decisions §39): a newly spawned
-    // task joins the *creating* task's resource control group, mirroring
-    // Linux fork/clone semantics (the child inherits the parent's cgroup).
-    // Captured before the no-interrupts critical section below because
-    // `current_task_cgroup` takes the SCHED lock via try_lock and we must
-    // not nest it inside the SCHED.lock() held there.  Defaults to
-    // ROOT_CGROUP during early boot / lock contention, which is correct.
-    let inherit_cgroup = current_task_cgroup();
+    // Cgroup and network namespace inheritance (Q14 / design-decisions §39):
+    // a newly spawned task joins the *creating* task's resource control group
+    // and network namespace, mirroring Linux fork/clone semantics. Read with
+    // a blocking lock, before the no-interrupts critical section below takes
+    // SCHED again: the `try_lock` this used fell back to the root group --
+    // and would have put a container's new thread or child in the host's
+    // network -- whenever the lock was busy. Task 0, the boot, is in both
+    // roots. Until 2026-10-08 the network namespace was not inherited at all
+    // (known-issues A-CONTAINER-CHILDREN-ESCAPE-THEIR-CONTAINER).
+    let (inherit_cgroup, inherit_net_ns) = creator_placement();
 
     // Disable interrupts for the entire task-creation + SCHED-insertion
     // critical section.  Task::new_kernel() allocates a kernel stack
@@ -2268,6 +2270,7 @@ fn spawn_inner(
         let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys, requested_id)?;
         new_task.cpu_affinity = affinity_mask;
         new_task.cgroup_id = inherit_cgroup;
+        new_task.net_ns = inherit_net_ns;
         new_task.ready_since_tick = crate::apic::tick_count();
         // Suspended spawn: create the task non-runnable so it cannot be
         // scheduled until the caller finishes registration and calls admit().
@@ -2770,6 +2773,23 @@ pub fn current_task_cgroup() -> crate::cgroup::CgroupId {
         }
     }
     crate::cgroup::ROOT_CGROUP
+}
+
+/// The current task's cgroup and network namespace, for a task it creates
+/// to join (`spawn_inner`): the roots for task 0 or a task not in the table.
+/// Blocks for the scheduler lock, unlike [`current_task_cgroup`]: a creator
+/// placed in a container must never hand its child the host's by losing a
+/// race for the lock.
+fn creator_placement() -> (crate::cgroup::CgroupId, crate::netns::NetNsId) {
+    let task_id = load_current_task();
+    if task_id == 0 {
+        return (crate::cgroup::ROOT_CGROUP, crate::netns::ROOT_NS);
+    }
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map_or(
+        (crate::cgroup::ROOT_CGROUP, crate::netns::ROOT_NS),
+        |task| (task.cgroup_id, task.net_ns),
+    )
 }
 
 /// Get the network namespace of the current task (non-blocking).

@@ -1968,6 +1968,16 @@ extern "C" fn kernel_main() -> ! {
     );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
+    // The workqueue worker, as soon as tasks can be scheduled preemptively:
+    // the self-test battery below already relies on deferred work -- a
+    // timer's SIGCONT or SIGKILL for a stopped process is carried out by the
+    // work queue (`syscall::handlers::defer_act_on_stopped`), and the ring-3
+    // tests that send one run long before Step 22c, where the worker used to
+    // be spawned. Idempotent; its self-test stays at Step 22c.
+    if let Err(e) = workqueue::init() {
+        serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
+    }
+
     {
         #[inline(never)]
         fn case() {
@@ -8739,15 +8749,10 @@ extern "C" fn kernel_main() -> ! {
                 mm::mempool::self_test()
             });
 
-            // Step 22c: Spawn workqueue worker task.
-            // Provides deferred work execution in full process context (can sleep,
-            // allocate, take locks).  Must be after scheduler (Step 10).
-            match workqueue::init() {
-                Ok(()) => {}
-                Err(e) => {
-                    serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
-                }
-            }
+            // Step 22c: the workqueue worker's self-test. The worker itself --
+            // deferred work in full process context (can sleep, allocate, take
+            // locks) -- is spawned as soon as preemptive scheduling starts, for
+            // the self-test battery's sake (see there).
             selftest::dispatch_debug("Workqueue", selftest::Severity::Diagnostic, || {
                 workqueue::self_test()
             });

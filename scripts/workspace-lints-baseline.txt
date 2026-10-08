@@ -124,7 +124,6 @@ userspace/sanitize
 userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
-userspace/shell
 userspace/ss
 userspace/sysctl
 userspace/syslogd

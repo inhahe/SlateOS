@@ -62,7 +62,10 @@ fn main() {
     println!("[3] Collections (Vec, HashMap)");
     let mut v: Vec<i32> = (1..=10).collect();
     v.sort_by(|a, b| b.cmp(a)); // reverse sort
-    println!("  vec (reversed): {:?}", &v[..5]);
+    // The first five, printed as the slice `&v[..5]` would print them, by a
+    // route that cannot panic however long `v` turns out to be.
+    let first: Vec<&i32> = v.iter().take(5).collect();
+    println!("  vec (reversed): {first:?}");
 
     let mut map = HashMap::new();
     map.insert("os", "our OS");

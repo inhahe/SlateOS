@@ -30029,250 +30029,53 @@ fn cmd_audit(args: &str) {
     }
 }
 
-/// `namespace` / `ns` — manage mount namespaces.
+/// `namespace` / `ns` -- the mount namespaces (`fs::mntns`): each one's id,
+/// the processes in it, the holds on it and its mounts. Made and entered by
+/// processes (`unshare -m`, `setns`), not from here.
 ///
 /// Usage:
-///   namespace list                      - list all namespaces
-///   namespace create NAME [PARENT_ID]   - create child namespace
-///   namespace destroy ID                - destroy namespace
-///   namespace mounts ID                 - list mounts in namespace
-///   namespace mount ID PATH TYPE [ro]   - add mount to namespace
-///   namespace unmount ID PATH           - remove mount from namespace
-///   namespace info ID                   - show namespace details
-///   namespace init                      - initialize namespace subsystem
+///   namespace [list]      - every mount namespace, the system's first
+///   namespace mounts ID   - the mounts in one
 fn cmd_namespace(args: &str) {
-    use crate::fs::mount_ns;
+    use crate::fs::mntns;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
-        let nss = mount_ns::list();
-        if nss.is_empty() {
-            shell_println!("No namespaces (run `namespace init` first).");
-            return;
-        }
-        shell_println!(
-            "{:<4} {:<16} {:>6} {:>6} {:>4}",
-            "ID",
-            "Name",
-            "Parent",
-            "Mounts",
-            "Refs"
-        );
-        shell_println!("{}", "-".repeat(40));
-        for ns in &nss {
-            let parent = ns
-                .parent
-                .map(|p| alloc::format!("{}", p))
-                .unwrap_or_else(|| String::from("-"));
+    match parts.first().copied() {
+        None | Some("list") => {
             shell_println!(
-                "{:<4} {:<16} {:>6} {:>6} {:>4}",
-                ns.id,
-                ns.name,
-                parent,
-                ns.mount_count,
-                ns.refcount
-            );
-        }
-        return;
-    }
-
-    match parts[0] {
-        "init" => {
-            mount_ns::init();
-            shell_println!("Mount namespace subsystem initialized.");
-        }
-
-        "list" | "ls" => {
-            let nss = mount_ns::list();
-            if nss.is_empty() {
-                shell_println!("No namespaces.");
-                return;
-            }
-            shell_println!(
-                "{:<4} {:<16} {:>6} {:>6} {:>4} {}",
+                "{:<6} {:>9} {:>6} {:>7}",
                 "ID",
-                "Name",
-                "Parent",
-                "Mounts",
-                "Refs",
-                "Nested"
+                "Processes",
+                "Holds",
+                "Mounts"
             );
-            shell_println!("{}", "-".repeat(55));
-            for ns in &nss {
-                let parent = ns
-                    .parent
-                    .map(|p| alloc::format!("{}", p))
-                    .unwrap_or_else(|| String::from("-"));
+            for ns in mntns::list() {
                 shell_println!(
-                    "{:<4} {:<16} {:>6} {:>6} {:>4} {}",
+                    "{:<6} {:>9} {:>6} {:>7}",
                     ns.id,
-                    ns.name,
-                    parent,
-                    ns.mount_count,
-                    ns.refcount,
-                    if ns.allow_nested { "yes" } else { "no" }
+                    ns.processes,
+                    ns.holds,
+                    ns.mounts
                 );
             }
         }
-
-        "create" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: namespace create NAME [PARENT_ID]");
-                set_exit(1);
-                return;
-            }
-            let name = parts[1];
-            // The guessed value *is* the root of the tree being nested into:
-            // an unreadable `PARENT_ID` used to mean `ROOT_NAMESPACE`, so
-            // `namespace create sandbox 1O` built the namespace directly under
-            // the root -- outside the container it was meant to be inside --
-            // and printed the same success line as the nesting that was asked
-            // for. Absence still means root, which is documented; a word that
-            // could not be read no longer does.
-            let Some(parent) = optional_num::<u64>(
-                &parts,
-                2,
-                "namespace",
-                "create",
-                "parent namespace id",
-                mount_ns::ROOT_NAMESPACE,
-            ) else {
-                return;
-            };
-            match mount_ns::create(parent, name) {
-                Ok(id) => shell_println!("Namespace '{}' created (id={})", name, id),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-
-        "destroy" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: namespace destroy ID");
-                set_exit(1);
-                return;
-            }
-            if let Ok(id) = parts[1].parse::<u64>() {
-                match mount_ns::destroy(id) {
-                    Ok(()) => shell_println!("Namespace {} destroyed.", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Invalid ID: {}", parts[1]);
-                set_exit(1);
-            }
-        }
-
-        "mounts" => {
-            if parts.len() < 2 {
+        Some("mounts") => {
+            let Some(id) = parts.get(1).and_then(|p| p.parse::<u64>().ok()) else {
                 shell_println!("Usage: namespace mounts ID");
                 set_exit(1);
                 return;
-            }
-            if let Ok(id) = parts[1].parse::<u64>() {
-                match mount_ns::ns_mounts(id) {
-                    Ok(mounts) => {
-                        shell_println!("{:<24} {:<12} {}", "Mount point", "Type", "Flags");
-                        shell_println!("{}", "-".repeat(42));
-                        for m in &mounts {
-                            let flags = if m.readonly { "ro" } else { "rw" };
-                            shell_println!(
-                                "{:<24} {:<12} {}",
-                                m.mount_path.display(),
-                                m.fs_type,
-                                flags
-                            );
-                        }
-                        shell_println!("({} mounts)", mounts.len());
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Invalid ID: {}", parts[1]);
-                set_exit(1);
-            }
-        }
-
-        "mount" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: namespace mount ID PATH TYPE [ro]");
+            };
+            if id != mntns::ROOT && crate::fs::Vfs::mount_count_in(id) == 0 {
+                shell_println!("No mount namespace {}", id);
                 set_exit(1);
                 return;
             }
-            if let Ok(id) = parts[1].parse::<u64>() {
-                let ro = parts.get(4) == Some(&"ro");
-                match mount_ns::ns_mount(id, parts[2], parts[3], ro) {
-                    Ok(()) => {
-                        shell_println!("Mounted {} ({}) in namespace {}", parts[2], parts[3], id)
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Invalid ID: {}", parts[1]);
-                set_exit(1);
+            for (path, fs_type, options) in crate::fs::Vfs::mounts_full_in(id) {
+                shell_println!("{} {} {}", path.display(), fs_type, options.to_string());
             }
         }
-
-        "unmount" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: namespace unmount ID PATH");
-                set_exit(1);
-                return;
-            }
-            if let Ok(id) = parts[1].parse::<u64>() {
-                match mount_ns::ns_unmount(id, parts[2]) {
-                    Ok(()) => shell_println!("Unmounted {} from namespace {}", parts[2], id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Invalid ID: {}", parts[1]);
-                set_exit(1);
-            }
-        }
-
-        "info" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: namespace info ID");
-                set_exit(1);
-                return;
-            }
-            if let Ok(id) = parts[1].parse::<u64>() {
-                match mount_ns::info(id) {
-                    Ok(i) => {
-                        shell_println!("Namespace {}:", i.id);
-                        shell_println!("  Name:       {}", i.name);
-                        shell_println!("  Parent:     {:?}", i.parent);
-                        shell_println!("  Mounts:     {}", i.mount_count);
-                        shell_println!("  Refcount:   {}", i.refcount);
-                        shell_println!("  Nested OK:  {}", i.allow_nested);
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Invalid ID: {}", parts[1]);
-                set_exit(1);
-            }
-        }
-
         _ => {
-            shell_println!("Usage: namespace [list|create|destroy|mounts|mount|unmount|info|init]");
+            shell_println!("Usage: namespace [list|mounts ID]");
             set_exit(1);
         }
     }

@@ -2077,13 +2077,8 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
         return Err(errno::EINVAL);
     }
 
-    // Namespaces (`namespace_request`): CLONE_NEWNS among the kinds not
-    // built yet, which clone3 answers EINVAL as for the rest; and none for a
-    // thread, as `clone_namespaces` says for clone(2).
-    let kinds = namespace_request(flags_user)?;
-    if kinds != 0 && flags_user & clone_flags::CLONE_THREAD != 0 {
-        return Err(errno::EINVAL);
-    }
+    // Namespaces: as clone(2) judges them (`clone_namespaces`).
+    clone_namespaces(flags_user)?;
 
     // Translate stack base + size to clone(2)'s "stack top" register.
     // clone(2) wants the value of the new RSP at child entry; on x86_64
@@ -2899,12 +2894,17 @@ fn namespace_request(flags: u64) -> Result<u64, i32> {
 /// The namespace bits of a `clone` or `clone3` flag word ([`namespace_request`]):
 /// what this kernel can make, for whom, for a new process (`proc::fork`
 /// makes them). A thread shares its process's namespaces here, where Linux
-/// lets it have its own, so a thread asking for one is `EINVAL`.
-/// `CLONE_NEWNS` keeps its own answer, `ENOSYS`, at its call sites. Until
-/// 2026-10-08 `clone(2)` took every namespace bit and made nothing, so a
-/// program believed itself isolated and was not. `Err(errno)`.
+/// lets it have its own (and refuses `CLONE_NEWNS` with the `CLONE_FS` a
+/// thread shares), so a thread asking for one is `EINVAL`. Until 2026-10-08
+/// `clone(2)` took every namespace bit but `CLONE_NEWNS` and made nothing, so
+/// a program believed itself isolated and was not. `Err(errno)`.
 fn clone_namespaces(flags: u64) -> Result<(), i32> {
-    let kinds = namespace_request(flags & !clone_flags::CLONE_NEWNS)?;
+    // A new mount namespace and a filesystem context shared with the parent
+    // contradict each other: Linux's `copy_process` refuses the pair first.
+    if flags & clone_flags::CLONE_NEWNS != 0 && flags & clone_flags::CLONE_FS != 0 {
+        return Err(errno::EINVAL);
+    }
+    let kinds = namespace_request(flags)?;
     if kinds != 0 && flags & clone_flags::CLONE_THREAD != 0 {
         return Err(errno::EINVAL);
     }
@@ -2936,11 +2936,11 @@ fn linux_clone_inner(
         // CLONE_VFORK on a thread-creation clone is nonsensical — the
         // new "child" shares the address space, so blocking the
         // parent until the child execs/exits is meaningless.  Reject
-        // unambiguously.  CLONE_PARENT / CLONE_NEWNS need
-        // infrastructure (PID reparenting, mount namespaces) we don't
-        // have yet. (CLONE_PTRACE is honoured: `ptrace::attach_new`.)
-        const UNSUPPORTED_BITS: u64 =
-            clone_flags::CLONE_VFORK | clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS;
+        // unambiguously.  CLONE_PARENT needs infrastructure (PID
+        // reparenting) we don't have yet. (CLONE_PTRACE is honoured:
+        // `ptrace::attach_new`; CLONE_NEWNS, as every namespace, is
+        // refused for a thread by `clone_namespaces` before this.)
+        const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK | clone_flags::CLONE_PARENT;
         if (flags & UNSUPPORTED_BITS) != 0 {
             return -i64::from(errno::ENOSYS);
         }
@@ -3077,10 +3077,10 @@ fn linux_clone_inner(
         return -i64::from(errno::ENOSYS);
     }
 
-    // CLONE_PARENT / CLONE_NEWNS need infrastructure we don't have (PID
-    // reparenting, mount namespaces) — reject up-front. (CLONE_PTRACE is
-    // honoured: `ptrace::attach_new`.)
-    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS;
+    // CLONE_PARENT needs infrastructure we don't have (PID reparenting) —
+    // reject up-front. (CLONE_PTRACE is honoured: `ptrace::attach_new`;
+    // CLONE_NEWNS gives the child a mount namespace, `proc::fork`.)
+    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_PARENT;
     if flags & UNSUPPORTED_BITS != 0 {
         return -i64::from(errno::ENOSYS);
     }
@@ -59003,11 +59003,12 @@ fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
 
 /// TD4 extraction: clone() CLONE_VFORK/CLONE_PARENT routing self-test.
 ///
-/// Proves CLONE_VFORK and CLONE_PTRACE no longer return -ENOSYS up-front
-/// (the one degenerates to plain fork, the other is honoured by
-/// `ptrace::attach_new`; both reach fork::fork_process, which yields -ESRCH
-/// in the self-test context), while CLONE_PARENT / CLONE_NEWNS still reject
-/// with -ENOSYS (PID reparenting / namespace infrastructure is missing).
+/// Proves CLONE_VFORK, CLONE_PTRACE and CLONE_NEWNS no longer return
+/// -ENOSYS up-front (the first degenerates to plain fork, the second is
+/// honoured by `ptrace::attach_new`, the third gives the child a mount
+/// namespace; all reach fork::fork_process, which yields -ESRCH in the
+/// self-test context), while CLONE_PARENT still rejects with -ENOSYS (PID
+/// reparenting is missing).
 /// Self-contained — references only module-level items. See
 /// [`self_test_errno_mapping`] for the TD4 rationale.
 #[inline(never)]
@@ -59038,6 +59039,7 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
     for (name, bit) in &[
         ("CLONE_VFORK", clone_flags::CLONE_VFORK),
         ("CLONE_PTRACE", clone_flags::CLONE_PTRACE),
+        ("CLONE_NEWNS", clone_flags::CLONE_NEWNS),
     ] {
         f.arg0 = clone_flags::SIGCHLD | *bit;
         match dispatch_linux_with_frame(&mut f) {
@@ -59055,21 +59057,16 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
         }
     }
 
-    for (name, bit) in &[
-        ("CLONE_PARENT", clone_flags::CLONE_PARENT),
-        ("CLONE_NEWNS", clone_flags::CLONE_NEWNS),
-    ] {
-        f.arg0 = clone_flags::SIGCHLD | *bit;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ENOSYS) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone({}) → {:?} (expected -ENOSYS)",
-                    name,
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
+    // CLONE_PARENT still has no reparenting behind it.
+    f.arg0 = clone_flags::SIGCHLD | clone_flags::CLONE_PARENT;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == linux_err(errno::ENOSYS).value => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone(CLONE_PARENT) → {:?} (expected -ENOSYS)",
+                other
+            );
+            return Err(KernelError::InternalError);
         }
     }
     Ok(())

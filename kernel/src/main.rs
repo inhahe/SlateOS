@@ -3691,6 +3691,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_mount(),
     );
+    // Mount namespaces: unshare, clone and setns with CLONE_NEWNS, a table
+    // of one's own (fs::mntns).
+    selftest::dispatch_debug(
+        "Linux mount namespaces (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mount_namespaces(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).
@@ -6242,9 +6249,10 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Power", selftest::Severity::Diagnostic, || {
                 fs::power::self_test()
             });
-            // Mount namespace self-test.
+            // Mount namespaces: a copy of the table, a private mount, freed
+            // with the last hold (fs::mntns).
             selftest::dispatch_debug("Mount namespace", selftest::Severity::Diagnostic, || {
-                fs::mount_ns::self_test()
+                fs::mntns::self_test()
             });
             // The byte-oriented path lexer, which the VFS is being converted onto.
             // If `Path::components` or `Path::starts_with` is wrong then every

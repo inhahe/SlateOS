@@ -771,6 +771,17 @@ fn fork_process_clone_inner(
 
     let child_pid = build_fork_child(parent_pid)?;
 
+    // CLONE_NEWNS: the child in a new mount namespace, a copy of the table
+    // it inherited (`crate::fs::mntns`); the clone call has checked the
+    // caller may. Before the child has a thread, so it never resolves a
+    // path in its parent's.
+    if (clone_tid.flags & clone_flags::CLONE_NEWNS) != 0
+        && let Err(e) = crate::fs::mntns::unshare(child_pid)
+    {
+        pcb::destroy(child_pid);
+        return Err(e);
+    }
+
     // CLONE_NEWUTS: the child in a new UTS namespace, a copy of the one it
     // inherited (`crate::utsns`); the clone call has checked the caller may.
     // Before the child has a thread, so it never runs in its parent's.

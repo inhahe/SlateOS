@@ -2196,6 +2196,10 @@ pub fn fork_create(
     // `utsns` never takes: the order is one way only.
     crate::utsns::retain(uts_ns);
     drop(table);
+    // Its parent's mount namespace (`crate::fs::mntns`, leaf locks only).
+    // The child has no thread yet, so nothing resolves a path for it before
+    // this. `clone(CLONE_NEWNS)` moves it to a copy afterwards.
+    crate::fs::mntns::inherit(parent_pid, pid);
 
     // Bump the backing-file reference for each file-backed VMA the child
     // inherited.  Done with the process-table lock released — the open-file
@@ -5552,6 +5556,9 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     let pml4_phys = proc.pml4_phys;
     // Its hold on its UTS namespace, which goes with the last.
     crate::utsns::release(proc.uts_ns);
+    // And on its mount namespace (`crate::fs::mntns`), whose table goes with
+    // the last: no process-table lock is held here.
+    crate::fs::mntns::process_gone(pid);
     // The rest of the record holds nothing that needs a lock to release.
     drop(proc);
     destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);

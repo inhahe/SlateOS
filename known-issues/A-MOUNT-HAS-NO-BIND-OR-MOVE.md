@@ -16,12 +16,12 @@ are still refused or ignored, and container tools use some of them.
 |---|---|---|
 | Bind mounts (`MS_BIND`, `mount --bind`), the backbone of container volumes | `EINVAL` | a mount that is a subtree of another filesystem: a `FileSystem` that forwards to the source's with a path prefix, sharing its `fs_id`, so files are the same files |
 | Moving a mount (`MS_MOVE`) | `EINVAL` | the mount's and its sub-mounts' paths rewritten under the table's lock, as `Vfs::pivot_mounts` rewrites them |
-| `MS_SHARED` (shared propagation) | `EINVAL` | propagation between mount namespaces: no mount here propagates to another, so private, slave and unbindable are taken as what every mount already is |
+| `MS_SHARED` (shared propagation) | `EINVAL` | propagation between mount namespaces (`fs::mntns`, design-decisions 1555): no mount here propagates to another, so private, slave and unbindable are taken as what every mount already is |
 | A second mount over a mount point (stacking) | `EBUSY` | the table allows one mount per path; Linux stacks them, the last on top |
 | `MS_NODEV` | taken, not enforced | device nodes on such a mount refused at open |
 | The `data` options (`size=`, `mode=`, `uid=` for tmpfs...) | not read | parsing per type |
 | `umount2("/")` | `EBUSY` | Linux remounts the caller's root read-only and answers 0; refusing was judged safer than making the system's root read-only on request |
-| `pivot_root(2)` | `EPERM`, root's included | the mount namespace work: `Vfs::pivot_root` exists for the boot and needs Linux's argument rules (`put_old` under `new_root`, `pivot_root(".", ".")`) |
+| `pivot_root(2)` | `EPERM`, root's included | Linux's argument rules over the caller's mount table (`Vfs::pivot_mounts` already works on it, for the boot): `put_old` at or under `new_root`, and `pivot_root(".", ".")`, which runc uses |
 
 **Test.** `spawn::self_test_linux_mount` (`build/mounttest.c`, checked
 against Linux 6.6 as root) covers what works.

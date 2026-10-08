@@ -1893,6 +1893,7 @@ fn spawn_process_inner(
     // And in its parent's UTS namespace, as a fork's child is.
     if options.parent != 0 {
         pcb::inherit_uts_ns(options.parent, pid);
+        crate::fs::mntns::inherit(options.parent, pid);
     }
 
     // Step 5d: Apply fd inheritance map.
@@ -24442,6 +24443,121 @@ pub fn self_test_linux_mount() -> KernelResult<()> {
         "[spawn]   Linux mount and umount2 (ring 3: a tmpfs mounted and listed, remounted \
          read-only and back, propagation, EBUSY then unmounted, a lazy unmount, MNT_EXPIRE, the \
          refusals, EPERM without root): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of mount namespaces through the Linux ABI:
+/// [`elf::build_linux_mount_namespaces_test_elf`] (`build/mntnstest.c`), run
+/// as root. `/proc/self/ns/mnt` as a handle; `unshare(CLONE_NEWNS)` and the
+/// private remount of `/`; a tmpfs of its own that a fork child shares until
+/// it `setns`'s out (and is put at `/`); `setns` out and back;
+/// `clone(CLONE_NEWNS)`; `EPERM` without root (`crate::fs::mntns`).
+pub fn self_test_linux_mount_namespaces() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mount namespaces (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mount_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mntns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make namespaces are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mntns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mount namespaces spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => {
+                "a fork child did not share its parent's mount namespace, or setns did not take \
+                 it out of it and put it at /"
+            }
+            Some(0x34 | 0x35) => "clone(CLONE_NEWNS) did not give the child a namespace and mount",
+            Some(0x36 | 0x37) => "a process that gave up root could unshare a mount namespace",
+            Some(0x40 | 0x41) => "/proc/self/ns/mnt did not open to a handle NS_GET_NSTYPE knows",
+            Some(0x42) => "its directory under /tmp could not be made",
+            Some(0x43..=0x46) => {
+                "unshare(CLONE_NEWNS) did not give a namespace of its own, or the private \
+                 remount of / was refused"
+            }
+            Some(0x47 | 0x48) => "a tmpfs in the new namespace did not mount or hold a file",
+            Some(0x49 | 0x4a) => "the fork child did not end 0x2B, or its setns moved its parent",
+            Some(0x4b | 0x4c) => "setns did not take it out of its namespace and back",
+            Some(0x4d..=0x50) => {
+                "the clone(CLONE_NEWNS) child's mount was seen by its parent, or CLONE_FS with \
+                 CLONE_NEWNS was taken"
+            }
+            Some(0x51) => "the unprivileged child did not end 0x2D",
+            Some(0x52..=0x54) => {
+                "its mount did not come off, or it could not go home and remove its directory"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Every namespace it made went with it, and the system's table is as it
+    // was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- {} namespaces and {} system mounts \
+             before, {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mount namespaces (ring 3: /proc/self/ns/mnt, unshare and a private /, a \
+         mount of its own, setns out and back, clone(CLONE_NEWNS), refused without root, every \
+         namespace freed): OK"
     );
     Ok(())
 }

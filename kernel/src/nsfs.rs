@@ -10,8 +10,9 @@
 //! (`ipc::cleanup_handles`, `proc::fork`).
 //!
 //! The raw handle is the kind in the top byte and the namespace's id below
-//! it ([`encode`], [`decode`]). One kind exists so far, [`NsKind::Uts`]
-//! (`crate::utsns`); the others follow as they are built.
+//! it ([`encode`], [`decode`]). Two kinds exist so far: [`NsKind::Mnt`]
+//! (`crate::fs::mntns`) and [`NsKind::Uts`] (`crate::utsns`); the others
+//! follow as they are built.
 
 use crate::error::{KernelError, KernelResult};
 use crate::sync::Mutex;
@@ -20,6 +21,8 @@ use alloc::string::String;
 /// The kinds of namespace a handle can name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NsKind {
+    /// A mount namespace (`crate::fs::mntns`): the mount table.
+    Mnt,
     /// A UTS namespace (`crate::utsns`): host and domain names.
     Uts,
 }
@@ -29,6 +32,7 @@ impl NsKind {
     const fn tag(self) -> u64 {
         match self {
             Self::Uts => 1,
+            Self::Mnt => 2,
         }
     }
 
@@ -36,6 +40,7 @@ impl NsKind {
     const fn from_tag(tag: u64) -> Option<Self> {
         match tag {
             1 => Some(Self::Uts),
+            2 => Some(Self::Mnt),
             _ => None,
         }
     }
@@ -44,6 +49,7 @@ impl NsKind {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Mnt => "mnt",
             Self::Uts => "uts",
         }
     }
@@ -52,6 +58,7 @@ impl NsKind {
     #[must_use]
     pub fn from_name(name: &[u8]) -> Option<Self> {
         match name {
+            b"mnt" => Some(Self::Mnt),
             b"uts" => Some(Self::Uts),
             _ => None,
         }
@@ -61,13 +68,14 @@ impl NsKind {
     #[must_use]
     pub const fn clone_flag(self) -> u64 {
         match self {
+            Self::Mnt => 0x0002_0000,
             Self::Uts => 0x0400_0000,
         }
     }
 }
 
 /// The kinds `/proc/<pid>/ns/` lists, in Linux's order.
-pub const KINDS: &[NsKind] = &[NsKind::Uts];
+pub const KINDS: &[NsKind] = &[NsKind::Mnt, NsKind::Uts];
 
 /// The `CLONE_NEW*` bits of every kind this kernel has: what `unshare`,
 /// `clone` and a pidfd's `setns` may ask for.
@@ -99,6 +107,7 @@ pub const fn decode(raw: u64) -> Option<(NsKind, u64)> {
 #[must_use]
 pub fn of_process(kind: NsKind, pid: crate::proc::pcb::ProcessId) -> Option<u64> {
     match kind {
+        NsKind::Mnt => crate::proc::pcb::state(pid).map(|_| crate::fs::mntns::of_process(pid)),
         NsKind::Uts => crate::proc::pcb::uts_ns(pid),
     }
 }
@@ -111,6 +120,10 @@ pub fn of_process(kind: NsKind, pid: crate::proc::pcb::ProcessId) -> Option<u64>
 /// `NoSuchProcess`; `ResourceExhausted` past the kind's limit.
 pub fn unshare(pid: crate::proc::pcb::ProcessId, kind: NsKind) -> KernelResult<()> {
     match kind {
+        NsKind::Mnt => {
+            crate::proc::pcb::state(pid).ok_or(KernelError::NoSuchProcess)?;
+            crate::fs::mntns::unshare(pid)
+        }
         NsKind::Uts => {
             let from = crate::proc::pcb::uts_ns(pid).ok_or(KernelError::NoSuchProcess)?;
             let id = crate::utsns::create_from(from)?;
@@ -120,7 +133,9 @@ pub fn unshare(pid: crate::proc::pcb::ProcessId, kind: NsKind) -> KernelResult<(
 }
 
 /// Put process `pid` in namespace `id` of `kind`, holding it -- `setns`. The
-/// caller has checked that it may.
+/// caller has checked that it may. A mount namespace entered leaves the
+/// process at its root, its working directory `/`, as Linux's `mntns_install`
+/// does: the old one may not exist in the new table.
 ///
 /// # Errors
 ///
@@ -132,6 +147,11 @@ pub fn enter(pid: crate::proc::pcb::ProcessId, kind: NsKind, id: u64) -> KernelR
         return Err(KernelError::NotFound);
     }
     match kind {
+        NsKind::Mnt => {
+            crate::proc::pcb::state(pid).ok_or(KernelError::NoSuchProcess)?;
+            crate::fs::mntns::set_process(pid, id);
+            crate::proc::pcb::set_cwd(pid, alloc::vec![b'/'])
+        }
         NsKind::Uts => crate::proc::pcb::set_uts_ns(pid, id),
     }
 }
@@ -139,6 +159,7 @@ pub fn enter(pid: crate::proc::pcb::ProcessId, kind: NsKind, id: u64) -> KernelR
 /// One more hold on the namespace `raw` names; `false` if it is gone.
 pub fn retain(raw: u64) -> bool {
     match decode(raw) {
+        Some((NsKind::Mnt, id)) => crate::fs::mntns::retain(id),
         Some((NsKind::Uts, id)) => crate::utsns::retain(id),
         None => false,
     }
@@ -146,25 +167,29 @@ pub fn retain(raw: u64) -> bool {
 
 /// One hold on the namespace `raw` names given up.
 pub fn release(raw: u64) {
-    if let Some((NsKind::Uts, id)) = decode(raw) {
-        crate::utsns::release(id);
+    match decode(raw) {
+        Some((NsKind::Mnt, id)) => crate::fs::mntns::release(id),
+        Some((NsKind::Uts, id)) => crate::utsns::release(id),
+        None => {}
     }
 }
 
 /// The inode number Linux reports for a namespace: `st_ino` of its file and
-/// the `N` in its link text. The root namespaces' are Linux's constants
-/// (`PROC_UTS_INIT_INO` is `0xEFFF_FFFE`, 4026531838), so a program that
-/// knows them recognises the root; another's is a number no root has.
+/// the `N` in its link text, one number space for every kind, as Linux's.
+/// The root UTS namespace's is Linux's constant (`PROC_UTS_INIT_INO`,
+/// `0xEFFF_FFFE`, 4026531838), so a program that knows it recognises the
+/// root; the root mount namespace's is the first number Linux hands out
+/// (`PROC_DYNAMIC_FIRST`, 4026531840), which its own boot's mount namespace
+/// gets. Any other is a number above both, the kind in its low three bits.
 #[must_use]
 pub const fn inum(kind: NsKind, id: u64) -> u64 {
+    const DYNAMIC_FIRST: u64 = 0xF000_0000;
     match kind {
-        NsKind::Uts => {
-            if id == crate::utsns::ROOT_UTS {
-                0xEFFF_FFFE
-            } else {
-                0xF000_0000_u64.wrapping_add(id)
-            }
-        }
+        NsKind::Uts if id == crate::utsns::ROOT_UTS => 0xEFFF_FFFE,
+        NsKind::Mnt if id == crate::fs::mntns::ROOT => DYNAMIC_FIRST,
+        _ => DYNAMIC_FIRST
+            .wrapping_add(id.wrapping_mul(8))
+            .wrapping_add(kind.tag()),
     }
 }
 
@@ -204,6 +229,10 @@ pub fn self_test() -> KernelResult<()> {
         && inum(NsKind::Uts, crate::utsns::ROOT_UTS) == 4_026_531_838
         && link_text(NsKind::Uts, crate::utsns::ROOT_UTS) == "uts:[4026531838]"
         && NsKind::from_name(b"uts") == Some(NsKind::Uts)
+        && NsKind::from_name(b"mnt") == Some(NsKind::Mnt)
+        && decode(encode(NsKind::Mnt, 7)) == Some((NsKind::Mnt, 7))
+        && inum(NsKind::Mnt, crate::fs::mntns::ROOT) == 4_026_531_840
+        && inum(NsKind::Mnt, 1) != inum(NsKind::Uts, 1)
         && NsKind::from_name(b"net").is_none();
     if !ok {
         crate::serial_println!("[nsfs]   FAIL: a handle's encoding or a link's text is wrong");

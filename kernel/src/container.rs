@@ -10,7 +10,9 @@
 //! - **PID namespace**: isolated PID number space (PID 1 inside container)
 //! - **User namespace**: UID/GID remapping (rootless containers)
 //! - **Network namespace**: isolated network stack (IP, routing, firewall)
-//! - **Mount namespace**: isolated filesystem view (already in fs::mount_ns)
+//! - **Filesystem view**: the container's root, volumes and read-only root
+//!   (`ipc::namespace`'s jail), not a Linux mount namespace (`fs::mntns`)
+//! - **UTS namespace**: its own host name (`crate::utsns`)
 //! - **Cgroup**: CPU, memory, and I/O resource limits
 //!
 //! The container manager creates and destroys these as a unit, ensuring

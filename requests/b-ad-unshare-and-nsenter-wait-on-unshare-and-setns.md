@@ -69,5 +69,5 @@ call (`requests/a-d-the-namespace-calls-have-native-numbers.md`). So
 `unshare --uts` and `nsenter --uts` can work once lane D wires those; every
 other kind still answers `EINVAL` (`EPERM` to a caller without the
 privilege), never a namespace that is not there. What remains is listed in
-`known-issues/A-ONLY-THE-UTS-NAMESPACE-HAS-LINUX-CALLS.md`. This file stays
+`known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`. This file stays
 open until the rest of the kinds land.

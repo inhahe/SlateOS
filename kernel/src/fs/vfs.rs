@@ -1491,6 +1491,12 @@ struct MountPoint {
     /// Counted under the mount table's lock, which is what keeps an open
     /// racing an unmount from slipping between the check and the removal.
     objects: usize,
+    /// This entry's own id, never reused: what a held file records to give
+    /// its hold back to ([`FileObject::mnt_id`]). A mount namespace's copy of
+    /// a mount is another entry with another id, as Linux gives each
+    /// namespace's copy its own mount ID, while `fs_id` -- the filesystem's --
+    /// is the same in every copy.
+    mnt_id: u64,
     /// Set by a first `umount2(MNT_EXPIRE)` (which answers `EAGAIN`),
     /// cleared when a file is held through the mount: a second
     /// `MNT_EXPIRE` with it still set unmounts ([`Vfs::unmount_expire`]).
@@ -1510,6 +1516,10 @@ struct MountPoint {
 pub struct FileObject {
     fs: MountedFs,
     fs_id: u64,
+    /// The mount table entry the hold was taken through
+    /// ([`MountPoint::mnt_id`]): the one it counts against and gives back
+    /// to, and whose options (read-only) govern writes through it.
+    mnt_id: u64,
     ino: u64,
 }
 
@@ -1584,18 +1594,25 @@ fn release_hold(obj: &FileObject) {
             &name,
         );
     }
-    release_mount_hold(obj.fs_id);
+    release_mount_hold(obj.mnt_id);
 }
 
-/// Give back one hold on mount `fs_id` (`MountPoint::objects`). The last
-/// hold on a lazily unmounted one ([`Vfs::unmount_detach`]) finishes it.
-fn release_mount_hold(fs_id: u64) {
+/// Give back one hold on mount table entry `mnt_id` (`MountPoint::objects`).
+/// The last hold on a lazily unmounted one ([`Vfs::unmount_detach`])
+/// finishes it.
+fn release_mount_hold(mnt_id: u64) {
     let finished = {
         let mut vfs = VFS.lock();
-        if let Some(mp) = vfs.mounts.iter_mut().find(|m| m.fs_id == fs_id) {
+        let inner = &mut *vfs;
+        if let Some(mp) = inner
+            .root
+            .iter_mut()
+            .chain(inner.others.values_mut().flatten())
+            .find(|m| m.mnt_id == mnt_id)
+        {
             mp.objects = mp.objects.saturating_sub(1);
             None
-        } else if let Some(i) = vfs.detached.iter().position(|m| m.fs_id == fs_id) {
+        } else if let Some(i) = vfs.detached.iter().position(|m| m.mnt_id == mnt_id) {
             let last = vfs.detached.get_mut(i).is_some_and(|mp| {
                 mp.objects = mp.objects.saturating_sub(1);
                 mp.objects == 0
@@ -1611,20 +1628,30 @@ fn release_mount_hold(fs_id: u64) {
     }
 }
 
-/// The mount `fs_id` names, in the table or detached and still held: a held
-/// file's mount, which a lazy unmount does not take from it.
-fn held_mount(vfs: &VfsInner, fs_id: u64) -> Option<&MountPoint> {
-    vfs.mounts
-        .iter()
-        .chain(vfs.detached.iter())
-        .find(|m| m.fs_id == fs_id)
+/// The mount table entry `mnt_id` names, in a table or detached and still
+/// held: a held file's mount, which a lazy unmount does not take from it.
+fn held_mount(vfs: &VfsInner, mnt_id: u64) -> Option<&MountPoint> {
+    vfs.every().find(|m| m.mnt_id == mnt_id)
 }
 
 /// Finish an unmount: sync the filesystem, give its device number back, and
 /// let go of what is kept about its files -- advisory locks, per-file state
-/// (`super::perfile`). For a mount already out of the table: a lazy unmount's
-/// at once when nothing is held on it, else at its last hold.
+/// (`super::perfile`). For a mount already out of its table: a lazy
+/// unmount's at once when nothing is held on it, else at its last hold; a
+/// mount namespace's when its table goes.
+///
+/// A filesystem another table still has -- a mount namespace's copy of the
+/// mount -- is not finished: only this entry went, and the filesystem is
+/// still the other table's, files, locks and device number alike.
 fn finish_unmount(mp: MountPoint) {
+    if VFS.lock().every().any(|m| m.fs_id == mp.fs_id) {
+        crate::serial_println!(
+            "[vfs] Unmounted {} from '{}' in one mount namespace; it stays mounted in another",
+            mp.fs_type,
+            mp.path.display()
+        );
+        return;
+    }
     if let Err(e) = mp.fs.lock().sync() {
         crate::serial_println!(
             "[vfs] WARNING: sync failed finishing the unmount of '{}': {:?}",
@@ -1641,7 +1668,7 @@ fn finish_unmount(mp: MountPoint) {
     // Locks on its files, by identity; one taken by path (a filesystem with
     // no inode numbers) by the subtree it was mounted on -- unless that path
     // is mounted again, by another filesystem, whose locks those now are.
-    let remounted = VFS.lock().mounts.iter().any(|m| m.path == mp.path);
+    let remounted = VFS.lock().root.iter().any(|m| m.path == mp.path);
     LOCK_TABLE.lock().retain(|entry| match entry.id {
         Some(id) => id.fs_id != mp.fs_id,
         None => remounted || !crate::fs::pathutil::path_in_subtree(&entry.path, &mp.path),
@@ -1650,11 +1677,12 @@ fn finish_unmount(mp: MountPoint) {
     super::perfile::filesystem_unmounted(mp.fs_id);
 }
 
-/// `ReadOnlyFilesystem` if mount `fs_id` is read-only now, `NotFound` if it
-/// has gone: what can change under a file opened for writing.
-fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
+/// `ReadOnlyFilesystem` if mount table entry `mnt_id` is read-only now,
+/// `NotFound` if it has gone: what can change under a file opened for
+/// writing.
+fn check_writable_mount(mnt_id: u64) -> KernelResult<()> {
     let vfs = VFS.lock();
-    let mp = held_mount(&vfs, fs_id).ok_or(KernelError::NotFound)?;
+    let mp = held_mount(&vfs, mnt_id).ok_or(KernelError::NotFound)?;
     if mp.options.read_only {
         Err(KernelError::ReadOnlyFilesystem)
     } else {
@@ -1759,6 +1787,11 @@ pub(crate) fn defer_forget_if_held(id: FileId, path: &Path) -> bool {
 /// ids are never reused, so a `FileId` minted for one mount can never collide
 /// with a later mount even after the original is unmounted.
 static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Source of the mount table entries' ids ([`MountPoint::mnt_id`]); never
+/// reused, so a hold given back after its entry is gone finds nothing rather
+/// than a stranger.
+static NEXT_MNT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Device numbers of the mounted filesystems: `fs_id` to the number `stat`
 /// reports as `st_dev`'s minor, under major 0, as Linux numbers its
@@ -1949,18 +1982,57 @@ pub struct PinnedDir {
 
 /// The global VFS state.
 static VFS: Mutex<VfsInner> = Mutex::new(VfsInner {
-    mounts: Vec::new(),
+    root: Vec::new(),
+    others: alloc::collections::BTreeMap::new(),
     detached: Vec::new(),
 });
 
 struct VfsInner {
-    mounts: Vec<MountPoint>,
+    /// The root mount namespace's table: the system's mounts.
+    root: Vec<MountPoint>,
+    /// Every other mount namespace's table (`super::mntns`), each made a copy
+    /// of its creator's ([`Vfs::copy_mount_table`]). The entries share the
+    /// filesystems -- the `fs` handle and `fs_id` -- with the tables they were
+    /// copied from, so a file is the same file through each.
+    others: alloc::collections::BTreeMap<u64, Vec<MountPoint>>,
     /// Mounts taken out of the table by a lazy unmount
     /// ([`Vfs::unmount_detach`]) while files were still held on them: no
     /// lookup reaches them, the files held on them go on working, and each
     /// is finished ([`finish_unmount`]) when its last hold goes
     /// ([`release_mount_hold`]).
     detached: Vec<MountPoint>,
+}
+
+impl VfsInner {
+    /// Mount namespace `ns`'s table. Empty for a namespace that does not
+    /// exist, so a lookup there finds nothing rather than another's mounts.
+    fn table(&self, ns: u64) -> &[MountPoint] {
+        if ns == super::mntns::ROOT {
+            &self.root
+        } else {
+            self.others
+                .get(&ns)
+                .map_or(&[] as &[MountPoint], Vec::as_slice)
+        }
+    }
+
+    /// Mount namespace `ns`'s table, to change; `NotFound` for one that does
+    /// not exist.
+    fn table_mut(&mut self, ns: u64) -> KernelResult<&mut Vec<MountPoint>> {
+        if ns == super::mntns::ROOT {
+            Ok(&mut self.root)
+        } else {
+            self.others.get_mut(&ns).ok_or(KernelError::NotFound)
+        }
+    }
+
+    /// Every entry of every table, and the detached ones still held.
+    fn every(&self) -> impl Iterator<Item = &MountPoint> {
+        self.root
+            .iter()
+            .chain(self.others.values().flatten())
+            .chain(self.detached.iter())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2137,6 +2209,21 @@ impl VfsDcacheEntry {
             negative: false,
         }
     }
+}
+
+/// Whether a path resolution may be cached and answered from the cache: not
+/// while a mount namespace besides the root exists (`super::mntns`).
+///
+/// The cache is keyed by path, and a path names a different file in a table
+/// whose mounts differ; worse, a change made through one namespace's path
+/// invalidates by that path, which leaves an entry another namespace made
+/// for the same file under another path stale. Until the cache keys its
+/// entries by filesystem and inode rather than by path, it stands aside while
+/// more than one table exists -- emptied when the first copy is made and when
+/// the last goes (`Vfs::copy_mount_table`, `Vfs::drop_mount_table`) -- and the
+/// common case, the system's table alone, keeps it.
+fn resolution_cacheable() -> bool {
+    !super::mntns::any()
 }
 
 /// Result of a VFS dcache lookup.
@@ -2690,13 +2777,36 @@ impl Vfs {
         Self::mount_with_options(mount_path, fs, MountOptions::defaults())
     }
 
-    /// Mount a filesystem at the given path with specific mount options.
+    /// Mount a filesystem at the given path with specific mount options, in
+    /// the caller's mount namespace (`super::mntns::current`).
     pub fn mount_with_options(
         mount_path: impl AsRef<Path>,
         fs: Box<dyn FileSystem>,
         options: MountOptions,
     ) -> KernelResult<()> {
-        let mount_path = mount_path.as_ref();
+        Self::mount_with_options_in(super::mntns::current(), mount_path.as_ref(), fs, options)
+    }
+
+    /// [`Self::mount`] into mount namespace `ns`'s table.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mount_with_options_in`].
+    pub fn mount_in(
+        ns: u64,
+        mount_path: impl AsRef<Path>,
+        fs: Box<dyn FileSystem>,
+    ) -> KernelResult<()> {
+        Self::mount_with_options_in(ns, mount_path.as_ref(), fs, MountOptions::defaults())
+    }
+
+    /// [`Self::mount_with_options`] into mount namespace `ns`'s table.
+    fn mount_with_options_in(
+        ns: u64,
+        mount_path: &Path,
+        fs: Box<dyn FileSystem>,
+        options: MountOptions,
+    ) -> KernelResult<()> {
         if !mount_path.is_absolute() {
             return Err(KernelError::InvalidArgument);
         }
@@ -2752,13 +2862,15 @@ impl Vfs {
         }
 
         let mut vfs = VFS.lock();
+        let table = vfs.table_mut(ns)?;
 
         // Check for duplicate mount point.  Both sides are normalised, so
         // `/mnt` and `/mnt/` now collide as they should.
-        for mp in &vfs.mounts {
-            if mp.path.as_path() == mount_path.as_path() {
-                return Err(KernelError::AlreadyExists);
-            }
+        if table
+            .iter()
+            .any(|mp| mp.path.as_path() == mount_path.as_path())
+        {
+            return Err(KernelError::AlreadyExists);
         }
 
         let opts_str = options.to_string();
@@ -2775,12 +2887,13 @@ impl Vfs {
         // the mount is visible, so no `stat` of it can see 0.
         let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
         assign_dev(fs_id);
-        vfs.mounts.push(MountPoint {
+        table.push(MountPoint {
             path: mount_path.to_path_buf(),
             fs: Arc::new(Mutex::new(fs)),
             fs_type,
             options,
             fs_id,
+            mnt_id: NEXT_MNT_ID.fetch_add(1, Ordering::Relaxed),
             objects: 0,
             expire_mark: false,
         });
@@ -2792,10 +2905,84 @@ impl Vfs {
 
         // Replay any deferred filesystem operations that were queued while
         // this volume was absent, busy, or read-only.  Best-effort: errors
-        // are logged but do not fail the mount.
-        super::deferred_ops::replay_on_mount(&mounted_path);
+        // are logged but do not fail the mount. They were queued by the
+        // system's paths, so only a mount in the system's table replays them.
+        if ns == super::mntns::ROOT {
+            super::deferred_ops::replay_on_mount(&mounted_path);
+        }
 
         Ok(())
+    }
+
+    /// Give mount namespace `to` a copy of `from`'s table: the same
+    /// filesystems at the same paths with the same options, each entry its
+    /// own (its own `mnt_id`, nothing held through it yet). `super::mntns`'s,
+    /// as it makes a namespace.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `from` does not exist; `AlreadyExists` if `to` does.
+    pub(crate) fn copy_mount_table(from: u64, to: u64) -> KernelResult<()> {
+        {
+            let mut vfs = VFS.lock();
+            if to == super::mntns::ROOT || vfs.others.contains_key(&to) {
+                return Err(KernelError::AlreadyExists);
+            }
+            if from != super::mntns::ROOT && !vfs.others.contains_key(&from) {
+                return Err(KernelError::NotFound);
+            }
+            let copy: Vec<MountPoint> = vfs
+                .table(from)
+                .iter()
+                .map(|mp| MountPoint {
+                    path: mp.path.clone(),
+                    fs: Arc::clone(&mp.fs),
+                    fs_type: mp.fs_type.clone(),
+                    options: mp.options,
+                    fs_id: mp.fs_id,
+                    mnt_id: NEXT_MNT_ID.fetch_add(1, Ordering::Relaxed),
+                    objects: 0,
+                    expire_mark: false,
+                })
+                .collect();
+            vfs.others.insert(to, copy);
+        }
+        // Path resolution is not cached while more than one table exists
+        // (`resolution_cacheable`); what was cached before is dropped, so it
+        // is not read back when the last namespace goes.
+        VFS_DCACHE.lock().invalidate_all();
+        Ok(())
+    }
+
+    /// Mount namespace `id`'s table goes, with its last hold
+    /// (`super::mntns::release`). Each entry is finished as an unmount's is
+    /// -- a filesystem only it had is synced and let go -- or, while a file
+    /// is still held through it, detached until the last is released.
+    pub(crate) fn drop_mount_table(id: u64) {
+        if id == super::mntns::ROOT {
+            return;
+        }
+        let now: Vec<MountPoint> = {
+            let mut vfs = VFS.lock();
+            let Some(table) = vfs.others.remove(&id) else {
+                return;
+            };
+            let (now, later): (Vec<MountPoint>, Vec<MountPoint>) =
+                table.into_iter().partition(|mp| mp.objects == 0);
+            vfs.detached.extend(later);
+            now
+        };
+        VFS_DCACHE.lock().invalidate_all();
+        for mp in now {
+            finish_unmount(mp);
+        }
+    }
+
+    /// How many mounts mount namespace `ns`'s table has; 0 for one that does
+    /// not exist.
+    #[must_use]
+    pub fn mount_count_in(ns: u64) -> usize {
+        VFS.lock().table(ns).len()
     }
 
     /// Index of the mount at `mount_path`, if it may be unmounted right now.
@@ -2806,9 +2993,8 @@ impl Vfs {
     /// Factored out because [`Self::unmount`] must run this check *twice*: once
     /// to find the filesystem to sync, and again after it has dropped and
     /// retaken the VFS lock, by which point a sub-mount may have appeared.
-    fn unmount_index(vfs: &VfsInner, mount_path: &Path) -> KernelResult<usize> {
-        let idx = vfs
-            .mounts
+    fn unmount_index(table: &[MountPoint], mount_path: &Path) -> KernelResult<usize> {
+        let idx = table
             .iter()
             .position(|mp| mp.path.as_path() == mount_path)
             .ok_or(KernelError::NotFound)?;
@@ -2817,7 +3003,7 @@ impl Vfs {
         // matches on component boundaries, so unmounting `/mnt` is not blocked
         // by an unrelated `/mnt_data` mount, and a `/mnt/` spelling of the
         // argument still finds the real children.
-        let has_children = vfs.mounts.iter().enumerate().any(|(i, mp)| {
+        let has_children = table.iter().enumerate().any(|(i, mp)| {
             i != idx && crate::fs::pathutil::path_strictly_under(&mp.path, mount_path)
         });
         if has_children {
@@ -2865,11 +3051,13 @@ impl Vfs {
         // (see known-issues TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS).
         // Cloning the `Arc` is the whole fix: it keeps the filesystem alive
         // across the unlocked window without keeping the mount table locked.
-        let (fs, fs_id) = {
+        let ns = super::mntns::current();
+        let (fs, mnt_id) = {
             let vfs = VFS.lock();
-            let idx = Self::unmount_index(&vfs, mount_path)?;
-            let mp = vfs.mounts.get(idx).ok_or(KernelError::NotFound)?;
-            (Arc::clone(&mp.fs), mp.fs_id)
+            let table = vfs.table(ns);
+            let idx = Self::unmount_index(table, mount_path)?;
+            let mp = table.get(idx).ok_or(KernelError::NotFound)?;
+            (Arc::clone(&mp.fs), mp.mnt_id)
         };
 
         // Sync with no VFS lock held.
@@ -2891,7 +3079,8 @@ impl Vfs {
         // is what makes that last case detectable instead of a silent unmount of
         // someone else's filesystem.
         let mut vfs = VFS.lock();
-        let idx = match Self::unmount_index(&vfs, mount_path) {
+        let table = vfs.table_mut(ns)?;
+        let idx = match Self::unmount_index(table, mount_path) {
             Ok(i) => i,
             // Someone else unmounted it while we were syncing.  The caller's
             // postcondition — this path is not mounted — holds, and whoever won
@@ -2901,7 +3090,7 @@ impl Vfs {
             // A sub-mount appeared in the window: genuinely busy, report it.
             Err(e) => return Err(e),
         };
-        if vfs.mounts.get(idx).map(|mp| mp.fs_id) != Some(fs_id) {
+        if table.get(idx).map(|mp| mp.mnt_id) != Some(mnt_id) {
             // Unmounted, and something else was mounted at the same path. Ours
             // is already gone; removing the newcomer would be the bug.
             return Ok(());
@@ -2909,11 +3098,11 @@ impl Vfs {
         // A file held open on it keeps it, as Linux's `umount` answers EBUSY.
         // Checked under the lock the holds are counted under, so no open can
         // slip in between this and the removal.
-        if vfs.mounts.get(idx).is_some_and(|mp| mp.objects > 0) {
+        if table.get(idx).is_some_and(|mp| mp.objects > 0) {
             return Err(KernelError::DeviceBusy);
         }
 
-        let mp = vfs.mounts.remove(idx);
+        let mp = table.remove(idx);
         drop(vfs);
         // Unmount changes affect path resolution — invalidate entire dcache.
         VFS_DCACHE.lock().invalidate_all();
@@ -2931,7 +3120,8 @@ impl Vfs {
     #[must_use]
     pub fn is_mount_point(path: impl AsRef<Path>) -> bool {
         let path = normalize_mount_path(path.as_ref());
-        VFS.lock().mounts.iter().any(|mp| mp.path == path)
+        let ns = super::mntns::current();
+        VFS.lock().table(ns).iter().any(|mp| mp.path == path)
     }
 
     /// Detach the mount at `mount_path` and every mount beneath it --
@@ -2949,15 +3139,17 @@ impl Vfs {
         if mount_path.as_path() == Path::new("/") {
             return Err(KernelError::PermissionDenied);
         }
+        let ns = super::mntns::current();
         let now: Vec<MountPoint> = {
             let mut vfs = VFS.lock();
-            if !vfs.mounts.iter().any(|mp| mp.path == *mount_path) {
+            let table = vfs.table_mut(ns)?;
+            if !table.iter().any(|mp| mp.path == *mount_path) {
                 return Err(KernelError::NotFound);
             }
-            let (gone, kept): (Vec<MountPoint>, Vec<MountPoint>) = core::mem::take(&mut vfs.mounts)
+            let (gone, kept): (Vec<MountPoint>, Vec<MountPoint>) = core::mem::take(table)
                 .into_iter()
                 .partition(|mp| crate::fs::pathutil::path_in_subtree(&mp.path, mount_path));
-            vfs.mounts = kept;
+            *table = kept;
             let (now, later): (Vec<MountPoint>, Vec<MountPoint>) =
                 gone.into_iter().partition(|mp| mp.objects == 0);
             vfs.detached.extend(later);
@@ -2981,10 +3173,11 @@ impl Vfs {
     /// `mount_path`; [`Self::unmount`]'s.
     pub fn unmount_expire(mount_path: impl AsRef<Path>) -> KernelResult<()> {
         let mount_path = normalize_mount_path(mount_path.as_ref());
+        let ns = super::mntns::current();
         let marked = {
             let mut vfs = VFS.lock();
             let mp = vfs
-                .mounts
+                .table_mut(ns)?
                 .iter_mut()
                 .find(|mp| mp.path == mount_path)
                 .ok_or(KernelError::NotFound)?;
@@ -3057,24 +3250,24 @@ impl Vfs {
         // Every path is planned and checked before any is changed, under one
         // hold of the table, so a refusal leaves the table as it was and no
         // lookup ever sees half a pivot.
+        let ns = super::mntns::current();
         let (moves, before) = {
             let mut vfs = VFS.lock();
-            let old_idx = vfs
-                .mounts
+            let table = vfs.table_mut(ns)?;
+            let old_idx = table
                 .iter()
                 .position(|m| m.path == root)
                 .ok_or(KernelError::NotFound)?;
-            let new_idx = vfs
-                .mounts
+            let new_idx = table
                 .iter()
                 .position(|m| m.path == new_root)
                 .ok_or(KernelError::NotFound)?;
-            if vfs.mounts.iter().any(|m| m.path == put_old) {
+            if table.iter().any(|m| m.path == put_old) {
                 return Err(KernelError::AlreadyExists);
             }
             let mut plan: Vec<(usize, PathBuf)> = Vec::new();
             plan.push((old_idx, put_old.clone()));
-            for (i, m) in vfs.mounts.iter().enumerate() {
+            for (i, m) in table.iter().enumerate() {
                 if i == new_idx || crate::fs::pathutil::path_strictly_under(&m.path, &new_root) {
                     let to = rebase_under(&m.path, &new_root, &root)
                         .ok_or(KernelError::InvalidArgument)?;
@@ -3083,8 +3276,7 @@ impl Vfs {
             }
             let planned = |j: usize| plan.iter().any(|&(i, _)| i == j);
             for (_, to) in &plan {
-                let clash = vfs
-                    .mounts
+                let clash = table
                     .iter()
                     .enumerate()
                     .any(|(j, m)| !planned(j) && m.path == *to);
@@ -3092,10 +3284,10 @@ impl Vfs {
                     return Err(KernelError::AlreadyExists);
                 }
             }
-            let before: Vec<PathBuf> = vfs.mounts.iter().map(|m| m.path.clone()).collect();
+            let before: Vec<PathBuf> = table.iter().map(|m| m.path.clone()).collect();
             let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
             for (i, to) in plan {
-                if let Some(m) = vfs.mounts.get_mut(i) {
+                if let Some(m) = table.get_mut(i) {
                     moves.push((core::mem::replace(&mut m.path, to.clone()), to));
                 }
             }
@@ -3189,7 +3381,8 @@ impl Vfs {
         let norm = Self::resolve_prologue(path)?;
 
         // Check VFS dcache first -- avoids component-by-component lstat walk.
-        {
+        let cacheable = resolution_cacheable();
+        if cacheable {
             let mut dcache = VFS_DCACHE.lock();
             match dcache.lookup(&norm, true) {
                 DcacheLookup::Hit(resolved) => return Ok(resolved),
@@ -3203,7 +3396,7 @@ impl Vfs {
         // 2026-10-03 `/etc/mtab`, a link to `/proc/self/mounts`, was cached
         // as whichever caller resolved it first had it, and every later
         // caller read that answer (rq42 and rq43's `/etc/mtab` self-test).
-        let mut uncacheable = false;
+        let mut uncacheable = !cacheable;
         match Self::resolve_inner(&norm, true, 0, false, None, &mut uncacheable) {
             Ok(resolved) => {
                 // Cache the positive result for future lookups.
@@ -3235,7 +3428,8 @@ impl Vfs {
         let norm = Self::resolve_prologue(path)?;
 
         // Check VFS dcache first -- avoids component-by-component lstat walk.
-        {
+        let cacheable = resolution_cacheable();
+        if cacheable {
             let mut dcache = VFS_DCACHE.lock();
             match dcache.lookup(&norm, false) {
                 DcacheLookup::Hit(resolved) => return Ok(resolved),
@@ -3245,7 +3439,7 @@ impl Vfs {
         }
 
         // As `resolve_follow`: a walk through procfs is not kept.
-        let mut uncacheable = false;
+        let mut uncacheable = !cacheable;
         match Self::resolve_inner(&norm, false, 0, false, None, &mut uncacheable) {
             Ok(resolved) => {
                 // Cache the positive result for future lookups.
@@ -3663,9 +3857,10 @@ impl Vfs {
         // look the same mount up again from scratch — which is what this used
         // to do, and it was the single most expensive thing about listing a
         // directory that has mounts under it.  See `submount_root_ino`.
+        let ns = super::mntns::current();
         let submounts: Vec<(PathBuf, MountedFs)> = {
             let vfs = VFS.lock();
-            Self::submount_children(&vfs, path)
+            Self::submount_children(vfs.table(ns), path)
         };
 
         // Inject the ones the underlying filesystem doesn't know about.
@@ -4729,12 +4924,19 @@ impl Vfs {
     /// The filesystem's own, from looking the file up or pinning it.
     pub fn open_object(path: impl AsRef<Path>) -> KernelResult<Option<FileHold>> {
         let path = path.as_ref();
-        let (fs, fs_id, relative) = {
+        let (fs, fs_id, mnt_id, relative) = {
+            // The namespace first: nothing else is taken under the table's lock.
+            let ns = super::mntns::current();
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(vfs.table_mut(ns)?, path)?;
             mp.objects = mp.objects.saturating_add(1);
             mp.expire_mark = false;
-            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+            (
+                Arc::clone(&mp.fs),
+                mp.fs_id,
+                mp.mnt_id,
+                relative.to_path_buf(),
+            )
         };
         let pinned = {
             let mut guard = fs.lock();
@@ -4749,14 +4951,19 @@ impl Vfs {
         match pinned {
             Ok(Some(ino)) => {
                 note_hold(FileId { fs_id, ino });
-                Ok(Some(FileHold(FileObject { fs, fs_id, ino })))
+                Ok(Some(FileHold(FileObject {
+                    fs,
+                    fs_id,
+                    mnt_id,
+                    ino,
+                })))
             }
             Ok(None) | Err(KernelError::NotSupported) => {
-                release_mount_hold(fs_id);
+                release_mount_hold(mnt_id);
                 Ok(None)
             }
             Err(e) => {
-                release_mount_hold(fs_id);
+                release_mount_hold(mnt_id);
                 Err(e)
             }
         }
@@ -4774,12 +4981,19 @@ impl Vfs {
     /// with no stable inode; the lookup's and the pin's own.
     pub fn hold_fifo(path: impl AsRef<Path>) -> KernelResult<FileHold> {
         let path = path.as_ref();
-        let (fs, fs_id, relative) = {
+        let (fs, fs_id, mnt_id, relative) = {
+            // The namespace first: nothing else is taken under the table's lock.
+            let ns = super::mntns::current();
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(vfs.table_mut(ns)?, path)?;
             mp.objects = mp.objects.saturating_add(1);
             mp.expire_mark = false;
-            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+            (
+                Arc::clone(&mp.fs),
+                mp.fs_id,
+                mp.mnt_id,
+                relative.to_path_buf(),
+            )
         };
         let pinned = {
             let mut guard = fs.lock();
@@ -4794,14 +5008,19 @@ impl Vfs {
         match pinned {
             Ok(Some(ino)) => {
                 note_hold(FileId { fs_id, ino });
-                Ok(FileHold(FileObject { fs, fs_id, ino }))
+                Ok(FileHold(FileObject {
+                    fs,
+                    fs_id,
+                    mnt_id,
+                    ino,
+                }))
             }
             Ok(None) => {
-                release_mount_hold(fs_id);
+                release_mount_hold(mnt_id);
                 Err(KernelError::NotSupported)
             }
             Err(e) => {
-                release_mount_hold(fs_id);
+                release_mount_hold(mnt_id);
                 Err(e)
             }
         }
@@ -4833,12 +5052,19 @@ impl Vfs {
         // The hold is counted on the mount first, as `open_object` counts
         // one, so an unmount racing this create cannot take the filesystem
         // away under it.
-        let (fs, fs_id, relative) = {
+        let (fs, fs_id, mnt_id, relative) = {
+            // The namespace first: nothing else is taken under the table's lock.
+            let ns = super::mntns::current();
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, dir)?;
+            let (mp, relative) = find_mount(vfs.table_mut(ns)?, dir)?;
             mp.objects = mp.objects.saturating_add(1);
             mp.expire_mark = false;
-            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+            (
+                Arc::clone(&mp.fs),
+                mp.fs_id,
+                mp.mnt_id,
+                relative.to_path_buf(),
+            )
         };
         let creator = creator_ids();
         let umask = creator_umask();
@@ -4890,7 +5116,7 @@ impl Vfs {
         let ino = match made {
             Ok(ino) => ino,
             Err(e) => {
-                release_mount_hold(fs_id);
+                release_mount_hold(mnt_id);
                 return Err(e);
             }
         };
@@ -4899,7 +5125,12 @@ impl Vfs {
             dir.join(alloc::format!("#{ino}")),
             linkable,
         );
-        Ok(FileHold(FileObject { fs, fs_id, ino }))
+        Ok(FileHold(FileObject {
+            fs,
+            fs_id,
+            mnt_id,
+            ino,
+        }))
     }
 
     /// Give held file `obj` the name `new_path` (not yet resolved): `linkat`
@@ -5090,7 +5321,7 @@ impl Vfs {
     ///
     /// `ReadOnlyFilesystem`, the filesystem's own.
     pub fn object_truncate(obj: &FileObject, path: &Path, size: u64) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         {
             let mut guard = obj.fs.lock();
             if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
@@ -5117,7 +5348,7 @@ impl Vfs {
         path: &Path,
         permissions: u16,
     ) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         {
             let mut guard = obj.fs.lock();
             attr_policy::may_change_metadata(ino_attrs(&mut **guard, obj.ino))?;
@@ -5140,7 +5371,7 @@ impl Vfs {
     ///
     /// `ReadOnlyFilesystem`; `NotPermitted`; the filesystem's own.
     pub fn object_set_owner(obj: &FileObject, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         {
             let mut fs = obj.fs.lock();
             if changes_owner(uid, gid) {
@@ -5174,7 +5405,7 @@ impl Vfs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         let mut guard = obj.fs.lock();
         times_rule(ino_attrs(&mut **guard, obj.ino), accessed_ns, modified_ns)?;
         let now = metadata_now_ns();
@@ -5224,7 +5455,7 @@ impl Vfs {
         value: &[u8],
         mode: XattrSetMode,
     ) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         let caller = xattr_policy::Caller::current();
         if name == super::acl::XATTR_ACCESS {
             let mut guard = obj.fs.lock();
@@ -5258,7 +5489,7 @@ impl Vfs {
     ///
     /// `ReadOnlyFilesystem`; `fs::xattr_policy`'s; `NoAttribute`.
     pub fn object_remove_xattr(obj: &FileObject, path: &Path, name: &[u8]) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         let caller = xattr_policy::Caller::current();
         if name == super::acl::XATTR_ACCESS {
             let mut guard = obj.fs.lock();
@@ -5310,7 +5541,7 @@ impl Vfs {
     ///
     /// `ReadOnlyFilesystem`.
     pub fn object_check_writable(obj: &FileObject) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)
+        check_writable_mount(obj.mnt_id)
     }
 
     /// [`xattr_on`](Self::xattr_on) for a held file, by its inode number. The
@@ -5343,7 +5574,7 @@ impl Vfs {
     ///
     /// `ReadOnlyFilesystem`; the filesystem's own.
     pub fn object_fallocate(obj: &FileObject, size: u64) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         let mut guard = obj.fs.lock();
         attr_policy::may_allocate(ino_attrs(&mut **guard, obj.ino))?;
         if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
@@ -5361,7 +5592,7 @@ impl Vfs {
     pub fn object_statvfs(obj: &FileObject) -> KernelResult<FsInfo> {
         let read_only = {
             let vfs = VFS.lock();
-            held_mount(&vfs, obj.fs_id)
+            held_mount(&vfs, obj.mnt_id)
                 .map(|m| m.options.read_only)
                 .ok_or(KernelError::NotFound)?
         };
@@ -5373,7 +5604,7 @@ impl Vfs {
     /// What may refuse a write to a held file: the mount turned read-only,
     /// an interceptor, quota.
     fn object_write_checks(obj: &FileObject, path: &Path, len: usize) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         // Before the filesystem lock, as for every write: interceptors must
         // not call back into the VFS while it is held.
         super::intercept::pre_write(path)?;
@@ -5644,8 +5875,9 @@ impl Vfs {
     /// at all, only the global VFS lock, because the type name is cached in
     /// [`MountPoint::fs_type`]. That is what `/proc/mounts` depends on.
     pub fn mounts() -> Vec<(PathBuf, String)> {
+        let ns = super::mntns::current();
         let vfs = VFS.lock();
-        vfs.mounts
+        vfs.table(ns)
             .iter()
             .map(|mp| (mp.path.clone(), mp.fs_type.clone()))
             .collect()
@@ -5655,8 +5887,15 @@ impl Vfs {
     ///
     /// Locks no filesystem — see [`Self::mounts`] and [`MountPoint::fs_type`].
     pub fn mounts_full() -> Vec<(PathBuf, String, MountOptions)> {
+        Self::mounts_full_in(super::mntns::current())
+    }
+
+    /// [`Self::mounts_full`] of mount namespace `ns`: what
+    /// `/proc/<pid>/mounts` shows of another process's.
+    #[must_use]
+    pub fn mounts_full_in(ns: u64) -> Vec<(PathBuf, String, MountOptions)> {
         let vfs = VFS.lock();
-        vfs.mounts
+        vfs.table(ns)
             .iter()
             .map(|mp| (mp.path.clone(), mp.fs_type.clone(), mp.options))
             .collect()
@@ -5668,8 +5907,15 @@ impl Vfs {
     ///
     /// Locks no filesystem, as [`Self::mounts`].
     pub fn mounts_with_dev() -> Vec<(PathBuf, String, MountOptions, u32)> {
+        Self::mounts_with_dev_in(super::mntns::current())
+    }
+
+    /// [`Self::mounts_with_dev`] of mount namespace `ns`: what
+    /// `/proc/<pid>/mountinfo` shows of another process's.
+    #[must_use]
+    pub fn mounts_with_dev_in(ns: u64) -> Vec<(PathBuf, String, MountOptions, u32)> {
         let vfs = VFS.lock();
-        vfs.mounts
+        vfs.table(ns)
             .iter()
             .map(|mp| {
                 (
@@ -5685,8 +5931,9 @@ impl Vfs {
     /// Get mount options for the filesystem containing `path`.
     pub fn mount_options(path: impl AsRef<Path>) -> KernelResult<MountOptions> {
         let path = path.as_ref();
+        let ns = super::mntns::current();
         let mut vfs = VFS.lock();
-        let (mp, _) = find_mount(&mut vfs, path)?;
+        let (mp, _) = find_mount(vfs.table_mut(ns)?, path)?;
         Ok(mp.options)
     }
 
@@ -5703,12 +5950,13 @@ impl Vfs {
     /// is).
     pub fn volume_of(path: impl AsRef<Path>) -> KernelResult<VolumeInfo> {
         let path = path.as_ref();
+        let ns = super::mntns::current();
         let (fs, info) = {
             let vfs = VFS.lock();
             // The longest mount path over `path`, the later of two equal ones
             // -- the one that shadows -- as `check_writable` chooses.
             let mut best: Option<&MountPoint> = None;
-            for mp in &vfs.mounts {
+            for mp in vfs.table(ns) {
                 if mount_matches(&mp.path, path)
                     && best.is_none_or(|b| mp.path.len() >= b.path.len())
                 {
@@ -5824,10 +6072,11 @@ impl Vfs {
         // Same normalisation as `mount`/`unmount`: identify the mount by its
         // canonical spelling, not by the caller's.
         let mount_path = &normalize_mount_path(mount_path.as_ref());
+        let ns = super::mntns::current();
         let became_writable = {
             let mut vfs = VFS.lock();
             let Some(mp) = vfs
-                .mounts
+                .table_mut(ns)?
                 .iter_mut()
                 .find(|mp| mp.path.as_path() == mount_path.as_path())
             else {
@@ -5866,10 +6115,10 @@ impl Vfs {
     /// are equivalent.  Doing it here turns a per-submount longest-prefix
     /// scan of the whole mount table into an `Arc` clone — see the
     /// `vfs_readdir_mp_*` benchmarks for what that was costing.
-    fn submount_children(vfs: &VfsInner, dir_path: &Path) -> Vec<(PathBuf, MountedFs)> {
+    fn submount_children(table: &[MountPoint], dir_path: &Path) -> Vec<(PathBuf, MountedFs)> {
         let mut names = Vec::new();
 
-        for mp in &vfs.mounts {
+        for mp in table {
             // `strip_prefix` is component-aligned, so a mount at `/tmpfile`
             // is not treated as living under `/tmp`.  A tail of exactly one
             // component is a direct child; an empty tail is the mount that
@@ -6980,7 +7229,7 @@ impl Vfs {
         path: &Path,
         attrs: FileAttr,
     ) -> KernelResult<()> {
-        check_writable_fs(obj.fs_id)?;
+        check_writable_mount(obj.mnt_id)?;
         {
             let mut guard = obj.fs.lock();
             if let Some((uid, _)) = caller_uid_gid() {
@@ -8008,6 +8257,7 @@ impl Vfs {
     /// VFS on stacked mounts).
     fn debug_stats_fs(path: impl AsRef<Path>) -> KernelResult<Option<MountedFs>> {
         let path = path.as_ref();
+        let ns = super::mntns::current();
         let vfs = VFS.lock();
         // Longest-prefix, not first-match.  `find` returned whichever covering
         // mount sat earliest in the table, and the root mount is registered
@@ -8015,7 +8265,7 @@ impl Vfs {
         // submount reported the *root* filesystem's stats.  Every other mount
         // lookup here scores by prefix length; this one did not.
         let mut best: Option<&MountPoint> = None;
-        for mp in &vfs.mounts {
+        for mp in vfs.table(ns) {
             if !mount_matches(&mp.path, path) {
                 continue;
             }
@@ -8097,8 +8347,7 @@ impl Vfs {
         // deadlocks against it regardless of how trivial `device_name` is.
         let candidates: Vec<(MountedFs, bool)> = {
             let vfs = VFS.lock();
-            vfs.mounts
-                .iter()
+            vfs.every()
                 .map(|mp| (Arc::clone(&mp.fs), mp.options.read_only))
                 .collect()
         };
@@ -8123,9 +8372,10 @@ impl Vfs {
         // Snapshot (path, handle) pairs under a brief global lock, then query
         // each filesystem lock-free — `statvfs` on a stacked mount may itself
         // re-enter the VFS, so it must not run under the global lock.
+        let ns = super::mntns::current();
         let mounts: Vec<(PathBuf, MountedFs)> = {
             let vfs = VFS.lock();
-            vfs.mounts
+            vfs.table(ns)
                 .iter()
                 .map(|mp| (mp.path.clone(), Arc::clone(&mp.fs)))
                 .collect()
@@ -8469,7 +8719,15 @@ impl Vfs {
         // lock-free (a stacked filesystem's sync may re-enter the VFS).
         let handles: Vec<MountedFs> = {
             let vfs = VFS.lock();
-            vfs.mounts.iter().map(|mp| Arc::clone(&mp.fs)).collect()
+            let mut seen: Vec<u64> = Vec::new();
+            vfs.every()
+                .filter(|mp| {
+                    let first = !seen.contains(&mp.fs_id);
+                    seen.push(mp.fs_id);
+                    first
+                })
+                .map(|mp| Arc::clone(&mp.fs))
+                .collect()
         };
         let mut last_err: Option<KernelError> = None;
         for fs in handles {
@@ -9709,11 +9967,13 @@ fn verify_pinned(
     Ok(())
 }
 
+/// The mount in `table` -- one mount namespace's -- whose path is the
+/// longest prefix of `path`, and `path` relative to it.
 fn find_mount<'a, 'p>(
-    vfs: &'a mut VfsInner,
+    table: &'a mut [MountPoint],
     path: &'p Path,
 ) -> KernelResult<(&'a mut MountPoint, &'p Path)> {
-    if vfs.mounts.is_empty() {
+    if table.is_empty() {
         return Err(KernelError::NotFound);
     }
 
@@ -9721,7 +9981,7 @@ fn find_mount<'a, 'p>(
     let mut best_idx = None;
     let mut best_len = 0;
 
-    for (i, mp) in vfs.mounts.iter().enumerate() {
+    for (i, mp) in table.iter().enumerate() {
         if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
             best_idx = Some(i);
             best_len = mp.path.len();
@@ -9742,7 +10002,7 @@ fn find_mount<'a, 'p>(
         }
     };
 
-    let mp = vfs.mounts.get_mut(idx).ok_or(KernelError::NotFound)?;
+    let mp = table.get_mut(idx).ok_or(KernelError::NotFound)?;
     Ok((mp, relative))
 }
 
@@ -9759,8 +10019,10 @@ fn find_mount<'a, 'p>(
 /// to perform the actual operation — a *different* lock from the global one
 /// and from any lower-layer mount's lock, so reentrancy is safe.
 fn resolve_mount(path: &Path) -> KernelResult<(MountedFs, u64, MountOptions, PathBuf)> {
+    // The namespace first: nothing else is taken under the table's lock.
+    let ns = super::mntns::current();
     let mut vfs = VFS.lock();
-    let (mp, relative) = find_mount(&mut vfs, path)?;
+    let (mp, relative) = find_mount(vfs.table_mut(ns)?, path)?;
     Ok((
         Arc::clone(&mp.fs),
         mp.fs_id,
@@ -9774,11 +10036,12 @@ fn resolve_mount(path: &Path) -> KernelResult<(MountedFs, u64, MountOptions, Pat
 /// Returns `ReadOnlyFilesystem` if the mount is read-only.
 /// Does not hold the VFS lock after returning.
 fn check_writable(path: &Path) -> KernelResult<()> {
+    let ns = super::mntns::current();
     let vfs = VFS.lock();
     // Find mount without &mut (we only need to read options).
     let mut best_len = 0;
     let mut best_ro = false;
-    for mp in &vfs.mounts {
+    for mp in vfs.table(ns) {
         if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
             best_len = mp.path.len();
             best_ro = mp.options.read_only;

@@ -6245,11 +6245,15 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     Waiting on it: util-linux's `unshare` and `nsenter`, which refuse until then
     (`requests/b-ad-unshare-and-nsenter-wait-on-unshare-and-setns.md`), lane D's
     libc `unshare()`/`setns()`, and any later `runc`, `podman` or `bubblewrap`,
-    which call the same set. **UTS done 2026-10-08** (design-decisions 1554):
-    `unshare`/`clone`/`clone3` with `CLONE_NEWUTS`, `setns` by handle and by
-    pidfd, `/proc/<pid>/ns/uts` (`kernel/src/utsns.rs`, `kernel/src/nsfs.rs`),
-    and containers' `--hostname` as their own UTS namespace. The other six
-    kinds remain: `known-issues/A-ONLY-THE-UTS-NAMESPACE-HAS-LINUX-CALLS.md`.
+    which call the same set. **UTS and mount done 2026-10-08**
+    (design-decisions 1554, 1555): `unshare`/`clone`/`clone3` with
+    `CLONE_NEWUTS` and `CLONE_NEWNS`, `setns` by handle and by pidfd,
+    `/proc/<pid>/ns/{uts,mnt}` (`kernel/src/utsns.rs`, `kernel/src/fs/mntns.rs`,
+    `kernel/src/nsfs.rs`), root's `mount(2)`/`umount2(2)` (private mounts
+    only), the native `SYS_NAMESPACE_*` calls, and containers' `--hostname` as
+    their own UTS namespace. Remaining: the other five kinds
+    (`known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`), and bind/move
+    mounts and `pivot_root` (`known-issues/A-MOUNT-HAS-NO-BIND-OR-MOVE.md`).
 
 ### 5.6 Additional software
 - [-] `[E]` Speech input / speech output — **output, step 1 of 4 done

@@ -28,9 +28,9 @@ of `uname`.
   namespace's descriptor or a pidfd, and `/proc/<pid>/ns/uts` as Linux has it:
   a link whose text is `uts:[N]`, which opens to a descriptor that `fstat`
   describes as nsfs's inode `N` on a device of its own
-  (`fs::vfs::reserve_dev`), and which answers `NS_GET_NSTYPE`. The other
-  namespace kinds are refused (`EINVAL` from `clone` and `setns`, `EPERM`
-  from `unshare` as before) rather than accepted and not made: until this
+  (`fs::vfs::reserve_dev`), and which answers `NS_GET_NSTYPE`. The kinds
+  not built are refused -- `EINVAL`, after `EPERM` for a caller without the
+  privilege (decision 2) -- rather than accepted and not made: until this
   change `clone(2)` took the bits and made nothing.
 - Containers: each has its own UTS namespace, named by `--hostname`, which
   every process it runs joins; replaced `ipc::namespace`'s per-process
@@ -82,8 +82,9 @@ registered listener: the right lives in the capability table, the record in
 `ipc_handles`, and neither is mistaken for the other. A new type would have
 grown the capability ABI that lane D mirrors for nothing a program can see.
 
-**Not yet:** the other kinds of namespace (mount, IPC, network, PID, user,
-cgroup, time) -- the roadmap's 5.5 item "The Linux namespace calls" --,
+**Not yet:** the other kinds of namespace (IPC, network, PID, user, cgroup,
+time; mount namespaces followed the same day, design-decisions 1555) -- the
+roadmap's 5.5 item "The Linux namespace calls" --,
 `/proc/<pid>/task/<tid>/ns`, `/proc/thread-self/ns`, and `NS_GET_USERNS`,
 which answers `EPERM` until a user namespace can be named by a handle
-(`known-issues/A-ONLY-THE-UTS-NAMESPACE-HAS-LINUX-CALLS.md`).
+(`known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`).

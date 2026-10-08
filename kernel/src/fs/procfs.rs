@@ -1118,7 +1118,9 @@ fn gen_pid_mounts(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
-    let global = crate::fs::Vfs::mounts_full();
+    // The process's own mount namespace's table (`fs::mntns`), not the
+    // reader's: `/proc/<pid>/mounts` is about that process.
+    let global = crate::fs::Vfs::mounts_full_in(crate::fs::mntns::of_process(task_id));
     if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
         return Ok(render_container_mounts(&view, &global));
     }
@@ -3505,7 +3507,8 @@ fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
-    let mounts = crate::fs::Vfs::mounts_with_dev();
+    // The process's own mount namespace's table (`fs::mntns`).
+    let mounts = crate::fs::Vfs::mounts_with_dev_in(crate::fs::mntns::of_process(task_id));
     // A container (jailed) process sees its own mount view, not the host's.
     if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
         return Ok(render_container_mountinfo(&view, &mounts));
@@ -4315,21 +4318,17 @@ fn gen_overlays() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// Generate `/proc/namespaces` — active mount namespaces.
+/// Generate `/proc/namespaces` — the mount namespaces (`fs::mntns`): each
+/// one's id, the processes in it, the holds on it and its mounts.
 fn gen_namespaces() -> Vec<u8> {
-    let nss = crate::fs::mount_ns::list();
+    let nss = crate::fs::mntns::list();
     let mut s = String::with_capacity(512);
     s.push_str(&format!("Mount namespaces: {}\n\n", nss.len()));
     for ns in &nss {
-        let parent = ns
-            .parent
-            .map(|p| format!("{}", p))
-            .unwrap_or_else(|| String::from("none"));
-        s.push_str(&format!("ns {} ({}):\n", ns.id, ns.name));
-        s.push_str(&format!("  parent:     {}\n", parent));
-        s.push_str(&format!("  mounts:     {}\n", ns.mount_count));
-        s.push_str(&format!("  refcount:   {}\n", ns.refcount));
-        s.push_str(&format!("  nested:     {}\n", ns.allow_nested));
+        s.push_str(&format!("ns {}:\n", ns.id));
+        s.push_str(&format!("  processes:  {}\n", ns.processes));
+        s.push_str(&format!("  holds:      {}\n", ns.holds));
+        s.push_str(&format!("  mounts:     {}\n", ns.mounts));
         s.push('\n');
     }
     s.into_bytes()

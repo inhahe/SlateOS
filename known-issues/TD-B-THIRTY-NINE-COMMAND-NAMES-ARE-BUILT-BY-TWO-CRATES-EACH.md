@@ -263,6 +263,37 @@ Two measured examples:
   `No such device`, status 1. **What the loser knew that the winner did
   not:** nothing. Nothing to port.
 
+* **`last`** — **RETIRED 2026-10-08, with `lastlog` beside it.**
+  `coreutils/src/bin/last.rs` is util-linux 2.39.3's `login-utils/last.c`
+  (and `lastb`, by its `argv[0]`); `coreutils/src/bin/lastlog.rs` is
+  shadow-utils 4.13's `src/lastlog.c`. `userspace/last`, written from the
+  manuals, was all three by its `argv[0]`, through the manifest aliases
+  `lastb = last` and `lastlog = last`. Each harness was run over the
+  standalone too -- as `lastlog` under that name:
+
+      coreutils last        511 passed,   0 differed,  3 differ on purpose
+      userspace/last         12 passed, 497 differed,  3 differ on purpose, 2 hung
+      coreutils lastlog     177 passed,   0 differed,  0 differ on purpose
+      userspace/last          1 passed, 176 differed,  0 differ on purpose
+
+  As `last`, it listed the file oldest first where upstream reads it
+  backwards and lists the newest first; wrote every logout with its date,
+  where the short format has only `HH:MM`; listed ghost entries (a login with
+  no user) as logins, ran the `-n` limit over the wrong end, and wrote user
+  and host names as they are -- so a host holding an escape sequence reached
+  the terminal, where upstream's `fputs_careful` writes `*[`. It had no
+  `--time-format`, `-s`, `-t` or `-p` and no long option at all; a second
+  `-f` replaced the first instead of adding a file; and it read `/dev/zero`
+  forever (the hangs: one or two, by how long a run takes to time out).
+  Its twelve passes are listings that select nothing -- a name or a tty no
+  record has -- and three runs with standard output or error closed. As
+  `lastlog`,
+  it had no `-R` -- every chrooted case stopped at `unknown option: -R` -- its
+  host column was 16 wide where upstream's is 42, and it listed only
+  accounts with a record, where upstream lists every account and says
+  `**Never logged in**`. **What the loser knew that the winner did not:**
+  nothing util-linux or shadow-utils has. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

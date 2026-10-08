@@ -1963,13 +1963,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "last"
-version = "0.1.0"
-dependencies = [
- "utmpfile",
-]
-
-[[package]]
 name = "launcher"
 version = "0.1.0"
 dependencies = [
@@ -4478,6 +4471,7 @@ dependencies = [
 name = "ulstrutils"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
  "quoting",
 ]
 

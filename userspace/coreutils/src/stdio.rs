@@ -55,7 +55,8 @@
 //! [`StdioReader::seek`], [`StdioReader::rewind`]): a written stream flushes
 //! first, a read one counts from the next byte it would hand out, and a
 //! standard descriptor moves for everyone who shares it -- `xxd -r` rewinds
-//! its standard input and seeks its output.
+//! its standard input and seeks its output. [`StdioReader::tell`] is
+//! `ftell`, which `last` reads a file's length with.
 //!
 //! What it does not reproduce: wide streams, and the line-buffered corner
 //! where a failed flush of a complete line is reported to `fwrite`'s caller
@@ -895,6 +896,39 @@ impl StdioReader {
         Ok(at)
     }
 
+    /// `ftell`: where the next byte the caller is handed comes from -- the
+    /// descriptor's position less what is buffered and unread. Nothing moves.
+    ///
+    /// # Errors
+    ///
+    /// `lseek(2)`'s: `ESPIPE` for a pipe or a terminal, `EBADF` for a closed
+    /// descriptor; and `EINVAL` where the buffer holds more than the position
+    /// accounts for, as glibc's `do_ftell` says to a negative answer.
+    pub fn tell(&mut self) -> io::Result<u64> {
+        let at = match &mut self.source {
+            Source::Descriptor(fd) => stdfd::seek(*fd, io::SeekFrom::Current(0)),
+            Source::File(f) => io::Seek::stream_position(f),
+            #[cfg(test)]
+            Source::Memory(m) => m.seek_to(io::SeekFrom::Current(0)),
+        }?;
+        let unread = u64::try_from(self.buf.len().saturating_sub(self.pos)).unwrap_or(u64::MAX);
+        at.checked_sub(unread)
+            .ok_or_else(|| io::Error::from_raw_os_error(EINVAL))
+    }
+
+    /// The file under a stream made by [`StdioReader::from_file`] --
+    /// `fileno`, for the `fstat` a caller makes of it. `None` for a standard
+    /// descriptor.
+    #[must_use]
+    pub fn file(&self) -> Option<&std::fs::File> {
+        match &self.source {
+            Source::File(f) => Some(f),
+            Source::Descriptor(_) => None,
+            #[cfg(test)]
+            Source::Memory(_) => None,
+        }
+    }
+
     /// `fclose`: the descriptor closed -- a standard one too, as
     /// `fclose (stdin)` closes 0 -- and `close(2)`'s failure returned.
     ///
@@ -1517,6 +1551,25 @@ mod tests {
         let e = r.seek(std::io::SeekFrom::Current(-1)).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(super::EINVAL));
         assert_eq!(r.getc().unwrap(), Some(b'a'));
+    }
+
+    #[test]
+    fn tell_counts_what_is_buffered_and_moves_nothing() {
+        let mut r = source(b"abcdefgh", 4, true);
+        assert_eq!(r.tell().unwrap(), 0);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        // The descriptor is at 4 with "bcd" unread.
+        assert_eq!(r.tell().unwrap(), 1);
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+        assert_eq!(r.tell().unwrap(), 2);
+        assert_eq!(r.seek(std::io::SeekFrom::End(0)).unwrap(), 8);
+        assert_eq!(r.tell().unwrap(), 8);
+        // A pipe has no position to tell.
+        let mut r = source(b"abc", 8, false);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        let e = r.tell().unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(super::ESPIPE));
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
     }
 
     #[test]

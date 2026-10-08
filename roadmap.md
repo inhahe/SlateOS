@@ -5949,6 +5949,16 @@ _Port ext4 first. Don't write a custom filesystem._
   which read its word list as UTF-8 and refused any list with one Latin-1 word
   in it; `scripts/look-diff.sh`: 1229 cases agree and 2 differ on purpose,
   over lists sorted as a dictionary and as bytes, unsorted and awkward ones);
+  `last` and `lastb` (2026-10-08, util-linux 2.39.3's `last.c`, replacing
+  `userspace/last`, which listed the file oldest first and wrote host names'
+  escape sequences to the terminal: the backwards read and its static state,
+  every time format, `-d`/`-i` through the C library's `getnameinfo`, names
+  through util-linux's `fputs_careful`, now in `ulstrutils`;
+  `scripts/last-diff.sh`: 511 cases agree and 3 differ on purpose, over wtmp
+  files written record by record) and `lastlog` (shadow-utils 4.13's, which the
+  same standalone answered to by its `argv[0]`; `scripts/lastlog-diff.sh`: 177
+  cases agree, run in a user namespace and chrooted with `-R` into fixture
+  roots, `-S` and `-C` judged by the file each leaves);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).

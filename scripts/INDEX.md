@@ -259,6 +259,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
 | `scripts/lane-claims.py` | Say, where every lane can see it at once, that you have started a task. |
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
+| `scripts/last-diff.sh` | Differential test: our `last` and `lastb` against util-linux 2.39.3's. |
+| `scripts/lastlog-diff.sh` | Differential test: our `lastlog` against shadow-utils 4.13's. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
 | `scripts/llvm-spike/run.sh` | Cross-compile LLVM 20's `opt`, `llc` and `ld.lld` for SlateOS, linked against |
@@ -539,4 +541,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_529 scripts._
+_531 scripts._

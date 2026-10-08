@@ -22,7 +22,11 @@ standalone was also the image's `xxd`, through the manifest alias
 `xxd = hexdump` and its own `argv[0]` dispatch; vim's `xxd` reached
 `coreutils` one commit earlier, under a name no other package builds, so
 there was no moment without an `xxd` either. `look` likewise: util-linux's
-in `coreutils`, `userspace/look` retired in the same commit.
+in `coreutils`, `userspace/look` retired in the same commit. And `last`:
+util-linux's in `coreutils` -- `lastb` by its `argv[0]` -- with shadow-utils'
+`lastlog` beside it, and `userspace/last`, which had been all three by its
+`argv[0]` through the manifest aliases `lastb = last` and `lastlog = last`,
+retired in the commit that added both.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

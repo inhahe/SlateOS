@@ -64,7 +64,6 @@ userspace/ipcalc/src/main.rs:argv-as-string
 userspace/iptables/src/main.rs:argv-as-string
 userspace/irqbalance/src/main.rs:argv-as-string
 userspace/jq/src/main.rs:argv-as-string
-userspace/last/src/main.rs:argv-as-string
 userspace/ldd/src/main.rs:argv-as-string
 userspace/less/src/main.rs:argv-as-string
 userspace/lex/src/main.rs:argv-as-string

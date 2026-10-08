@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**483 programs; 324 on the image, 6 carried inside the kernel.**
+**484 programs; 325 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 298
+## Userland utilities and services (`userspace/`, lane B) -- 299
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -135,7 +135,8 @@ two disagree.
 | `jq` | Slate OS JSON processor | yes |  |  |
 | `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
 | `kill` | Process Termination Utility | yes |  | `killall` |
-| `last` | Login Records Viewer (`last` / `lastb` / `lastlog`) | yes |  | `lastb`, `lastlog` |
+| `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
+| `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
 | `ldconfig` | Shared library cache management. | yes |  |  |
 | `ldd` | Shared Library Dependency Lister | yes |  |  |
 | `less` | Terminal Pager | yes |  |  |

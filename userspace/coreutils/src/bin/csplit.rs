@@ -118,6 +118,7 @@
 //! `on repetition 6` — the repetition whose piece was written in full — rather
 //! than at 7 with an empty piece.
 
+use coreutils::cleanup;
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
@@ -127,6 +128,7 @@ use ere::{Regex, bre};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 // Before `main`, so that `stdfd::restore` still sees the descriptors `csplit`
@@ -241,6 +243,10 @@ fn os_from_bytes(b: &[u8]) -> OsString {
 /// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
     stdfd::restore();
+    // Upstream's `main`: the usual suspects caught, so that a piece is not
+    // left behind by a signal -- unless `-k` asked to keep them, which is
+    // why nothing is registered under it (see `Sink::create`).
+    cleanup::install();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -756,9 +762,12 @@ struct Sink<'a> {
     /// `-z` elided, which is why `csplit -z f 1` leaves a single `xx00` holding
     /// everything rather than an `xx01`.
     index: usize,
-    /// Names that have been closed and counted, in creation order, for the
-    /// cleanup an error triggers.
+    /// Every piece made and not elided, in creation order: upstream's
+    /// `files_created`, which an error's cleanup -- and a signal's -- removes.
     written: Vec<OsString>,
+    /// Whether the pieces are registered for removal on a signal: not under
+    /// `-k`, whose `delete_all_files` returns at once.
+    register: bool,
     open: Option<(OsString, File, u64)>,
     /// Where each piece's size is printed: `run_main`'s standard output, lent
     /// rather than a handle of its own. Upstream's `fprintf (stdout, ...)` is
@@ -777,8 +786,28 @@ impl Sink<'_> {
         // the "cannot open ... for writing" phrasing it uses for the *input*.
         // Measured, not assumed; the two openings really are worded
         // differently.
-        let file = File::create(&name)
-            .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
+        //
+        // Kept off descriptors 0-2, as upstream's `fopen` under `stdio--.h`
+        // is `fopen_safer`. Opened plainly, a piece took a closed standard
+        // descriptor and became that stream: the sizes, once their buffer
+        // filled, went into the piece holding descriptor 1, and a `match not
+        // found` said while the last piece held descriptor 2 was kept inside
+        // it under `-k`.
+        //
+        // Made and registered in one critical section, as upstream's
+        // `create_output_file` counts it in `files_created` with the caught
+        // signals blocked: no signal can come between the two and leave the
+        // piece behind.
+        let register = self.register;
+        let file = cleanup::change(|list| {
+            let file = stdfd::create_safer(&name)?;
+            if register {
+                cleanup::add_to(list, Path::new(&name));
+            }
+            Ok::<File, io::Error>(file)
+        })
+        .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
+        self.written.push(name.clone());
         self.open = Some((name, file, 0));
         Ok(())
     }
@@ -812,31 +841,36 @@ impl Sink<'_> {
         stdfd::close(file)
             .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
         if bytes == 0 && self.elide_empty {
-            // Upstream's `unlink`, whose failure is said and is not fatal --
-            // except that a file already gone is no failure at all.
-            if let Err(e) = std::fs::remove_file(&name)
+            // Upstream's `unlink`, in a critical section with the count, whose
+            // failure is said and is not fatal -- except that a file already
+            // gone is no failure at all.
+            if let Err(e) = cleanup::remove(Path::new(&name))
                 && e.kind() != io::ErrorKind::NotFound
             {
                 say(format!("{}: {}", quotef_os(&name), strerror(&e)).as_bytes());
             }
             // The file never existed as far as numbering is concerned.
+            self.written.pop();
             return Ok(());
         }
         if !self.quiet {
             // Unread: the stream remembers a failure for `close_stdout`.
             let _ = writeln!(self.out, "{bytes}");
         }
-        self.written.push(name);
         self.index = self.index.saturating_add(1);
         Ok(())
     }
 
+    /// Upstream's `delete_all_files`, outside a handler: every piece made,
+    /// the last first, a failure to remove one said -- unless it is already
+    /// gone -- and the run going on to its status of 1 regardless.
     fn remove_all(&mut self) {
-        for name in self.written.drain(..) {
-            // Best effort: GNU's `remove_files` reports a failure to unlink but
-            // is already on its way out with a status of 1, which is what we
-            // return regardless.
-            let _ = std::fs::remove_file(&name);
+        while let Some(name) = self.written.pop() {
+            if let Err(e) = cleanup::remove(Path::new(&name))
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                say(format!("{}: {}", quotef_os(&name), strerror(&e)).as_bytes());
+            }
         }
     }
 }
@@ -1096,6 +1130,7 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString], out: &mut Stre
         elide_empty: options.elide_empty,
         index: 0,
         written: Vec::new(),
+        register: !options.keep_files,
         open: None,
         out,
     };

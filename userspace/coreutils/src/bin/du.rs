@@ -58,7 +58,7 @@ use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::quote::{os_bytes, quote, quoteaf, quoteaf_os, quotef};
 #[cfg(unix)]
-use coreutils::stdfd::{self, Stream};
+use coreutils::stdfd::{self, Reopen, Stream};
 // Only [`RealTree`] turns a byte path back into an `OsString`, and it is the
 // half of this file that the Windows development host does not compile — so
 // importing this unconditionally is an unused import there and a needed one on
@@ -1264,30 +1264,28 @@ fn read_operand_list(name: &[u8], err: &mut dyn Write) -> Result<ListRead, u8> {
     // `read_to_end` keeps what it read before a failure, which is what the
     // names upstream has already walked when `getdelim` fails are made of --
     // a partial last name included, as `getdelim` returns one.
-    let (read, closed) = if name == b"-" {
-        // Descriptor 0 itself: `io::stdin()` would answer a closed one with
-        // end of file, where upstream's read fails.
-        let read = stdfd::RawStdin.read_to_end(&mut text);
-        (read, stdfd::close_stdin())
-    } else {
-        match std::fs::File::open(os_from_bytes(name)) {
-            Ok(mut file) => {
-                let read = file.read_to_end(&mut text);
-                (read, stdfd::close(file))
-            }
-            Err(error) => {
-                // `error (EXIT_FAILURE, …)`, so no referral follows. Unchecked:
-                // a diagnostic that is lost is `close_stderr`'s to report.
-                let _ = writeln!(
-                    err,
-                    "du: cannot open {} for reading: {}",
-                    quoteaf(name),
-                    strerror(&error)
-                );
-                return Err(1);
-            }
-        }
-    };
+    // Upstream's `freopen (files_from, "r", stdin)` for a name: the list
+    // becomes descriptor 0 and is read as standard input is, and a failure is
+    // reported with the `errno` glibc's `freopen` leaves --
+    // `du --files0-from=nosuch <&-` is `du: cannot open 'nosuch' for reading:
+    // Bad file descriptor` (see `stdfd::freopen`).
+    if name != b"-"
+        && let Err(error) = stdfd::freopen(os_from_bytes(name), Reopen::Read, 0)
+    {
+        // `error (EXIT_FAILURE, …)`, so no referral follows. Unchecked: a
+        // diagnostic that is lost is `close_stderr`'s to report.
+        let _ = writeln!(
+            err,
+            "du: cannot open {} for reading: {}",
+            quoteaf(name),
+            strerror(&error)
+        );
+        return Err(1);
+    }
+    // Descriptor 0 itself: `io::stdin()` would answer a closed one with end of
+    // file, where upstream's read fails.
+    let read = stdfd::RawStdin.read_to_end(&mut text);
+    let closed = stdfd::close_stdin();
     let failed = match read {
         Ok(_) => false,
         Err(error) => {

@@ -125,9 +125,9 @@ ran=
 # whose text differs on purpose. Marking them `xfail` would throw away the thing
 # they test, since an xfail passes however the two differ — including if ours
 # had rejected the abbreviation as ambiguous.
-SETUP=; STDIN=; STDIN_FILE=; SKIP_STDOUT=
+SETUP=; STDIN=; STDIN_FILE=; SKIP_STDOUT=; CLOSE_STDIN=
 
-reset_knobs() { SETUP=; STDIN=; STDIN_FILE=; SKIP_STDOUT=; }
+reset_knobs() { SETUP=; STDIN=; STDIN_FILE=; SKIP_STDOUT=; CLOSE_STDIN=; }
 
 # --- what a directory looks like afterwards ----------------------------------
 render() {
@@ -174,6 +174,9 @@ compare() {
     if [ -n "$STDIN_FILE" ]; then
       ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" "$PROG" "$@" \
           <"$STDIN_FILE" >"$out" 2>"$err" )
+    elif [ -n "$CLOSE_STDIN" ]; then
+      ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" "$PROG" "$@" \
+          <&- >"$out" 2>"$err" )
     else
       ( cd "$dir" && printf '%b' "$STDIN" \
           | timeout -k 2 60 env PATH="$bindir/$side" "$PROG" "$@" >"$out" 2>"$err" )
@@ -622,6 +625,23 @@ if [ "$PROG" = b2sum ]; then
   SETUP='printf "one\n" > a; printf "abc  a\naa  a\n" > X'
   run_case -c -w X                 # an odd-length digest is refused
 fi
+
+# =============================================================================
+# 9c. Standard input closed
+# =============================================================================
+# Upstream opens every file -- the inputs, and --check's list -- with `fopen`
+# under `stdio--.h`, which is `fopen_safer`: never on descriptor 0. So with
+# standard input closed a `-` is that closed descriptor, a read failure, and
+# not the file most recently opened in its place. A `-` line in a list read
+# that way used to check the list file itself.
+
+SETUP='printf "hello\n" > a'; CLOSE_STDIN=1; run_case a -
+SETUP='printf "hello\n" > a'; CLOSE_STDIN=1; run_case - a
+SETUP='printf "hello\n" > a'; CLOSE_STDIN=1; run_case a a
+SETUP='printf "hello\n" > a; $PROG a - </dev/null > SUMS'; CLOSE_STDIN=1; run_case -c SUMS
+SETUP='printf "hello\n" > a; $PROG - a </dev/null > SUMS'; CLOSE_STDIN=1; run_case -c SUMS
+SETUP='printf "hello\n" > a; $PROG a - </dev/null > SUMS'; CLOSE_STDIN=1; run_case -c --status SUMS
+SETUP='printf "hello\n" > a; $PROG a > SUMS'; CLOSE_STDIN=1; run_case -c SUMS -
 
 # =============================================================================
 # 10. A write error

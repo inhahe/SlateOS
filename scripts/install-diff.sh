@@ -152,7 +152,8 @@ compare() {
     run_side "$o_dir" ours "$@" </dev/null >/dev/full 2>"$o_err"; o_rc=$?
     run_side "$g_dir" gnu  "$@" </dev/null >/dev/full 2>"$g_err"; g_rc=$?
   elif [ -n "${CASE_FD:-}" ]; then
-    # The other descriptors: `CASE_FD=closed|inclosed|errfull|errclosed`.
+    # The other descriptors:
+    # `CASE_FD=closed|inclosed|inoutclosed|errfull|errclosed`.
     case $CASE_FD in
       closed)
         run_side "$o_dir" ours "$@" </dev/null >&- 2>"$o_err"; o_rc=$?
@@ -160,6 +161,9 @@ compare() {
       inclosed)
         run_side "$o_dir" ours "$@" <&- >"$o_bin" 2>"$o_err"; o_rc=$?
         run_side "$g_dir" gnu  "$@" <&- >"$g_bin" 2>"$g_err"; g_rc=$? ;;
+      inoutclosed)
+        run_side "$o_dir" ours "$@" <&- >&- 2>"$o_err"; o_rc=$?
+        run_side "$g_dir" gnu  "$@" <&- >&- 2>"$g_err"; g_rc=$? ;;
       errfull)
         run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>/dev/full; o_rc=$?
         run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>/dev/full; g_rc=$? ;;
@@ -426,6 +430,12 @@ CASE_FD=closed run_case --help
 CASE_FD=closed run_case --version
 CASE_FD=inclosed run_case a.txt out.txt
 CASE_FD=inclosed run_case -v a.txt b.txt dest
+# Both closed at once: upstream's `copy.c` opens through `fcntl--.h`, so no
+# file it installs lands on descriptor 0 or 1; ours opens plainly and agrees,
+# because `-v`'s line is written before the files are opened.
+CASE_FD=inoutclosed run_case -v a.txt out.txt
+CASE_FD=inoutclosed run_case -v a.txt b.txt dest
+CASE_FD=inoutclosed run_case -Dv a.txt x/y/z.txt
 CASE_FD=errfull run_case a.txt out.txt
 CASE_FD=errfull run_case nosuch.txt out.txt
 CASE_FD=errfull run_case -v nosuch.txt a.txt dest

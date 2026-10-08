@@ -130,7 +130,6 @@ use crate::stdfd;
 use crate::xnum::{self, Status};
 use std::cmp::Ordering;
 use std::ffi::OsString;
-use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::process::ExitCode;
 
@@ -992,7 +991,10 @@ pub fn feed_file(
         // `md5sum <&-` printed the empty input's digest and exited 0.
         feed(&mut stdfd::RawStdin)
     } else {
-        match File::open(os_from_bytes(name)) {
+        // Upstream's `fopen` under `stdio--.h`, which is `fopen_safer`: never
+        // on descriptor 0, 1 or 2, so a `-` later on the command line is the
+        // closed standard input itself and not this file again.
+        match stdfd::open_read_safer(os_from_bytes(name)) {
             Ok(f) => {
                 let mut reader = BufReader::new(f);
                 feed(&mut reader)
@@ -1656,7 +1658,11 @@ fn check_file(
         // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
         Box::new(stdfd::RawStdin)
     } else {
-        match File::open(os_from_bytes(checkfile)) {
+        // `fopen_safer`, as above: with standard input closed the list must
+        // not become it, or a `-` line in the list reads the list itself.
+        // Measured: `md5sum -c sums <&-` with a `-` line is `-: FAILED open
+        // or read` on GNU, where a plain open made it `-: OK`.
+        match stdfd::open_read_safer(os_from_bytes(checkfile)) {
             Ok(f) => Box::new(f),
             Err(e) => {
                 diag!("{program}: {}: {}", quotef(checkfile), strerror(&e));

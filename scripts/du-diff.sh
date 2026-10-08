@@ -450,6 +450,16 @@ du --files0-from=- < t
 du -c --files0-from=- < t
 du -c --files0-from=t
 du -c --files0-from=- <&- >&-
+# A named list is `freopen (F, "r", stdin)`: it goes onto descriptor 0, and a
+# failed `freopen` reports the `errno` of glibc closing that descriptor -- `Bad
+# file descriptor` when it was closed already, where ours, opening the list as
+# an ordinary file, said `No such file or directory`.
+du --files0-from=nosuchlist <&-
+du --files0-from=nosuchlist <&- >&-
+du --files0-from=nosuchlist >&-
+du --files0-from=list0 <&-
+du -c --files0-from=list0 <&- >&-
+du --files0-from=list0 >&-
 # `-X -` reads standard input too, and its failure is a refusal.
 du -X - t <&-
 du -X - t < t

@@ -128,11 +128,10 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
 use coreutils::quote::{quote, quotef_os};
-use coreutils::stdfd::{self, Stream};
+use coreutils::stdfd::{self, Reopen, Stream};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
@@ -184,6 +183,9 @@ enum Trouble {
     Read(OsString, io::Error),
     /// An odd token count: the last token had nothing to precede.
     OddTokens(OsString),
+    /// Upstream's `fclose (stdin)`, once the order is out, failed: the input
+    /// is named as `standard input` for `-` and by its name otherwise.
+    Close(OsString, io::Error),
     Write(io::Error),
 }
 
@@ -198,6 +200,10 @@ impl Trouble {
                 "tsort: {}: input contains an odd number of tokens",
                 quotef_os(name)
             ),
+            Self::Close(name, e) if name == "-" => {
+                diag!("tsort: standard input: {}", strerror(e));
+            }
+            Self::Close(name, e) => diag!("tsort: {}: {}", quotef_os(name), strerror(e)),
             Self::Write(e) => stdfd::write_error("tsort", e),
         }
         ExitCode::FAILURE
@@ -248,6 +254,14 @@ fn run_main() -> ExitCode {
     let mut err = Stream::stderr();
 
     let outcome = tsort(&data, &file, &mut out, &mut err);
+    // Upstream's `fclose (stdin)` once the order is printed -- the input is
+    // standard input or the operand `freopen` put there -- and a failure to
+    // close it ends the run.
+    let outcome = outcome.and_then(|ok| {
+        stdfd::close_stdin()
+            .map(|()| ok)
+            .map_err(|e| Trouble::Close(file.clone(), e))
+    });
 
     // Buffered output has to reach the OS on every exit path, the cycle one
     // included: upstream gets that from `atexit (close_stdout)`, and a cyclic
@@ -297,20 +311,19 @@ fn say(mut out: Stream, bytes: &[u8]) -> ExitCode {
 // ---------------------------------------------------------------------- input
 
 fn read_input(file: &OsStr) -> Result<Vec<u8>, Trouble> {
-    let mut data = Vec::new();
-    if file == "-" {
-        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty,
-        // where upstream's `tsort <&-` is `tsort: -: read error: Bad file
-        // descriptor`.
-        stdfd::RawStdin
-            .read_to_end(&mut data)
-            .map_err(|e| Trouble::Read(file.to_os_string(), e))?;
-    } else {
-        let mut handle = File::open(file).map_err(|e| Trouble::Open(file.to_os_string(), e))?;
-        handle
-            .read_to_end(&mut data)
-            .map_err(|e| Trouble::Read(file.to_os_string(), e))?;
+    // Upstream's `freopen (file, "r", stdin)` for an operand: the file becomes
+    // descriptor 0 and is read as standard input is. A failure is reported with
+    // the `errno` glibc's `freopen` leaves, which for `tsort nosuch <&-` is
+    // `tsort: nosuch: Bad file descriptor` (see `stdfd::freopen`).
+    if file != "-" {
+        stdfd::freopen(file, Reopen::Read, 0).map_err(|e| Trouble::Open(file.to_os_string(), e))?;
     }
+    let mut data = Vec::new();
+    // Descriptor 0 itself: `io::stdin()` reads a closed one as empty, where
+    // upstream's `tsort <&-` is `tsort: -: read error: Bad file descriptor`.
+    stdfd::RawStdin
+        .read_to_end(&mut data)
+        .map_err(|e| Trouble::Read(file.to_os_string(), e))?;
     Ok(data)
 }
 

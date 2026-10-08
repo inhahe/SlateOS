@@ -1,8 +1,9 @@
 ## B-JOURNALCTL-AND-SYSLOGD-PANIC-WHEN-OUTPUT-CANNOT-BE-WRITTEN (lane B, 2026-10-07)
 
-**Status:** FIXED 2026-10-08 (lane B), pending a boot test on `main` before
-it moves to resolved. Fixing it turned up more in the same two programs, all
-fixed in the same series and listed under "Found on the way".
+**Status:** FIXED 2026-10-08 (lane B); boot-tested on `main` the same day
+(`b085a015f`, published as `cd4a13399`). Fixing it turned up more in the same
+two programs, all fixed in the same series and listed under "Found on the
+way".
 
 **In short:** `journalctl` and `syslogd` printed through Rust's `println!`,
 which ends the program with a panic -- an internal error message and status

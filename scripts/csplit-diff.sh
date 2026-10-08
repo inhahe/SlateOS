@@ -86,6 +86,12 @@ printf 'x\ny\nz' > nonl.txt
 # Empty input. Every pattern is out of range against it.
 : > empty.txt
 
+# Enough pieces that the sizes printed overflow standard output's buffer
+# while pieces are still being written: 1500 two-line pieces, each size two
+# or three bytes and a newline, past the 4096 bytes after which it is
+# written out mid-run.
+seq 1 3000 > seq3000.txt
+
 # --- machinery ----------------------------------------------------------------
 
 # One invocation of one side, in that side's own directory. `$1` is `ours` or
@@ -483,7 +489,48 @@ raw_case - - '/x/' '{*}'
 REDIR='>&-'
 run_case seq20.txt 4
 run_case seq20.txt 21
+# Upstream opens each piece through `fopen_safer` (`stdio--.h`), so a closed
+# standard descriptor stays closed and no piece is ever descriptor 1 or 2.
+# Opened plainly, a piece took the lowest free descriptor -- the closed one --
+# and became that standard stream: the sizes, flushed once the buffer filled,
+# were written into whichever piece held descriptor 1, and with `-k` the
+# `match not found` written while the last piece held descriptor 2 was kept
+# inside it.
+run_case seq3000.txt -n 4 2 '{*}'
+run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
+REDIR='2>&-'
+run_case marks.txt -k '/MARK/' '/nomatch/'
+run_case marks.txt '/MARK/' '/nomatch/'
+run_case seq20.txt -k 4 '/nomatch/'
+run_case seq20.txt -k 4 25
+run_case seq20.txt -k '/5/' '{9}'
+REDIR='<&- 2>&-'
+run_case marks.txt -k '/MARK/' '/nomatch/'
+REDIR='<&- >&-'
+run_case seq3000.txt -n 4 2 '{*}'
+REDIR='>&- 2>&-'
+run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
 REDIR=
+
+# --- a signal removes the pieces, unless -k -------------------------------------
+# Upstream catches SIGINT, SIGTERM, SIGPIPE and the rest and removes every
+# piece it made before it dies of the signal, as an error's cleanup does;
+# under -k it keeps them. Here the reader of the sizes is gone before they
+# are written, so the write at the end is SIGPIPE, after 1500 pieces.
+pieces_left() {
+  local side=$1 dir=$2; shift 2
+  rm -rf "$dir"; mkdir "$dir"
+  ( cd "$dir" && seq 1 3000 | env PATH="$bindir/$side" csplit "$@" | true ) 2>/dev/null
+  find "$dir" -mindepth 1 | wc -l
+}
+for keep in '' -k; do
+  o_left=$(pieces_left ours o_sig $keep -n 4 - 2 '{*}')
+  g_left=$(pieces_left gnu g_sig $keep -n 4 - 2 '{*}')
+  if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+    AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+  rm -rf o_sig g_sig
+  report "csplit ${keep:+$keep }-n 4 - 2 {*} | true [pieces left]"
+done
 
 # --- not implemented ----------------------------------------------------------
 

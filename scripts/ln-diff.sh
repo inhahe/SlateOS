@@ -80,7 +80,7 @@ listing() {
 #   ANSWERS -- standard input (the `-i` answers); empty means /dev/null-like
 #   ENVV    -- extra `NAME=value` words for `env`
 #   RUNS    -- how many times to run the command in the same directory
-reset_knobs() { ANSWERS=''; ENVV=(); RUNS=1; }
+reset_knobs() { ANSWERS=''; ENVV=(); RUNS=1; CLOSING=''; }
 reset_knobs
 
 # `@DIR@` in an argument becomes that side's case directory, for the cases
@@ -101,8 +101,15 @@ compare() {
     printf '%s' "$ANSWERS" >"$DIFF_TMP/in-$side"
     rcs=''
     for ((i = 0; i < RUNS; i++)); do
-      ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" "${ENVV[@]}" ln "${args[@]}" ) \
-        <"$DIFF_TMP/in-$side" >>"$out" 2>>"$err"
+      if [ -n "$CLOSING" ]; then
+        # Standard descriptors closed for `ln` alone, after the captures so
+        # that the closing wins.
+        ( cd "$dir" && eval "timeout -k 2 60 env PATH=\"\$bindir/\$side\" \"\${ENVV[@]}\" \
+            ln \"\${args[@]}\" $CLOSING" ) <"$DIFF_TMP/in-$side" >>"$out" 2>>"$err"
+      else
+        ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" "${ENVV[@]}" ln "${args[@]}" ) \
+          <"$DIFF_TMP/in-$side" >>"$out" 2>>"$err"
+      fi
       rc=$?
       rcs="$rcs$rc "
     done
@@ -132,6 +139,7 @@ label_of() {
   [ -z "$ANSWERS" ] || label="$label   [in: ${ANSWERS//$'\n'/\\n}]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
   [ "$RUNS" = 1 ] || label="$label   [runs: $RUNS]"
+  [ -z "$CLOSING" ] || label="$label   [$CLOSING]"
   printf '%s' "$label"
 }
 
@@ -340,6 +348,19 @@ run_case -S
 run_case -t
 run_case --help=x
 run_case -- a h
+
+# --- standard descriptors closed -------------------------------------------------
+# Upstream keeps the target directory of `ln A B DIR` open (`openat_safer`, so
+# never on descriptor 0, 1 or 2) and links relative to it; ours opens it only
+# to ask whether it is a directory, closes it at once and links by name, so it
+# holds no descriptor while `-v` writes. Agreeing, these hold that.
+CLOSING='>&-'; run_case -sv a b d
+CLOSING='>&-'; run_case -v a b d
+CLOSING='<&- >&-'; run_case -sv a b d
+CLOSING='<&- >&- 2>&-'; run_case -sv a b d
+CLOSING='>&-'; run_case -sv a nosuch/x
+CLOSING='>&- 2>&-'; run_case -sv a nosuch/x
+CLOSING='<&-'; run_case -s a s
 xfail_case 'our --help omits the GNU ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
 xfail_case 'our --version names SlateOS' a h --vers

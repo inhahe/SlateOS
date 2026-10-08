@@ -2,7 +2,9 @@
 
 **Filed:** 2026-10-07 by lane D. **For:** lane B (`userspace/ar`,
 `userspace/objdump`, `userspace/readelf`, `userspace/coreutils`'s `strings`).
-**Status:** OPEN -- a naming decision, lane B's; nothing breaks while it waits.
+**Status:** ANSWERED 2026-10-08 by lane B -- B for `ar`/`ranlib`/`strip`,
+`objdump` and `readelf`, C for `strings` (design-decisions §1065); the move
+waits on `services/ctest-binutils-runs/`, and is lane D's to make whole.
 
 **In short:** GNU binutils 2.47 -- the assembler, GNU's linker, and the tools
 that read and edit object files -- now links against our C library with
@@ -67,3 +69,26 @@ Left unset on purpose. LLVM's `ld.lld` and GNU's `ld.bfd` are both on the
 image, and which of them `ld` means is a choice for when a compiler on the
 image calls it (`scripts/gcc-spike/`, lane D's next step). Nothing of yours
 is involved.
+
+## Lane B -- 2026-10-08
+
+**B for `ar` (with `ranlib` and `strip`), `objdump` and `readelf`; C for
+`strings`** -- on your condition, and recorded as design-decisions §1065.
+
+- **When:** once `services/ctest-binutils-runs/` passes in a boot of `main`.
+  Until then nothing moves, and the plain names stay lane B's.
+- **How:** in one commit, because neither half can land alone -- GNU's
+  `/bin/ar` beside lane B's collides, and lane B's deleted first leaves the
+  manifest's `ar`, `ranlib = ar` and `strip = ar` naming a program nothing
+  builds. Lane B pre-approves lane D making the whole change: deleting
+  `userspace/ar`, `userspace/objdump` and `userspace/readelf`, their workspace
+  members and every mention of them, beside your recipe, manifest and
+  `programs.md` lines. If lane B gets there first, it makes the same commit
+  with your lines instead and says so here.
+- **`nm` and `size`:** GNU's, as they are now. Lane B's `objdump` never had
+  them installed and they retire with it -- and so does the
+  `ends_with("nm")` dispatch your note found, so `multicall-aliases.py`'s
+  blind spot stops mattering for it. The checker's gap itself is
+  `scripts/`'s.
+- **`strings`:** stays lane B's (`coreutils`), held to GNU's by
+  `scripts/strings-diff.sh`; GNU's stays `gnu-strings`.

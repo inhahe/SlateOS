@@ -9200,12 +9200,14 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     // nothing -- which is what the first version of this did, passing a whole
     // boot while proving neither syscall existed.
     //
-    // `which != ITIMER_REAL` is rejected before the pid lookup, so this reaches
-    // the handler either way. It separates three outcomes a caller must be able
-    // to tell apart: `NoSuchSyscall` means the number is not registered at all,
-    // `InvalidArgument` means a registered handler ran and refused the
-    // argument, and success would mean the handler accepted a CPU-time request
-    // for a wall-clock timer.
+    // A `which` past ITIMER_PROF is rejected before the pid lookup, so this
+    // reaches the handler either way. It separates the outcomes a caller must
+    // be able to tell apart: `NoSuchSyscall` means the number is not
+    // registered at all, `InvalidArgument` means a registered handler ran and
+    // refused the argument. (ITIMER_VIRTUAL, 1, was the refused one until the
+    // CPU-time timers, design-decisions 1550, made it a timer of its own; this
+    // asked for its refusal until 2026-10-08, the first boot that reached it
+    // after.)
     let bad_which = SyscallResult::err(KernelError::InvalidArgument).value;
     let no_such = SyscallResult::err(KernelError::NoSuchSyscall).value;
     for (nr, name) in [
@@ -9215,7 +9217,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         let r = dispatch(
             nr,
             &SyscallArgs {
-                arg0: 1, // ITIMER_VIRTUAL
+                arg0: 3, // past ITIMER_PROF
                 arg1: 0,
                 arg2: 0,
                 arg3: 0,
@@ -9233,7 +9235,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         }
         if r.value != bad_which {
             serial_println!(
-                "[syscall]   FAIL: {} ({}) returned {} for ITIMER_VIRTUAL, expected InvalidArgument ({}). Accepting it would arm a wall-clock timer for a CPU-time request",
+                "[syscall]   FAIL: {} ({}) returned {} for which 3, expected InvalidArgument ({}): there is no fourth interval timer",
                 name,
                 nr,
                 r.value,
@@ -9256,36 +9258,40 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         // PASS printed above it.
         //
         // itimer's order is the REVERSE of setgroups' and chroot's, and asserting it
-        // is how that stays true. `sys_itimer_set` refuses `which != ITIMER_REAL`
-        // BEFORE the caller lookup, which the ITIMER_VIRTUAL case above covers. So
-        // this passes a VALID which (ITIMER_REAL = 0) and requires NoSuchProcess --
-        // the only way to reach the caller lookup, and the half the skip never ran.
+        // is how that stays true. `sys_itimer_set` refuses a `which` past
+        // ITIMER_PROF BEFORE the caller lookup, which the case above covers. So
+        // this passes VALID ones -- ITIMER_REAL (0), and ITIMER_VIRTUAL (1), a
+        // CPU-time timer -- and requires NoSuchProcess: the only way to reach the
+        // caller lookup, and the half the skip never ran.
         //
         // The divergence is defensible: setgroups withholds which COUNTS are
         // acceptable, and `which` is three public constants. But it is a divergence,
         // so it is pinned rather than assumed.
-        let probe = dispatch(
-            SYS_ITIMER_SET,
-            &SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            },
-        );
-        if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
-            serial_println!(
-                "[syscall]   FAIL: {} with no owning process returned {}, expected NoSuchProcess ({})",
+        for which in [0, 1] {
+            let probe = dispatch(
                 SYS_ITIMER_SET,
-                probe.value,
-                SyscallResult::err(KernelError::NoSuchProcess).value
+                &SyscallArgs {
+                    arg0: which,
+                    arg1: 0,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
             );
-            return Err(KernelError::InternalError);
+            if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+                serial_println!(
+                    "[syscall]   FAIL: {} (which {}) with no owning process returned {}, expected NoSuchProcess ({})",
+                    SYS_ITIMER_SET,
+                    which,
+                    probe.value,
+                    SyscallResult::err(KernelError::NoSuchProcess).value
+                );
+                return Err(KernelError::InternalError);
+            }
         }
         serial_println!(
-            "[syscall]   itimer (1069/1070): OK -- ITIMER_VIRTUAL refused, and a caller with no process is refused after the which check (the reverse of setgroups' order, pinned deliberately)"
+            "[syscall]   itimer (1069/1070): OK -- a which past ITIMER_PROF refused, and a caller with no process is refused after the which check, for the wall-clock and a CPU-time timer alike (the reverse of setgroups' order, pinned deliberately)"
         );
         return Ok(());
     }
@@ -9308,17 +9314,21 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         )
     };
 
-    // Look before touching: refuse to clobber a timer this test does not own.
-    let existing = call(SYS_ITIMER_GET, 0, 0, 0);
-    if existing.value != 0 || existing.value2 != 0 {
-        serial_println!(
-            "[syscall]   Dispatch itimer: SKIP (a timer is already armed on this \
-             process: {} ns remaining, interval {}) — refusing to clobber state \
-             this test does not own",
-            existing.value,
-            existing.value2
-        );
-        return Ok(());
+    // Look before touching: refuse to clobber a timer this test does not own --
+    // the wall-clock one or ITIMER_VIRTUAL, the two it arms.
+    for which in [0, 1] {
+        let existing = call(SYS_ITIMER_GET, which, 0, 0);
+        if existing.value != 0 || existing.value2 != 0 {
+            serial_println!(
+                "[syscall]   Dispatch itimer: SKIP (timer {} is already armed on this \
+                 process: {} ns remaining, interval {}) — refusing to clobber state \
+                 this test does not own",
+                which,
+                existing.value,
+                existing.value2
+            );
+            return Ok(());
+        }
     }
 
     // Take every reading first, disarm unconditionally, judge afterwards.
@@ -9326,7 +9336,12 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     let read = call(SYS_ITIMER_GET, 0, 0, 0);
     let disarmed = call(SYS_ITIMER_SET, 0, 0, 0);
     let after = call(SYS_ITIMER_GET, 0, 0, 0);
-    let virt = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+    // ITIMER_VIRTUAL: an hour of the process's user-mode CPU time, which this
+    // test cannot use up before it disarms it.
+    let v_armed = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+    let v_read = call(SYS_ITIMER_GET, 1, 0, 0);
+    let v_disarmed = call(SYS_ITIMER_SET, 1, 0, 0);
+    let v_after = call(SYS_ITIMER_GET, 1, 0, 0);
 
     let hour = i64::try_from(ONE_HOUR_NS).unwrap_or(i64::MAX);
 
@@ -9373,18 +9388,31 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if virt.value >= 0 {
+    if v_armed.value != 0
+        || v_armed.value2 != 0
+        || v_read.value <= 0
+        || v_read.value > hour
+        || v_disarmed.value <= 0
+        || v_after.value != 0
+        || v_after.value2 != 0
+    {
         serial_println!(
-            "[syscall]   FAIL: ITIMER_VIRTUAL returned {}, expected an error — \
-             accepting it would arm a wall-clock timer for a CPU-time request",
-            virt.value
+            "[syscall]   FAIL: ITIMER_VIRTUAL: set ({}, {}), get {}, disarm {}, then \
+             ({}, {}); expected (0, 0), a positive value no greater than the hour, \
+             the remainder, and (0, 0)",
+            v_armed.value,
+            v_armed.value2,
+            v_read.value,
+            v_disarmed.value,
+            v_after.value,
+            v_after.value2
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[syscall]   itimer (1069/1070: arm, read back armed, disarm reports the \
-         remainder, ITIMER_VIRTUAL refused): OK"
+         remainder, for ITIMER_REAL and ITIMER_VIRTUAL): OK"
     );
     Ok(())
 }

@@ -616,6 +616,71 @@ pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
     imp::fd_safer(file)
 }
 
+/// gnulib's `open_safer`, as a method on [`std::fs::OpenOptions`]: the open,
+/// then [`fd_safer`], so that the file never takes descriptor 0, 1 or 2.
+///
+/// # Where, and only where, upstream does it
+///
+/// Not every program: whether a file opened with a standard descriptor
+/// closed lands *on* that descriptor is observable, and upstream decides it
+/// per program. In coreutils 9.4 the safer opens come from per-file headers
+/// -- `stdio--.h` (a safe `fopen`) in `comm`, `csplit`, `digest.c` (the
+/// `*sum` programs and `cksum`), `dircolors`, `du`, `join`, `pr`, `ptx`,
+/// `shuf`, `tee`, `tsort` and `uniq`; `fcntl--.h` (a safe `open`) in
+/// `copy.c` (`cp`, `mv`, `install`), `shred`, `split` and `tail`;
+/// `stdlib--.h` for `sort`'s and `tac`'s temporary files; `unistd--.h` in
+/// `nohup`; `openat_safer` for `ln`'s target directory; and gnulib's `fts`
+/// and `randread` -- and `system.h`, which every program includes, carries
+/// none of them. So `cat`, `sort`'s inputs, `paste`, `wc` and the rest open
+/// plainly, and a file opened with standard input closed *is* standard
+/// input: measured, `sort f - <&-` sorts `f` once and exits 0 (its
+/// `xfclose` leaves descriptor 0 open, so `-` finds `f` at its end), and
+/// `paste f - <&-` says `standard input is closed` (it checks for exactly
+/// that descriptor). A port opens as its upstream does, and these are for
+/// the programs whose upstream is safe -- what `tee` needed: `printf
+/// 'hello\n' | tee out.txt >&-` wrote `hello` into `out.txt` twice and
+/// exited 0, where GNU's writes it once and says `tee: 'standard output':
+/// Bad file descriptor`. `known-issues/TD-B-GUARDED-PROGRAMS-OPEN-FILES-
+/// WITHOUT-OPEN-SAFER.md` lists which programs are converted.
+pub trait OpenSafer {
+    /// [`std::fs::OpenOptions::open`], kept off descriptors 0-2.
+    ///
+    /// # Errors
+    ///
+    /// What the open said, or `EMFILE` from moving the file up.
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File>;
+}
+
+impl OpenSafer for std::fs::OpenOptions {
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File> {
+        self.open(path).and_then(fd_safer)
+    }
+}
+
+/// [`std::fs::File::open`], kept off descriptors 0-2: `open_safer (name,
+/// O_RDONLY)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn open_read_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open_safer(path)
+}
+
+/// [`std::fs::File::create`], kept off descriptors 0-2: `open_safer (name,
+/// O_WRONLY | O_CREAT | O_TRUNC, 0666)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn create_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_safer(path)
+}
+
 /// Whether `fd` is a terminal — `isatty(3)`.
 ///
 /// The module already asks this to choose stdout's buffering, and several
@@ -2297,5 +2362,63 @@ mod tests {
         assert_eq!(text, b"kept");
         drop(file);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The three safer opens open as the calls they replace do. Where the
+    /// descriptor lands needs one of 0-2 closed, which a test cannot do safely
+    /// (see the test above); `tee-diff.sh`'s closed-stdout cases and
+    /// `awk-diff.sh`'s `wfile_closed_case` hold that end to end.
+    #[test]
+    fn the_safer_opens_open_as_the_plain_ones_do() {
+        use super::OpenSafer;
+        use std::io::{Read, Write};
+
+        let dir = std::env::temp_dir().join(format!("stdfd-open-safer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+
+        // `create_safer`: creates, and truncates what is there.
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"first")
+            .unwrap();
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"2nd")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd");
+
+        // `open_read_safer`: reads, and refuses to write.
+        let mut text = Vec::new();
+        super::open_read_safer(&path)
+            .unwrap()
+            .read_to_end(&mut text)
+            .unwrap();
+        assert_eq!(text, b"2nd");
+        assert!(
+            super::open_read_safer(&path)
+                .unwrap()
+                .write_all(b"x")
+                .is_err()
+        );
+        assert!(super::open_read_safer(dir.join("missing")).is_err());
+
+        // `open_safer`: the options are the caller's, passed through.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open_safer(&path)
+            .unwrap()
+            .write_all(b"+")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd+");
+        let refused = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open_safer(&path)
+            .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

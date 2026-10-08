@@ -1,45 +1,93 @@
 ## TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER (lane B, 2026-10-07)
 
-**Status:** OPEN (lane B). Nothing is known to fail today; this is a
-structural guarantee upstream has and we do not.
+**Status:** PARTLY FIXED 2026-10-08 (lane B): `tee`, the program whose
+difference corrupted data, opens its files as its upstream does now.
+**OPEN** for the other programs whose upstream keeps its files off
+descriptors 0-2 (the list at the end): each is converted with the harness
+case that shows the difference, not all at once.
 
-**In short:** a program can be started with its standard output or error
-closed (`cp -v a b >&-`). The descriptor guard (`guard_std_fds!`) keeps them
-closed, as GNU's programs see them, so that `write error` is reported where
-GNU reports it. But then the next file the program opens takes the lowest
-free descriptor -- 1, or 2 -- and anything written to "standard output" while
-that file is open goes *into the file*. GNU cannot do this: gnulib's
-`fcntl-safer` module makes every `open` in coreutils `open_safer`, which never
-returns 0, 1 or 2. Ours opens with plain `OpenOptions`, so the only thing
-keeping a `-v` line or a diagnostic out of a user's file is the order in which
-the program happens to write and open.
+**In short:** a program can be started with a standard descriptor closed
+(`tee out.txt >&-`). The descriptor guard (`guard_std_fds!`) keeps it closed,
+as upstream's programs see it, so that `write error` is reported where they
+report it. But then the next file the program opens takes the lowest free
+descriptor -- 0, 1 or 2 -- and *is* that standard stream. Whether that
+happens is upstream's choice, made program by program, and observable; a port
+has to make the same choice.
 
-**Where.** Every guarded program that opens a file and also writes to standard
-output or error while it is open. Measured 2026-10-07 for the case that looked
-most exposed, `cp` (whose copies all go through `coreutils::copy`):
+**It corrupted data in `tee`.** Measured 2026-10-07, against GNU coreutils
+9.4:
 
-* `cp -v` over 300 files with standard output closed -- 15 KB of `-v` lines,
-  so `Stream`'s 4096-byte buffer is flushed many times -- leaves every copy
-  intact and ends `write error: Bad file descriptor`, status 1, as GNU's does.
-  It is safe because `emit_verbose`'s line is written before each copy opens
-  its source and destination (GNU's order, `copy.c:2630`), never while one is
-  open.
-* `cp -p`/`--preserve=ownership` with standard error closed: also intact, but
-  only because a non-root ownership failure is not reported at all, here or
-  upstream. A preservation failure that *is* reported -- printed at the site,
-  with the destination still open -- would go into the destination. None was
-  found that an unprivileged harness can provoke.
+```
+printf 'hello\n' | tee out.txt >&-
+  ours: out.txt holds "hello" TWICE, exit 0, nothing said
+  GNU:  out.txt holds "hello" once, exit 1,
+        tee: 'standard output': Bad file descriptor
+```
 
-So the hazard is latent: one future line of output moved inside an open file's
-lifetime, in any of `cp`, `mv`, `install`, `ln`, `tac`, `split`, `sort -o`,
-`tee`, would silently write into user data, and only when a descriptor was
-closed -- exactly the run nobody looks at.
+`out.txt` had opened on descriptor 1, so every block `tee` copied to standard
+output was written into the file as well. GNU's `tee` opens with `fopen`
+under `stdio--.h`, which makes it `fopen_safer`. Ours does the same now
+(`coreutils::stdfd::OpenSafer`, `open_read_safer`, `create_safer`), and
+`tee-diff.sh` has seven closed-stdout cases with files to write.
 
-**The proper fix:** upstream's. A `coreutils::stdfd::open_safer` (an open
-followed by `fd_safer`, which already exists and which `tac` already uses for
-its temporary file) and every file-opening helper in the crate --
-`copy::open_new`, `copy::open_truncating`, the source open in `copy_reg`,
-`dirfd`'s opens, `stdio`'s -- routed through it, with a unit test per helper
-that opens with descriptors 0-2 closed in a child process and checks the
-descriptor it got. A ratchet like `check-raced-globals.py` could then refuse
-a new `OpenOptions::open` in `src/bin/` that bypasses it.
+**What upstream does, program by program.** In coreutils 9.4 the safer opens
+come from headers a program includes for itself -- `system.h`, which all of
+them include, carries none:
+
+| mechanism | programs |
+|---|---|
+| `stdio--.h`: `fopen` is `fopen_safer` | `comm`, `csplit`, `digest.c` (the `*sum` programs, `cksum`), `dircolors`, `du`, `join`, `pr`, `ptx`, `shuf`, `tee`, `tsort`, `uniq` |
+| `fcntl--.h`: `open` is `open_safer` | `copy.c` (`cp`, `mv`, `install`), `shred`, `split`, `tail` |
+| `stdlib--.h`: `mkstemp` is `mkstemp_safer` | `sort`'s temporary files, `temp-stream.c` (`tac`'s) |
+| `unistd--.h`: `dup`, `pipe` | `nohup` |
+| `openat_safer`, called by name | `ln`'s target directory |
+| gnulib modules that include `fcntl--.h` | `fts` (every `-R` walk, `du`, `rm -r`), `randread` (`--random-source`), `savewd`, `save-cwd` |
+
+Everything else opens plainly. So `cat`, `wc`, `head`, `paste`, `sort`'s
+inputs and the rest put a file on a closed standard descriptor, and that is
+visible: measured, `sort f - <&-` sorts `f` once and exits 0 (its `xfclose`
+leaves descriptor 0 open, so `-` finds `f` at its end), and `paste f - <&-`
+says `paste: standard input is closed` (it checks for exactly that
+descriptor). A first version of this fix made every open in the crate safe,
+behind a `clippy.toml` rule, on the belief that gnulib's `fcntl-safer` made
+all of coreutils safe; `read-error-diff.sh` and `sort-diff.sh` found these
+four differences in it, and it was cut back to `tee` before it was
+committed. GNU sed opens plainly too (`R /dev/stdin <&-` reads the input file
+on descriptor 0) -- what keeps `sed 'w out' f >&-` from writing into `out` is
+the order it closes in, not where it opens. gawk occupies a closed descriptor
+with `/dev/null` (`init_fds`) before it opens anything, and ours does the
+same, so `awk-diff.sh`'s three closed-stdout cases (added with this) agree
+without any change to `awk`.
+
+Several programs, in the table and out of it, do not keep a file *off* 0
+and 1 at all but put it there on purpose (grepped, coreutils 9.4):
+`freopen` onto standard input in `dircolors`, `du` (`--files0-from`),
+`shuf`, `tsort` and `uniq`, and onto standard output in `ptx`, `shuf -o` and
+`uniq`'s output operand; `fd_reopen` onto descriptor 0 in `csplit`, `split`,
+`stty -F`, `touch` and `dd if=`, and onto 1 in `dd of=` and `nohup`. Each of
+those has to be ported as upstream does it, which is not `fd_safer` either.
+
+**Still to do** -- each with a closed-descriptor case in its harness that
+fails before and agrees after:
+
+* `stdio--.h` (`fopen_safer`): the `*sum` programs and `cksum` (their
+  inputs), `pr` (its inputs), `csplit` (its output files), `ptx` (its
+  `-b`/`-i`/`-o` word files).
+* `freopen`/`fd_reopen` (onto 0 or 1): `dircolors`, `du --files0-from`,
+  `shuf`, `tsort`, `uniq`, `ptx`'s output, `csplit`'s and `split`'s input,
+  `stty -F`, `touch`, `dd`, `nohup`.
+* `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
+  `copy.c`), `split`'s output files.
+* `stdlib--.h`: `sort`'s temporary files.
+* `ln`'s target directory (`openat_safer`).
+
+Already as upstream before this entry: `shred`, `comm`, `join`, `tail` and
+`randint` (each called `fd_safer` at its one site), and `tac`'s temporary
+file. `date` calls `fd_safer` too, where upstream `freopen`s onto standard
+input -- to be measured with the rest.
+
+Found while checking whether `cp` had `tee`'s hazard: it did not, by luck of
+ordering -- `emit_verbose`'s line is written before each copy opens its files
+(GNU's order, `copy.c:2630`), so no file of `cp`'s ever holds descriptor 1
+when standard output is written; 300 files of `-v` with standard output
+closed came out intact.

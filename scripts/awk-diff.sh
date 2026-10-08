@@ -181,6 +181,13 @@ run_side() {
   local flags=
   [ "$side" = gnu ] && flags=$GNUFLAGS
   [ "$side" = ours ] && [ -n "$selfcheck" ] && flags=$GNUFLAGS
+  if [ "$out" = '>&-' ]; then
+    # Standard output closed: see `wfile_closed_case`.
+    # shellcheck disable=SC2086
+    diff_run timeout -k 2 30 env $RUN_ENV PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
+      </dev/null >&- 2>"$err"
+    return
+  fi
   if [ "$stdin" = "-" ]; then
     # shellcheck disable=SC2086
     diff_run timeout -k 2 30 env $RUN_ENV PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
@@ -403,6 +410,39 @@ tty_case() {
   REPORT=$(printf '  ours: %s\n  gnu:  %s' "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" \
     "$(printf '%s' "$g_out" | tr -s ' \n' ' ')")
   report "$AGREED" "tty: awk $prog"
+}
+
+# `wfile_closed_case LABEL ARGS...` — `wfile_case` with standard output
+# closed. The files a program opens must not land on descriptor 1, or what it
+# prints to "standard output" goes into them. gawk's never do: its `init_fds`
+# opens `/dev/null` on a closed standard descriptor, the wrong way round,
+# before any file is opened -- and ours does the same, so neither does ours.
+# (`tee`, whose upstream keeps them off with a safe `fopen` instead, did not:
+# see `tee-diff.sh`.)
+wfile_closed_case() {
+  local label="$1"; shift
+  local w=$DIFF_TMP/wc side o_rc g_rc o_msg g_msg o_dump g_dump
+  rm -rf "$w"; mkdir -p "$w/ours" "$w/gnu"
+  for side in ours gnu; do
+    cp "$fixtures"/*.txt "$fixtures"/*.awk "$w/$side/"
+  done
+  ( cd "$w/ours" && run_side ours - '>&-' err.stderr "$@" ); o_rc=$?
+  ( cd "$w/gnu"  && run_side gnu  - '>&-' err.stderr "$@" ); g_rc=$?
+  o_msg=$(cat "$w/ours/err.stderr"); g_msg=$(cat "$w/gnu/err.stderr")
+  o_dump=$(cd "$w/ours" && find . -type f ! -name '*.txt' ! -name '*.awk' ! -name err.stderr \
+             | sort | while read -r f; do printf '=== %s\n' "$f"; od -An -tx1 "$f"; done)
+  g_dump=$(cd "$w/gnu" && find . -type f ! -name '*.txt' ! -name '*.awk' ! -name err.stderr \
+             | sort | while read -r f; do printf '=== %s\n' "$f"; od -An -tx1 "$f"; done)
+  if [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ] && [ "$o_dump" = "$g_dump" ]; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(printf '  ours (rc=%s): {%s}\n    files: %s\n  gnu  (rc=%s): {%s}\n    files: %s' \
+    "$o_rc" "$(printf '%s' "$o_msg" | tr '\n' '|')" "$(printf '%s' "$o_dump" | tr -s ' \n' ' ')" \
+    "$g_rc" "$(printf '%s' "$g_msg" | tr '\n' '|')" "$(printf '%s' "$g_dump" | tr -s ' \n' ' ')")
+  rm -rf "$w"
+  report "$AGREED" "closed stdout: $label"
 }
 
 # `wfile_case LABEL ARGS...` — for a program that writes files of its own.
@@ -728,6 +768,9 @@ wfile_case 'close and reopen'      '{print > "out"; close("out")}' abc.txt
 wfile_case 'printf to a file'      '{printf "%s|", $0 > "out"}' abc.txt
 wfile_case 'pipe to a command'     '{print | "cat > out"}' abc.txt
 wfile_case 'stderr by name'        'BEGIN {print "e" > "/dev/stderr"}'
+wfile_closed_case 'print to a file and to stdout' '{print > "out"; print}' abc.txt
+wfile_closed_case 'print to a file only'          '{print > "out"}' abc.txt
+wfile_closed_case 'append, then stdout'           'BEGIN {print "pre" > "out"} {print >> "out"; print}' abc.txt
 
 # --- odd inputs -------------------------------------------------------------
 run_case empty '{print "never"} END {print NR}'

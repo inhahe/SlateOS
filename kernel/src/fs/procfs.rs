@@ -2561,28 +2561,31 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         }
     }
     s.push('\n');
-    // Memory: only processes with an address-space charge carry these.  A
-    // bare scheduler task (kernel thread) omits them, exactly as Linux omits
-    // the Vm* lines for tasks with no mm.  Derive the size from the SAME
+    // Memory: every process with an address space carries these, as Linux's
+    // with an `mm` does -- from its first instruction, before it has mapped
+    // anything. A bare scheduler task (kernel thread) and a zombie, whose
+    // address space has gone, omit them, exactly as Linux omits the Vm* lines
+    // for tasks with no mm. Until 2026-10-08 they waited for the first
+    // charged mapping, and a program that read `VmLck` before its first mmap
+    // found none (the mlock ring-3 test, 0x31). Derive the size from the SAME
     // 4 KiB ABI-page accounting as /proc/<pid>/statm so the two files agree
     // exactly (Linux keeps VmSize == statm.size * pagesize): pages =
     // ceil(bytes / 4096), VmSize_kB = pages * 4.  VmRSS mirrors VmSize
     // because we do not track resident pages separately — an upper bound,
     // which is the safe direction for callers (see gen_pid_statm).  Threads
     // share the owning process's address space, so this is process-wide.
-    if let Some(as_bytes) = crate::proc::pcb::linux_as_used(proc_id) {
-        if as_bytes > 0 {
-            const ABI_PAGE_SIZE: u64 = 4096;
-            let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
-            let _ = writeln!(s, "VmSize:\t{kb} kB");
-            // Locked memory (`mlock`, `mlockall`, `MAP_LOCKED`): Linux's
-            // `mm->locked_vm`. Absent until 2026-10-07.
-            let locked_kb = crate::mm::mlock::locked_bytes(proc_id)
-                .div_ceil(ABI_PAGE_SIZE)
-                .saturating_mul(4);
-            let _ = writeln!(s, "VmLck:\t{locked_kb} kB");
-            let _ = writeln!(s, "VmRSS:\t{kb} kB");
-        }
+    if crate::proc::pcb::get_pml4(proc_id).is_some_and(|pml4| pml4 != 0) {
+        const ABI_PAGE_SIZE: u64 = 4096;
+        let as_bytes = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
+        let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
+        let _ = writeln!(s, "VmSize:\t{kb} kB");
+        // Locked memory (`mlock`, `mlockall`, `MAP_LOCKED`): Linux's
+        // `mm->locked_vm`. Absent until 2026-10-07.
+        let locked_kb = crate::mm::mlock::locked_bytes(proc_id)
+            .div_ceil(ABI_PAGE_SIZE)
+            .saturating_mul(4);
+        let _ = writeln!(s, "VmLck:\t{locked_kb} kB");
+        let _ = writeln!(s, "VmRSS:\t{kb} kB");
     }
     let _ = writeln!(s, "Threads:\t{num_threads}");
     // Signals, in Linux's order and format (fs/proc/array.c task_sig()):

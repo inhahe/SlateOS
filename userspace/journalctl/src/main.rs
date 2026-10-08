@@ -35,12 +35,12 @@
 
 #![cfg_attr(not(test), no_main)]
 
+use journalrec::Value;
 use quoting::quotef_os;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -170,14 +170,10 @@ struct JournalEntry {
 }
 
 impl JournalEntry {
-    /// Parse from a single JSON-lines record.
+    /// Parse from a single JSON-lines record, through `journalrec`'s reader
+    /// -- the one `syslogd`'s commands read with too.
     fn from_json_line(line: &str) -> Option<Self> {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-            return None;
-        }
-
-        let fields = parse_json_object(trimmed)?;
+        let fields = journalrec::parse_object(line)?;
         // A field read as text: a string or a scalar, not bytes.
         let text = |key: &str| fields.get(key).and_then(Value::text);
 
@@ -251,7 +247,7 @@ impl JournalEntry {
         }
         parts.push(format!(
             "\"level\":\"{}\"",
-            json_escape(self.priority.name())
+            journalrec::escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
             parts.push(format!(
@@ -261,7 +257,10 @@ impl JournalEntry {
         }
         parts.push(format!("\"msg\":{}", journalrec::json_value(&self.message)));
         if !self.boot_id.is_empty() {
-            parts.push(format!("\"boot_id\":\"{}\"", json_escape(&self.boot_id)));
+            parts.push(format!(
+                "\"boot_id\":\"{}\"",
+                journalrec::escape(&self.boot_id)
+            ));
         }
         if self.pid != 0 {
             parts.push(format!("\"pid\":{}", self.pid));
@@ -287,7 +286,7 @@ impl JournalEntry {
         ];
         for (k, v) in &self.fields {
             if !known_keys.contains(&k.as_str()) {
-                parts.push(format!("\"{}\":{}", json_escape(k), v.to_json()));
+                parts.push(format!("\"{}\":{}", journalrec::escape(k), v.to_json()));
             }
         }
         format!("{{{}}}", parts.join(","))
@@ -303,7 +302,7 @@ impl JournalEntry {
         }
         lines.push(format!(
             "    \"level\": \"{}\",",
-            json_escape(self.priority.name())
+            journalrec::escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
             lines.push(format!(
@@ -318,7 +317,7 @@ impl JournalEntry {
         if !self.boot_id.is_empty() {
             lines.push(format!(
                 "    \"boot_id\": \"{}\",",
-                json_escape(&self.boot_id)
+                journalrec::escape(&self.boot_id)
             ));
         }
         if self.pid != 0 {
@@ -348,7 +347,11 @@ impl JournalEntry {
             .filter(|(k, _)| !known_keys.contains(&k.as_str()))
             .collect();
         for (k, v) in &extras {
-            lines.push(format!("    \"{}\": {},", json_escape(k), v.to_json()));
+            lines.push(format!(
+                "    \"{}\": {},",
+                journalrec::escape(k),
+                v.to_json()
+            ));
         }
         // Remove trailing comma from last field line.
         if let Some(last) = lines.last_mut()
@@ -359,258 +362,6 @@ impl JournalEntry {
         lines.push("}".to_string());
         lines.join("\n")
     }
-}
-
-// ============================================================================
-// Minimal JSON parser (no external deps)
-// ============================================================================
-
-/// One field's value, as the record wrote it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Value {
-    /// A JSON string, decoded.
-    Text(String),
-    /// A JSON array of byte values: a field that is not text, as `syslogd`
-    /// writes one and as `journalctl -o json` prints one on Linux
-    /// (design-decisions §1063).
-    Bytes(Vec<u8>),
-    /// Anything else -- a number, `true`, `false`, `null`, or an array that
-    /// is not bytes -- as it was written.
-    Scalar(String),
-}
-
-impl Value {
-    /// The value's bytes: a string's UTF-8, an array's bytes, a scalar's
-    /// text.
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Value::Text(s) | Value::Scalar(s) => s.as_bytes(),
-            Value::Bytes(b) => b,
-        }
-    }
-
-    /// The value as text, when it is: a string or a scalar.
-    fn text(&self) -> Option<&str> {
-        match self {
-            Value::Text(s) | Value::Scalar(s) => Some(s),
-            Value::Bytes(_) => None,
-        }
-    }
-
-    /// The value as JSON, spelled as it was: a string escaped, bytes as
-    /// their array, a scalar as written.
-    fn to_json(&self) -> String {
-        match self {
-            Value::Text(s) => format!("\"{}\"", json_escape(s)),
-            Value::Bytes(b) => journalrec::json_value(b),
-            Value::Scalar(s) => s.clone(),
-        }
-    }
-}
-
-/// Parse a flat JSON object into key-value pairs: strings, numbers and the
-/// other scalars, and arrays -- a field that is not text is an array of its
-/// byte values. Does not handle nested objects.
-fn parse_json_object(json: &str) -> Option<BTreeMap<String, Value>> {
-    let trimmed = json.trim();
-    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-        return None;
-    }
-    let inner = &trimmed[1..trimmed.len() - 1];
-    let mut map = BTreeMap::new();
-    let mut pos = 0;
-    let bytes = inner.as_bytes();
-
-    while pos < bytes.len() {
-        // Skip whitespace and commas.
-        while pos < bytes.len()
-            && (bytes[pos] == b' '
-                || bytes[pos] == b','
-                || bytes[pos] == b'\t'
-                || bytes[pos] == b'\n'
-                || bytes[pos] == b'\r')
-        {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-
-        // Parse key (must be a string).
-        let key = match parse_json_string_value(inner, &mut pos) {
-            Some(k) => k,
-            None => break,
-        };
-
-        // Skip to colon.
-        while pos < bytes.len() && bytes[pos] != b':' {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        pos += 1; // skip ':'
-
-        // Skip whitespace.
-        while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-
-        // Parse value: a string, an array, or a scalar (number/bool/null).
-        let value = if bytes[pos] == b'"' {
-            match parse_json_string_value(inner, &mut pos) {
-                Some(v) => Value::Text(v),
-                None => break,
-            }
-        } else if bytes[pos] == b'[' {
-            // To the closing bracket: a flat array, as every writer here
-            // spells one, so no bracket is nested inside it.
-            let start = pos;
-            while pos < bytes.len() && bytes[pos] != b']' {
-                pos += 1;
-            }
-            let end = (pos + 1).min(bytes.len());
-            let text = &inner[start..end];
-            pos = end;
-            byte_array(text).map_or_else(|| Value::Scalar(text.to_string()), Value::Bytes)
-        } else {
-            let start = pos;
-            while pos < bytes.len() && bytes[pos] != b',' && bytes[pos] != b'}' {
-                pos += 1;
-            }
-            Value::Scalar(inner[start..pos].trim().to_string())
-        };
-
-        map.insert(key, value);
-    }
-
-    Some(map)
-}
-
-/// `[98,97,255]` as the bytes it lists, or `None` when it is not an array of
-/// numbers each 0 to 255 -- kept then as written rather than half-read.
-fn byte_array(text: &str) -> Option<Vec<u8>> {
-    let body = text.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if body.is_empty() {
-        return Some(Vec::new());
-    }
-    body.split(',')
-        .map(|n| n.trim().parse::<u8>().ok())
-        .collect()
-}
-
-/// Parse a JSON string starting at `pos` (which should point to the opening `"`).
-fn parse_json_string_value(s: &str, pos: &mut usize) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.get(*pos) != Some(&b'"') {
-        return None;
-    }
-    *pos += 1; // skip opening "
-
-    let mut result = String::new();
-    // Where the current run of bytes needing no decoding began. A run always
-    // ends at an ASCII byte -- a quote, a backslash -- or at the end, so it is
-    // copied as the UTF-8 it already is. Pushing it byte by byte `as char`, as
-    // this did until 2026-09-26, turned every non-ASCII character into
-    // mojibake: a record saying `café` was shown as `cafÃ©`.
-    let mut run = *pos;
-    while let Some(&b) = bytes.get(*pos) {
-        match b {
-            b'"' => {
-                result.push_str(s.get(run..*pos).unwrap_or_default());
-                *pos += 1; // skip closing "
-                return Some(result);
-            }
-            b'\\' => {
-                result.push_str(s.get(run..*pos).unwrap_or_default());
-                *pos += decode_escape(bytes, *pos, &mut result);
-                run = *pos;
-            }
-            _ => *pos += 1,
-        }
-    }
-    // Unterminated string -- return what we have.
-    result.push_str(s.get(run..*pos).unwrap_or_default());
-    Some(result)
-}
-
-/// Decode the escape whose backslash is at `bytes[at]` into `out`, returning
-/// how many bytes it spans.
-///
-/// Every escape JSON defines is decoded, `\uXXXX` included and a surrogate
-/// pair as the one character it encodes. What cannot be decoded -- a lone
-/// surrogate, a malformed `\u`, an escape JSON does not define -- is kept as
-/// it was written, backslash and all: a log viewer that drops text it cannot
-/// interpret shows a record that was never written. (The old decoder dropped a
-/// lone surrogate, and a pair lost both halves.)
-fn decode_escape(bytes: &[u8], at: usize, out: &mut String) -> usize {
-    let simple = match bytes.get(at + 1) {
-        Some(b'"') => Some('"'),
-        Some(b'\\') => Some('\\'),
-        Some(b'/') => Some('/'),
-        Some(b'b') => Some('\u{8}'),
-        Some(b'f') => Some('\u{c}'),
-        Some(b'n') => Some('\n'),
-        Some(b'r') => Some('\r'),
-        Some(b't') => Some('\t'),
-        _ => None,
-    };
-    if let Some(c) = simple {
-        out.push(c);
-        return 2;
-    }
-    if bytes.get(at + 1) == Some(&b'u')
-        && let Some(unit) = hex4(bytes, at + 2)
-    {
-        if (0xD800..0xDC00).contains(&unit) {
-            if bytes.get(at + 6) == Some(&b'\\')
-                && bytes.get(at + 7) == Some(&b'u')
-                && let Some(low) = hex4(bytes, at + 8)
-                && (0xDC00..0xE000).contains(&low)
-                && let Some(ch) = char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
-            {
-                out.push(ch);
-                return 12;
-            }
-        } else if let Some(ch) = char::from_u32(unit) {
-            out.push(ch);
-            return 6;
-        }
-    }
-    // Kept as written: the backslash here, and whatever follows it copied by
-    // the caller as ordinary text.
-    out.push('\\');
-    1
-}
-
-/// Four hex digits at `bytes[at..at + 4]` as a number.
-fn hex4(bytes: &[u8], at: usize) -> Option<u32> {
-    let digits = bytes.get(at..at + 4)?;
-    digits.iter().try_fold(0u32, |acc, &d| {
-        char::from(d).to_digit(16).map(|v| acc * 16 + v)
-    })
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                // Use write! to a String -- infallible, no error to handle.
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 // ============================================================================
@@ -1007,9 +758,11 @@ fn is_blank(line: &[u8]) -> bool {
 struct Journal {
     /// All records, oldest first.
     entries: Vec<JournalEntry>,
-    /// For each file read: where the next read should start, and any
-    /// unterminated last line held back for it (see [`read_journal`]).
-    tails: BTreeMap<PathBuf, Tail>,
+    /// What has been read of each file -- known by its identity, so that a
+    /// rotation renaming the files does not lose the place -- and any
+    /// unterminated last line held back (see [`read_journal`]): where `-f`
+    /// goes on from.
+    follow: journalio::Follow,
     /// Files with lines that are not records, and how many.
     not_records: Vec<(PathBuf, usize)>,
     /// Files and directories that could not be read, and why.
@@ -1019,10 +772,10 @@ struct Journal {
 /// Read every log file, as bytes, line by line.
 ///
 /// `hold_back_unterminated` is for `-f`: a last line with no newline may be a
-/// record still being written, so it is neither shown nor counted, but kept in
-/// the file's [`Tail`] for the follow loop to complete. A plain listing shows
-/// it if it parses -- a writer that never ends its last record is still a
-/// writer whose record should be seen.
+/// record still being written, so it is neither shown nor counted, but held
+/// in [`Journal::follow`] for the follow loop to complete. A plain listing
+/// shows it if it parses -- a writer that never ends its last record is still
+/// a writer whose record should be seen.
 fn read_journal(hold_back_unterminated: bool) -> Journal {
     let (files, unreadable) = discover();
     read_files(&files, unreadable, hold_back_unterminated)
@@ -1036,45 +789,31 @@ fn read_files(
     hold_back_unterminated: bool,
 ) -> Journal {
     let mut entries = Vec::new();
-    let mut tails = BTreeMap::new();
+    let mut follow = journalio::Follow::new();
     let mut not_records = Vec::new();
 
     for file in files {
-        let bytes = match fs::read(file) {
-            Ok(b) => b,
+        let bytes = match follow.read(file, hold_back_unterminated) {
+            Ok(Some(b)) => b,
             // Gone between discovery and reading -- rotated away. Not an
             // error: there is nothing left that could have been shown.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Ok(None) => continue,
             Err(e) => {
                 unreadable.push((file.clone(), e));
                 continue;
             }
         };
-        let (complete, unterminated) = split_complete(&bytes);
         let mut bad = 0usize;
-        let mut take = |line: &[u8]| match record_of(line) {
-            Some(entry) => entries.push(entry),
-            None if is_blank(line) => {}
-            None => bad = bad.saturating_add(1),
-        };
-        for line in complete.split(|&b| b == b'\n') {
-            take(line);
-        }
-        let mut tail = Tail {
-            offset: len_u64(&bytes),
-            partial: Vec::new(),
-        };
-        if !unterminated.is_empty() {
-            if hold_back_unterminated {
-                tail.partial = unterminated.to_vec();
-            } else {
-                take(unterminated);
+        for line in journalio::lines(&bytes) {
+            match record_of(line) {
+                Some(entry) => entries.push(entry),
+                None if is_blank(line) => {}
+                None => bad = bad.saturating_add(1),
             }
         }
         if bad > 0 {
             not_records.push((file.clone(), bad));
         }
-        tails.insert(file.clone(), tail);
     }
 
     // Sort by timestamp.
@@ -1086,21 +825,9 @@ fn read_files(
 
     Journal {
         entries,
-        tails,
+        follow,
         not_records,
         unreadable,
-    }
-}
-
-/// `bytes` up to and including its last newline (without that newline), and
-/// what follows it -- an unterminated last line, or nothing.
-fn split_complete(bytes: &[u8]) -> (&[u8], &[u8]) {
-    match bytes.iter().rposition(|&b| b == b'\n') {
-        Some(nl) => (
-            bytes.get(..nl).unwrap_or_default(),
-            bytes.get(nl.saturating_add(1)..).unwrap_or_default(),
-        ),
-        None => (&[], bytes),
     }
 }
 
@@ -1786,7 +1513,7 @@ fn vacuum_file(
     let content = held.read_all().map_err(VacuumFailure::Read)?;
     let mut kept: Vec<&[u8]> = Vec::new();
     let mut removed = 0usize;
-    for line in lines_of(&content) {
+    for line in journalio::lines(&content) {
         if keep(line) {
             kept.push(line);
         } else {
@@ -1820,14 +1547,6 @@ fn vacuum_time(files: &[PathBuf], cutoff: u64, archive: &dyn Fn(&Path) -> bool) 
         }
     }
     vacuumed
-}
-
-/// The lines of a log file's bytes: split on newlines, with a final newline
-/// ending the last line rather than starting an empty one.
-fn lines_of(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    let empty = bytes.is_empty();
-    body.split(|&b| b == b'\n').filter(move |_| !empty)
 }
 
 /// Lines back into a file's bytes, each ended by a newline.
@@ -1911,52 +1630,6 @@ fn vacuum_size(
 // Follow mode
 // ============================================================================
 
-/// Where `-f` has read a file up to, and the unterminated line it is waiting
-/// to see finished.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Tail {
-    /// Bytes of the file already consumed.
-    offset: u64,
-    /// The start of a line whose newline has not been written yet.
-    partial: Vec<u8>,
-}
-
-impl Tail {
-    /// Take the bytes past `offset` in a file that is now `len` long, and
-    /// return the complete lines they finish.
-    ///
-    /// A file SHORTER than the offset was truncated or replaced (rotation),
-    /// and is read again from the start: the records written to it since are
-    /// new, and skipping to the old offset would lose them -- which this did
-    /// before 2026-09-26.
-    fn advance(&mut self, file: &Path, len: u64) -> io::Result<Vec<Vec<u8>>> {
-        if len < self.offset {
-            *self = Tail::default();
-        }
-        if len == self.offset {
-            return Ok(Vec::new());
-        }
-        let mut f = fs::File::open(file)?;
-        f.seek(SeekFrom::Start(self.offset))?;
-        let mut fresh = Vec::new();
-        f.read_to_end(&mut fresh)?;
-        self.offset = self.offset.saturating_add(len_u64(&fresh));
-        self.partial.extend_from_slice(&fresh);
-        let (complete, unterminated) = split_complete(&self.partial);
-        let lines: Vec<Vec<u8>> = if complete.is_empty() && unterminated.len() == self.partial.len()
-        {
-            Vec::new()
-        } else {
-            complete
-                .split(|&b| b == b'\n')
-                .map(<[u8]>::to_vec)
-                .collect()
-        };
-        self.partial = unterminated.to_vec();
-        Ok(lines)
-    }
-}
-
 fn cmd_follow(cfg: &Config) {
     // Print existing entries first (last N if -n specified, else last 10).
     // The offsets `-f` continues from come out of the SAME read: taking file
@@ -1983,36 +1656,33 @@ fn cmd_follow(cfg: &Config) {
         }
     }
 
-    let mut tails = journal.tails;
+    let mut follow = journal.follow;
 
     // Poll for new content. Only the bytes past each file's offset are read
     // -- this used to re-read every file whole, twice a second, and then
     // slice the `String` at the old length, which panicked whenever that
-    // length fell inside a multi-byte character.
+    // length fell inside a multi-byte character. Each file is known by its
+    // identity, not its name: a rotation renames them all, and the place
+    // reached in each goes with it (journalio's `Follow`).
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         let (current_files, _) = discover();
         for file in &current_files {
-            let len = match fs::metadata(file) {
-                Ok(m) => m.len(),
-                // Rotated away between discovery and now; its successor is
-                // found on the next round.
-                Err(_) => continue,
-            };
             // A file first seen now is read from its start.
-            let tail = tails.entry(file.clone()).or_default();
-            let lines = match tail.advance(file, len) {
-                Ok(lines) => lines,
+            let bytes = match follow.read(file, true) {
+                Ok(Some(bytes)) => bytes,
+                // Rotated away between discovery and now; it is found under
+                // its new name next round.
+                Ok(None) => continue,
                 Err(e) => {
                     eprintln!("journalctl: cannot read {}: {e}", quotef_os(file));
                     continue;
                 }
             };
             // Apply filters except reverse and num_entries.
-            let fresh: Vec<JournalEntry> = lines
-                .iter()
-                .filter_map(|line| record_of(line))
+            let fresh: Vec<JournalEntry> = journalio::lines(&bytes)
+                .filter_map(record_of)
                 .filter(|entry| entry_passes_filters(entry, cfg))
                 .collect();
             match render_all(&fresh, cfg) {
@@ -2024,6 +1694,10 @@ fn cmd_follow(cfg: &Config) {
                 }
             }
         }
+        // A file not found this round -- vacuumed away, or past the last
+        // rotation -- is forgotten, so a new file given its identity is read
+        // from its start.
+        follow.end_round();
     }
 }
 
@@ -2250,14 +1924,6 @@ mod tests {
         }
     }
 
-    /// A value compared with text: equal when it is that text -- a string
-    /// or a scalar spelled so.
-    impl PartialEq<str> for Value {
-        fn eq(&self, other: &str) -> bool {
-            self.text() == Some(other)
-        }
-    }
-
     /// A record whose message is not text: read as its bytes, shown as
     /// them, and written back as the same array (design-decisions §1063).
     #[test]
@@ -2426,61 +2092,8 @@ mod tests {
         assert!(Priority::Info.ansi_color().is_empty());
     }
 
-    // =========================================================================
-    // JSON parsing tests
-    // =========================================================================
-
-    #[test]
-    fn test_parse_json_object_basic() {
-        let json = r#"{"ts":1000,"level":"info","msg":"hello"}"#;
-        let map = parse_json_object(json).unwrap();
-        assert_eq!(map.get("ts").unwrap(), "1000");
-        assert_eq!(map.get("level").unwrap(), "info");
-        assert_eq!(map.get("msg").unwrap(), "hello");
-    }
-
-    #[test]
-    fn test_parse_json_object_empty() {
-        let map = parse_json_object("{}").unwrap();
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn test_parse_json_object_not_json() {
-        assert!(parse_json_object("not json").is_none());
-        assert!(parse_json_object("[1,2,3]").is_none());
-        assert!(parse_json_object("").is_none());
-    }
-
-    #[test]
-    fn test_parse_json_object_escaped_strings() {
-        let json = r#"{"msg":"line1\nline2","path":"c:\\temp"}"#;
-        let map = parse_json_object(json).unwrap();
-        assert_eq!(map.get("msg").unwrap(), "line1\nline2");
-        assert_eq!(map.get("path").unwrap(), "c:\\temp");
-    }
-
-    #[test]
-    fn test_parse_json_string_with_unicode() {
-        let json = r#"{"msg":"hello \u0041 world"}"#;
-        let map = parse_json_object(json).unwrap();
-        assert_eq!(map.get("msg").unwrap(), "hello A world");
-    }
-
-    #[test]
-    fn test_json_escape_basic() {
-        assert_eq!(json_escape("hello"), "hello");
-        assert_eq!(json_escape("a\"b"), "a\\\"b");
-        assert_eq!(json_escape("a\\b"), "a\\\\b");
-        assert_eq!(json_escape("a\nb"), "a\\nb");
-        assert_eq!(json_escape("a\tb"), "a\\tb");
-    }
-
-    #[test]
-    fn test_json_escape_control_chars() {
-        assert_eq!(json_escape("\x01"), "\\u0001");
-        assert_eq!(json_escape("\x1f"), "\\u001f");
-    }
+    // The parser's own tests -- JSON objects, strings, escapes, byte arrays
+    // -- are journalrec's, with the parser.
 
     // =========================================================================
     // JournalEntry parsing tests
@@ -2519,7 +2132,10 @@ mod tests {
     fn test_entry_from_json_line_extra_fields() {
         let line = r#"{"ts":100,"level":"info","service":"x","msg":"m","custom_key":"custom_val"}"#;
         let entry = JournalEntry::from_json_line(line).unwrap();
-        assert_eq!(entry.fields.get("custom_key").unwrap(), "custom_val");
+        assert_eq!(
+            entry.fields.get("custom_key").and_then(Value::text),
+            Some("custom_val")
+        );
     }
 
     #[test]
@@ -3294,58 +2910,18 @@ mod tests {
         assert!(cfg.reverse);
     }
 
-    // --- JSON string decoding ---
+    // --- Decoding (the cases themselves are journalrec's) ---
 
-    fn decoded(json: &str) -> Option<String> {
-        let mut pos = 0;
-        parse_json_string_value(json, &mut pos)
-    }
-
-    /// Non-ASCII text used to come back as mojibake, one Latin-1 character
-    /// per UTF-8 byte: `café` as `cafÃ©`.
+    /// What the shared reader decodes reaches the record: a message in UTF-8,
+    /// or escaped, keeps its characters. The private parser this replaced
+    /// was fixed for that on 2026-09-26; `syslogd`'s copy never was.
     #[test]
-    fn json_strings_decode_as_utf8() {
-        assert_eq!(decoded("\"caf\u{e9}\"").as_deref(), Some("caf\u{e9}"));
-        assert_eq!(
-            decoded("\"\u{65e5}\u{672c}\"").as_deref(),
-            Some("\u{65e5}\u{672c}")
-        );
-    }
-
-    #[test]
-    fn every_escape_json_defines_is_decoded() {
-        let cases = [
-            (r#""\u00e9""#, "\u{e9}"),
-            (r#""\ud83d\ude00""#, "\u{1f600}"),
-            (r#""\b\f\n\r\t\/\\\"""#, "\u{8}\u{c}\n\r\t/\\\""),
-        ];
-        for (json, want) in cases {
-            assert_eq!(decoded(json).as_deref(), Some(want), "{json}");
-        }
-    }
-
-    /// What cannot be decoded is kept as written, not dropped.
-    #[test]
-    fn undecodable_escapes_are_kept_as_written() {
-        let cases = [
-            (r#""a\ud83dz""#, "a\\ud83dz"),
-            (r#""\x41""#, "\\x41"),
-            (r#""\u12G4""#, "\\u12G4"),
-            (r#""\u00e""#, "\\u00e"),
-        ];
-        for (json, want) in cases {
-            assert_eq!(decoded(json).as_deref(), Some(want), "{json}");
-        }
-    }
-
-    /// `\u` followed by multi-byte characters used to slice the `&str`
-    /// inside one of them, which panics.
-    #[test]
-    fn a_multibyte_character_after_a_short_u_escape_does_not_panic() {
-        assert_eq!(
-            decoded("\"\\u\u{e9}\u{e9}\u{e9}\"").as_deref(),
-            Some("\\u\u{e9}\u{e9}\u{e9}")
-        );
+    fn a_record_keeps_its_characters() {
+        let entry =
+            JournalEntry::from_json_line("{\"ts\":1,\"msg\":\"caf\u{e9} \\u00e9 \\ud83d\\ude00\"}")
+                .unwrap();
+        assert_eq!(entry.message, "caf\u{e9} \u{e9} \u{1f600}".as_bytes());
+        assert_eq!(entry.timestamp, 1);
     }
 
     // --- Reading as bytes (B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-...) ---
@@ -3421,18 +2997,15 @@ mod tests {
         let listing = read_files(std::slice::from_ref(&file), Vec::new(), false);
         assert_eq!(listing.entries.len(), 2);
 
-        let follow = read_files(std::slice::from_ref(&file), Vec::new(), true);
-        assert_eq!(follow.entries.len(), 1);
-        let mut tail = follow.tails[&file].clone();
-        assert_eq!(tail.partial, rec(2, "b").into_bytes());
+        let mut held = read_files(std::slice::from_ref(&file), Vec::new(), true);
+        assert_eq!(held.entries.len(), 1);
+        assert_eq!(held.follow.read(&file, true).unwrap(), Some(Vec::new()));
 
         let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
         io::Write::write_all(&mut f, b"\n").unwrap();
         drop(f);
-        let len = fs::metadata(&file).unwrap().len();
-        let lines = tail.advance(&file, len).unwrap();
-        assert_eq!(lines, [rec(2, "b").into_bytes()]);
-        assert!(tail.partial.is_empty());
+        let bytes = held.follow.read(&file, true).unwrap().unwrap();
+        assert_eq!(bytes, format!("{}\n", rec(2, "b")).into_bytes());
     }
 
     /// Only the bytes past the offset are read, and a record written in two
@@ -3443,7 +3016,7 @@ mod tests {
         let dir = ScratchDir::new("journalctl_torn");
         let file = dir.path("syslog.jsonl");
         fs::write(&file, b"").unwrap();
-        let mut tail = Tail::default();
+        let mut follow = journalio::Follow::new();
 
         let whole = format!("{}\n", rec(3, "caf\u{e9}"));
         let bytes = whole.as_bytes();
@@ -3452,34 +3025,30 @@ mod tests {
         let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
 
         io::Write::write_all(&mut f, &bytes[..cut]).unwrap();
-        let len = fs::metadata(&file).unwrap().len();
-        assert!(tail.advance(&file, len).unwrap().is_empty());
+        assert_eq!(follow.read(&file, true).unwrap(), Some(Vec::new()));
 
         io::Write::write_all(&mut f, &bytes[cut..]).unwrap();
-        let len = fs::metadata(&file).unwrap().len();
-        let lines = tail.advance(&file, len).unwrap();
+        let read = follow.read(&file, true).unwrap().unwrap();
+        let lines: Vec<&[u8]> = journalio::lines(&read).collect();
         assert_eq!(lines.len(), 1);
-        assert_eq!(
-            record_of(&lines[0]).unwrap().message,
-            "caf\u{e9}".as_bytes()
-        );
+        assert_eq!(record_of(lines[0]).unwrap().message, "caf\u{e9}".as_bytes());
     }
 
-    /// A file that got shorter was truncated or replaced, and is read again
-    /// from its start rather than from the old offset.
+    /// A file that got shorter was truncated, and is read again from its
+    /// start rather than from the old offset.
     #[test]
     fn follow_rereads_a_truncated_file_from_the_start() {
         let dir = ScratchDir::new("journalctl_truncated");
         let file = dir.path("syslog.jsonl");
         fs::write(&file, format!("{}\n{}\n", rec(1, "old"), rec(2, "older"))).unwrap();
-        let mut tail = Tail::default();
-        let len = fs::metadata(&file).unwrap().len();
-        assert_eq!(tail.advance(&file, len).unwrap().len(), 2);
+        let mut follow = journalio::Follow::new();
+        let read = follow.read(&file, true).unwrap().unwrap();
+        assert_eq!(journalio::lines(&read).count(), 2);
 
+        // `fs::write` truncates the same file rather than replacing it.
         fs::write(&file, format!("{}\n", rec(3, "new"))).unwrap();
-        let len = fs::metadata(&file).unwrap().len();
-        let lines = tail.advance(&file, len).unwrap();
-        assert_eq!(lines, [rec(3, "new").into_bytes()]);
+        let read = follow.read(&file, true).unwrap().unwrap();
+        assert_eq!(read, format!("{}\n", rec(3, "new")).into_bytes());
     }
 
     // --- Rotated files, and vacuums under the journal's lock ---
@@ -3581,7 +3150,7 @@ mod tests {
     #[test]
     fn lines_round_trip_through_vacuums_split_and_join() {
         for text in ["", "a\n", "a\nb\n", "a\nb", "\n", "a\n\nb\n"] {
-            let lines: Vec<&[u8]> = lines_of(text.as_bytes()).collect();
+            let lines: Vec<&[u8]> = journalio::lines(text.as_bytes()).collect();
             let back = joined_lines(&lines);
             let expected = if text.is_empty() || text.ends_with('\n') {
                 text.to_string()

@@ -9,6 +9,7 @@
     python scripts/guest.py sh 'ls /bin'
     python scripts/guest.py ping
     python scripts/guest.py stop
+    python scripts/guest.py kexec [--timeout 900]              # restart through kexec
 
 C-Q11 idea 1 (design-decisions 1534): instead of a two-and-a-half-hour boot to
 try a changed program, keep one guest running and copy the program in. The
@@ -35,9 +36,18 @@ words -- a verb and decimal numbers (a `put`'s mode is octal) -- then the byte
 fields the numbers measure; a reply is the same shape, its last number the
 length of the one field that follows (`pong` has none).
 
+`kexec` is the check that the kernel can restart without the firmware
+(`kernel/src/kexec.rs`, todo.txt's kexec section): it boots a guest whose
+command line also holds `kexec.selftest=1`, so the kernel, once up, reloads
+itself (`kexec::reload_self`); it requires the serial log to show the reload
+and a second boot banner, and then the *restarted* kernel's agent to answer --
+a running system, not only a jump that landed. It stops the guest whatever
+happens, and exits 0 when the restart worked, 1 when it did not.
+
 Exit status: a `run` or `try` exits with the program's own code (124 when it
-ran out of time, as `timeout` does); `sh` with the shell command's; otherwise 0,
-or 1 when the agent refused the request, 2 for a usage or connection error.
+ran out of time, as `timeout` does); `sh` with the shell command's; `kexec` as
+above; otherwise 0, or 1 when the agent refused the request, 2 for a usage or
+connection error.
 """
 
 from __future__ import annotations
@@ -65,6 +75,15 @@ PROTOCOL_VERSION = 1
 # the guest first (kernel/src/selftest.rs, `skip`). boot-test.sh refuses
 # both, so neither can reach a boot test.
 GUEST_CMDLINE_WORDS = ("selftest.skip=1", "bench.skip=1")
+
+# `kexec`: the word that has the kernel reload itself through kexec as the
+# boot's last act before BOOT_OK (kernel/src/main.rs, kexec::reload_self), and
+# the serial lines that say how it went. The reloaded kernel is given the same
+# command line without the word, so it boots once more and stays up.
+KEXEC_WORD = "kexec.selftest=1"
+KEXEC_MARKER = b"=== KEXEC-SELFTEST: reloading the kernel into itself now ==="
+KEXEC_REFUSED = b"=== KEXEC-SELFTEST: reload did not happen"
+BOOT_BANNER = b"=== Kernel booting ==="
 
 QEMU_CANDIDATES = (
     "C:/Program Files/qemu/qemu-system-x86_64.exe",
@@ -260,9 +279,10 @@ def qemu_command(port: int, esp: str, swap: str, rootfs: str | None, serial: str
     return cmd
 
 
-def guest_limine_conf(text: str) -> str:
-    """`text`, the boot test's limine.conf, with GUEST_CMDLINE_WORDS on the
-    first entry's command line -- the entry Limine starts by itself.
+def guest_limine_conf(text: str, extra: tuple[str, ...] = ()) -> str:
+    """`text`, the boot test's limine.conf, with GUEST_CMDLINE_WORDS and then
+    `extra` on the first entry's command line -- the entry Limine starts by
+    itself.
 
     The boot test gives that entry a `cmdline:` line after its `kernel_path:`
     (boot-test.sh, where it writes $ESP_DIR/limine.conf); the words go on the
@@ -283,11 +303,11 @@ def guest_limine_conf(text: str) -> str:
             cmdline = i
         elif words[:1] == ["kernel_path:"] and kernel_path is None:
             kernel_path = i
-    extra = " ".join(GUEST_CMDLINE_WORDS)
+    words = " ".join(GUEST_CMDLINE_WORDS + tuple(extra))
     if cmdline is not None:
-        lines[cmdline] = lines[cmdline].rstrip() + " " + extra
+        lines[cmdline] = lines[cmdline].rstrip() + " " + words
     elif kernel_path is not None:
-        lines.insert(kernel_path + 1, "    cmdline: " + extra)
+        lines.insert(kernel_path + 1, "    cmdline: " + words)
     else:
         raise Usage("limine.conf's first entry has no kernel_path: line, so the guest's "
                     "command line has nowhere to go")
@@ -333,6 +353,92 @@ def port_free(port: int) -> bool:
 
 
 def start(port: int, timeout: float) -> None:
+    proc, serial = launch(port)
+    print("guest: QEMU started (PID %d), serial log %s; waiting for the agent..." % (proc.pid, serial))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise Usage("QEMU exited with %s; see %s" % (proc.returncode, os.path.join(GUEST_DIR, "qemu.log")))
+        if ping(port, wait=5.0):
+            print("guest: the agent answers on 127.0.0.1:%d" % port)
+            return
+        time.sleep(2.0)
+    raise Usage("the agent did not answer within %d s; the guest is still running -- see %s" % (timeout, serial))
+
+
+def kexec_verdict(serial: bytes) -> str | None:
+    """What a guest's serial log says of a self-reload: "reloaded" once a boot
+    banner follows the reload's marker -- the second kernel is running --
+    "refused" when the first kernel says the reload did not happen (a
+    preparation step failed; the `[kexec]` line before it names which), and
+    None while neither: not asked yet, or the jump in flight."""
+    at = serial.find(KEXEC_MARKER)
+    if at < 0:
+        return None
+    after = serial[at + len(KEXEC_MARKER):]
+    if KEXEC_REFUSED in after:
+        return "refused"
+    if BOOT_BANNER in after:
+        return "reloaded"
+    return None
+
+
+def kexec_check(port: int, timeout: float) -> int:
+    """Boot a guest told to reload itself through kexec (KEXEC_WORD), and
+    require the restart to work: the reload's marker, a second boot banner,
+    then the restarted kernel's agent answering. Stops the guest whatever
+    happens. 0 when the restart worked, 1 when it did not."""
+    proc, serial = launch(port, (KEXEC_WORD,))
+    print("guest: QEMU started (PID %d), serial log %s; waiting for the kernel to "
+          "restart itself..." % (proc.pid, serial))
+    deadline = time.monotonic() + timeout
+    verdict = None
+    try:
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                stage = "after the reload began" if kexec_marker_seen(serial) else "before the reload"
+                print("guest: QEMU exited (%s) %s -- with -no-reboot that is a triple "
+                      "fault or a reset; see %s" % (proc.returncode, stage, serial),
+                      file=sys.stderr)
+                return 1
+            try:
+                with open(serial, "rb") as f:
+                    log = f.read()
+            except OSError:
+                log = b""
+            verdict = kexec_verdict(log)
+            if verdict == "refused":
+                print("guest: the kernel did not restart itself -- the preparation "
+                      "failed; see the [kexec] lines in %s" % serial, file=sys.stderr)
+                return 1
+            # Only once the second banner is out: before it, an answer could
+            # come from the first kernel.
+            if verdict == "reloaded" and ping(port, wait=5.0):
+                print("guest: the kernel restarted itself through kexec, and the "
+                      "restarted kernel's agent answers on 127.0.0.1:%d" % port)
+                return 0
+            time.sleep(2.0)
+        print("guest: no restarted kernel answered within %d s (%s); see %s"
+              % (timeout, "the second kernel booted but its agent is silent"
+                 if verdict == "reloaded" else "no second boot", serial), file=sys.stderr)
+        return 1
+    finally:
+        stop()
+
+
+def kexec_marker_seen(serial: str) -> bool:
+    """Whether the serial log at `serial` holds the reload's marker."""
+    try:
+        with open(serial, "rb") as f:
+            return KEXEC_MARKER in f.read()
+    except OSError:
+        return False
+
+
+def launch(port: int, extra_words: tuple[str, ...] = ()) -> tuple[subprocess.Popen, str]:
+    """Start QEMU on a copy of the last boot test's ESP, its command line
+    given GUEST_CMDLINE_WORDS and `extra_words`; record its PID and port.
+    Returns the process and the path of its serial log."""
     if running_pid() is not None:
         raise Usage("a guest is already running (PID in %s); `stop` it first" % PIDFILE)
     if not port_free(port):
@@ -358,8 +464,11 @@ def start(port: int, timeout: float) -> None:
     except OSError as e:
         raise Usage("%s cannot be read (%s): run scripts/boot-test.sh once to build it" % (conf, e))
     with open(conf, "w", encoding="utf-8", newline="") as f:
-        f.write(guest_limine_conf(text))
+        f.write(guest_limine_conf(text, extra_words))
     serial = os.path.join(GUEST_DIR, "serial.txt")
+    # A fresh log: a check reading it must not find the last guest's lines.
+    if os.path.exists(serial):
+        os.remove(serial)
     cmd = qemu_command(port, esp, swap, rootfs if os.path.exists(rootfs) else None, serial)
     with open(os.path.join(GUEST_DIR, "qemu.log"), "wb") as log:
         flags = 0
@@ -373,16 +482,7 @@ def start(port: int, timeout: float) -> None:
         f.write(str(proc.pid))
     with open(PORT_FILE, "w", encoding="utf-8", newline="") as f:
         f.write(str(port))
-    print("guest: QEMU started (PID %d), serial log %s; waiting for the agent..." % (proc.pid, serial))
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise Usage("QEMU exited with %s; see %s" % (proc.returncode, os.path.join(GUEST_DIR, "qemu.log")))
-        if ping(port, wait=5.0):
-            print("guest: the agent answers on 127.0.0.1:%d" % port)
-            return
-        time.sleep(2.0)
-    raise Usage("the agent did not answer within %d s; the guest is still running -- see %s" % (timeout, serial))
+    return proc, serial
 
 
 def stop() -> None:
@@ -436,6 +536,8 @@ def main(argv: list[str]) -> int:
         r.add_argument("args", nargs=argparse.REMAINDER)
     h = sub.add_parser("sh")
     h.add_argument("command")
+    k = sub.add_parser("kexec")
+    k.add_argument("--timeout", type=float, default=900.0)
     args = ap.parse_args(argv)
     port = guest_port(args.port)
 
@@ -443,6 +545,8 @@ def main(argv: list[str]) -> int:
         if args.cmd == "start":
             start(port if args.port is not None else DEFAULT_PORT, args.timeout)
             return 0
+        if args.cmd == "kexec":
+            return kexec_check(port if args.port is not None else DEFAULT_PORT, args.timeout)
         if args.cmd == "stop":
             stop()
             return 0

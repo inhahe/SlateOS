@@ -164,6 +164,23 @@ def main() -> int:
         check("an entry with no kernel_path: is refused", "accepted", "refused")
     except guest.Usage:
         check("an entry with no kernel_path: is refused", "refused", "refused")
+    check("`kexec`'s word follows the guest's",
+          guest.guest_limine_conf(staged, (guest.KEXEC_WORD,)),
+          staged.replace("selftest.keep_going=1\n",
+                         "selftest.keep_going=1 " + words + " kexec.selftest=1\n"))
+
+    # The serial log's verdict on a self-reload.
+    banner, marker = guest.BOOT_BANNER, guest.KEXEC_MARKER
+    refused = guest.KEXEC_REFUSED + b": InvalidArgument ===\n"
+    check("no marker: no verdict yet", guest.kexec_verdict(banner + b"\n[boot] up\n"), None)
+    check("the marker alone: the jump in flight",
+          guest.kexec_verdict(banner + b"\n" + marker + b"\n[kexec] image 0x1 bytes\n"), None)
+    check("a banner after the marker: reloaded",
+          guest.kexec_verdict(banner + b"\n" + marker + b"\n" + banner + b"\n"), "reloaded")
+    check("the first kernel's own banner, before the marker, does not count",
+          guest.kexec_verdict(banner + b"\n" + marker), None)
+    check("the first kernel's refusal: refused",
+          guest.kexec_verdict(banner + b"\n" + marker + b"\n" + refused + b"BOOT_OK\n"), "refused")
 
     print()
     if failures:

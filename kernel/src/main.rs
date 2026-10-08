@@ -9226,6 +9226,37 @@ extern "C" fn kernel_main() -> ! {
                 .union(cap::Rights::MEMORY_LOCK)
                 .union(cap::Rights::TRANSFER),
         ),
+        // Two init holds only to hand on, to the services whose
+        // `/etc/startup.conf` line names them with `caps:` -- the compositor's
+        // `caps:InputDevice/0/r,Service/0/w`: read the keyboard and mouse,
+        // offer the display service. The kernel delegates only what the parent
+        // holds (`pcb::inherit_caps_subset`), so the grant has to sit here.
+        //
+        // design-decisions 706 kept `InputDevice` off init while init's whole
+        // table went to everything it started -- every program would have read
+        // every keystroke. That is no longer how init starts anything: every
+        // process goes through `SYS_PROCESS_SPAWN_EX2`'s named subset, which
+        // leaves these two types out unless the line names them, and init does
+        // not fork (design-decisions 1174, `services/init`'s `child_caps` and
+        // `DELEGATED_TYPES`). So only such a service holds them; init's own
+        // console cannot read devices. Revisit with 1174 if init ever forks or
+        // spawns any other way.
+        //
+        // `TRANSFER`, as on the three objects above: nothing reads it today
+        // (the subset path checks only that init holds the rights it hands
+        // on), and it is here so that a delegation that one day does read it
+        // does not silently fail for PID 1 (lane D's request,
+        // `requests/d-a-init-needs-inputdevice-and-service-to-hand-on.md`).
+        (
+            cap::ResourceType::InputDevice,
+            0,
+            cap::Rights::READ.union(cap::Rights::TRANSFER),
+        ),
+        (
+            cap::ResourceType::Service,
+            0,
+            cap::Rights::WRITE.union(cap::Rights::TRANSFER),
+        ),
     ];
     let spawn_opts = proc::spawn::SpawnOptions {
         name: "init",

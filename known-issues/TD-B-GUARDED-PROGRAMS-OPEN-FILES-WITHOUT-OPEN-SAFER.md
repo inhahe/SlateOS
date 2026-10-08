@@ -75,11 +75,11 @@ those has to be ported as upstream does it, which is not `fd_safer` either.
 **Still to do** -- each with a closed-descriptor case in its harness that
 fails before and agrees after:
 
-* `fd_reopen` (onto 0 or 1): `csplit`'s and `split`'s input, `stty -F`,
-  `touch`, `dd`. (`nohup`'s was already right, and now shares
-  `stdfd::move_to`.)
+* `fd_reopen` (onto 0 or 1): `stty -F`, `touch`, `dd`. (`nohup`'s was
+  already right, and now shares `stdfd::move_to`; `csplit`'s and `split`'s
+  inputs were measured and cannot be told apart -- below.)
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
-  `copy.c`), `split`'s output files.
+  `copy.c`).
 * `ln`'s target directory (`openat_safer`).
 
 **The `*sum` programs, `sum` and `cksum`, 2026-10-08.** All built from
@@ -178,8 +178,26 @@ Already as upstream before this entry: `shred`, `comm`, `join`, `tail` and
 `randint` (each called `fd_safer` at its one site), and `tac`'s temporary
 file. Since, outside coreutils: `find`'s `-fprint` files (2026-10-08),
 which findutils opens through `sharefile_fopen` under `stdio--.h`, and
-keeps one stream per file by device and inode -- `find-diff.sh` holds both. `date` calls `fd_safer` too, where upstream `freopen`s onto standard
-input -- to be measured with the rest.
+keeps one stream per file by device and inode -- `find-diff.sh` holds both.
+
+`date -f FILE` calls `fd_safer` where upstream opens plainly -- `date.c`
+uses `fopen` and includes no `stdio--.h` (this note used to say it
+`freopen`s onto standard input; it does not). Measured 2026-10-08 with every
+combination of standard descriptors closed, over four inputs (32 cases), the
+two cannot be told apart: the file is opened read-only, so wherever it lands
+a write to it fails with the same `EBADF` a closed descriptor gives.
+
+**`split`, 2026-10-08: measured, nothing to convert.** Upstream opens each
+piece with `open_safer` and takes its input with `fd_reopen` onto descriptor
+0; ours opens both plainly, and agrees with GNU 9.4 with standard input,
+output and error closed in every combination -- pieces, diagnostics and
+status -- because each piece is announced, written and closed before the
+next, so no piece is open when the buffered `creating file` lines reach
+descriptor 1. Round robin too: upstream keeps every piece open at once there,
+but ours deals the records out in memory first and still writes one piece at
+a time, and `split --verbose -n r/900` with standard output closed gave the
+same 900 pieces, byte for byte. `split-diff.sh` keeps ten such cases (a `CLOSING`
+knob, standard input and output only).
 
 Found while checking whether `cp` had `tee`'s hazard: it did not, by luck of
 ordering -- `emit_verbose`'s line is written before each copy opens its files

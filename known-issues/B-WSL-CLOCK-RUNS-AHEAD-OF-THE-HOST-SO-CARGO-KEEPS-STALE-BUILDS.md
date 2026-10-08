@@ -6,9 +6,10 @@ stale build. **OPEN** for the clock itself (needs root inside WSL -- the
 operator's call, below) and for `scripts/coreutils-check.sh`'s WSL half, the
 push gate's Linux clippy and tests, which still take cargo's word.
 
-**In short:** the clock inside WSL runs ahead of Windows' clock, and the gap
-grows -- 5.0 s at 05:31, 6.6 s at 05:42, 7.2 s at 06:00 on 2026-10-08, with
-the WSL machine up under an hour. Cargo decides what to rebuild by comparing a
+**In short:** the clock inside WSL runs ahead of Windows' clock -- 5.0 s at
+05:31, 6.6 s at 05:42, 7.2 s at 06:00 and 7.3 s at 06:37 on 2026-10-08, the
+WSL machine up under two hours: it grew fast and then all but stopped, so how
+far it goes is not known. Cargo decides what to rebuild by comparing a
 source file's time stamp, which Windows sets, with the time it started the
 last build, which it reads from WSL's clock. An edit made within that gap
 after a build started therefore looks *older* than the build, and cargo keeps

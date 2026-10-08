@@ -3603,6 +3603,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_sigchld_stop(),
     );
+    // A stopped process takes only SIGKILL and SIGCONT until it is continued,
+    // a timer's included (crate::syscall::handlers::act_on_stopped).
+    selftest::dispatch_debug(
+        "Linux signals to a stopped process (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_stopped_signals(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

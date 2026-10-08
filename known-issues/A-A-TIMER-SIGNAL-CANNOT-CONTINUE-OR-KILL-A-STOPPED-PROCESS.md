@@ -1,27 +1,30 @@
-### A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS -- 2026-10-07 -- OPEN (lane A)
+### A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS -- 2026-10-07 -- OPEN until its fix (lane-a-wip, 2026-10-08) has a boot on main (lane A)
 
-**Status:** OPEN (lane A), found while writing POSIX timers (§1540). Applies
-to `ITIMER_REAL` too.
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+Found while writing POSIX timers (§1540).
 
 **In short:** a timer can be told to send any signal, `SIGCONT` and `SIGKILL`
 included. When `kill` sends one of those to a stopped program, the kernel
-continues it or ends it on the spot. When a timer sends it, the kernel only
-queues it, and a stopped program never gets to look at its queue: a timer's
-`SIGCONT` does not wake it, and a timer's `SIGKILL` or deadly `SIGALRM` waits
-until something else continues it.
+continues it or ends it on the spot. When a timer sent it, the kernel only
+queued it, and a stopped program never looks at its queue: a timer's
+`SIGCONT` did not wake it, and a timer's `SIGKILL` waited until something
+else continued it.
 
-**Where:** `proc::posix_timer::fire` and `proc::itimer::real_fire` run in the
-timer interrupt and can only queue (`signal::post_timer_signal`,
-`signal::set_pending_info`). Stopping, continuing and ending a process
-(`handlers::post_signal` → `stop_process_for_signal`, `continue_process`,
-`kill_process_threads`) take locks an interrupt may not wait for. A running
-or sleeping process is fine: the queued signal wakes its interruptible
-sleep, and the delivery checkpoint carries out `SIGKILL`'s and `SIGSTOP`'s
-default actions (which never reach a handler).
+**Corrected 2026-10-08:** this entry also said a timer's deadly `SIGALRM`
+should end a stopped program. It should not: POSIX lets a stopped process
+take only `SIGKILL` and `SIGCONT` until it is continued, and Linux's
+`wants_signal` passes a stopped thread over for anything else -- measured
+(`build/stoppedsigtest.c` on Linux 6.6.87). Waiting for `SIGCONT` was right
+for the timer; it was `kill` that was wrong the other way: `kill -TERM` ended
+a stopped program with no handlers on the spot.
 
-**Proper fix:** hand the post to a kernel thread when the target is stopped
-and the signal is `SIGCONT` or fatal -- a small queue of `(pid, signal,
-record)` the interrupt fills and the thread drains through `post_signal` --
-or make the continue and the kill safe to start from an interrupt (set the
-state and wake the threads, leaving the rest to them), as Linux's
-`prepare_signal` and `complete_signal` do.
+**The fix** (`syscall::handlers`):
+- `fire` (POSIX timers) hands a `SIGCONT` or `SIGKILL` it queued to the work
+  queue (`defer_act_on_stopped`: a fixed, interrupt-safe list of
+  `(pid, signal)`), whose `act_on_stopped` continues or ends the process if
+  it is stopped.
+- `post_signal`: a deadly signal other than `SIGKILL` to a stopped process is
+  left pending; the delivery checkpoint ends it after a `SIGCONT`.
+
+**Tested by** `spawn::self_test_linux_stopped_signals`
+(`build/stoppedsigtest.c`), every case checked against Linux 6.6.87.

@@ -436,19 +436,17 @@ fn add_overrun(overrun: &mut i64, skipped: u64) {
 fn fire(arg: u64) {
     #[allow(clippy::cast_possible_truncation)]
     let (idx, generation) = ((arg >> 32) as usize, arg as u32);
-    with_table(|t| {
-        let Some(slot) = t.slots.get_mut(idx) else {
-            return;
-        };
+    // The signal sent, for a stopped target's sake -- after the table's lock
+    // is let go (`handlers::defer_act_on_stopped`).
+    let sent = with_table(|t| {
+        let slot = t.slots.get_mut(idx)?;
         let Slot { hr_gen, timer } = slot;
         if *hr_gen != generation {
-            return; // re-armed, cancelled or freed since
+            return None; // re-armed, cancelled or freed since
         }
-        let Some(timer) = timer.as_mut() else {
-            return;
-        };
+        let timer = timer.as_mut()?;
         if !timer.ready || timer.status != Status::Armed || timer.hr.is_none() {
-            return;
+            return None;
         }
         timer.hr = None;
         let now = timer.domain.now();
@@ -456,7 +454,7 @@ fn fire(arg: u64) {
             // Early: the wall clock was stepped back after the arming (a
             // monotonic arming is never early). Wait out the rest.
             arm_hr(idx, hr_gen, timer, now);
-            return;
+            return None;
         }
         let Notify::Signal {
             signo,
@@ -465,7 +463,7 @@ fn fire(arg: u64) {
         } = timer.notify
         else {
             // SIGEV_NONE arms no hrtimer.
-            return;
+            return None;
         };
         let periodic = timer.interval > 0;
         timer.status = if periodic {
@@ -475,7 +473,7 @@ fn fire(arg: u64) {
         };
         let info = SigInfo::timer(timer.id, value);
         match signal::post_timer_signal(timer.pid, signo, timer.id, timer.arm_gen, thread, info) {
-            TimerPost::Queued | TimerPost::AlreadyQueued => {}
+            TimerPost::Queued | TimerPost::AlreadyQueued => Some((timer.pid, signo)),
             TimerPost::Ignored => {
                 if periodic {
                     // Nothing was queued, so nothing will be taken to re-arm
@@ -490,10 +488,20 @@ fn fire(arg: u64) {
                     add_overrun(&mut timer.overrun, skipped);
                     arm_hr(idx, hr_gen, timer, now);
                 }
+                // An ignored SIGCONT still continues a stopped process.
+                Some((timer.pid, signo))
             }
-            TimerPost::Gone => timer.status = Status::Disarmed,
+            TimerPost::Gone => {
+                timer.status = Status::Disarmed;
+                None
+            }
         }
     });
+    // A stopped target's delivery checkpoint never runs, and the interrupt
+    // cannot continue or end it: the work queue looks (Linux acts at the send).
+    if let Some((pid, signo)) = sent {
+        crate::syscall::handlers::defer_act_on_stopped(pid, signo);
+    }
 }
 
 /// The signal layer has taken `pid`'s timer `id`'s queued signal -- to

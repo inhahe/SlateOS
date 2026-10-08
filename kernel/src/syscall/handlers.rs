@@ -8585,6 +8585,24 @@ fn post_signal(
     };
     match decision {
         signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
+        signal::PostDecision::Terminate(fatal)
+            if fatal != signal::SIGKILL && pcb::is_stopped(target) =>
+        {
+            // A stopped process takes nothing but SIGKILL until it is
+            // continued (POSIX; Linux's `wants_signal` passes a stopped
+            // thread over): the signal waits, pending, and the delivery
+            // checkpoint carries out its default action after a SIGCONT.
+            // Until 2026-10-08 a `kill -TERM` ended a stopped program with no
+            // handlers on the spot.
+            match thread_target {
+                Some(tid) => {
+                    signal::set_thread_pending_info(target, tid, sig, info);
+                }
+                None => {
+                    signal::set_pending_info(target, sig, info);
+                }
+            }
+        }
         signal::PostDecision::Terminate(fatal) => {
             // No userspace handler (or SIGKILL): terminate, recorded as a
             // death by the signal (never as a bare exit code: 128 to 255 is
@@ -10210,6 +10228,133 @@ fn notify_parent_of_job_control(
         ev.sigchld_code_and_status(),
     );
     crate::proc::signal::set_pending_info(parent, SIGCHLD, info);
+}
+
+/// Carry out, now, what `SIGCONT` or `SIGKILL` -- just queued on process
+/// `pid` by a timer -- does to `pid` if it is *stopped*: `SIGCONT` continues
+/// it (pending stop signals discarded, as Linux's `prepare_signal` flushes
+/// them), even ignored or blocked; `SIGKILL` ends it. The two signals a
+/// stopped process takes (POSIX); anything else waits, pending, until it is
+/// continued. A process that is not stopped is left alone: its delivery
+/// checkpoint acts on the signal as it returns to user mode.
+///
+/// A `kill`'s reach the stopped process through [`post_signal`]; a timer's
+/// are queued in the timer interrupt, which can do no more, and come here
+/// through the work queue ([`defer_act_on_stopped`]). Until 2026-10-08 a
+/// timer's `SIGCONT` or `SIGKILL` waited until something else continued the
+/// process
+/// (`known-issues/A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS.md`).
+pub fn act_on_stopped(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    use crate::proc::{pcb, signal, thread};
+    if !pcb::is_stopped(pid) {
+        return;
+    }
+    if sig == signal::SIGCONT {
+        signal::discard_pending_stops(pid);
+        continue_process(pid);
+    } else if sig == signal::SIGKILL {
+        if pcb::set_killed_by_signal(pid, u8::try_from(sig).unwrap_or(u8::MAX)).is_err() {
+            return; // gone meanwhile: nothing left to end
+        }
+        thread::kill_process_threads(pid);
+        serial_println!(
+            "[signal] Stopped process {} ended by a timer's SIGKILL",
+            pid
+        );
+    }
+}
+
+/// The `(pid, signal)` pairs the timer interrupt queued for
+/// [`act_on_stopped`], which takes locks an interrupt may not wait for:
+/// drained by the work queue ([`drain_stopped_acts`]). Fixed room, filled
+/// without allocating; a pair already waiting is not added twice.
+struct StoppedActs {
+    /// The pairs, `len` of them, oldest first.
+    items: [(u64, u32); STOPPED_ACTS_ROOM],
+    /// How many of `items` are in use.
+    len: usize,
+}
+
+/// Room in [`StoppedActs`]: a pair waits only until the work queue runs, and
+/// a periodic timer refills a dropped one at its next expiry.
+const STOPPED_ACTS_ROOM: usize = 32;
+
+/// The waiting pairs. Taken with interrupts off: the timer interrupt fills it.
+static STOPPED_ACTS: crate::sync::PreemptSpinMutex<StoppedActs> =
+    crate::sync::PreemptSpinMutex::new(StoppedActs {
+        items: [(0, 0); STOPPED_ACTS_ROOM],
+        len: 0,
+    });
+
+/// Whether a drain is already submitted to the work queue.
+static STOPPED_ACTS_SCHEDULED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Pairs dropped because the room was full -- for a diagnosis.
+static STOPPED_ACTS_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// From the timer interrupt: a timer has just sent `sig` to `pid` (queued,
+/// or dropped as ignored). If `sig` is one a stopped process takes --
+/// `SIGCONT` or `SIGKILL` -- the work queue looks at `pid`
+/// ([`act_on_stopped`]). Never blocks, never allocates.
+pub fn defer_act_on_stopped(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    use crate::proc::signal;
+    use core::sync::atomic::Ordering;
+    if sig != signal::SIGCONT && sig != signal::SIGKILL {
+        return;
+    }
+    let queued = {
+        let mut acts = STOPPED_ACTS.lock_irqsave();
+        let len = acts.len;
+        if acts
+            .items
+            .get(..len)
+            .is_some_and(|w| w.contains(&(pid, sig)))
+        {
+            true
+        } else if let Some(slot) = acts.items.get_mut(len) {
+            *slot = (pid, sig);
+            acts.len = len.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    };
+    if !queued {
+        STOPPED_ACTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if !STOPPED_ACTS_SCHEDULED.swap(true, Ordering::AcqRel)
+        && !crate::workqueue::submit(drain_stopped_acts, 0)
+    {
+        // The work queue is full: the next timer's post submits again.
+        STOPPED_ACTS_SCHEDULED.store(false, Ordering::Release);
+    }
+}
+
+/// The work queue's item: act on every waiting pair. The flag is cleared
+/// first, so a pair added while this runs submits another drain rather than
+/// being left behind.
+fn drain_stopped_acts(_arg: u64) {
+    use core::sync::atomic::Ordering;
+    STOPPED_ACTS_SCHEDULED.store(false, Ordering::Release);
+    loop {
+        let next = {
+            let mut acts = STOPPED_ACTS.lock_irqsave();
+            if acts.len == 0 {
+                None
+            } else {
+                let first = acts.items.first().copied();
+                acts.items.copy_within(1.., 0);
+                acts.len = acts.len.saturating_sub(1);
+                first
+            }
+        };
+        let Some((pid, sig)) = next else {
+            break;
+        };
+        act_on_stopped(pid, sig);
+    }
 }
 
 /// Post a signal the kernel raises -- a terminal's `^C`/`^Z`/`SIGWINCH`, the

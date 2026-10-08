@@ -24083,6 +24083,96 @@ pub fn self_test_linux_sigchld_stop() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of signals sent to a stopped process, through the Linux ABI:
+/// [`elf::build_linux_stopped_signals_test_elf`] (`build/stoppedsigtest.c`).
+/// A stopped process takes only `SIGKILL` and `SIGCONT` until it is
+/// continued: a `SIGTERM` (with or without handlers installed) and a
+/// timer's default `SIGALRM` wait for a `SIGCONT` and then end it; a POSIX
+/// timer's `SIGCONT` continues it and a timer's `SIGKILL` ends it, through
+/// the work queue (`handlers::act_on_stopped`, `defer_act_on_stopped`).
+pub fn self_test_linux_stopped_signals() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux signals to a stopped process (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_stopped_signals_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-stopped-signals"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-stopped-signals",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: stopped-signals spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: signals to a stopped process (ring 3) — the program did not finish \
+             in 120 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "fork failed",
+            Some(0x40 | 0x44 | 0x48 | 0x4a | 0x4c | 0x50) => {
+                "a child's own SIGSTOP was not seen by WUNTRACED (a child failing its \
+                 rt_sigaction, timer_create, timer_settime or setitimer exits 0x31-0x33 or \
+                 0x60/0x61 instead)"
+            }
+            Some(0x41 | 0x45 | 0x51) => "the parent's kill(SIGTERM) failed",
+            Some(0x42 | 0x46) => "SIGTERM ended or changed a stopped child before its SIGCONT",
+            Some(0x43 | 0x47) => "after SIGCONT, the child did not end with its pending SIGTERM",
+            Some(0x49) => "a timer's SIGCONT did not continue the stopped child (exit 5)",
+            Some(0x4b) => "a timer's SIGKILL did not end the stopped child",
+            Some(0x4d) => "ITIMER_REAL's SIGALRM ended or changed a stopped child before SIGCONT",
+            Some(0x4e | 0x4f) => "after SIGCONT, the child did not end with its pending SIGALRM",
+            Some(0x52) => "an ignored SIGTERM changed the stopped child",
+            Some(0x53 | 0x54) => "after SIGCONT, the child that ignores SIGTERM did not exit 6",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: signals to a stopped process (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux signals to a stopped process (ring 3: SIGTERM and a default SIGALRM wait \
+         for SIGCONT, a timer's SIGCONT continues, a timer's SIGKILL ends, an ignored SIGTERM \
+         does nothing): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

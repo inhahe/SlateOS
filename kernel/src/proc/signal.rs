@@ -2124,6 +2124,14 @@ pub fn discard_pending_cont(pid: ProcessId) {
     clear_pending(pid, sigcont_bit());
 }
 
+/// Discard every pending stop signal (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`,
+/// `SIGTTOU`) for `pid`: a continue's, as Linux's `prepare_signal` flushes
+/// them for a `SIGCONT` -- for one that arrives where [`classify_post_info`]
+/// did not judge it (a timer's; `handlers::act_on_stopped`).
+pub fn discard_pending_stops(pid: ProcessId) {
+    clear_pending(pid, stop_signals_mask());
+}
+
 /// The kernel's decision about what to do with a posted signal.
 ///
 /// Returned by [`classify_post`] so the syscall handler can perform the

@@ -156,13 +156,10 @@ impl Ctx {
                 self.bufsize = 0;
             }
         }
-        let mut blocks = data.chunks_exact(64);
-        for block in &mut blocks {
-            let mut whole = [0u8; 64];
-            whole.copy_from_slice(block);
-            self.block(&whole);
+        let (blocks, rest) = data.as_chunks::<64>();
+        for block in blocks {
+            self.block(block);
         }
-        let rest = blocks.remainder();
         if !rest.is_empty() {
             self.buffer[..rest.len()].copy_from_slice(rest);
             self.bufsize = rest.len();
@@ -206,8 +203,8 @@ impl Drop for Ctx {
 /// A value's bytes, least significant first, as `memcpy` would copy them.
 fn bytes_of<const N: usize>(value: &[u64]) -> [u8; N] {
     let mut out = [0u8; N];
-    for (chunk, w) in out.chunks_exact_mut(8).zip(value) {
-        chunk.copy_from_slice(&w.to_le_bytes());
+    for (chunk, w) in out.as_chunks_mut::<8>().0.iter_mut().zip(value) {
+        *chunk = w.to_le_bytes();
     }
     out
 }

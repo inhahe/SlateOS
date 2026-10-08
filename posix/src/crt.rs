@@ -1141,11 +1141,35 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 // DSO handle — used by __cxa_atexit for identifying the binary
 // ---------------------------------------------------------------------------
 
-/// DSO handle for the main executable.
-///
-/// Programs compiled with GCC/Clang reference this symbol.
-/// For a static binary, it just needs to exist (value doesn't matter).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+// The DSO handle for the main executable: the module identity a C++ static
+// object's destructor registration carries (`__cxa_atexit(dtor, obj,
+// &__dso_handle)`). Only its address is ever used, and a static program is
+// one module, so it has one handle.
+//
+// WEAK on SlateOS. Neither glibc nor musl defines `__dso_handle`: GCC's
+// crtbegin*.o does, and a GCC link names crtbegin in every program. Defined
+// strongly here as well, it was a second definition in every GCC-linked
+// program -- "multiple definition of `__dso_handle'" -- because this word sits
+// in the archive member every program pulls in for `_start`
+// (known-issues-resolved/D-POSIX-DSO-HANDLE-WAS-STRONG-SO-NO-GCC-LINK-COULD-SUCCEED.md).
+// zig's links name no crtbegin and take this one; a GCC link takes crtbegin's.
+// Pointer-sized, as crtbegin's is. scripts/check-libc-shape.py CHECK 7 holds
+// the archive to it.
+#[cfg(target_os = "none")]
+global_asm!(
+    ".pushsection .rodata.slateos_dso_handle,\"a\",@progbits",
+    ".p2align 3",
+    ".weak __dso_handle",
+    ".type __dso_handle, @object",
+    ".size __dso_handle, 8",
+    "__dso_handle:",
+    ".quad 0",
+    ".popsection",
+);
+
+/// The host's stand-in for the DSO handle the assembly above defines on
+/// SlateOS: the tests take its address, as a C++ registration does.
+#[cfg(not(target_os = "none"))]
 pub static __dso_handle: u8 = 0;
 
 // ---------------------------------------------------------------------------

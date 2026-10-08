@@ -529,6 +529,20 @@ ALIASES: list[tuple[str, ...]] = [
 # the program to define something else for it has a hole in it.
 LINK_SUPPLIED = frozenset({"main", "__ehdr_start"})
 
+# CHECK 7: what a compiler's own startup objects define, the archive defines
+# only weakly, if at all.
+#
+# GCC names crtbegin*.o and crtend.o in every link, and they define
+# `__dso_handle` -- glibc and musl leave it to them and define none. This
+# library defines it too, for the links that name no crtbegin (zig's), and in
+# the member every program extracts for `_start`. Strong, it was a second
+# definition in every program GCC linked against this archive ("multiple
+# definition of `__dso_handle'", measured 2026-10-07 with GCC's crtbeginT.o and
+# GNU ld; known-issues-resolved/
+# D-POSIX-DSO-HANDLE-WAS-STRONG-SO-NO-GCC-LINK-COULD-SUCCEED.md). Weak, it fills
+# in where no crtbegin is linked and yields where one is.
+CRT_PROVIDED = frozenset({"__dso_handle"})
+
 #: ELF symbol bindings, as `st_info >> 4` holds them.
 STB_GLOBAL, STB_WEAK = 1, 2
 
@@ -602,6 +616,14 @@ SELFTEST_MUTANTS = [
     ("a name the link supplies counts as unresolved",
      'LINK_SUPPLIED = frozenset({"main", "__ehdr_start"})',
      "LINK_SUPPLIED = frozenset()"),
+
+    # CHECK 7: does it run, and does it tell strong from weak?
+    ("the crt check never runs",
+     "    for name in sorted(CRT_PROVIDED):\n",
+     "    for name in []:\n"),
+    ("a strong definition of a crt name passes",
+     "            if bind != STB_WEAK:\n",
+     "            if False:\n"),
 
     # A breach must be a refusal, not a finding. `run-checker.sh` reads 1 as
     # "the checker found something" and prints a refusal naming code that is
@@ -1000,6 +1022,25 @@ def check(path: Path, verbose: bool) -> list[str]:
     if verbose and not unresolved:
         print("  ok  every name a member refers to is in the archive or supplied by the "
               "link")
+
+    # --- CHECK 7: a name a compiler's crt objects define is weak here -------
+    for name in sorted(CRT_PROVIDED):
+        for off in sorted(o for o, syms in members.items() if name in syms):
+            obj = member_body(data, off)
+            if not obj:
+                continue  # an index-only fixture member, as in CHECK 5
+            bind = elf_defined_symbols(obj).get(name, (0, 0, STB_WEAK))[2]
+            if bind != STB_WEAK:
+                violations.append(
+                    f"[crt] member {member_name(path, off)} defines {name} strong: GCC's "
+                    f"crtbegin*.o, which every GCC link names, defines it too, so every "
+                    f"program GCC links against {path.name} fails with \"multiple "
+                    f"definition of `{name}'\". Define it weak, as posix/src/crt.rs does "
+                    f"(known-issues-resolved/"
+                    f"D-POSIX-DSO-HANDLE-WAS-STRONG-SO-NO-GCC-LINK-COULD-SUCCEED.md)."
+                )
+            elif verbose:
+                print(f"  ok  {name} is weak here, so a compiler's crtbegin may define it")
 
     return violations
 
@@ -1406,6 +1447,18 @@ def _selftest() -> int:
         vs = graded(clean + [user(["rust_eh_personality"])])
         check_("...and rust_eh_personality's says where it comes from",
                tags(vs) == ["[unresolved]"] and "C-unwind" in vs[0])
+
+        # CHECK 7 [crt]: a name GCC's crtbegin defines, defined strong here.
+        # Named, not read from CRT_PROVIDED, for the reason the LINK_SUPPLIED
+        # case gives.
+        def crt_member(bind):
+            return ("crt", ["__dso_handle"], synth_elf([("__dso_handle", 1, 0, bind)]))
+
+        vs = graded(clean + [crt_member(STB_GLOBAL)])
+        check_("[crt] a strong __dso_handle is caught",
+               tags(vs) == ["[crt]"] and "__dso_handle" in vs[0])
+        check_("...but not a weak one, which a compiler's crtbegin overrides",
+               graded(clean + [crt_member(STB_WEAK)]) == [])
 
         # --- is_collidable, which the two above depend on ----------------
         check_("C names are collidable", is_collidable("getopt"))

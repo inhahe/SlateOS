@@ -13,20 +13,40 @@
 //! | Call | Answers |
 //! |---|---|
 //! | `dlopen(NULL)`, `dlopen("")` | the program's handle, the one POSIX promises for NULL -- which is the program's `struct link_map` |
-//! | `dlopen(file)` | NULL, `file: cannot open shared object file: ...`; with `RTLD_NOLOAD`, NULL and no error, a file not loaded being the answer asked for |
-//! | `dlsym`, `dlvsym` | NULL, `program: undefined symbol: name`: a static program has no symbol table in memory to look in |
+//! | `dlopen` of the C library's own names (`libc.so.6`, `libm.so.6` ... -- `OWN_NAMES` below) | the program's handle too: every one of those libraries is linked into it |
+//! | `dlopen(file)`, any other | NULL, `file: cannot open shared object file: ...`; with `RTLD_NOLOAD`, NULL and no error, a file not loaded being the answer asked for |
+//! | `dlsym`, `dlvsym` | a symbol the program exports, if it was linked to export them (below); else NULL, `program: undefined symbol: name` |
 //! | `dlclose` | 0 for the program's handle, which is never unloaded |
 //! | `dlinfo` | the program's link map, namespace, directory, TLS module and block, program headers |
-//! | `dladdr`, `dladdr1` | for an address inside the program, the program's name and ELF header, and no symbol |
+//! | `dladdr`, `dladdr1` | for an address inside the program, the program's name and ELF header, and the exported symbol holding it, if any |
 //! | `dl_iterate_phdr` | one call, the program's: its headers, load bias and TLS |
 //! | `_dl_find_object` | the program's segment holding an address, and its `.eh_frame_hdr` |
 //! | `dlmopen` | the base namespace only, as glibc's static one |
 //!
-//! `dladdr` is the one place this parts from glibc's static answer, which is
-//! 0 for every address: glibc's static program map records no address
-//! range. Its dynamic one says what POSIX asks for, that the program is an
-//! object like any other, and that is what this says (design-decisions
-//! §1147).
+//! `dladdr` parts from glibc's static answer, which is 0 for every address:
+//! glibc's static program map records no address range. Its dynamic one says
+//! what POSIX asks for, that the program is an object like any other, and
+//! that is what this says (design-decisions §1147).
+//!
+//! ## A program that exports its symbols
+//!
+//! A program linked with `--export-dynamic` (`-rdynamic`) carries its own
+//! dynamic symbol table: every global symbol it defines, with a hash table to
+//! find one by name, in a loaded segment that `PT_DYNAMIC` locates. glibc's
+//! static `dlsym` never looks there -- it answers NULL for such a program as
+//! for any other (measured: `gcc -static -Wl,--export-dynamic`, 2026-10-07)
+//! -- and its dynamic one finds the symbol. This finds it, as POSIX's `dlsym`
+//! of the global handle says it should and as dynamic glibc does, and
+//! `dladdr` names it (design-decisions §1184). The rules are glibc's
+//! (`do_lookup_x`, `determine_info`): a defined, global or weak symbol of
+//! default or protected visibility; a TLS symbol at the calling thread's
+//! copy; an IFUNC by calling its resolver; and a symbol's version, if the
+//! program has versions at all, as `dlvsym` asks for it. A program linked
+//! without exports is answered exactly as before, as glibc's static one.
+//!
+//! This is what lets a runtime that calls C by name work here. Mono's
+//! `DllImport("libc")` opens `libc.so.6` and looks a function up in it.
+//! CPython's `ctypes.CDLL(None)` does the same through the program's handle.
 //!
 //! ## Why `dl_iterate_phdr` matters
 //!
@@ -287,6 +307,519 @@ fn as_ptr(v: u64) -> *mut c_void {
     )
 }
 
+/// The names the C library's parts go by on a glibc system. Each of those
+/// libraries is linked into every program here, so opening one by name opens
+/// the program (design-decisions §1184). Not `pub`: it is no constant of any
+/// C header, and `check-libc-abi.py` holds every public constant to one.
+const OWN_NAMES: [&[u8]; 9] = [
+    b"libc.so.6",
+    b"libm.so.6",
+    b"libdl.so.2",
+    b"libpthread.so.0",
+    b"librt.so.1",
+    b"libutil.so.1",
+    b"libcrypt.so.1",
+    b"libresolv.so.2",
+    b"libanl.so.1",
+];
+
+/// Is `file` -- by itself, or as the last part of a path -- one of the
+/// [`OWN_NAMES`]?
+fn is_own_name(file: &[u8]) -> bool {
+    let base = file.rsplit(|&b| b == b'/').next().unwrap_or(file);
+    OWN_NAMES.contains(&base)
+}
+
+// ---------------------------------------------------------------------------
+// The program's exported symbols
+// ---------------------------------------------------------------------------
+
+/// `PT_DYNAMIC`: the segment holding the program's dynamic section.
+const PT_DYNAMIC: u32 = 2;
+
+// `Elf64_Dyn` tags: the section's end, and what locates the symbols.
+const DT_NULL: u64 = 0;
+const DT_HASH: u64 = 4;
+const DT_STRTAB: u64 = 5;
+const DT_SYMTAB: u64 = 6;
+const DT_STRSZ: u64 = 10;
+const DT_SYMENT: u64 = 11;
+const DT_GNU_HASH: u64 = 0x6fff_fef5;
+const DT_VERSYM: u64 = 0x6fff_fff0;
+const DT_VERDEF: u64 = 0x6fff_fffc;
+const DT_VERDEFNUM: u64 = 0x6fff_fffd;
+
+/// `sizeof (Elf64_Dyn)`.
+const DYN_SIZE: u64 = 16;
+/// `sizeof (Elf64_Sym)`.
+const SYM_SIZE: u64 = 24;
+
+// What glibc's lookup weighs of a symbol: its binding, its kind, its
+// section and its visibility.
+const STB_GLOBAL: u8 = 1;
+const STB_WEAK: u8 = 2;
+const STB_GNU_UNIQUE: u8 = 10;
+const STT_NOTYPE: u8 = 0;
+const STT_OBJECT: u8 = 1;
+const STT_FUNC: u8 = 2;
+const STT_COMMON: u8 = 5;
+const STT_TLS: u8 = 6;
+const STT_GNU_IFUNC: u8 = 10;
+const SHN_UNDEF: u16 = 0;
+const SHN_ABS: u16 = 0xfff1;
+const STV_DEFAULT: u8 = 0;
+const STV_PROTECTED: u8 = 3;
+
+/// A `.gnu.version` entry's version index.
+const VERSYM_INDEX: u16 = 0x7fff;
+/// The bit that hides a version from every lookup that does not name it.
+const VERSYM_HIDDEN: u16 = 0x8000;
+
+/// One `Elf64_Sym`, read out of the program's table.
+#[derive(Clone, Copy, Debug)]
+struct Sym {
+    /// Its index in the table.
+    index: u64,
+    /// Where the entry is in memory: `dladdr1`'s `RTLD_DL_SYMENT` answer.
+    at: u64,
+    name: u32,
+    info: u8,
+    other: u8,
+    shndx: u16,
+    value: u64,
+    size: u64,
+}
+
+impl Sym {
+    const fn bind(&self) -> u8 {
+        self.info.wrapping_shr(4)
+    }
+
+    const fn kind(&self) -> u8 {
+        self.info & 0xf
+    }
+
+    const fn visibility(&self) -> u8 {
+        self.other & 3
+    }
+
+    /// Does a lookup from outside the program's own code see it? glibc's
+    /// `do_lookup_x` and `check_match`: defined, with a value (a TLS symbol's
+    /// may be 0, an absolute one's is its own); of a kind that is code or
+    /// data; global, weak or unique; and neither hidden nor internal.
+    fn exported(&self) -> bool {
+        let defined = self.shndx != SHN_UNDEF
+            && (self.value != 0 || self.shndx == SHN_ABS || self.kind() == STT_TLS);
+        let kind = matches!(
+            self.kind(),
+            STT_NOTYPE | STT_OBJECT | STT_FUNC | STT_COMMON | STT_TLS | STT_GNU_IFUNC
+        );
+        let bind = matches!(self.bind(), STB_GLOBAL | STB_WEAK | STB_GNU_UNIQUE);
+        let seen = matches!(self.visibility(), STV_DEFAULT | STV_PROTECTED);
+        defined && kind && bind && seen
+    }
+}
+
+/// `dl_new_hash`, the GNU hash table's function.
+fn gnu_hash(name: &[u8]) -> u32 {
+    name.iter().fold(5381u32, |h, &c| {
+        h.wrapping_mul(33).wrapping_add(u32::from(c))
+    })
+}
+
+/// `_dl_elf_hash`, the SysV hash table's function.
+fn elf_hash(name: &[u8]) -> u32 {
+    name.iter().fold(0u32, |h, &c| {
+        let h = h.wrapping_shl(4).wrapping_add(u32::from(c));
+        let g = h & 0xf000_0000;
+        (h ^ g.wrapping_shr(24)) & !g
+    })
+}
+
+/// Where the program keeps the symbols it exports, read in place. Every read
+/// is first checked to lie whole inside one of the program's loaded segments,
+/// so a malformed table answers "not found" rather than faulting.
+#[derive(Clone, Copy)]
+struct Exports {
+    ph: ProgramHeaders,
+    bias: u64,
+    // Run-time addresses of the tables, 0 where the program has none.
+    symtab: u64,
+    strtab: u64,
+    strsz: u64,
+    gnu_hash: u64,
+    sysv_hash: u64,
+    versym: u64,
+    verdef: u64,
+    verdefnum: u64,
+}
+
+impl Exports {
+    /// The program's tables, if its headers show a dynamic section that
+    /// locates a symbol table, its strings and a hash table to search them.
+    fn of(ph: ProgramHeaders) -> Option<Self> {
+        let dynamic = ph.find(PT_DYNAMIC)?;
+        let bias = ph.load_bias();
+        let mut e = Self {
+            ph,
+            bias,
+            symtab: 0,
+            strtab: 0,
+            strsz: 0,
+            gnu_hash: 0,
+            sysv_hash: 0,
+            versym: 0,
+            verdef: 0,
+            verdefnum: 0,
+        };
+        let mut syment = SYM_SIZE;
+        let start = bias.wrapping_add(dynamic.p_vaddr);
+        for i in 0..dynamic.p_memsz / DYN_SIZE {
+            let at = start.checked_add(i.checked_mul(DYN_SIZE)?)?;
+            let tag = e.u64_at(at)?;
+            let val = e.u64_at(at.checked_add(8)?)?;
+            // A pointer's run-time address is the link-time one plus the
+            // bias -- 0 for an ET_EXEC, every program here -- no dynamic
+            // linker having relocated the section in place.
+            let addr = bias.wrapping_add(val);
+            match tag {
+                DT_NULL => break,
+                DT_SYMTAB => e.symtab = addr,
+                DT_STRTAB => e.strtab = addr,
+                DT_STRSZ => e.strsz = val,
+                DT_SYMENT => syment = val,
+                DT_HASH => e.sysv_hash = addr,
+                DT_GNU_HASH => e.gnu_hash = addr,
+                DT_VERSYM => e.versym = addr,
+                DT_VERDEF => e.verdef = addr,
+                DT_VERDEFNUM => e.verdefnum = val,
+                _ => {}
+            }
+        }
+        let located =
+            e.symtab != 0 && e.strtab != 0 && e.strsz != 0 && (e.gnu_hash != 0 || e.sysv_hash != 0);
+        (located && syment == SYM_SIZE).then_some(e)
+    }
+
+    /// The memory `len` bytes at `addr` occupy, if one of the program's
+    /// loaded segments holds them all.
+    fn span(&self, addr: u64, len: u64) -> Option<*const u8> {
+        let start = usize::try_from(addr).ok()?;
+        let (_, end) = segment_holding(&self.ph, start)?;
+        (addr.checked_add(len)? <= end).then(|| core::ptr::with_exposed_provenance(start))
+    }
+
+    fn u16_at(&self, addr: u64) -> Option<u16> {
+        let p = self.span(addr, 2)?;
+        // SAFETY: `span` found the two bytes in the program's image, mapped
+        // for its life; read unaligned, alignment being no promise here.
+        Some(unsafe { p.cast::<u16>().read_unaligned() })
+    }
+
+    fn u32_at(&self, addr: u64) -> Option<u32> {
+        let p = self.span(addr, 4)?;
+        // SAFETY: as `u16_at`'s, for four bytes.
+        Some(unsafe { p.cast::<u32>().read_unaligned() })
+    }
+
+    fn u64_at(&self, addr: u64) -> Option<u64> {
+        let p = self.span(addr, 8)?;
+        // SAFETY: as `u16_at`'s, for eight bytes.
+        Some(unsafe { p.cast::<u64>().read_unaligned() })
+    }
+
+    /// The string at `offset` in the string table, without its NUL; `None`
+    /// if it does not end inside the table.
+    fn string(&self, offset: u32) -> Option<&'static [u8]> {
+        let offset = u64::from(offset);
+        let room = self.strsz.checked_sub(offset).filter(|&r| r > 0)?;
+        let p = self.span(self.strtab.checked_add(offset)?, room)?;
+        // SAFETY: `span` found `room` bytes there, in the program's image,
+        // which is mapped and never written for the life of the program.
+        let bytes = unsafe { core::slice::from_raw_parts(p, usize::try_from(room).ok()?) };
+        let n = bytes.iter().position(|&b| b == 0)?;
+        bytes.get(..n)
+    }
+
+    /// Entry `index` of the symbol table.
+    fn sym(&self, index: u64) -> Option<Sym> {
+        let at = self.symtab.checked_add(index.checked_mul(SYM_SIZE)?)?;
+        let p = self.span(at, SYM_SIZE)?;
+        // SAFETY: `span` found the entry's 24 bytes there, in the program's
+        // image; each field is read unaligned at its `Elf64_Sym` offset.
+        unsafe {
+            Some(Sym {
+                index,
+                at,
+                name: p.cast::<u32>().read_unaligned(),
+                info: p.add(4).read(),
+                other: p.add(5).read(),
+                shndx: p.add(6).cast::<u16>().read_unaligned(),
+                value: p.add(8).cast::<u64>().read_unaligned(),
+                size: p.add(16).cast::<u64>().read_unaligned(),
+            })
+        }
+    }
+
+    /// Call `each` with every entry named `name`, found through the hash
+    /// table -- GNU's if the program has one, else the SysV one -- until it
+    /// answers `true`.
+    fn named(&self, name: &[u8], each: &mut dyn FnMut(Sym) -> bool) {
+        if self.gnu_hash != 0 {
+            // A table that is malformed partway answers what it found.
+            let _ = self.gnu_named(name, each);
+        } else {
+            let _ = self.sysv_named(name, each);
+        }
+    }
+
+    /// The GNU table: a Bloom filter that turns most names away at once,
+    /// then a bucket per hash and a chain of hashes, its last marked by the
+    /// low bit, in symbol order.
+    fn gnu_named(&self, name: &[u8], each: &mut dyn FnMut(Sym) -> bool) -> Option<()> {
+        let t = self.gnu_hash;
+        let nbuckets = self.u32_at(t)?;
+        let symoffset = u64::from(self.u32_at(t.checked_add(4)?)?);
+        let bloom_size = self.u32_at(t.checked_add(8)?)?;
+        let shift = self.u32_at(t.checked_add(12)?)?;
+        if nbuckets == 0 || bloom_size == 0 {
+            return None;
+        }
+        let h = gnu_hash(name);
+        let bloom = t.checked_add(16)?;
+        let word_at =
+            bloom.checked_add(u64::from((h / 64).checked_rem(bloom_size)?).checked_mul(8)?)?;
+        let word = self.u64_at(word_at)?;
+        let mask =
+            1u64.wrapping_shl(h % 64) | 1u64.wrapping_shl(h.checked_shr(shift).unwrap_or(0) % 64);
+        if word & mask != mask {
+            return None;
+        }
+        let buckets = bloom.checked_add(u64::from(bloom_size).checked_mul(8)?)?;
+        let chain = buckets.checked_add(u64::from(nbuckets).checked_mul(4)?)?;
+        let mut index = u64::from(
+            self.u32_at(buckets.checked_add(u64::from(h.checked_rem(nbuckets)?).checked_mul(4)?)?)?,
+        );
+        if index < symoffset {
+            return None;
+        }
+        loop {
+            let ch =
+                self.u32_at(chain.checked_add(index.checked_sub(symoffset)?.checked_mul(4)?)?)?;
+            if ch | 1 == h | 1 {
+                let s = self.sym(index)?;
+                if self.string(s.name) == Some(name) && each(s) {
+                    return Some(());
+                }
+            }
+            if ch & 1 != 0 {
+                return Some(());
+            }
+            index = index.checked_add(1)?;
+        }
+    }
+
+    /// The SysV table: a bucket per hash, and a chain of symbol indexes
+    /// ending at 0.
+    fn sysv_named(&self, name: &[u8], each: &mut dyn FnMut(Sym) -> bool) -> Option<()> {
+        let t = self.sysv_hash;
+        let nbucket = self.u32_at(t)?;
+        let nchain = self.u32_at(t.checked_add(4)?)?;
+        if nbucket == 0 {
+            return None;
+        }
+        let buckets = t.checked_add(8)?;
+        let chain = buckets.checked_add(u64::from(nbucket).checked_mul(4)?)?;
+        let h = elf_hash(name);
+        let mut index =
+            self.u32_at(buckets.checked_add(u64::from(h.checked_rem(nbucket)?).checked_mul(4)?)?)?;
+        // At most `nchain` steps: a chain that loops is malformed, and is
+        // left rather than followed forever.
+        for _ in 0..nchain {
+            if index == 0 || index >= nchain {
+                return Some(());
+            }
+            let s = self.sym(u64::from(index))?;
+            if self.string(s.name) == Some(name) && each(s) {
+                return Some(());
+            }
+            index = self.u32_at(chain.checked_add(u64::from(index).checked_mul(4)?)?)?;
+        }
+        Some(())
+    }
+
+    /// How many entries the symbol table has: the SysV table says; the GNU
+    /// one is followed from its highest bucket to the end of that chain.
+    fn count(&self) -> Option<u64> {
+        if self.sysv_hash != 0 {
+            return self.u32_at(self.sysv_hash.checked_add(4)?).map(u64::from);
+        }
+        let t = self.gnu_hash;
+        let nbuckets = u64::from(self.u32_at(t)?);
+        let symoffset = u64::from(self.u32_at(t.checked_add(4)?)?);
+        let bloom_size = u64::from(self.u32_at(t.checked_add(8)?)?);
+        let buckets = t.checked_add(16)?.checked_add(bloom_size.checked_mul(8)?)?;
+        let chain = buckets.checked_add(nbuckets.checked_mul(4)?)?;
+        let mut last = 0u64;
+        for b in 0..nbuckets {
+            let v = u64::from(self.u32_at(buckets.checked_add(b.checked_mul(4)?)?)?);
+            last = last.max(v);
+        }
+        if last < symoffset {
+            return Some(symoffset);
+        }
+        loop {
+            let ch =
+                self.u32_at(chain.checked_add(last.checked_sub(symoffset)?.checked_mul(4)?)?)?;
+            last = last.checked_add(1)?;
+            if ch & 1 != 0 {
+                return Some(last);
+            }
+        }
+    }
+
+    /// Symbol `index`'s `.gnu.version` entry; `None` if the program has no
+    /// versions.
+    fn versym(&self, index: u64) -> Option<u16> {
+        if self.versym == 0 {
+            return None;
+        }
+        self.u16_at(self.versym.checked_add(index.checked_mul(2)?)?)
+    }
+
+    /// The name of version `ndx`, from the program's version definitions.
+    fn version_name(&self, ndx: u16) -> Option<&'static [u8]> {
+        let mut at = self.verdef;
+        if at == 0 {
+            return None;
+        }
+        // Elf64_Verdef: vd_ndx @4 (u16), vd_aux @12 and vd_next @16 (u32s);
+        // its first Elf64_Verdaux's vda_name @0 names it.
+        for _ in 0..self.verdefnum.max(1) {
+            let vd_ndx = self.u16_at(at.checked_add(4)?)?;
+            let vd_aux = self.u32_at(at.checked_add(12)?)?;
+            let vd_next = self.u32_at(at.checked_add(16)?)?;
+            if vd_ndx == ndx {
+                let name = self.u32_at(at.checked_add(u64::from(vd_aux))?)?;
+                return self.string(name);
+            }
+            if vd_next == 0 {
+                return None;
+            }
+            at = at.checked_add(u64::from(vd_next))?;
+        }
+        None
+    }
+
+    /// The entry `dlsym` (`version` `None`) or `dlvsym` answers `name` with:
+    /// glibc's `check_match` and `do_lookup_x`. In a program without versions
+    /// any exported definition answers either. With versions, `dlvsym` wants
+    /// the one of that version, hidden or not; `dlsym` wants an unversioned
+    /// definition, else the one version not hidden -- and none if there are
+    /// several, which would be ambiguous.
+    fn find(&self, name: &[u8], version: Option<&[u8]>) -> Option<Sym> {
+        let mut found: Option<Sym> = None;
+        let mut versioned: Option<Sym> = None;
+        let mut versions = 0u32;
+        self.named(name, &mut |s| {
+            if !s.exported() {
+                return false;
+            }
+            match (version, self.versym(s.index)) {
+                (_, None) => {
+                    found = Some(s);
+                    true
+                }
+                (None, Some(v)) if v & VERSYM_INDEX <= 1 => {
+                    found = Some(s);
+                    true
+                }
+                (None, Some(v)) => {
+                    if v & VERSYM_HIDDEN == 0 {
+                        versions = versions.saturating_add(1);
+                        versioned.get_or_insert(s);
+                    }
+                    false
+                }
+                (Some(want), Some(v)) => {
+                    if self.version_name(v & VERSYM_INDEX) == Some(want) {
+                        found = Some(s);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        });
+        found.or(if versions == 1 { versioned } else { None })
+    }
+
+    /// The address entry `s` gives a caller whose thread pointer is `tp`: a
+    /// TLS symbol's in the calling thread's block, an IFUNC's from its
+    /// resolver, an absolute symbol's its value, any other's its value moved
+    /// by the bias.
+    fn address(&self, s: &Sym, tp: u64) -> Option<*mut c_void> {
+        match s.kind() {
+            STT_TLS => {
+                let block = tls_block(&self.ph.tls_image(), tp);
+                let p = tls_address(block, PROGRAM_TLS_MODULE, s.value);
+                (!p.is_null()).then_some(p)
+            }
+            STT_GNU_IFUNC => {
+                let at = as_ptr(self.bias.wrapping_add(s.value));
+                if at.is_null() {
+                    return None;
+                }
+                // SAFETY: the program's own code, which its link marked an
+                // IFUNC: a function of no arguments returning the address to
+                // use, called here as a dynamic linker calls it.
+                let resolver: unsafe extern "C" fn() -> *mut c_void =
+                    unsafe { core::mem::transmute::<*mut c_void, _>(at) };
+                // SAFETY: as above.
+                let p = unsafe { resolver() };
+                (!p.is_null()).then_some(p)
+            }
+            _ => {
+                let base = if s.shndx == SHN_ABS { 0 } else { self.bias };
+                Some(as_ptr(base.wrapping_add(s.value)))
+            }
+        }
+    }
+
+    /// The exported symbol `dladdr` names for `addr`: glibc's
+    /// `determine_info`. Global or weak, of default or protected visibility,
+    /// neither TLS nor absolute, and holding `addr` -- inside its size, or at
+    /// its address for a symbol of no size -- the one at the highest address
+    /// among them.
+    fn holding(&self, addr: u64) -> Option<Sym> {
+        let count = self.count()?;
+        let mut best: Option<Sym> = None;
+        // Entry 0 is the null symbol.
+        for i in 1..count {
+            let Some(s) = self.sym(i) else { break };
+            let eligible = matches!(s.bind(), STB_GLOBAL | STB_WEAK)
+                && matches!(s.visibility(), STV_DEFAULT | STV_PROTECTED)
+                && s.kind() != STT_TLS
+                && (s.shndx != SHN_UNDEF || s.value != 0)
+                && s.shndx != SHN_ABS
+                && u64::from(s.name) < self.strsz;
+            if !eligible {
+                continue;
+            }
+            let start = self.bias.wrapping_add(s.value);
+            let inside = if s.shndx == SHN_UNDEF || s.size == 0 {
+                addr == start
+            } else {
+                addr.checked_sub(start).is_some_and(|d| d < s.size)
+            };
+            if inside && best.is_none_or(|b| b.value < s.value) {
+                best = Some(s);
+            }
+        }
+        best
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The calling thread's message
 // ---------------------------------------------------------------------------
@@ -432,6 +965,11 @@ unsafe fn open(file: *const u8, mode: i32) -> *mut c_void {
     if name.is_empty() {
         return program_handle();
     }
+    // One of the C library's own parts: inside the program, and so loaded --
+    // RTLD_NOLOAD's question is answered yes too.
+    if is_own_name(name) {
+        return program_handle();
+    }
     // Not loaded, and not to be: that is the answer, not an error.
     if mode & RTLD_NOLOAD != 0 {
         return core::ptr::null_mut();
@@ -504,8 +1042,40 @@ unsafe fn lookup_fails(handle: *mut c_void, name: *const u8, version: *const u8)
     }
 }
 
-/// `dlsym(handle, name)`: NULL -- the program's symbol table is not in
-/// memory -- with the reason `dlerror` gives.
+/// What `dlsym` and `dlvsym` answer, the program's headers being `ph` and
+/// the calling thread's pointer `tp`: the address of the symbol the program
+/// exports by that name (and version), through [`RTLD_DEFAULT`] or the
+/// program's handle; else NULL, with the reason `dlerror` gives.
+///
+/// # Safety
+///
+/// `name` and `version` must be NULL or C strings.
+unsafe fn lookup(
+    ph: Option<ProgramHeaders>,
+    tp: u64,
+    handle: *mut c_void,
+    name: *const u8,
+    version: *const u8,
+) -> *mut c_void {
+    if handle.is_null() || is_program(handle) {
+        // SAFETY: the caller's contract.
+        let (n, v) = unsafe { (bytes(name), bytes(version)) };
+        let v = (!version.is_null()).then_some(v);
+        let found = ph
+            .and_then(Exports::of)
+            .and_then(|e| e.find(n, v).and_then(|s| e.address(&s, tp)));
+        if let Some(p) = found {
+            return p;
+        }
+    }
+    // SAFETY: the caller's contract.
+    unsafe { lookup_fails(handle, name, version) };
+    core::ptr::null_mut()
+}
+
+/// `dlsym(handle, name)`: the address of `name`, which the program exports
+/// if it was linked to (`--export-dynamic`); else NULL, with the reason
+/// `dlerror` gives, as for a program that exports nothing.
 ///
 /// # Safety
 ///
@@ -513,8 +1083,15 @@ unsafe fn lookup_fails(handle: *mut c_void, name: *const u8, version: *const u8)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const u8) -> *mut c_void {
     // SAFETY: this function's contract.
-    unsafe { lookup_fails(handle, name, core::ptr::null()) };
-    core::ptr::null_mut()
+    unsafe {
+        lookup(
+            program_headers(),
+            crate::tls::thread_pointer(),
+            handle,
+            name,
+            core::ptr::null(),
+        )
+    }
 }
 
 /// `dlvsym(handle, name, version)`: as [`dlsym`], naming the version.
@@ -529,8 +1106,15 @@ pub unsafe extern "C" fn dlvsym(
     version: *const u8,
 ) -> *mut c_void {
     // SAFETY: this function's contract.
-    unsafe { lookup_fails(handle, name, version) };
-    core::ptr::null_mut()
+    unsafe {
+        lookup(
+            program_headers(),
+            crate::tls::thread_pointer(),
+            handle,
+            name,
+            version,
+        )
+    }
 }
 
 /// `dlerror()`: the calling thread's pending message, which it clears; NULL
@@ -660,35 +1244,56 @@ pub unsafe extern "C" fn dlinfo(handle: *mut c_void, request: i32, arg: *mut c_v
 // dladdr, dladdr1
 // ---------------------------------------------------------------------------
 
-/// `dladdr`'s answer for `addr` among these headers: 1 with `*info` filled
-/// in if one of the program's segments holds it, else 0.
+/// What `dladdr` found for an address the program holds: the exported
+/// symbol holding it, if there is one.
+struct Held {
+    sym: Option<Sym>,
+}
+
+/// `dladdr`'s answer for `addr` among these headers: if one of the
+/// program's segments holds it, `*info` filled in -- the exported symbol
+/// holding it too, where the program exports any -- and that symbol's entry,
+/// if there is one; `None` for an address the program does not hold.
 ///
 /// # Safety
 ///
 /// `info` must be valid for a `Dl_info` write.
-unsafe fn addr_info(ph: Option<ProgramHeaders>, addr: *const c_void, info: *mut DlInfo) -> i32 {
-    let Some(ph) = ph else { return 0 };
-    if segment_holding(&ph, addr.addr()).is_none() {
-        return 0;
-    }
+unsafe fn addr_info(
+    ph: Option<ProgramHeaders>,
+    addr: *const c_void,
+    info: *mut DlInfo,
+) -> Option<Held> {
+    let ph = ph?;
+    segment_holding(&ph, addr.addr())?;
+    let exports = Exports::of(ph);
+    let sym = exports.and_then(|e| e.holding(addr.addr() as u64));
+    let (sname, saddr) = match (exports, sym) {
+        (Some(e), Some(s)) => (
+            e.string(s.name).map_or(core::ptr::null(), <[u8]>::as_ptr),
+            as_ptr(e.bias.wrapping_add(s.value)),
+        ),
+        _ => (core::ptr::null(), core::ptr::null_mut()),
+    };
     // SAFETY: a plain read of the pointer `__libc_start_main` set to argv[0].
     let name = unsafe { crate::crt::progname_full_slot().read() };
-    // SAFETY: the caller's contract.
+    // SAFETY: the caller's contract. `sname` is NUL-terminated where it
+    // lies, in the program's string table, which `string` found to end
+    // inside the table.
     unsafe {
         info.write(DlInfo {
             dli_fname: name,
             dli_fbase: ph.ehdr().cast_mut().cast(),
-            dli_sname: core::ptr::null(),
-            dli_saddr: core::ptr::null_mut(),
+            dli_sname: sname,
+            dli_saddr: saddr,
         });
     }
-    1
+    Some(Held { sym })
 }
 
 /// `dladdr(addr, info)`: for an address inside the program, 1, with the
 /// program's name (argv[0], as glibc gives it) and ELF header in `*info`,
-/// and no symbol, a static program's symbol table not being in memory; 0
-/// for any other address.
+/// and -- where the program exports its symbols -- the name and address of
+/// the one holding it; 0 for any other address.
 ///
 /// # Safety
 ///
@@ -699,13 +1304,13 @@ pub unsafe extern "C" fn dladdr(addr: *const c_void, info: *mut DlInfo) -> i32 {
         return 0;
     }
     // SAFETY: this function's contract.
-    unsafe { addr_info(program_headers(), addr, info) }
+    i32::from(unsafe { addr_info(program_headers(), addr, info) }.is_some())
 }
 
 /// `dladdr1(addr, info, extra, flags)`: [`dladdr`], and, where it finds the
 /// address, for [`RTLD_DL_LINKMAP`] the program's link map in `*extra` and
-/// for [`RTLD_DL_SYMENT`] the symbol's entry -- none, NULL. Other flags are
-/// 0's, as in glibc.
+/// for [`RTLD_DL_SYMENT`] the entry of the symbol it names -- NULL if none.
+/// Other flags are 0's, as in glibc.
 ///
 /// # Safety
 ///
@@ -718,19 +1323,26 @@ pub unsafe extern "C" fn dladdr1(
     extra: *mut *mut c_void,
     flags: i32,
 ) -> i32 {
+    if info.is_null() {
+        return 0;
+    }
     // SAFETY: this function's contract.
-    let found = unsafe { dladdr(addr, info) };
-    if found != 0 && !extra.is_null() {
+    let Some(held) = (unsafe { addr_info(program_headers(), addr, info) }) else {
+        return 0;
+    };
+    if !extra.is_null() {
         // SAFETY: this function's contract.
         unsafe {
             match flags {
                 RTLD_DL_LINKMAP => extra.write(program_handle()),
-                RTLD_DL_SYMENT => extra.write(core::ptr::null_mut()),
+                RTLD_DL_SYMENT => {
+                    extra.write(held.sym.map_or(core::ptr::null_mut(), |s| as_ptr(s.at)));
+                }
                 _ => {}
             }
         }
     }
-    found
+    1
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,17 +1665,62 @@ mod tests {
     /// not loaded is the answer, not an error.
     #[test]
     fn a_file_is_never_loaded() {
-        let f = c("libm.so.6");
-        // SAFETY: a C string.
-        assert!(unsafe { dlopen(f.as_ptr(), RTLD_NOW) }.is_null());
-        let m = take().unwrap();
-        assert!(
-            m.starts_with("libm.so.6: cannot open shared object file: "),
-            "{m}"
-        );
+        for name in [
+            "libfoo.so.1",
+            "/usr/lib/libz.so.1",
+            "libc.so",
+            "libc.so.7",
+            "xlibc.so.6",
+        ] {
+            let f = c(name);
+            // SAFETY: a C string.
+            assert!(unsafe { dlopen(f.as_ptr(), RTLD_NOW) }.is_null(), "{name}");
+            let m = take().unwrap();
+            assert!(
+                m.starts_with(&std::format!("{name}: cannot open shared object file: ")),
+                "{m}"
+            );
+            // SAFETY: as above.
+            assert!(unsafe { dlopen(f.as_ptr(), RTLD_NOW | RTLD_NOLOAD) }.is_null());
+            assert_eq!(take(), None);
+        }
+    }
+
+    /// The C library's own parts are linked into the program: opening one,
+    /// by name or by a path ending in it, opens the program, loaded already
+    /// -- so `RTLD_NOLOAD` finds it too -- and leaves no message.
+    #[test]
+    fn the_c_librarys_own_names_open_the_program() {
+        for name in [
+            "libc.so.6",
+            "libm.so.6",
+            "libdl.so.2",
+            "libpthread.so.0",
+            "librt.so.1",
+            "libutil.so.1",
+            "libcrypt.so.1",
+            "libresolv.so.2",
+            "libanl.so.1",
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/usr/lib64/libm.so.6",
+        ] {
+            let f = c(name);
+            for mode in [RTLD_NOW, RTLD_LAZY | RTLD_GLOBAL, RTLD_NOW | RTLD_NOLOAD] {
+                // SAFETY: a C string.
+                let h = unsafe { dlopen(f.as_ptr(), mode) };
+                assert!(is_program(h), "{name} {mode:#x}");
+                assert_eq!(take(), None, "{name}");
+                assert_eq!(dlclose(h), 0);
+            }
+        }
+        // The mode is checked first, as for any other name.
+        let f = c("libc.so.6");
         // SAFETY: as above.
-        assert!(unsafe { dlopen(f.as_ptr(), RTLD_NOW | RTLD_NOLOAD) }.is_null());
-        assert_eq!(take(), None);
+        assert!(unsafe { dlopen(f.as_ptr(), 0) }.is_null());
+        assert_eq!(
+            take().as_deref(),
+            Some("libc.so.6: invalid mode for dlopen(): Invalid argument")
+        );
     }
 
     #[test]
@@ -1424,10 +2081,12 @@ mod tests {
             0x40_0000, 0x40_0fff, 0x40_1000, 0x40_3fff, 0x40_4000, 0x40_47ff,
         ] {
             // SAFETY: `info` is a `Dl_info`.
-            assert_eq!(
-                unsafe { addr_info(Some(img.headers()), at(inside), &raw mut info) },
-                1,
-                "{inside:#x}"
+            assert!(
+                matches!(
+                    unsafe { addr_info(Some(img.headers()), at(inside), &raw mut info) },
+                    Some(Held { sym: None })
+                ),
+                "{inside:#x}: held, and no symbol in a program that exports none"
             );
             assert_eq!(info.dli_fbase.addr() as u64, img.addr());
             assert!(info.dli_sname.is_null() && info.dli_saddr.is_null());
@@ -1441,14 +2100,666 @@ mod tests {
         }
         for outside in [0x3f_ffff, 0x40_4800, 0x40_5000, 0x7fff_0000] {
             // SAFETY: as above.
-            assert_eq!(
-                unsafe { addr_info(Some(img.headers()), at(outside), &raw mut info) },
-                0,
+            assert!(
+                unsafe { addr_info(Some(img.headers()), at(outside), &raw mut info) }.is_none(),
                 "{outside:#x}"
             );
         }
         // SAFETY: as above; on the host there are no headers at all.
         assert_eq!(unsafe { dladdr(core::ptr::null(), &raw mut info) }, 0);
+    }
+
+    // -- the program's exported symbols ---------------------------------------
+
+    /// A symbol for [`exports_image`]: what its table entry says.
+    #[derive(Clone, Copy)]
+    struct TSym {
+        name: &'static str,
+        value: u64,
+        size: u64,
+        kind: u8,
+        bind: u8,
+        vis: u8,
+        shndx: u16,
+        /// Its `.gnu.version` entry, where the image has versions.
+        versym: u16,
+    }
+
+    /// A global function of no size, defined, unversioned.
+    const fn tsym(name: &'static str, value: u64) -> TSym {
+        TSym {
+            name,
+            value,
+            size: 0,
+            kind: STT_FUNC,
+            bind: STB_GLOBAL,
+            vis: STV_DEFAULT,
+            shndx: 1,
+            versym: 1,
+        }
+    }
+
+    /// The hash table an image has, and its bucket count.
+    #[derive(Clone, Copy)]
+    enum Hash {
+        Gnu(u32),
+        Sysv(u32),
+    }
+
+    /// A program linked at 0x400000 with `--export-dynamic`, lying in a heap
+    /// block: its headers, dynamic section, symbol and string tables, hash
+    /// table and -- given any -- version tables, all in one loaded segment.
+    struct Built {
+        words: Vec<u64>,
+        /// Each input symbol's index in the table.
+        index: Vec<u64>,
+    }
+
+    impl Built {
+        fn addr(&self) -> u64 {
+            self.words.as_ptr().addr() as u64
+        }
+
+        fn bias(&self) -> u64 {
+            self.addr().wrapping_sub(0x40_0000)
+        }
+
+        fn headers(&self) -> ProgramHeaders {
+            // SAFETY: the block starts with an ELF header followed by the
+            // table it describes, and lives as long as `self`.
+            unsafe { ProgramHeaders::of_ehdr(self.words.as_ptr().cast()) }.unwrap()
+        }
+
+        fn exports(&self) -> Exports {
+            Exports::of(self.headers()).expect("the image locates its tables")
+        }
+
+        /// What `dlsym` (`version` `None`) or `dlvsym` answers through the
+        /// program's handle, the thread pointer being `tp`.
+        fn lookup(&self, name: &str, version: Option<&str>, tp: u64) -> *mut c_void {
+            let n = c(name);
+            let v = version.map(c);
+            let _ = take();
+            // SAFETY: C strings that outlive the call.
+            unsafe {
+                lookup(
+                    Some(self.headers()),
+                    tp,
+                    program_handle(),
+                    n.as_ptr(),
+                    v.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+                )
+            }
+        }
+    }
+
+    fn put(b: &mut [u8], at: usize, bytes: &[u8]) {
+        b[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// The image of [`Built`]. `versions` are the version definitions,
+    /// `(index, name)`; `tls_memsz` gives the image a `PT_TLS` of that size;
+    /// `dyn_extra` adds dynamic entries ahead of the end.
+    fn exports_image(
+        syms: &[TSym],
+        hash: Hash,
+        versions: &[(u16, &str)],
+        tls_memsz: u64,
+        dyn_extra: &[(u64, u64)],
+    ) -> Built {
+        const BASE: u64 = 0x40_0000;
+        let align8 = |n: usize| n.div_ceil(8) * 8;
+        // The GNU table wants each bucket's symbols together, in bucket order.
+        let mut order: Vec<usize> = (0..syms.len()).collect();
+        if let Hash::Gnu(nb) = hash {
+            order.sort_by_key(|&i| gnu_hash(syms[i].name.as_bytes()) % nb);
+        }
+        let mut strtab = std::vec![0u8];
+        let mut name_off = std::vec![0u32; syms.len()];
+        for &i in &order {
+            name_off[i] = u32::try_from(strtab.len()).unwrap();
+            strtab.extend_from_slice(syms[i].name.as_bytes());
+            strtab.push(0);
+        }
+        let ver_name: Vec<u32> = versions
+            .iter()
+            .map(|(_, n)| {
+                let o = u32::try_from(strtab.len()).unwrap();
+                strtab.extend_from_slice(n.as_bytes());
+                strtab.push(0);
+                o
+            })
+            .collect();
+        let nsyms = syms.len() + 1;
+        let mut symtab = std::vec![0u8; nsyms * 24];
+        let mut index = std::vec![0u64; syms.len()];
+        let mut versym = std::vec![0u8; nsyms * 2];
+        for (k, &i) in order.iter().enumerate() {
+            let s = syms[i];
+            let e = (k + 1) * 24;
+            put(&mut symtab, e, &name_off[i].to_le_bytes());
+            symtab[e + 4] = (s.bind << 4) | s.kind;
+            symtab[e + 5] = s.vis;
+            put(&mut symtab, e + 6, &s.shndx.to_le_bytes());
+            put(&mut symtab, e + 8, &s.value.to_le_bytes());
+            put(&mut symtab, e + 16, &s.size.to_le_bytes());
+            put(&mut versym, (k + 1) * 2, &s.versym.to_le_bytes());
+            index[i] = (k + 1) as u64;
+        }
+        let mut hashtab = Vec::new();
+        match hash {
+            Hash::Gnu(nb) => {
+                let shift = 6u32;
+                let mut bloom = 0u64;
+                let mut buckets = std::vec![0u32; nb as usize];
+                let mut chain = std::vec![0u32; syms.len()];
+                for (k, &i) in order.iter().enumerate() {
+                    let h = gnu_hash(syms[i].name.as_bytes());
+                    bloom |= (1u64 << (h % 64)) | (1u64 << ((h >> shift) % 64));
+                    let b = (h % nb) as usize;
+                    if buckets[b] == 0 {
+                        buckets[b] = u32::try_from(k + 1).unwrap();
+                    }
+                    let last = order
+                        .get(k + 1)
+                        .is_none_or(|&j| gnu_hash(syms[j].name.as_bytes()) % nb != h % nb);
+                    chain[k] = if last { h | 1 } else { h & !1 };
+                }
+                for w in [nb, 1, 1, shift] {
+                    hashtab.extend_from_slice(&w.to_le_bytes());
+                }
+                hashtab.extend_from_slice(&bloom.to_le_bytes());
+                for w in buckets.iter().chain(chain.iter()) {
+                    hashtab.extend_from_slice(&w.to_le_bytes());
+                }
+            }
+            Hash::Sysv(nb) => {
+                let mut bucket = std::vec![0u32; nb as usize];
+                let mut chain = std::vec![0u32; nsyms];
+                for (k, &i) in order.iter().enumerate() {
+                    let idx = u32::try_from(k + 1).unwrap();
+                    let b = (elf_hash(syms[i].name.as_bytes()) % nb) as usize;
+                    chain[idx as usize] = bucket[b];
+                    bucket[b] = idx;
+                }
+                for w in [nb, u32::try_from(nsyms).unwrap()] {
+                    hashtab.extend_from_slice(&w.to_le_bytes());
+                }
+                for w in bucket.iter().chain(chain.iter()) {
+                    hashtab.extend_from_slice(&w.to_le_bytes());
+                }
+            }
+        }
+        // Elf64_Verdef (20 bytes), its one Elf64_Verdaux (8) after it.
+        let mut verdef = Vec::new();
+        for (k, (ndx, _)) in versions.iter().enumerate() {
+            let next = if k + 1 < versions.len() { 28u32 } else { 0 };
+            verdef.extend_from_slice(&1u16.to_le_bytes());
+            verdef.extend_from_slice(&0u16.to_le_bytes());
+            verdef.extend_from_slice(&ndx.to_le_bytes());
+            verdef.extend_from_slice(&1u16.to_le_bytes());
+            verdef.extend_from_slice(&0u32.to_le_bytes());
+            verdef.extend_from_slice(&20u32.to_le_bytes());
+            verdef.extend_from_slice(&next.to_le_bytes());
+            verdef.extend_from_slice(&ver_name[k].to_le_bytes());
+            verdef.extend_from_slice(&0u32.to_le_bytes());
+        }
+        // PT_PHDR, the tables' PT_LOAD, the code's PT_LOAD, PT_DYNAMIC, and
+        // PT_TLS if asked for.
+        let nph = if tls_memsz > 0 { 5 } else { 4 };
+        let phdrs = 64;
+        let dyn_off = align8(phdrs + 56 * nph);
+        let ndyn = 6 + dyn_extra.len() + if versions.is_empty() { 0 } else { 3 };
+        let symtab_off = align8(dyn_off + 16 * ndyn);
+        let strtab_off = align8(symtab_off + symtab.len());
+        let hash_off = align8(strtab_off + strtab.len());
+        let versym_off = align8(hash_off + hashtab.len());
+        let verdef_off = align8(versym_off + versym.len());
+        let tls_off = align8(verdef_off + verdef.len());
+        let total = align8(tls_off + usize::try_from(tls_memsz).unwrap() + 8);
+        let at = |o: usize| BASE + o as u64;
+        let mut b = std::vec![0u8; total];
+        put(&mut b, 0x20, &64u64.to_le_bytes());
+        put(&mut b, 0x36, &56u16.to_le_bytes());
+        put(&mut b, 0x38, &u16::try_from(nph).unwrap().to_le_bytes());
+        // The symbols' code and data, 0x401000-0x403000, is a segment of its
+        // own: `dladdr` asks only whether it holds an address, so it needs
+        // no memory behind it. The tables must end below it.
+        assert!(total <= 0x1000, "the tables fit below the code");
+        let mut phs = std::vec![
+            ph(PT_PHDR, 64, at(64), (56 * nph) as u64, (56 * nph) as u64, 8),
+            ph(PT_LOAD, 0, BASE, total as u64, total as u64, 0x1000),
+            ph(PT_LOAD, 0x1000, BASE + 0x1000, 0x2000, 0x2000, 0x1000),
+            ph(
+                PT_DYNAMIC,
+                dyn_off as u64,
+                at(dyn_off),
+                (16 * ndyn) as u64,
+                (16 * ndyn) as u64,
+                8
+            ),
+        ];
+        if tls_memsz > 0 {
+            phs.push(ph(PT_TLS, tls_off as u64, at(tls_off), 0, tls_memsz, 8));
+        }
+        for (k, p) in phs.iter().enumerate() {
+            let e = phdrs + 56 * k;
+            put(&mut b, e, &p.p_type.to_le_bytes());
+            put(&mut b, e + 8, &p.p_offset.to_le_bytes());
+            put(&mut b, e + 16, &p.p_vaddr.to_le_bytes());
+            put(&mut b, e + 24, &p.p_vaddr.to_le_bytes());
+            put(&mut b, e + 32, &p.p_filesz.to_le_bytes());
+            put(&mut b, e + 40, &p.p_memsz.to_le_bytes());
+            put(&mut b, e + 48, &p.p_align.to_le_bytes());
+        }
+        let hash_tag = if matches!(hash, Hash::Gnu(_)) {
+            DT_GNU_HASH
+        } else {
+            DT_HASH
+        };
+        let mut dyns = std::vec![
+            (DT_SYMTAB, at(symtab_off)),
+            (DT_STRTAB, at(strtab_off)),
+            (DT_STRSZ, strtab.len() as u64),
+            (DT_SYMENT, SYM_SIZE),
+            (hash_tag, at(hash_off)),
+        ];
+        if !versions.is_empty() {
+            dyns.push((DT_VERSYM, at(versym_off)));
+            dyns.push((DT_VERDEF, at(verdef_off)));
+            dyns.push((DT_VERDEFNUM, versions.len() as u64));
+        }
+        dyns.extend_from_slice(dyn_extra);
+        dyns.push((DT_NULL, 0));
+        for (k, (tag, val)) in dyns.iter().enumerate() {
+            put(&mut b, dyn_off + 16 * k, &tag.to_le_bytes());
+            put(&mut b, dyn_off + 16 * k + 8, &val.to_le_bytes());
+        }
+        put(&mut b, symtab_off, &symtab);
+        put(&mut b, strtab_off, &strtab);
+        put(&mut b, hash_off, &hashtab);
+        if !versions.is_empty() {
+            put(&mut b, versym_off, &versym);
+            put(&mut b, verdef_off, &verdef);
+        }
+        let mut words = std::vec![0u64; total / 8];
+        for (i, byte) in b.iter().enumerate() {
+            words[i / 8] |= u64::from(*byte) << (8 * (i % 8));
+        }
+        Built { words, index }
+    }
+
+    /// Symbols linked at these addresses, as the tests below lay them out.
+    fn basics() -> Vec<TSym> {
+        std::vec![
+            TSym {
+                size: 0x10,
+                ..tsym("f1", 0x40_1000)
+            },
+            TSym {
+                size: 0x20,
+                ..tsym("f2", 0x40_1010)
+            },
+            tsym("z", 0x40_1100),
+            TSym {
+                kind: STT_OBJECT,
+                size: 8,
+                ..tsym("counter", 0x40_2000)
+            },
+            TSym {
+                bind: STB_WEAK,
+                ..tsym("weakling", 0x40_1200)
+            },
+            TSym {
+                vis: 2,
+                ..tsym("hidden_one", 0x40_1300)
+            },
+            TSym {
+                bind: 0,
+                ..tsym("local_one", 0x40_1400)
+            },
+            TSym {
+                shndx: SHN_UNDEF,
+                value: 0,
+                ..tsym("undefined_one", 0)
+            },
+            TSym {
+                kind: 3,
+                ..tsym("a_section", 0x40_1500)
+            },
+            TSym {
+                shndx: SHN_ABS,
+                value: 0x5555,
+                ..tsym("absolute", 0)
+            },
+        ]
+    }
+
+    /// Through either hash table, any bucket count: an exported definition
+    /// is found where its value says, moved by the bias; a hidden, local,
+    /// undefined or section symbol, and a name that is not there, are not --
+    /// and leave `dlsym`'s message.
+    #[test]
+    fn dlsym_finds_what_the_program_exports() {
+        for hash in [
+            Hash::Gnu(1),
+            Hash::Gnu(3),
+            Hash::Gnu(7),
+            Hash::Sysv(1),
+            Hash::Sysv(5),
+        ] {
+            let img = exports_image(&basics(), hash, &[], 0, &[]);
+            let bias = img.bias();
+            for (name, value) in [
+                ("f1", 0x40_1000u64),
+                ("f2", 0x40_1010),
+                ("z", 0x40_1100),
+                ("counter", 0x40_2000),
+                ("weakling", 0x40_1200),
+            ] {
+                let p = img.lookup(name, None, 0);
+                assert_eq!(p.addr() as u64, bias.wrapping_add(value), "{name}");
+                assert_eq!(take(), None, "{name}: a found symbol leaves no message");
+            }
+            // An absolute symbol is its value, the bias not applying.
+            assert_eq!(img.lookup("absolute", None, 0).addr(), 0x5555);
+            for name in [
+                "hidden_one",
+                "local_one",
+                "undefined_one",
+                "a_section",
+                "nope",
+                "f",
+                "f12",
+                "",
+            ] {
+                assert!(img.lookup(name, None, 0).is_null(), "{name}");
+                assert_eq!(
+                    take(),
+                    Some(std::format!("{}: undefined symbol: {name}", prog())),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// `RTLD_DEFAULT` searches the program as its handle does; `RTLD_NEXT`
+    /// and a handle no `dlopen` gave find nothing, with their own messages.
+    #[test]
+    fn dlsym_through_each_handle() {
+        let img = exports_image(&basics(), Hash::Gnu(3), &[], 0, &[]);
+        let n = c("f2");
+        let want = img.bias().wrapping_add(0x40_1010);
+        // SAFETY: C strings.
+        unsafe {
+            let p = lookup(
+                Some(img.headers()),
+                0,
+                RTLD_DEFAULT,
+                n.as_ptr(),
+                core::ptr::null(),
+            );
+            assert_eq!(p.addr() as u64, want);
+            let p = lookup(
+                Some(img.headers()),
+                0,
+                RTLD_NEXT,
+                n.as_ptr(),
+                core::ptr::null(),
+            );
+            assert!(p.is_null());
+            assert_eq!(
+                take().as_deref(),
+                Some("RTLD_NEXT used in code not dynamically loaded")
+            );
+            let bogus = core::ptr::without_provenance_mut::<c_void>(0x1234);
+            let p = lookup(Some(img.headers()), 0, bogus, n.as_ptr(), core::ptr::null());
+            assert!(p.is_null());
+            assert_eq!(take().as_deref(), Some("shared object not open"));
+            // No headers -- the host, or a program whose headers are not
+            // mapped -- and so no table: glibc's static answer.
+            let p = lookup(None, 0, RTLD_DEFAULT, n.as_ptr(), core::ptr::null());
+            assert!(p.is_null());
+            assert_eq!(
+                take(),
+                Some(std::format!("{}: undefined symbol: f2", prog()))
+            );
+        }
+    }
+
+    /// A TLS symbol is the calling thread's copy: its block below the thread
+    /// pointer, the symbol's value into it. With no thread pointer -- or no
+    /// `PT_TLS` -- there is no copy to give.
+    #[test]
+    fn a_tls_symbol_is_the_calling_threads_copy() {
+        let syms = [TSym {
+            kind: STT_TLS,
+            value: 16,
+            size: 8,
+            ..tsym("tls_var", 0)
+        }];
+        let img = exports_image(&syms, Hash::Gnu(1), &[], 24, &[]);
+        let tp = 0x7000_0000u64;
+        assert_eq!(img.lookup("tls_var", None, tp).addr() as u64, tp - 24 + 16);
+        assert!(img.lookup("tls_var", None, 0).is_null());
+        let _ = take();
+        let no_tls = exports_image(&syms, Hash::Gnu(1), &[], 0, &[]);
+        assert!(no_tls.lookup("tls_var", None, tp).is_null());
+    }
+
+    extern "C" fn chosen_one() {}
+
+    extern "C" fn pick() -> *mut c_void {
+        chosen_one as *mut c_void
+    }
+
+    /// An IFUNC is what its resolver answers, as a dynamic linker binds one.
+    #[test]
+    fn an_ifunc_is_what_its_resolver_answers() {
+        let mut img = exports_image(
+            &[TSym {
+                kind: STT_GNU_IFUNC,
+                ..tsym("chosen", 1)
+            }],
+            Hash::Gnu(1),
+            &[],
+            0,
+            &[],
+        );
+        // The bias depends on where the block lies, so the entry's value --
+        // the resolver's link-time address -- is written once it is known:
+        // st_value, eight bytes into the entry.
+        let resolver: extern "C" fn() -> *mut c_void = pick;
+        let value = (resolver as usize as u64).wrapping_sub(img.bias());
+        let e = img.exports();
+        let off = usize::try_from(e.symtab.wrapping_sub(img.addr())).unwrap()
+            + usize::try_from(SYM_SIZE * img.index[0]).unwrap()
+            + 8;
+        for (k, byte) in value.to_le_bytes().iter().enumerate() {
+            let i = off + k;
+            img.words[i / 8] &= !(0xff << (8 * (i % 8)));
+            img.words[i / 8] |= u64::from(*byte) << (8 * (i % 8));
+        }
+        assert_eq!(img.lookup("chosen", None, 0), chosen_one as *mut c_void);
+    }
+
+    /// The versions a program defines: dlvsym wants the one it names,
+    /// hidden or not; dlsym an unversioned definition, else the one default
+    /// version -- and none when two would answer.
+    #[test]
+    fn versions_are_glibcs() {
+        const HIDDEN: u16 = VERSYM_HIDDEN;
+        let syms = [
+            TSym {
+                versym: 2 | HIDDEN,
+                ..tsym("foo", 0x40_1000)
+            },
+            TSym {
+                versym: 3,
+                ..tsym("foo", 0x40_1100)
+            },
+            TSym {
+                versym: 1,
+                ..tsym("bar", 0x40_1200)
+            },
+            TSym {
+                versym: 2,
+                ..tsym("baz", 0x40_1300)
+            },
+            TSym {
+                versym: 2,
+                ..tsym("qux", 0x40_1400)
+            },
+            TSym {
+                versym: 3,
+                ..tsym("qux", 0x40_1500)
+            },
+            TSym {
+                versym: 2 | HIDDEN,
+                ..tsym("old", 0x40_1600)
+            },
+        ];
+        let versions = [(1, "libtest"), (2, "V1"), (3, "V2")];
+        for hash in [Hash::Gnu(1), Hash::Gnu(4), Hash::Sysv(3)] {
+            let img = exports_image(&syms, hash, &versions, 0, &[]);
+            let b = img.bias();
+            let addr = |p: *mut c_void| p.addr() as u64;
+            assert_eq!(
+                addr(img.lookup("foo", None, 0)),
+                b.wrapping_add(0x40_1100),
+                "foo: the default"
+            );
+            assert_eq!(
+                addr(img.lookup("foo", Some("V1"), 0)),
+                b.wrapping_add(0x40_1000),
+                "foo@V1: hidden, named"
+            );
+            assert_eq!(
+                addr(img.lookup("foo", Some("V2"), 0)),
+                b.wrapping_add(0x40_1100)
+            );
+            assert!(img.lookup("foo", Some("V3"), 0).is_null());
+            assert_eq!(
+                take(),
+                Some(std::format!(
+                    "{}: undefined symbol: foo, version V3",
+                    prog()
+                ))
+            );
+            assert_eq!(addr(img.lookup("bar", None, 0)), b.wrapping_add(0x40_1200));
+            assert!(
+                img.lookup("bar", Some("V1"), 0).is_null(),
+                "an unversioned bar is no bar@V1"
+            );
+            assert_eq!(addr(img.lookup("baz", None, 0)), b.wrapping_add(0x40_1300));
+            assert!(
+                img.lookup("qux", None, 0).is_null(),
+                "two default versions: ambiguous"
+            );
+            assert_eq!(
+                addr(img.lookup("qux", Some("V2"), 0)),
+                b.wrapping_add(0x40_1500)
+            );
+            assert!(
+                img.lookup("old", None, 0).is_null(),
+                "only a hidden version"
+            );
+            assert_eq!(
+                addr(img.lookup("old", Some("V1"), 0)),
+                b.wrapping_add(0x40_1600)
+            );
+        }
+        // Without versions, a version asked for is no obstacle: glibc takes
+        // an unversioned definition from an object that has none.
+        let plain = exports_image(&basics(), Hash::Gnu(2), &[], 0, &[]);
+        assert_eq!(
+            plain.lookup("f1", Some("GLIBC_2.2.5"), 0).addr() as u64,
+            plain.bias().wrapping_add(0x40_1000)
+        );
+    }
+
+    /// `dladdr` names the exported symbol holding an address: inside its
+    /// size, or at its address for a symbol of none, the highest such; TLS,
+    /// absolute, hidden and local symbols are never names.
+    #[test]
+    fn dladdr_names_the_symbol() {
+        for hash in [Hash::Gnu(1), Hash::Gnu(5), Hash::Sysv(2)] {
+            let img = exports_image(&basics(), hash, &[], 0, &[]);
+            let b = img.bias();
+            let at = |v: u64| as_ptr(b.wrapping_add(v)).cast_const();
+            let mut info = DlInfo {
+                dli_fname: core::ptr::null(),
+                dli_fbase: core::ptr::null_mut(),
+                dli_sname: core::ptr::null(),
+                dli_saddr: core::ptr::null_mut(),
+            };
+            for (addr, name, start) in [
+                (0x40_1000u64, Some("f1"), 0x40_1000u64),
+                (0x40_100f, Some("f1"), 0x40_1000),
+                (0x40_1010, Some("f2"), 0x40_1010),
+                (0x40_102f, Some("f2"), 0x40_1010),
+                (0x40_1030, None, 0),
+                (0x40_1100, Some("z"), 0x40_1100),
+                (0x40_1101, None, 0),
+                (0x40_2004, Some("counter"), 0x40_2000),
+                (0x40_1300, None, 0),
+                (0x40_1400, None, 0),
+            ] {
+                // SAFETY: `info` is a `Dl_info`.
+                let held = unsafe { addr_info(Some(img.headers()), at(addr), &raw mut info) };
+                assert!(held.is_some(), "{addr:#x} is in the program");
+                match name {
+                    Some(n) => {
+                        // SAFETY: a name from the image's string table.
+                        let got = unsafe { CStr::from_ptr(info.dli_sname.cast()) };
+                        assert_eq!(got.to_bytes(), n.as_bytes(), "{addr:#x}");
+                        assert_eq!(info.dli_saddr.addr() as u64, b.wrapping_add(start));
+                        let s = held.unwrap().sym.unwrap();
+                        assert_eq!(s.at, img.exports().symtab + SYM_SIZE * s.index);
+                    }
+                    None => {
+                        assert!(
+                            info.dli_sname.is_null() && info.dli_saddr.is_null(),
+                            "{addr:#x}"
+                        );
+                        assert!(held.unwrap().sym.is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A table that is not what it should be is no table: the dynamic
+    /// section outside the loaded segment, entries of the wrong size, no hash
+    /// table; and names past the end of the string table are no names.
+    #[test]
+    fn a_malformed_table_finds_nothing() {
+        // DT_SYMENT other than 24.
+        let img = exports_image(&basics(), Hash::Gnu(1), &[], 0, &[(DT_SYMENT, 16)]);
+        assert!(Exports::of(img.headers()).is_none());
+        // A string table claimed smaller than it is: the later names run off
+        // its end, and are not found; the earlier still are.
+        let names = exports_image(&basics(), Hash::Gnu(1), &[], 0, &[]);
+        let e = names.exports();
+        let short = Exports { strsz: 4, ..e };
+        assert!(short.find(b"counter", None).is_none());
+        // The tables moved off the end of every segment.
+        let mut far = names.exports();
+        far.symtab = far.symtab.wrapping_add(0x10_0000);
+        assert!(far.find(b"f1", None).is_none());
+        assert!(far.holding(names.bias().wrapping_add(0x40_1000)).is_none());
+    }
+
+    /// The hash functions are glibc's: values checked against its
+    /// `dl_new_hash` and `_dl_elf_hash` for these names.
+    #[test]
+    fn the_hash_functions_are_glibcs() {
+        assert_eq!(gnu_hash(b""), 5381);
+        assert_eq!(gnu_hash(b"printf"), 0x156b_2bb8);
+        assert_eq!(gnu_hash(b"exit"), 0x7c96_7e3f);
+        assert_eq!(elf_hash(b""), 0);
+        assert_eq!(elf_hash(b"printf"), 0x0779_05a6);
+        assert_eq!(elf_hash(b"exit"), 0x0006_cf04);
     }
 
     /// The segment holding the address, and `.eh_frame_hdr` -- glibc's

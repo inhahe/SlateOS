@@ -216,7 +216,15 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Six programs still lack it: `ed find hostname kill more patch`.
+all. Five programs still lack it: `ed hostname kill more patch`.
+`find` was converted on 2026-10-08, with its output rebuilt on stdio's
+terms: each sink a buffered `Stream` as upstream's `FILE *` is, `-print`
+unchecked, `-printf` checked call by call (`find: 'standard output':
+REASON`, once per failed buffer), `-ls` checked field by field and fatal
+at `list_file`'s stage (`Failed to write output (at stage 275)`), an
+`-fprint` file closed and checked at the end (fatal), `fflush (stdout)`
+checked after that, and `close_stdout` last; `find-diff.sh` holds
+twenty-three descriptor cases, all agreeing with findutils 4.9.0.
 `df` was converted on 2026-10-08: its help and version had gone out by
 `print!`, which panics on a failed write, and its table through Rust's
 `Stdout` with a failure turned into status 1 and nothing said; it is

@@ -83,7 +83,9 @@ fails before and agrees after:
 
 Already as upstream before this entry: `shred`, `comm`, `join`, `tail` and
 `randint` (each called `fd_safer` at its one site), and `tac`'s temporary
-file. `date` calls `fd_safer` too, where upstream `freopen`s onto standard
+file. Since, outside coreutils: `find`'s `-fprint` files (2026-10-08),
+which findutils opens through `sharefile_fopen` under `stdio--.h`, and
+keeps one stream per file by device and inode -- `find-diff.sh` holds both. `date` calls `fd_safer` too, where upstream `freopen`s onto standard
 input -- to be measured with the rest.
 
 Found while checking whether `cp` had `tee`'s hazard: it did not, by luck of

@@ -20,6 +20,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* glibc's <sys/mount.h> brings in the kernel's <linux/mount.h> when there is
+ * one, and defines its own enum fsconfig_command and struct mount_attr only
+ * when that header has not (the two #ifndefs below). Without this step a
+ * program that includes <sys/mount.h> and then <linux/mount.h> -- Mono's
+ * w32file-unix.c does (scripts/mono-spike/) -- gets each defined twice, which
+ * does not compile. glibc 2.36 shipped exactly that break, and this is how it
+ * was fixed. The macros below are the kernel header's own, spelled as it
+ * spells them, so defining them again changes nothing. */
+#ifdef __has_include
+# if __has_include(<linux/mount.h>)
+#  include <linux/mount.h>
+# endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -1171,6 +1171,21 @@ else
     # against the new libc.a and stages the stripped binary again.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/oils-for-unix-slateos.elf" \
         scripts/oils-spike/slatelink.sh
+    # GDB's relink is seconds: slatelink.sh links the objects run.sh compiled
+    # against the new libc.a and stages gdb and gdbserver again. One artifact
+    # stands for the two, which are always linked and staged together.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/gdb-slateos.elf" \
+        scripts/gdb-spike/slatelink.sh
+    # binutils' relink is seconds: slatelink.sh links the fourteen programs'
+    # objects against the new libc.a and stages them again. One stands for
+    # the fourteen, which are always linked and staged together.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/binutils/as" \
+        scripts/binutils-spike/slatelink.sh
+    # Mono's relink is seconds: slatelink.sh links the runtime's objects
+    # against the new libc.a and stages mono-sgen again. Its class libraries
+    # are .NET bytecode, which no libc.a change makes stale.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/mono-sgen-slateos.elf" \
+        scripts/mono-spike/slatelink.sh
     # Oils' spec tests are behind when the harness they carry is not the
     # tree's (oils_spec_current). Rebuilding records the Linux expectations
     # again, about seven minutes, which is the point: expectations recorded by
@@ -1468,6 +1483,115 @@ else
     echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/oils-spec/bundle.sh)"
 fi
 
+# --- GDB 18.1, the GNU debugger, linked against OUR OWN libc -----------------
+# The debugger the operator asked for (design-decisions.md §1050), built by
+# scripts/gdb-spike/run.sh with GMP and MPFR and relinked against libc.a by its
+# slatelink.sh -- nothing missing and nothing duplicated (its README). Staged
+# with each program's symbol table and without its DWARF, which slatelink.sh
+# strips: about 14 MB for gdb and 3 MB for gdbserver.
+#
+# What it can do here today: examine a program without running it -- its
+# symbols, its machine code, its types where they were kept -- and debug a
+# remote target as a client. It cannot yet run a program under its control:
+# that needs the kernel's ptrace and /proc/<pid>/mem, asked of lane A in
+# requests/d-a-a-debugger-needs-ptrace-for-native-programs.md. gdbserver, the
+# half that runs beside the program being debugged, waits on the same.
+#
+# Staleness: the rule bash's has -- absent is honest (NOTE), older than libc.a
+# is a lie (fatal); the relink pass above is what normally keeps it fresh. The
+# two are linked and staged together, so they are judged together.
+#
+# /bin/gnu-gdb, not /bin/gdb: that name is lane B's hand-written debugger
+# (userspace/gdb, a workspace program, staged as every one is), and two
+# programs staged at one path leave the image holding whichever was copied
+# last. The port takes /bin/gdb when lane B agrees
+# (requests/d-b-gnu-gdb-is-on-the-image-and-could-take-bin-gdb.md), as genuine
+# Oils takes /bin/osh only once the Rust OSH is renamed. /bin/gdbserver is
+# nobody else's.
+# PROGRAM: /bin/gnu-gdb -- GDB 18.1, the GNU debugger: examines a program's symbols and machine code; running one under it waits on the kernel. (scripts/gdb-spike/)
+# PROGRAM: /bin/gdbserver -- GDB 18.1's remote stub, run beside the program being debugged; waits on the kernel as gdb does. (scripts/gdb-spike/)
+GDB_SLATE="$ROOT_DIR/build/spike/gdb-slateos.elf"
+GDBSERVER_SLATE="$ROOT_DIR/build/spike/gdbserver-slateos.elf"
+GDB_STALE=0
+if [ -e "$GDB_SLATE" ] && [ -e "$GDBSERVER_SLATE" ]; then
+    cp -L "$GDB_SLATE" "$STAGE/bin/gnu-gdb"
+    cp -L "$GDBSERVER_SLATE" "$STAGE/bin/gdbserver"
+    chmod 0755 "$STAGE/bin/gnu-gdb" "$STAGE/bin/gdbserver"
+    echo "[rootfs] staged GDB 18.1 (linked against our libc.a): /bin/gnu-gdb" \
+         "($(stat -c %s "$STAGE/bin/gnu-gdb") bytes), /bin/gdbserver" \
+         "($(stat -c %s "$STAGE/bin/gdbserver") bytes)"
+    for f in "$GDB_SLATE" "$GDBSERVER_SLATE"; do
+        if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+           && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$f" ]; then
+            echo "[rootfs] WARNING: $(basename "$f") is OLDER than the sysroot libc.a — it links a"
+            echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+            echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
+            GDB_STALE=1
+        fi
+    done
+elif [ -e "$GDB_SLATE" ] || [ -e "$GDBSERVER_SLATE" ]; then
+    # One without the other is a half-finished relink, not a choice.
+    echo "[rootfs] ERROR: build/spike has one of gdb-slateos.elf and gdbserver-slateos.elf"
+    echo "[rootfs]        without the other; slatelink.sh stages both or neither. Relink them:"
+    echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
+    exit 1
+else
+    echo "[rootfs] NOTE: $GDB_SLATE not found — /bin/gnu-gdb and /bin/gdbserver will be absent"
+    echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/gdb-spike/run.sh)"
+fi
+
+# --- Mono 6.14.1, the .NET runtime, linked against OUR OWN libc --------------
+# The .NET runtime the operator asked for (design-decisions.md §1050): the
+# JIT and virtual machine, mono-sgen, built by scripts/mono-spike/run.sh and
+# relinked against libc.a by its slatelink.sh -- nothing missing and nothing
+# duplicated -- and the class libraries it needs, which scripts/mono-spike/
+# bcl.sh builds on the host (they are .NET bytecode, the same on every
+# system):
+#   /bin/mono                   mono-sgen, without its DWARF (7.6 MB)
+#   /lib/mono/4.5/mscorlib.dll  the one assembly every program needs
+#   /etc/mono/config            Mono's library map: DllImport("libc") is
+#                               libc.so.6, which dlopen answers with the
+#                               program itself (design-decisions §1184)
+#   /lib/mono/checks/checks.exe what services/ctest-mono-runs runs
+# mono finds lib/ and etc/ beside its own bin/ (its set_dirs), so the image
+# works mounted at / or at /mnt with nothing set in the environment.
+#
+# Together or not at all, as CPython and its library are: a runtime without
+# mscorlib dies before running a line of anyone's program. The runtime is
+# judged against libc.a for staleness as bash's is; the libraries never go
+# stale against it.
+# PROGRAM: /bin/mono -- Mono 6.14.1, the .NET runtime: runs .NET programs, JIT-compiled. (scripts/mono-spike/)
+MONO_SLATE="$ROOT_DIR/build/spike/mono-sgen-slateos.elf"
+MONO_LIBS="$ROOT_DIR/build/spike/mono"
+MONO_STALE=0
+if [ -e "$MONO_SLATE" ] && [ -f "$MONO_LIBS/lib/mono/4.5/mscorlib.dll" ] \
+   && [ -f "$MONO_LIBS/etc/mono/config" ] && [ -f "$MONO_LIBS/lib/mono/checks/checks.exe" ]; then
+    mkdir -p "$STAGE/lib/mono/4.5" "$STAGE/lib/mono/checks" "$STAGE/etc/mono"
+    cp -L "$MONO_SLATE" "$STAGE/bin/mono"
+    chmod 0755 "$STAGE/bin/mono"
+    cp "$MONO_LIBS/lib/mono/4.5/mscorlib.dll" "$STAGE/lib/mono/4.5/mscorlib.dll"
+    cp "$MONO_LIBS/etc/mono/config" "$STAGE/etc/mono/config"
+    cp "$MONO_LIBS/lib/mono/checks/checks.exe" "$STAGE/lib/mono/checks/checks.exe"
+    echo "[rootfs] staged Mono 6.14.1 (linked against our libc.a): /bin/mono" \
+         "($(stat -c %s "$STAGE/bin/mono") bytes), mscorlib.dll" \
+         "($(stat -c %s "$STAGE/lib/mono/4.5/mscorlib.dll") bytes)"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$MONO_SLATE" ]; then
+        echo "[rootfs] WARNING: mono-sgen-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/mono-spike/slatelink.sh"
+        MONO_STALE=1
+    fi
+elif [ -e "$MONO_SLATE" ]; then
+    echo "[rootfs] WARNING: $MONO_SLATE is built but its class libraries are not --"
+    echo "[rootfs]          leaving /bin/mono off: without mscorlib.dll it runs nothing. Build them:"
+    echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/mono-spike/bcl.sh"
+else
+    echo "[rootfs] NOTE: $MONO_SLATE not found — /bin/mono will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/mono-spike/run.sh,"
+    echo "[rootfs]        then scripts/mono-spike/bcl.sh for its class libraries)"
+fi
+
 # --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
 # The speech synthesizer (design.txt: speech output is one of the two things
 # exempt from "no AI"), built by scripts/espeak-spike/run.sh (lane E's; see its
@@ -1707,6 +1831,104 @@ else
     echo "[rootfs] NOTE: LLVM's tools are not in build/spike -- /bin/opt, /bin/llc and"
     echo "[rootfs]       /bin/ld.lld will be absent (build them with"
     echo "[rootfs]       wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh)"
+fi
+
+# --- GNU binutils 2.47, linked against OUR OWN libc --------------------------
+# The assembler a C compiler hands its output to, GNU's linker, and the tools
+# that read and edit object files, built by scripts/binutils-spike/run.sh and
+# relinked against libc.a by its slatelink.sh -- all fourteen with nothing
+# missing and nothing duplicated. No assembler was on the image before: llc
+# writes object files itself, and GCC (scripts/gcc-spike/) cannot.
+#
+#   /bin/as, /bin/ld.bfd             the assembler, and GNU's linker
+#   /bin/nm, /bin/objcopy, /bin/size, /bin/addr2line, /bin/c++filt,
+#   /bin/elfedit                     the rest, under their own names
+#   /bin/gnu-ar, /bin/gnu-ranlib, /bin/gnu-strip, /bin/gnu-strings,
+#   /bin/gnu-objdump, /bin/gnu-readelf
+#                                    under gnu- names, below
+#   /usr/lib/x86_64-slateos/libc.a   the C library a program is linked with --
+#                                    the LLVM block's file, at its path, staged
+#                                    here too so that an assembler and a linker
+#                                    do not depend on LLVM's being built
+#
+# gnu-: /bin/ar (and ranlib and strip, the manifest's other names for it),
+# /bin/objdump, /bin/readelf and /bin/strings are lane B's own programs
+# (userspace/), staged as every workspace program is, and two programs at one
+# path would leave the image holding whichever was copied last -- which the
+# userland loop below refuses outright. GNU's take those names if lane B
+# agrees (requests/d-b-gnu-binutils-is-on-the-image-beside-lane-bs-tools.md),
+# as /bin/gnu-gdb waits on /bin/gdb. /bin/ld is left unset: ld.lld and
+# ld.bfd are both here, and which of them `ld` names is a choice for when a
+# compiler on the image calls it.
+#
+# Together or not at all: slatelink.sh links and stages the fourteen at once,
+# so some without the rest is a half-finished relink. Staleness as for every
+# port: absent is honest (NOTE), older than libc.a is a lie (fatal, below).
+# PROGRAM: /bin/as -- GNU as 2.47, the assembler: assembly source to an object file. (scripts/binutils-spike/)
+# PROGRAM: /bin/ld.bfd -- GNU ld 2.47, the GNU linker. (scripts/binutils-spike/)
+# PROGRAM: /bin/nm -- GNU nm 2.47: lists the symbols in object files. (scripts/binutils-spike/)
+# PROGRAM: /bin/objcopy -- GNU objcopy 2.47: copies an object file, converting or editing it on the way. (scripts/binutils-spike/)
+# PROGRAM: /bin/size -- GNU size 2.47: the sizes of an object file's sections. (scripts/binutils-spike/)
+# PROGRAM: /bin/addr2line -- GNU addr2line 2.47: a code address to the source file and line it came from. (scripts/binutils-spike/)
+# PROGRAM: /bin/c++filt -- GNU c++filt 2.47: turns mangled C++ symbol names back into C++. (scripts/binutils-spike/)
+# PROGRAM: /bin/elfedit -- GNU elfedit 2.47: edits the header of an ELF file. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-ar -- GNU ar 2.47: makes, edits and lists static libraries. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-ranlib -- GNU ranlib 2.47: writes a static library's symbol index. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-strip -- GNU strip 2.47: removes symbols and debugging information from object files. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-strings -- GNU strings 2.47: prints the runs of text in a file. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-objdump -- GNU objdump 2.47: disassembles object files and describes their contents. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-readelf -- GNU readelf 2.47: describes the contents of an ELF file. (scripts/binutils-spike/)
+BINUTILS_DIR="$ROOT_DIR/build/spike/binutils"
+BINUTILS_NAMES="as ld.bfd nm objcopy size addr2line c++filt elfedit ar ranlib strip strings objdump readelf"
+BINUTILS_STALE=0
+binutils_present=0
+for b in $BINUTILS_NAMES; do
+    [ -e "$BINUTILS_DIR/$b" ] && binutils_present=$((binutils_present + 1))
+done
+if [ "$binutils_present" -eq 14 ]; then
+    # Each path written out, not built in a loop: the program catalogue
+    # checks every `# PROGRAM:` path above against the paths written here.
+    cp -L "$BINUTILS_DIR/as" "$STAGE/bin/as"
+    cp -L "$BINUTILS_DIR/ld.bfd" "$STAGE/bin/ld.bfd"
+    cp -L "$BINUTILS_DIR/nm" "$STAGE/bin/nm"
+    cp -L "$BINUTILS_DIR/objcopy" "$STAGE/bin/objcopy"
+    cp -L "$BINUTILS_DIR/size" "$STAGE/bin/size"
+    cp -L "$BINUTILS_DIR/addr2line" "$STAGE/bin/addr2line"
+    cp -L "$BINUTILS_DIR/c++filt" "$STAGE/bin/c++filt"
+    cp -L "$BINUTILS_DIR/elfedit" "$STAGE/bin/elfedit"
+    cp -L "$BINUTILS_DIR/ar" "$STAGE/bin/gnu-ar"
+    cp -L "$BINUTILS_DIR/ranlib" "$STAGE/bin/gnu-ranlib"
+    cp -L "$BINUTILS_DIR/strip" "$STAGE/bin/gnu-strip"
+    cp -L "$BINUTILS_DIR/strings" "$STAGE/bin/gnu-strings"
+    cp -L "$BINUTILS_DIR/objdump" "$STAGE/bin/gnu-objdump"
+    cp -L "$BINUTILS_DIR/readelf" "$STAGE/bin/gnu-readelf"
+    for b in as ld.bfd nm objcopy size addr2line c++filt elfedit gnu-ar gnu-ranlib \
+             gnu-strip gnu-strings gnu-objdump gnu-readelf; do
+        chmod 0755 "$STAGE/bin/$b"
+    done
+    mkdir -p "$STAGE/usr/lib/x86_64-slateos"
+    cp "$SYSROOT_LIBC" "$STAGE/usr/lib/x86_64-slateos/libc.a"
+    echo "[rootfs] staged GNU binutils 2.47 (linked against our libc.a): /bin/as, /bin/ld.bfd," \
+         "/bin/nm, /bin/objcopy, /bin/size, /bin/addr2line, /bin/c++filt, /bin/elfedit and" \
+         "/bin/gnu-{ar,ranlib,strip,strings,objdump,readelf}"
+    for b in $BINUTILS_NAMES; do
+        if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$BINUTILS_DIR/$b" ]; then
+            echo "[rootfs] WARNING: build/spike/binutils/$b is OLDER than the sysroot libc.a -- it"
+            echo "[rootfs]          links a stale libc. Relink all fourteen, seconds:"
+            echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
+            BINUTILS_STALE=1
+        fi
+    done
+elif [ "$binutils_present" -gt 0 ]; then
+    # Some without the rest is a half-finished relink, not a choice.
+    echo "[rootfs] ERROR: build/spike/binutils holds $binutils_present of binutils' fourteen"
+    echo "[rootfs]        programs; slatelink.sh stages all or none. Relink them:"
+    echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
+    exit 1
+else
+    echo "[rootfs] NOTE: GNU binutils is not in build/spike -- /bin/as, /bin/ld.bfd and the rest"
+    echo "[rootfs]       will be absent (build them with"
+    echo "[rootfs]       wsl -d Ubuntu --exec bash scripts/binutils-spike/run.sh)"
 fi
 
 # --- fastpy, lane B's Python compiler: built here, from its checkout ----------
@@ -2397,6 +2619,54 @@ if [ "$OILS_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/oils-for-unix and /bin/ysh on the image would be built"
         echo "[rootfs]        against a libc that is no longer in the build. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$MONO_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: mono-sgen-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/mono-sgen-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/mono on the image would be built against a libc that"
+        echo "[rootfs]        is no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/mono-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$GDB_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: gdb-slateos.elf or gdbserver-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike's gdb-slateos.elf or gdbserver-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/gnu-gdb and /bin/gdbserver on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$BINUTILS_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: a program in build/spike/binutils is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: a program in build/spike/binutils is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/as, /bin/ld.bfd and the rest on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1

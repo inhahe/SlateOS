@@ -27,6 +27,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bashprobe.py` | Faithful transport to real bash, plus an arity-exact word probe. |
 | `scripts/bc-diff.sh` | Differential test: our bc against GNU bc. |
 | `scripts/bench-history.py` | Record and diff the kernel micro-benchmark scorecard across boots. |
+| `scripts/binutils-spike/run.sh` | Cross-compile GNU binutils (as, ld, ar, nm, objdump ...) and link them against SlateOS's libc.a. |
+| `scripts/binutils-spike/slatelink.sh` | Link binutils' built objects against the CURRENT libc.a, and stage its programs. |
 | `scripts/blkdiscard-diff.sh` | Differential test: our `blkdiscard` against util-linux 2.39.3's. |
 | `scripts/blkid-cli-diff.sh` | Differential test: our `blkid` and `findfs` against util-linux 2.39.3's. |
 | `scripts/blkid-diff.sh` | Differential test: `userspace/ulblkid`, the port of util-linux 2.39.3's |
@@ -222,6 +224,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
 | `scripts/gather-notices.py` | Gather the third-party notices a SlateOS image must carry (design-decisions §1433). |
+| `scripts/gcc-spike/run.sh` | Cross-compile GCC's compilers (gcc, g++, cc1, cc1plus, ...) and link them against SlateOS's libc.a. |
+| `scripts/gdb-spike/run.sh` | Cross-compile upstream GDB, with GMP and MPFR, and link it against SlateOS's libc.a. |
+| `scripts/gdb-spike/slatelink.sh` | Link GDB's and gdbserver's built objects against the CURRENT libc.a, and stage them. |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
@@ -274,6 +279,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
 | `scripts/mktemp-diff.sh` | mktemp-diff.sh — compare our `mktemp` against GNU coreutils 9.4's, inside WSL. |
+| `scripts/mono-spike/bcl.sh` | Build Mono's class libraries on the host, and stage what SlateOS's mono needs. |
+| `scripts/mono-spike/run.sh` | Cross-compile the Mono runtime (mono-sgen) and link it against SlateOS's libc.a. |
+| `scripts/mono-spike/slatelink.sh` | Link the Mono runtime's built objects against the CURRENT libc.a, and stage it. |
 | `scripts/more-diff.sh` | Differential test: our more against util-linux's more. |
 | `scripts/mountpoint-diff.sh` | Differential test: our `mountpoint` against util-linux 2.39.3's. |
 | `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
@@ -516,4 +524,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_506 scripts._
+_514 scripts._

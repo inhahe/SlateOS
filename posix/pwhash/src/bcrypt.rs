@@ -208,7 +208,7 @@ pub fn hash(key: &[u8], salt: &[u8; 16], count: u32, flags: u8) -> [u8; 24] {
 
     // "OrpheanBeholderScryDoubt", encrypted 64 times.
     let mut out = [0u8; 24];
-    for (i, chunk) in out.chunks_exact_mut(8).enumerate() {
+    for (i, chunk) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         let (mut l, mut r) = (MAGIC[2 * i], MAGIC[2 * i + 1]);
         for _ in 0..64 {
             (l, r) = encrypt(&ctx, l, r);

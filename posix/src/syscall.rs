@@ -316,6 +316,13 @@ pub const SYS_SCHED_GET_AFFINITY: u64 = 1101;
 /// the native `getcpu(2)`; one return value and no pointers, so it cannot
 /// fault. Lane A's (1092); a kernel without it answers `NoSuchSyscall`.
 pub const SYS_CPU_CURRENT: u64 = 1092;
+/// Where this process's program header table is: `process_get_phdr(out) ->
+/// 0`, writing `{ u64 vaddr; u16 phnum; u16 phentsize; u32 reserved }` to the
+/// 16 bytes at `out` -- the native `AT_PHDR`, `AT_PHNUM` and `AT_PHENT`. The
+/// address is a loaded segment's, or a read-only copy the loader mapped when
+/// no segment holds the table. `NotFound` for an image with no headers. Lane
+/// A's (1102); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_PROCESS_GET_PHDR: u64 = 1102;
 
 // Process groups / sessions (533–536)
 //

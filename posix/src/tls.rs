@@ -287,7 +287,9 @@ pub(crate) struct Phdr {
 /// through this.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProgramHeaders {
-    /// The ELF header.
+    /// The ELF header -- or null when no loaded segment maps it, and the
+    /// table was found where the kernel mapped a copy of it
+    /// ([`program_headers`]).
     ehdr: *const u8,
     /// The first program header.
     phdr: *const u8,
@@ -346,9 +348,67 @@ impl ProgramHeaders {
         })
     }
 
-    /// The ELF header.
+    /// The table at `phdr`, `phnum` entries of `phentsize` bytes, of the
+    /// program whose ELF header is at `ehdr` -- null when no loaded segment
+    /// maps the header; `None` when it has no entries, or entries too short
+    /// to be `Elf64_Phdr`s.
+    ///
+    /// # Safety
+    ///
+    /// `phdr` must point at `phnum` entries of `phentsize` bytes, and a
+    /// non-null `ehdr` at the program's `Elf64_Ehdr`, all mapped for as long
+    /// as the result is used.
+    #[cfg_attr(not(any(test, target_os = "none")), allow(dead_code))]
+    pub(crate) unsafe fn of_table(
+        ehdr: *const u8,
+        phdr: *const u8,
+        phnum: usize,
+        phentsize: usize,
+    ) -> Option<Self> {
+        if phnum == 0 || phentsize < PHDR_SIZE || phdr.is_null() {
+            return None;
+        }
+        Some(Self {
+            ehdr,
+            phdr,
+            phnum,
+            phentsize,
+        })
+    }
+
+    /// The ELF header, or null when no loaded segment maps it. (What the
+    /// library itself reads of it is [`ProgramHeaders::base`].)
+    #[cfg(test)]
     pub(crate) const fn ehdr(&self) -> *const u8 {
         self.ehdr
+    }
+
+    /// Where the program begins in memory: its ELF header, where that is
+    /// mapped -- `dladdr`'s `dli_fbase`, as glibc gives it -- and otherwise
+    /// the start of its lowest loaded segment, which is what glibc's
+    /// `l_map_start` is for any object.
+    pub(crate) fn base(&self) -> *const u8 {
+        if !self.ehdr.is_null() {
+            return self.ehdr;
+        }
+        let bias = self.load_bias();
+        let lowest = self
+            .iter()
+            .filter(|p| p.p_type == PT_LOAD)
+            .map(|p| {
+                // The segment's page, as it is mapped: its address rounded
+                // down to its alignment, when that is a power of two.
+                let align = if p.p_align.is_power_of_two() {
+                    p.p_align
+                } else {
+                    1
+                };
+                p.p_vaddr & !(align.wrapping_sub(1))
+            })
+            .min();
+        lowest.map_or(core::ptr::null(), |vaddr| {
+            core::ptr::without_provenance(usize::try_from(bias.wrapping_add(vaddr)).unwrap_or(0))
+        })
     }
 
     /// The first program header: `dl_phdr_info`'s `dlpi_phdr`.
@@ -403,6 +463,13 @@ impl ProgramHeaders {
         if let Some(p) = self.find(PT_PHDR) {
             return (self.phdr.addr() as u64).wrapping_sub(p.p_vaddr);
         }
+        if self.ehdr.is_null() {
+            // No header in memory to measure from: and with none mapped there
+            // is no PT_PHDR either -- it may only describe a table that is
+            // part of the memory image -- so an `ET_EXEC`, which every
+            // program here is, at the addresses it was linked for.
+            return 0;
+        }
         if let Some(p) = self.iter().find(|p| p.p_type == PT_LOAD && p.p_offset == 0) {
             return (self.ehdr.addr() as u64).wrapping_sub(p.p_vaddr);
         }
@@ -422,13 +489,24 @@ impl ProgramHeaders {
     }
 }
 
-/// This program's headers; `None` if they are not in memory.
+/// This program's headers; `None` if they cannot be found.
 ///
-/// Found through the linker-defined `__ehdr_start` symbol, which in a static
-/// link resolves to the load address of our own `Elf64_Ehdr` -- the same
-/// information a Linux crt takes from `AT_PHDR`/`AT_PHNUM`. Native processes
-/// get no auxiliary vector (`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`),
-/// so this is the only source.
+/// Asked of the kernel first: lane A's `SYS_PROCESS_GET_PHDR` (1102) says
+/// where the table is, how many entries it has and how long each is -- the
+/// native form of a Linux crt's `AT_PHDR`, `AT_PHNUM` and `AT_PHENT`
+/// (`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`).
+/// Where a loaded segment holds the table that is where it is; where none
+/// does, the kernel maps a read-only copy, so a linker script that leaves the
+/// headers out of every segment no longer costs a program its `__thread`
+/// variables. The answer is kept ([`kernel_phdr`]): the unwinder walks the
+/// headers through `dl_iterate_phdr` on every C++ throw, and they cannot
+/// change.
+///
+/// A kernel without the call, or one with no headers to tell of, leaves the
+/// linker-defined `__ehdr_start`, which in a static link resolves to the load
+/// address of our own `Elf64_Ehdr` when a loaded segment maps it. Either way
+/// the ELF header is `__ehdr_start`'s, or none -- and where there is none,
+/// [`ProgramHeaders::base`] finds the image's start from its lowest segment.
 ///
 /// ## When `__ehdr_start` is 0
 ///
@@ -442,18 +520,117 @@ impl ProgramHeaders {
 /// which said nothing about why
 /// (`requests/a-bd-coreutils-cannot-start-two-link-faults.md`).
 ///
-/// It now answers `None` -- for [`image`], "no TLS image", which is what
-/// glibc (weak `__ehdr_start`, null-checked in `_dl_aux_init`) and musl (no
-/// `AT_PHDR`, so its `PT_TLS` walk runs zero times) both do. The cost of that
-/// answer is known and narrow: a program whose headers are unmapped *and*
-/// which has a `PT_TLS` segment -- C `__thread`, since the slateos target
-/// sets `has-thread-local` false -- runs with an empty TLS block, so its
-/// thread-locals start at zero instead of their initialisers; and
-/// `dl_iterate_phdr` has no program to report, so such a program cannot
-/// unwind. Every program linked with lld's default layout maps its headers
-/// and is unaffected.
+/// On a kernel without `SYS_PROCESS_GET_PHDR` it answers `None` -- for
+/// [`image`], "no TLS image", which is what glibc (weak `__ehdr_start`,
+/// null-checked in `_dl_aux_init`) and musl (no `AT_PHDR`, so its `PT_TLS`
+/// walk runs zero times) both do. The cost of that answer is known and
+/// narrow: a program whose headers are unmapped *and* which has a `PT_TLS`
+/// segment -- C `__thread`, since the slateos target sets `has-thread-local`
+/// false -- runs with an empty TLS block, so its thread-locals start at zero
+/// instead of their initialisers; and `dl_iterate_phdr` has no program to
+/// report, so such a program cannot unwind. Every program linked with lld's
+/// default layout maps its headers and is unaffected.
 #[cfg(target_os = "none")]
 pub(crate) fn program_headers() -> Option<ProgramHeaders> {
+    let ehdr = ehdr_start();
+    if let Some((phdr, phnum, phentsize)) = kernel_phdr() {
+        // SAFETY: the kernel says this process's table is mapped at `phdr`,
+        // `phnum` entries of `phentsize` bytes, for its life -- in a loaded
+        // segment, or in the copy it mapped -- and a non-null `__ehdr_start`
+        // is the ELF header the linker placed in a loaded segment.
+        if let Some(ph) = unsafe {
+            ProgramHeaders::of_table(
+                ehdr,
+                core::ptr::with_exposed_provenance(phdr),
+                phnum,
+                phentsize,
+            )
+        } {
+            return Some(ph);
+        }
+    }
+    if ehdr.is_null() {
+        return None;
+    }
+    // SAFETY: `__ehdr_start` is non-null, so the linker gave it the load
+    // address of our own ELF header, which it does only when a loaded
+    // segment maps the header -- and the program header table follows it
+    // in that segment, as every layout that maps the header puts it
+    // (`FILEHDR PHDRS`). Both are the executable's, mapped for its life.
+    unsafe { ProgramHeaders::of_ehdr(ehdr) }
+}
+
+crate::perprocess::process_global! {
+    /// [`kernel_phdr`]'s answer, once asked: 0 not yet asked, 1 answered (in
+    /// [`kernel_phdr_table_ptr`]), 2 refused -- a kernel without the call,
+    /// or a program with no headers.
+    #[cfg_attr(not(target_os = "none"), allow(dead_code))]
+    fn kernel_phdr_state_ptr() -> core::sync::atomic::AtomicU8 =
+        core::sync::atomic::AtomicU8::new(0);
+
+    /// The kernel's answer: the table's address, and its count and entry
+    /// size packed as `phnum | phentsize << 16`.
+    #[cfg_attr(not(target_os = "none"), allow(dead_code))]
+    fn kernel_phdr_table_ptr() -> [core::sync::atomic::AtomicU64; 2] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+}
+
+/// Where the kernel says this process's program header table is: its
+/// address, its count and its entry size -- or `None` from a kernel without
+/// `SYS_PROCESS_GET_PHDR` or for an image with no headers. Asked once, and
+/// kept: the headers are the image's, which only an `exec` replaces, and an
+/// `exec` starts this library again.
+#[cfg(target_os = "none")]
+fn kernel_phdr() -> Option<(usize, usize, usize)> {
+    use core::sync::atomic::Ordering::{Acquire, Release};
+    // SAFETY: atomics, shared by every thread.
+    let (state, table) = unsafe { (&*kernel_phdr_state_ptr(), &*kernel_phdr_table_ptr()) };
+    let [addr, shape] = table;
+    match state.load(Acquire) {
+        1 => return phdr_answer(addr.load(Acquire), shape.load(Acquire)),
+        2 => return None,
+        _ => {}
+    }
+    let mut out = [0u8; 16];
+    let ret = crate::syscall::syscall1(
+        crate::syscall::SYS_PROCESS_GET_PHDR,
+        out.as_mut_ptr() as u64,
+    );
+    let Some((vaddr, packed)) = (ret >= 0).then(|| parse_phdr_record(&out)) else {
+        // Two threads that both ask before either answers store the same.
+        state.store(2, Release);
+        return None;
+    };
+    addr.store(vaddr, Release);
+    shape.store(packed, Release);
+    state.store(1, Release);
+    phdr_answer(vaddr, packed)
+}
+
+/// `SYS_PROCESS_GET_PHDR`'s 16 bytes -- `{ u64 vaddr; u16 phnum; u16
+/// phentsize; u32 reserved }` -- as the address and `phnum | phentsize << 16`.
+#[cfg_attr(not(any(test, target_os = "none")), allow(dead_code))]
+fn parse_phdr_record(out: &[u8; 16]) -> (u64, u64) {
+    let [a0, a1, a2, a3, a4, a5, a6, a7, n0, n1, e0, e1, ..] = *out;
+    let vaddr = u64::from_le_bytes([a0, a1, a2, a3, a4, a5, a6, a7]);
+    let phnum = u64::from(u16::from_le_bytes([n0, n1]));
+    let phentsize = u64::from(u16::from_le_bytes([e0, e1]));
+    (vaddr, phnum | (phentsize << 16))
+}
+
+/// The address, count and entry size [`parse_phdr_record`] packed; `None`
+/// for an address that does not fit one.
+#[cfg_attr(not(any(test, target_os = "none")), allow(dead_code))]
+fn phdr_answer(vaddr: u64, packed: u64) -> Option<(usize, usize, usize)> {
+    let phnum = usize::from(u16::try_from(packed & 0xFFFF).ok()?);
+    let phentsize = usize::from(u16::try_from(packed >> 16).ok()?);
+    Some((usize::try_from(vaddr).ok()?, phnum, phentsize))
+}
+
+/// The linker-defined `__ehdr_start`: the address of this executable's ELF
+/// header, or null when no loaded segment maps it.
+#[cfg(target_os = "none")]
+fn ehdr_start() -> *const u8 {
     // Linker-defined: address of the ELF header of this executable.
     unsafe extern "C" {
         static __ehdr_start: u8;
@@ -476,15 +653,7 @@ pub(crate) fn program_headers() -> Option<ProgramHeaders> {
             options(pure, nomem, nostack, preserves_flags)
         );
     }
-    if ehdr.is_null() {
-        return None;
-    }
-    // SAFETY: `__ehdr_start` is non-null, so the linker gave it the load
-    // address of our own ELF header, which it does only when a loaded
-    // segment maps the header -- and the program header table follows it
-    // in that segment, as every layout that maps the header puts it
-    // (`FILEHDR PHDRS`). Both are the executable's, mapped for its life.
-    unsafe { ProgramHeaders::of_ehdr(ehdr) }
+    ehdr
 }
 
 /// Host build: no ELF image to inspect.
@@ -915,6 +1084,60 @@ mod tests {
         img.set_u16(0x36, 32);
         // SAFETY: as above.
         assert!(unsafe { ProgramHeaders::of_ehdr(img.ptr()) }.is_none());
+    }
+
+    /// The kernel's answer, `{ u64 vaddr; u16 phnum; u16 phentsize; u32
+    /// reserved }`, read as it lays it out.
+    #[test]
+    fn the_kernel_s_answer_is_read_as_it_is_laid_out() {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&0x40_0040u64.to_le_bytes());
+        out[8..10].copy_from_slice(&5u16.to_le_bytes());
+        out[10..12].copy_from_slice(&56u16.to_le_bytes());
+        out[12..].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let (vaddr, packed) = super::parse_phdr_record(&out);
+        assert_eq!(vaddr, 0x40_0040);
+        assert_eq!(super::phdr_answer(vaddr, packed), Some((0x40_0040, 5, 56)));
+    }
+
+    /// A table the kernel found where no loaded segment maps the ELF header:
+    /// there is no header to measure from and no `PT_PHDR` -- the linker
+    /// writes one only for a table in the memory image -- so the bias is 0,
+    /// as it is for every `ET_EXEC` here; the TLS image is `PT_TLS` where it
+    /// was linked; and the program begins at its lowest segment's page.
+    #[test]
+    fn a_table_with_no_header_mapped_is_read_with_a_bias_of_0() {
+        let img = SyntheticImage::new(&linked_at_4m(false));
+        // SAFETY: the block's table, five entries of 56 bytes after the
+        // 64-byte header, mapped for the test.
+        let h = unsafe {
+            ProgramHeaders::of_table(core::ptr::null(), img.ptr().wrapping_add(64), 4, 56)
+        }
+        .expect("a table");
+        assert!(h.ehdr().is_null());
+        assert_eq!(h.load_bias(), 0);
+        assert_eq!(h.tls_image().init_vaddr, 0x40_1400);
+        assert_eq!(h.base().addr(), 0x40_0000);
+        // With the header mapped, the program begins at it.
+        let mapped = img.headers();
+        assert_eq!(mapped.base(), mapped.ehdr());
+    }
+
+    /// The kernel's table is refused as `of_ehdr`'s is: no entries, entries
+    /// too short to be `Elf64_Phdr`s -- and no table at all.
+    #[test]
+    fn a_kernel_table_that_is_not_one_is_refused() {
+        let img = SyntheticImage::new(&linked_at_4m(true));
+        let table = img.ptr().wrapping_add(64);
+        // SAFETY: the block's table, as above.
+        unsafe {
+            assert!(ProgramHeaders::of_table(core::ptr::null(), table, 0, 56).is_none());
+            assert!(ProgramHeaders::of_table(core::ptr::null(), table, 5, 32).is_none());
+            assert!(
+                ProgramHeaders::of_table(core::ptr::null(), core::ptr::null(), 5, 56).is_none()
+            );
+            assert!(ProgramHeaders::of_table(img.ptr(), table, 5, 56).is_some());
+        }
     }
 
     /// On the host there is no image of our own to read: no headers, and no

@@ -1,9 +1,12 @@
-### [D] TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS — 2026-09-25 — OPEN
+### [D] TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS — 2026-09-25 — OPEN (both halves written; closes when lane A's kernel is on `main`)
 
-**Status:** OPEN — the narrow residual of the fix for
-`requests/a-bd-coreutils-cannot-start-two-link-faults.md` fault 1; the proper
-fix is a kernel ABI addition (lane A), requested at low priority in
-`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`.
+**Status:** OPEN -- both halves are written: lane A's `SYS_PROCESS_GET_PHDR`
+(1102, on `lane-a`), which says where the table is and maps a read-only copy
+when no segment holds it, and lane D's use of it (2026-10-07,
+`posix/src/tls.rs`, `program_headers`: the kernel's answer first, kept, then
+`__ehdr_start`). It closes when lane A's kernel is on `main`: every native
+program asks it at start-up for its TLS template, so a green boot on that
+kernel is its test. The residual below then holds only on an older kernel.
 
 **In short:** the C library finds a program's thread-local variables through the
 program's own ELF header in memory. A linker script that leaves the header out

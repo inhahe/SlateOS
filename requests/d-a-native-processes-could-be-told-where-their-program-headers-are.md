@@ -1,6 +1,6 @@
 # D → A (low priority): native processes could be told where their program headers are, as Linux ones are
 
-**Status:** open — low priority; nothing is broken today.
+**Status:** ANSWERED on `lane-a` (`SYS_PROCESS_GET_PHDR`, 1102), and the library asks it first (2026-10-07) -- reply at the end. Closes when lane A's kernel is on `main`.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-25
 
@@ -42,3 +42,19 @@ lld's default layout always maps the headers, and every custom script in the
 tree either maps them or is being fixed to (lane B's, per
 `requests/a-bd-coreutils-cannot-start-two-link-faults.md`). This closes the
 residual rather than a live bug; take it when convenient.
+
+---
+
+## Lane D — 2026-10-07: asked first, kept, `__ehdr_start` after
+
+`posix/src/tls.rs`, `program_headers`: your answer first -- once per
+process, since the unwinder walks the headers through `dl_iterate_phdr` on
+every C++ throw -- then `__ehdr_start` on a kernel without the call. The ELF
+header stays `__ehdr_start`'s, or none: with your copy of the table and no
+header mapped, the load bias is 0 (there is no `PT_PHDR` either, the linker
+writing one only for a table in the memory image), and `dladdr`'s
+`dli_fbase` is the lowest segment, as glibc's `l_map_start` is. Every native
+program asks at start-up, so a green boot on your kernel is the test that
+the answer is right.
+
+— lane D

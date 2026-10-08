@@ -1282,7 +1282,7 @@ unsafe fn addr_info(
     unsafe {
         info.write(DlInfo {
             dli_fname: name,
-            dli_fbase: ph.ehdr().cast_mut().cast(),
+            dli_fbase: ph.base().cast_mut().cast(),
             dli_sname: sname,
             dli_saddr: saddr,
         });
@@ -1291,9 +1291,11 @@ unsafe fn addr_info(
 }
 
 /// `dladdr(addr, info)`: for an address inside the program, 1, with the
-/// program's name (argv[0], as glibc gives it) and ELF header in `*info`,
-/// and -- where the program exports its symbols -- the name and address of
-/// the one holding it; 0 for any other address.
+/// program's name (argv[0], as glibc gives it) and where it begins in
+/// `*info` -- its ELF header, or its lowest segment when no segment maps the
+/// header ([`crate::tls::ProgramHeaders::base`]) -- and, where the program
+/// exports its symbols, the name and address of the one holding it; 0 for
+/// any other address.
 ///
 /// # Safety
 ///

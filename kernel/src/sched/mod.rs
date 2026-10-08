@@ -4554,21 +4554,6 @@ pub fn timer_tick(from_user: bool) -> bool {
     false
 }
 
-/// Return the accumulated `(user_ticks, sys_ticks)` CPU time for a task
-/// by its scheduler id, or `None` if no such task is registered.
-///
-/// Ticks are at `USER_HZ` (100 Hz, 10 ms each), the same units Linux
-/// uses for `times`/`/proc` clock_t fields.  Used by the Linux-ABI
-/// `getrusage`/`times`/`/proc/<pid>/stat` CPU-time surfaces (via the
-/// per-process roll-up in `proc::thread::process_cpu_ticks`).  Takes the
-/// global `SCHED` lock — not for hot paths.
-#[must_use]
-pub fn cpu_ticks(tid: TaskId) -> Option<(u64, u64)> {
-    let state = SCHED.lock();
-    let task = state.tasks.get(&tid)?;
-    Some((task.user_ticks, task.sys_ticks))
-}
-
 /// Return a task's current [`TaskState`] by its scheduler id, or `None` if no
 /// such task is registered.
 ///
@@ -4767,6 +4752,62 @@ impl CpuSample {
             CpuClockKind::Sched => self.ns(),
         }
     }
+
+    /// The precise run time split into `(user, system)` nanoseconds in the
+    /// proportion the ticks saw -- Linux's `cputime_adjust`, which is what
+    /// `getrusage`, `times`, `wait4` and `/proc` report: all of it user while
+    /// no tick has found the kernel, all system while none has found user
+    /// code. `prev`, the split last given for the same thread or process,
+    /// keeps both halves from going back as the ratio shifts, and is updated.
+    #[must_use]
+    pub fn adjusted(self, prev: &mut PrevCputime) -> (u64, u64) {
+        adjust_cputime(self.ns(), self.user_ticks, self.sys_ticks, prev)
+    }
+}
+
+/// [`CpuSample::adjusted`]'s arithmetic, on a run time of `rtime`
+/// nanoseconds and the `user` and `sys` ticks that saw it -- apart, so it can
+/// be checked on chosen numbers (`proc::cputimer::self_test`).
+#[must_use]
+pub fn adjust_cputime(rtime: u64, user: u64, sys: u64, prev: &mut PrevCputime) -> (u64, u64) {
+    if prev.utime.saturating_add(prev.stime) >= rtime {
+        return (prev.utime, prev.stime);
+    }
+    let mut stime = if sys == 0 {
+        0
+    } else if user == 0 {
+        rtime
+    } else {
+        // stime = sys * rtime / (sys + user), in 128 bits so no product
+        // overflows; the quotient is at most rtime.
+        let total = u128::from(sys).saturating_add(u128::from(user));
+        u128::from(sys)
+            .saturating_mul(u128::from(rtime))
+            .checked_div(total)
+            .and_then(|s| u64::try_from(s).ok())
+            .unwrap_or(rtime)
+    };
+    // Neither half goes back: rtime does not, so holding one at its last
+    // value holds the other at or above its own.
+    stime = stime.max(prev.stime);
+    let mut utime = rtime.saturating_sub(stime);
+    if utime < prev.utime {
+        utime = prev.utime;
+        stime = rtime.saturating_sub(utime);
+    }
+    prev.utime = utime;
+    prev.stime = stime;
+    (utime, stime)
+}
+
+/// The `(user, system)` split [`CpuSample::adjusted`] last gave for a thread
+/// or a process -- Linux's `struct prev_cputime`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrevCputime {
+    /// User nanoseconds.
+    pub utime: u64,
+    /// System nanoseconds.
+    pub stime: u64,
 }
 
 /// Which of a task's CPU-time measures a CPU-time clock reads -- Linux's
@@ -5200,6 +5241,18 @@ fn sample_locked(task: &Task) -> CpuSample {
 pub fn cpu_sample(tid: TaskId) -> Option<CpuSample> {
     let state = SCHED.lock();
     state.tasks.get(&tid).map(|task| sample_locked(task))
+}
+
+/// Task `tid`'s run time as `(user, system)` nanoseconds, split as
+/// [`CpuSample::adjusted`] splits it, against the task's own last split;
+/// `None` if no such task is registered. What `getrusage(RUSAGE_THREAD)`
+/// and a thread's `/proc` `stat` report. Takes the global `SCHED` lock.
+#[must_use]
+pub fn thread_times(tid: TaskId) -> Option<(u64, u64)> {
+    let mut state = SCHED.lock();
+    let task = state.tasks.get_mut(&tid)?;
+    let sample = sample_locked(task);
+    Some(sample.adjusted(&mut task.prev_cputime))
 }
 
 /// Everything the scheduler counts for a task that its process goes on
@@ -7130,15 +7183,10 @@ pub struct TaskInfo {
     /// Its policy, real-time priority and `SCHED_RESET_ON_FORK`:
     /// `/proc/<pid>/stat` fields 40 and 41.
     pub attr: task::SchedAttr,
-    /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz).
+    /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz). (Its
+    /// user/system split, `/proc/<pid>/stat` fields 14 and 15, is the precise
+    /// run time split by the tick ratio: [`thread_times`].)
     pub total_ticks: u64,
-    /// User-mode (ring 3) CPU time, in timer ticks.  `user_ticks +
-    /// sys_ticks == total_ticks`.  Exposed as `/proc/<pid>/stat` field
-    /// 14 (utime).
-    pub user_ticks: u64,
-    /// System (ring 0) CPU time, in timer ticks.  Exposed as
-    /// `/proc/<pid>/stat` field 15 (stime).
-    pub sys_ticks: u64,
     /// Minor page faults (resolved without I/O — demand-zero, CoW,
     /// stack growth).  Exposed as `/proc/<pid>/stat` field 10 (minflt).
     pub min_flt: u64,
@@ -7210,8 +7258,6 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             priority: task.priority,
             attr: task.sched_attr(),
             total_ticks: task.total_ticks,
-            user_ticks: task.user_ticks,
-            sys_ticks: task.sys_ticks,
             min_flt: task.min_flt,
             maj_flt: task.maj_flt,
             nvcsw: task.nvcsw,
@@ -7255,8 +7301,6 @@ pub fn task_info(task_id: TaskId) -> Option<TaskInfo> {
         priority: task.priority,
         attr: task.sched_attr(),
         total_ticks: task.total_ticks,
-        user_ticks: task.user_ticks,
-        sys_ticks: task.sys_ticks,
         min_flt: task.min_flt,
         maj_flt: task.maj_flt,
         nvcsw: task.nvcsw,

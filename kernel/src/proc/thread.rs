@@ -1223,11 +1223,9 @@ pub(crate) fn self_test_with_thread<R>(tid: TaskId, pid: ProcessId, body: impl F
 /// This makes the result exact for multi-threaded processes even after
 /// worker threads have exited — not just single-threaded ones.
 ///
-/// Sourced by the Linux-ABI `getrusage(RUSAGE_SELF)` `ru_utime`/
-/// `ru_stime`, `times` `tms_utime`/`tms_stime`, and `/proc/<pid>/stat`
-/// utime/stime surfaces.  Children-time (`cutime`/`cstime`,
-/// `RUSAGE_CHILDREN`) is tracked separately — see
-/// [`crate::proc::pcb::process_child_ticks`].
+/// The sampled measure the PROF and VIRT clocks read. What `getrusage`,
+/// `times`, the wait family and `/proc` report is the precise run time split
+/// in these ticks' proportion -- [`crate::proc::pcb::process_times`].
 #[must_use]
 pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
     pcb::process_counters(pid).map_or((0, 0), |c| (c.cpu.user_ticks, c.cpu.sys_ticks))
@@ -1282,10 +1280,12 @@ pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
 /// the same child differently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessUsage {
-    /// User-mode CPU time in `USER_HZ` (100 Hz) ticks.
-    pub user_ticks: u64,
-    /// Kernel-mode CPU time in `USER_HZ` ticks.
-    pub sys_ticks: u64,
+    /// User-mode CPU time, in nanoseconds: the precise run time split by the
+    /// tick ratio (`pcb::process_times`, Linux's
+    /// `thread_group_cputime_adjusted`).
+    pub utime_ns: u64,
+    /// Kernel-mode CPU time, in nanoseconds, split likewise.
+    pub stime_ns: u64,
     /// Minor page faults (no I/O required).
     pub min_flt: u64,
     /// Major page faults (backing store read).
@@ -1316,12 +1316,13 @@ pub struct ProcessUsage {
 #[must_use]
 pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
     let own = pcb::process_counters(pid).unwrap_or_default();
-    let (cuser, csys) = pcb::process_child_ticks(pid);
+    let (utime, stime) = pcb::process_times(pid).unwrap_or((0, 0));
+    let (cuser, csys) = pcb::process_child_times(pid);
     let (cmin, cmaj) = pcb::process_child_faults(pid);
     let (cnv, cniv) = pcb::process_child_ctxsw(pid);
     ProcessUsage {
-        user_ticks: own.cpu.user_ticks.saturating_add(cuser),
-        sys_ticks: own.cpu.sys_ticks.saturating_add(csys),
+        utime_ns: utime.saturating_add(cuser),
+        stime_ns: stime.saturating_add(csys),
         min_flt: own.min_flt.saturating_add(cmin),
         maj_flt: own.maj_flt.saturating_add(cmaj),
         nvcsw: own.nvcsw.saturating_add(cnv),

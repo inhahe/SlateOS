@@ -7467,10 +7467,10 @@ fn test_dispatch_wait_status_wpgid_and_wnowait() -> KernelResult<()> {
 /// `min(caller, kernel)` truncation and the zero-filled tail live in the
 /// wrapper and are covered from ring 3 by the userspace test fixture.
 ///
-/// The CPU-time check is the one worth stating twice: the counters are kept
-/// in USER_HZ ticks internally but this structure carries **microseconds**,
-/// so a `1` in must come out as `10_000`. A pass-through bug would look
-/// entirely plausible in a hex dump.
+/// The CPU-time check is the one worth stating twice: the usage is kept in
+/// nanoseconds but this structure carries **microseconds**, truncated, so
+/// 30 ms and a little must come out as `30_000`. A pass-through bug would
+/// look entirely plausible in a hex dump.
 fn test_dispatch_wait_info_layout() -> KernelResult<()> {
     use crate::proc::pcb::ExitInfo;
     use crate::proc::thread::ProcessUsage;
@@ -7486,8 +7486,8 @@ fn test_dispatch_wait_info_layout() -> KernelResult<()> {
         pid: 0x1234_5678,
         uid: 4242,
         usage: ProcessUsage {
-            user_ticks: 3,
-            sys_ticks: 7,
+            utime_ns: 30_000_999,
+            stime_ns: 70_000_001,
             min_flt: 101,
             maj_flt: 102,
             nvcsw: 103,
@@ -7510,8 +7510,8 @@ fn test_dispatch_wait_info_layout() -> KernelResult<()> {
         (0, 0x1234_5678, "pid@0"),
         (8, 4242, "uid@8 (+ zero pad @12)"),
         (16, 0x4200, "wstatus@16 (+ zero pad @20)"),
-        (24, 30_000, "utime_us@24 (3 ticks = 30ms)"),
-        (32, 70_000, "stime_us@32 (7 ticks = 70ms)"),
+        (24, 30_000, "utime_us@24 (30.000999 ms, truncated)"),
+        (32, 70_000, "stime_us@32 (70.000001 ms, truncated)"),
         (40, 101, "minflt@40"),
         (48, 102, "majflt@48"),
         (56, 103, "nvcsw@56"),
@@ -7566,8 +7566,8 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
     }
 
     let usage = ProcessUsage {
-        user_ticks: 3,
-        sys_ticks: 7,
+        utime_ns: 30_000_999,
+        stime_ns: 70_000_001,
         min_flt: 101,
         maj_flt: 102,
         nvcsw: 103,
@@ -7582,8 +7582,8 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
     };
 
     let expect: [(usize, u64, &str); 7] = [
-        (0, 30_000, "utime_us@0 (3 ticks = 30ms)"),
-        (8, 70_000, "stime_us@8 (7 ticks = 70ms)"),
+        (0, 30_000, "utime_us@0 (30.000999 ms, truncated)"),
+        (8, 70_000, "stime_us@8 (70.000001 ms, truncated)"),
         (16, 101, "minflt@16"),
         (24, 102, "majflt@24"),
         (32, 103, "nvcsw@32"),

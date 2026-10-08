@@ -1236,11 +1236,17 @@ pub struct Process {
     // unreaped zombie's time is not yet visible to the parent), which is
     // exactly POSIX/Linux semantics.  Backs `times` `tms_cutime`/`tms_cstime`,
     // `getrusage(RUSAGE_CHILDREN)`, and `/proc/<pid>/stat` fields 16/17.
-    // Reset to 0 for a freshly-forked child.
-    /// Accumulated user-mode ticks of reaped descendant processes.
-    pub child_user_ticks: u64,
-    /// Accumulated kernel-mode ticks of reaped descendant processes.
-    pub child_sys_ticks: u64,
+    // Reset to 0 for a freshly-forked child. In nanoseconds: each child's
+    // run time split as `process_times` splits it (Linux's
+    // `thread_group_cputime_adjusted`), plus its own children's.
+    /// Accumulated user nanoseconds of reaped descendant processes.
+    pub child_utime_ns: u64,
+    /// Accumulated system nanoseconds of reaped descendant processes.
+    pub child_stime_ns: u64,
+    /// The user/system split of the process's run time last reported
+    /// (`process_times`), which keeps the next from going back -- Linux's
+    /// `signal->prev_cputime`.
+    pub prev_cputime: crate::sched::PrevCputime,
 
     // --- Per-process page-fault accounting (minflt/majflt) ---
     //
@@ -1522,8 +1528,9 @@ impl Process {
             acct_sys_ticks: 0,
             acct_cycles: 0,
             cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
-            child_user_ticks: 0,
-            child_sys_ticks: 0,
+            child_utime_ns: 0,
+            child_stime_ns: 0,
+            prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
             acct_min_flt: 0,
             acct_maj_flt: 0,
             child_min_flt: 0,
@@ -2058,8 +2065,9 @@ pub fn fork_create(
         acct_sys_ticks: 0,
         acct_cycles: 0,
         cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
-        child_user_ticks: 0,
-        child_sys_ticks: 0,
+        child_utime_ns: 0,
+        child_stime_ns: 0,
+        prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
         // Page-fault accounting also resets on fork.
         acct_min_flt: 0,
         acct_maj_flt: 0,
@@ -5262,11 +5270,15 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
 
         // Capture the child's CPU time to credit the parent's children-time
         // accumulator (POSIX cutime/cstime).  The child is a zombie, so all
-        // its threads have already folded their ticks into `acct_*`; we also
-        // carry up the child's own children-time (its reaped grandchildren),
+        // its threads have already folded their time into `acct_*`; its run
+        // time is split as `process_times` splits it (against its own last
+        // split, so a wait that read its usage first credits the same), and
+        // its own children-time (its reaped grandchildren) is carried up,
         // mirroring Linux's `wait_task_zombie` accumulation.
-        let child_user = proc.acct_user_ticks.saturating_add(proc.child_user_ticks);
-        let child_sys = proc.acct_sys_ticks.saturating_add(proc.child_sys_ticks);
+        let mut prev = proc.prev_cputime;
+        let (own_utime, own_stime) = exited_counters(proc).cpu.adjusted(&mut prev);
+        let child_user = own_utime.saturating_add(proc.child_utime_ns);
+        let child_sys = own_stime.saturating_add(proc.child_stime_ns);
         // Same carry-up for page faults (ru_minflt/ru_majflt children).
         let child_min = proc.acct_min_flt.saturating_add(proc.child_min_flt);
         let child_maj = proc.acct_maj_flt.saturating_add(proc.child_maj_flt);
@@ -5280,8 +5292,8 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
         // is removed (parent is a distinct table entry).  Absent for a
         // kernel-spawned child whose parent (pid 0) isn't in the table.
         if let Some(parent) = table.get_mut(&parent_pid) {
-            parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_user);
-            parent.child_sys_ticks = parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_utime_ns = parent.child_utime_ns.saturating_add(child_user);
+            parent.child_stime_ns = parent.child_stime_ns.saturating_add(child_sys);
             parent.child_min_flt = parent.child_min_flt.saturating_add(child_min);
             parent.child_maj_flt = parent.child_maj_flt.saturating_add(child_maj);
             parent.child_nvcsw = parent.child_nvcsw.saturating_add(child_nv);
@@ -8996,7 +9008,12 @@ pub fn process_acct_ticks(pid: ProcessId) -> Option<(u64, u64)> {
 pub fn process_counters(pid: ProcessId) -> Option<crate::sched::TaskCounters> {
     let table = PROCESS_TABLE.lock();
     let proc = table.get(&pid)?;
-    let exited = crate::sched::TaskCounters {
+    Some(exited_counters(proc).plus(crate::sched::counters_sum(&proc.threads)))
+}
+
+/// What `proc`'s exited threads left: its `acct_*` accumulators.
+fn exited_counters(proc: &Process) -> crate::sched::TaskCounters {
+    crate::sched::TaskCounters {
         cpu: crate::sched::CpuSample {
             cycles: proc.acct_cycles,
             user_ticks: proc.acct_user_ticks,
@@ -9006,22 +9023,37 @@ pub fn process_counters(pid: ProcessId) -> Option<crate::sched::TaskCounters> {
         maj_flt: proc.acct_maj_flt,
         nvcsw: proc.acct_nvcsw,
         nivcsw: proc.acct_nivcsw,
-    };
-    Some(exited.plus(crate::sched::counters_sum(&proc.threads)))
+    }
 }
 
-/// Get a process's accumulated children CPU ticks (from reaped descendants)
-/// as `(child_user_ticks, child_sys_ticks)`.  Returns `(0, 0)` if the
-/// process is unknown.
+/// Process `pid`'s run time as `(user, system)` nanoseconds -- the precise
+/// total of [`process_counters`] split in the proportion its ticks saw,
+/// against the process's last split (`sched::CpuSample::adjusted`, Linux's
+/// `thread_group_cputime_adjusted`) -- or `None` if the process is unknown.
+/// What `getrusage(RUSAGE_SELF)`, `times`, the wait family and
+/// `/proc/<pid>/stat` report.
+#[must_use]
+pub fn process_times(pid: ProcessId) -> Option<(u64, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let sample = exited_counters(proc)
+        .plus(crate::sched::counters_sum(&proc.threads))
+        .cpu;
+    Some(sample.adjusted(&mut proc.prev_cputime))
+}
+
+/// Get a process's accumulated children CPU time (from reaped descendants)
+/// as `(user, system)` nanoseconds.  Returns `(0, 0)` if the process is
+/// unknown.
 ///
 /// Backs `times` `tms_cutime`/`tms_cstime`, `getrusage(RUSAGE_CHILDREN)`,
 /// and `/proc/<pid>/stat` fields 16/17.
 #[must_use]
-pub fn process_child_ticks(pid: ProcessId) -> (u64, u64) {
+pub fn process_child_times(pid: ProcessId) -> (u64, u64) {
     let table = PROCESS_TABLE.lock();
     table
         .get(&pid)
-        .map(|p| (p.child_user_ticks, p.child_sys_ticks))
+        .map(|p| (p.child_utime_ns, p.child_stime_ns))
         .unwrap_or((0, 0))
 }
 
@@ -11269,11 +11301,28 @@ fn test_destroy() -> KernelResult<()> {
 ///   3. **Children-time carry-up** — reaping a zombie credits the
 ///      parent's `child_*` accumulator with the child's CPU time *plus*
 ///      the child's own children-time (POSIX cutime/cstime), mirroring
-///      Linux's `wait_task_zombie` → `signal->cutime`/`cstime`.
+///      Linux's `wait_task_zombie` → `signal->cutime`/`cstime`. The CPU
+///      time is the child's run time split by its tick ratio
+///      (`sched::CpuSample::adjusted`), in nanoseconds.
 fn test_cpu_time_accounting() -> KernelResult<()> {
     let parent = create("cputime-parent", 0);
     let child = create("cputime-child", parent);
     let grandchild = create("cputime-grandchild", child);
+    // Synthetic run times, 30 ms and 80 ms of cycles, and the splits they
+    // should be credited as: user and system in the proportion of the ticks.
+    let ms_cycles = crate::bench::tsc_freq().checked_div(1_000).unwrap_or(0);
+    let gc_cycles = ms_cycles.saturating_mul(30);
+    let c_cycles = ms_cycles.saturating_mul(80);
+    let split = |cycles: u64, user_ticks: u64, sys_ticks: u64| {
+        crate::sched::CpuSample {
+            cycles,
+            user_ticks,
+            sys_ticks,
+        }
+        .adjusted(&mut crate::sched::PrevCputime::default())
+    };
+    let gc_split = split(gc_cycles, 2, 1);
+    let c_split = split(c_cycles, 5, 3);
 
     // Bring the grandchild to life then make it a zombie, charging it
     // 2 user / 1 sys ticks and 3 minor / 1 major faults at thread-exit.
@@ -11285,7 +11334,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 2,
             sys_ticks: 1,
-            cycles: 0,
+            cycles: gc_cycles,
             min_flt: 3,
             maj_flt: 1,
             nvcsw: 6,
@@ -11357,7 +11406,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The child reaps the grandchild → child.child_* == (2, 1).
+    // The child reaps the grandchild → child.child_* == its split.
     set_running(child)?;
     add_thread(child, 971)?;
     match try_reap(child, grandchild)? {
@@ -11369,10 +11418,11 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if process_child_ticks(child) != (2, 1) {
+    if process_child_times(child) != gc_split {
         serial_println!(
-            "[proc]   FAIL: child children-time != (2,1): {:?}",
-            process_child_ticks(child)
+            "[proc]   FAIL: child children-time != {:?}: {:?}",
+            gc_split,
+            process_child_times(child)
         );
         destroy(child);
         destroy(parent);
@@ -11408,7 +11458,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 5,
             sys_ticks: 3,
-            cycles: 0,
+            cycles: c_cycles,
             min_flt: 4,
             maj_flt: 2,
             nvcsw: 7,
@@ -11429,10 +11479,15 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if process_child_ticks(parent) != (7, 4) {
+    let both = (
+        c_split.0.saturating_add(gc_split.0),
+        c_split.1.saturating_add(gc_split.1),
+    );
+    if process_child_times(parent) != both {
         serial_println!(
-            "[proc]   FAIL: parent children-time != (7,4): {:?}",
-            process_child_ticks(parent)
+            "[proc]   FAIL: parent children-time != {:?}: {:?}",
+            both,
+            process_child_times(parent)
         );
         destroy(parent);
         return Err(KernelError::InternalError);

@@ -766,6 +766,11 @@ pub struct Task {
     /// (`proc::cputimer`). Cleared when it blocks ([`Self::record_block`]).
     pub rt_run_ticks: u64,
 
+    /// The user/system split of this thread's run time last reported
+    /// (`getrusage(RUSAGE_THREAD)`, `/proc/<pid>/task/<tid>/stat`), which
+    /// keeps the next from going back ([`super::CpuSample::adjusted`]).
+    pub prev_cputime: super::PrevCputime,
+
     /// CPU time charged to this task while it was executing **user-mode**
     /// (ring 3) code, in timer ticks (USER_HZ = 100, so 10 ms each).
     ///
@@ -1282,6 +1287,7 @@ impl Task {
             cpu_account: None,
             cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
             rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1380,6 +1386,7 @@ impl Task {
             cpu_account: None,
             cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
             rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1551,6 +1558,7 @@ impl Task {
             cpu_account: None,
             cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
             rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,

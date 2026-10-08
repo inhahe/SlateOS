@@ -52,7 +52,8 @@ use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::{self, ProcessId};
 use crate::proc::signal::{self, SigInfo};
 use crate::sched::{
-    CpuClockKind, CpuTimerTick, NO_CPU_EXPIRY, ProcCpuAccount, ProcExpiry, TICK_NS,
+    CpuClockKind, CpuTimerTick, NO_CPU_EXPIRY, PrevCputime, ProcCpuAccount, ProcExpiry, TICK_NS,
+    adjust_cputime,
 };
 use crate::serial_println;
 use alloc::collections::BTreeMap;
@@ -671,6 +672,38 @@ pub fn self_test() -> KernelResult<()> {
     check(
         soft_only.check(0) == Some(SIGXCPU),
         "a zero soft limit is not due at once",
+    )?;
+
+    // The user/system split of a run time (Linux's cputime_adjust).
+    let mut prev = PrevCputime::default();
+    check(
+        adjust_cputime(30 * MS, 0, 0, &mut prev) == (30 * MS, 0),
+        "a run time no tick saw is not all user",
+    )?;
+    let mut prev = PrevCputime::default();
+    check(
+        adjust_cputime(30 * MS, 0, 3, &mut prev) == (0, 30 * MS),
+        "a run time only system ticks saw is not all system",
+    )?;
+    let mut prev = PrevCputime::default();
+    check(
+        adjust_cputime(30 * MS, 2, 1, &mut prev) == (20 * MS, 10 * MS),
+        "a 2:1 run time is not split 2:1",
+    )?;
+    // The ratio swings to system: system rises, user holds where it was.
+    check(
+        adjust_cputime(33 * MS, 1, 10, &mut prev) == (20 * MS, 13 * MS),
+        "a split went back as the ratio swung",
+    )?;
+    // No more run time: the last split again, whatever the ticks say.
+    check(
+        adjust_cputime(33 * MS, 100, 0, &mut prev) == (20 * MS, 13 * MS),
+        "a split moved without more run time",
+    )?;
+    // Back to user: user rises, system holds.
+    check(
+        adjust_cputime(40 * MS, 100, 1, &mut prev) == (27 * MS, 13 * MS),
+        "a split went back as the ratio swung back",
     )?;
 
     serial_println!("[cputimer] CPU-time itimer and limit self-test: OK");

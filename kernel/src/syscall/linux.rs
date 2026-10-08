@@ -16081,16 +16081,14 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
 /// `usage` is a bad pointer.
 /// Write a `struct timeval { i64 tv_sec; i64 tv_usec; }` into `buf` at
-/// byte `off`, derived from `ticks` at `USER_HZ == 100` (10 ms/tick).
+/// byte `off`, from `ns` nanoseconds, truncated to the microsecond as
+/// Linux's `ns_to_kernel_old_timeval` truncates.
 ///
-/// Used to fill `getrusage`'s `ru_utime`/`ru_stime` from the scheduler's
-/// per-task tick counters.  Pure integer math, saturating throughout so
-/// an implausibly large tick count can never overflow or panic.
-fn write_rusage_timeval(buf: &mut [u8; 144], off: usize, ticks: u64) {
-    // 100 Hz → 10_000 microseconds per tick.
-    let micros = ticks.saturating_mul(10_000);
-    let secs = micros / 1_000_000;
-    let usecs = micros % 1_000_000;
+/// Used to fill `getrusage`'s and `wait4`'s `ru_utime`/`ru_stime` from the
+/// precise run time split by the tick ratio (`pcb::process_times`).
+fn write_rusage_timeval(buf: &mut [u8; 144], off: usize, ns: u64) {
+    let secs = ns / 1_000_000_000;
+    let usecs = (ns % 1_000_000_000) / 1_000;
     #[allow(clippy::cast_possible_wrap)]
     let secs_i = secs as i64;
     #[allow(clippy::cast_possible_wrap)]
@@ -16149,23 +16147,23 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     //   - RUSAGE_THREAD (1): just the calling thread.
     //   - RUSAGE_CHILDREN (-1): CPU time of reaped descendants
     //     (`signal->cutime`/`cstime`), accumulated at wait/reap.
-    let (user_ticks, sys_ticks): (u64, u64) = match who_i32 {
+    let (utime_ns, stime_ns): (u64, u64) = match who_i32 {
         RUSAGE_SELF => {
             let pid = caller_pid().unwrap_or(0);
-            crate::proc::thread::process_cpu_ticks(pid)
+            crate::proc::pcb::process_times(pid).unwrap_or((0, 0))
         }
         RUSAGE_THREAD => {
             let tid = crate::sched::current_task_id();
-            crate::sched::cpu_ticks(tid).unwrap_or((0, 0))
+            crate::sched::thread_times(tid).unwrap_or((0, 0))
         }
         _ => {
             // RUSAGE_CHILDREN: reaped-children CPU time.
             let pid = caller_pid().unwrap_or(0);
-            crate::proc::pcb::process_child_ticks(pid)
+            crate::proc::pcb::process_child_times(pid)
         }
     };
-    write_rusage_timeval(&mut buf, 0, user_ticks);
-    write_rusage_timeval(&mut buf, 16, sys_ticks);
+    write_rusage_timeval(&mut buf, 0, utime_ns);
+    write_rusage_timeval(&mut buf, 16, stime_ns);
 
     // ru_minflt (offset 64) and ru_majflt (offset 72), both
     // `__kernel_long_t` (i64).  Minor faults resolved without I/O
@@ -16446,14 +16444,14 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
 /// that happens to fall in the errno band is still treated as success).
 ///
 /// `tms_utime`/`tms_stime` (the calling process's user/system CPU time
-/// in clock ticks at `USER_HZ == 100`) are sourced from the scheduler's
-/// per-task tick counters, summed across the process's live and exited
-/// threads.  `tms_cutime`/`tms_cstime` (CPU time of reaped descendants)
-/// come from the per-process children-time accumulator credited at
-/// wait/reap.  `buf == NULL` is permitted (POSIX:
+/// in clock ticks at `USER_HZ == 100`) are its precise run time, summed
+/// across its live and exited threads and split in the proportion its
+/// ticks saw (`pcb::process_times`, Linux's `thread_group_cputime_adjusted`),
+/// as `nsec_to_clock_t` truncates it.  `tms_cutime`/`tms_cstime` (CPU time
+/// of reaped descendants) come from the per-process children-time
+/// accumulator credited at wait/reap.  `buf == NULL` is permitted (POSIX:
 /// the caller wants only the return value). A non-NULL but unwritable
-/// `buf` returns `EFAULT`.  Because our tick rate equals Linux's USER_HZ,
-/// a tick count maps directly to a `clock_t` with no rescale.
+/// `buf` returns `EFAULT`.
 fn sys_times(args: &SyscallArgs) -> SyscallResult {
     let tms_ptr = args.arg0;
 
@@ -16467,17 +16465,13 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         let pid = caller_pid().unwrap_or(0);
-        let (user_ticks, sys_ticks) = crate::proc::thread::process_cpu_ticks(pid);
-        let (cuser_ticks, csys_ticks) = crate::proc::pcb::process_child_ticks(pid);
+        let (utime_ns, stime_ns) = crate::proc::pcb::process_times(pid).unwrap_or((0, 0));
+        let (cutime_ns, cstime_ns) = crate::proc::pcb::process_child_times(pid);
         let mut buf = [0u8; TMS_SIZE];
-        #[allow(clippy::cast_possible_wrap)]
-        let utime_i = user_ticks as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let stime_i = sys_ticks as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let cutime_i = cuser_ticks as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let cstime_i = csys_ticks as i64;
+        let utime_i = nsec_to_clock_t(utime_ns);
+        let stime_i = nsec_to_clock_t(stime_ns);
+        let cutime_i = nsec_to_clock_t(cutime_ns);
+        let cstime_i = nsec_to_clock_t(cstime_ns);
         buf[0..8].copy_from_slice(&utime_i.to_ne_bytes()); // tms_utime
         buf[8..16].copy_from_slice(&stime_i.to_ne_bytes()); // tms_stime
         buf[16..24].copy_from_slice(&cutime_i.to_ne_bytes()); // tms_cutime
@@ -16495,6 +16489,14 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_wrap)]
     let v = ticks as i64;
     SyscallResult::ok(v)
+}
+
+/// Nanoseconds as a `clock_t` of `USER_HZ` (100) ticks, truncated -- Linux's
+/// `nsec_to_clock_t`, for `times`, `waitid`'s `si_utime`/`si_stime` and
+/// `/proc`.
+pub(crate) fn nsec_to_clock_t(ns: u64) -> i64 {
+    const NS_PER_CLOCK_T: u64 = 10_000_000;
+    i64::try_from(ns / NS_PER_CLOCK_T).unwrap_or(i64::MAX)
 }
 
 /// `getpgrp()` — return the calling process's process-group ID.
@@ -46786,13 +46788,10 @@ fn waitid_siginfo(found: &WaitidFound) -> WaitidSiginfo {
     // `_rest[12..20]`.  (28..32 is the padding the compiler inserts to align
     // an 8-byte `clock_t` after the 4-byte `si_status`; it stays zero.)
     // Linux measures these in USER_HZ ticks — `nsec_to_clock_t` in
-    // `wait_task_zombie` — which is exactly what `ProcessUsage` stores, so
-    // no conversion is right here and any conversion would be wrong.
+    // `wait_task_zombie` — from the nanoseconds `ProcessUsage` holds.
     let mut rest = [0u8; 100];
-    #[allow(clippy::cast_possible_wrap)]
-    let utime = found.usage.user_ticks as i64;
-    #[allow(clippy::cast_possible_wrap)]
-    let stime = found.usage.sys_ticks as i64;
+    let utime = nsec_to_clock_t(found.usage.utime_ns);
+    let stime = nsec_to_clock_t(found.usage.stime_ns);
     if let Some(slot) = rest.get_mut(4..12) {
         slot.copy_from_slice(&utime.to_ne_bytes());
     }
@@ -46868,9 +46867,9 @@ fn write_user_rusage(
     }
     let mut buf = [0u8; RUSAGE_SIZE];
     // ru_utime @ 0, ru_stime @ 16 — same encoder as `sys_getrusage`, so the
-    // two syscalls cannot disagree about what a tick is worth.
-    write_rusage_timeval(&mut buf, 0, usage.user_ticks);
-    write_rusage_timeval(&mut buf, 16, usage.sys_ticks);
+    // two syscalls cannot disagree.
+    write_rusage_timeval(&mut buf, 0, usage.utime_ns);
+    write_rusage_timeval(&mut buf, 16, usage.stime_ns);
     let mut put = |off: usize, v: u64| {
         #[allow(clippy::cast_possible_wrap)]
         let signed = v as i64;
@@ -47102,16 +47101,17 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     let mut buf = [0u8; 128];
     // Non-zero CPU times so the si_utime/si_stime slots (siginfo offsets 32
     // and 40) are distinguishable from the zero-fill around them.  These are
-    // USER_HZ ticks on the wire, exactly as Linux's `nsec_to_clock_t` leaves
-    // them, so the encoder must pass them through unscaled.
+    // USER_HZ ticks on the wire, Linux's `nsec_to_clock_t` of the
+    // nanoseconds `ProcessUsage` holds: 31.0x and 42.0x ticks truncate to
+    // 31 and 42.
     let probe = WaitidFound {
         si_code: CLD_EXITED,
         si_pid: 0x1234,
         si_uid: 7,
         si_status: 99,
         usage: crate::proc::thread::ProcessUsage {
-            user_ticks: 31,
-            sys_ticks: 42,
+            utime_ns: 310_000_009,
+            stime_ns: 429_999_999,
             ..crate::proc::thread::ProcessUsage::default()
         },
     };

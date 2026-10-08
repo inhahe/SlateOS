@@ -74,7 +74,14 @@ not a CPU-time one, and for an unknown `op`.
    and reports its interval.
 9. `RLIMIT_CPU` is enforced now (`SIGXCPU` at the soft limit and each second
    after -- the soft limit moves up a second each time, as Linux's does --
-   `SIGKILL` at the hard one); nothing to call, but a fixture may want it.
+   `SIGKILL` at the hard one), and `RLIMIT_RTTIME` likewise for a real-time
+   thread that runs without blocking; nothing to call, but a fixture may want
+   them.
+10. Nothing to change, but worth knowing: `SYS_PROCESS_GET_RUSAGE` and the
+    wait-status image now carry the precise run time, split between user and
+    system by the tick ratio as Linux's `getrusage` does, rather than whole
+    10 ms ticks -- a fixture that expected a multiple of 10 000 µs will see
+    other values.
 
 ## Reply
 

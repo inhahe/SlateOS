@@ -35,9 +35,11 @@ process's clock by anyone.
 
 `getrusage`, `times`, `wait4`'s usage and `/proc/<pid>/stat` read the same
 snapshot (`pcb::process_counters`), so they no longer miss a thread that
-exits mid-read. They still report ticks; Linux scales its ticks to the precise
-total (`cputime_adjust`), which would make short runs show their real time
-rather than 0 or 10 ms -- left for later.
+exits mid-read. And since 2026-10-08 they report what Linux does: the precise
+run time split between user and system in the proportion the ticks saw,
+never going back (`sched::adjust_cputime`, Linux's `cputime_adjust`, with a
+per-process and per-thread last split), so a 4 ms run shows 4 ms, not 0 or
+10 (`known-issues/A-RUSAGE-REPORTS-WHOLE-TICKS-NOT-THE-RUN-TIME-IT-MEASURES.md`).
 
 **Revisit** if CPU-time timers (`timer_create` on these clocks, `ITIMER_PROF`,
 `ITIMER_VIRTUAL`, `RLIMIT_CPU`), which come next, need a per-process running

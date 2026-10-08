@@ -4672,10 +4672,6 @@ pub const WAIT_INFO_SIZE: usize = 72;
 /// could only reach it through `copy_to_user` could not check it at all
 /// from a bare kernel task.
 pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; WAIT_INFO_SIZE] {
-    /// One tick is 10 ms at `USER_HZ == 100`; see `sys_getrusage`, which is
-    /// the other consumer of these same counters and must not disagree.
-    const US_PER_TICK: u64 = 10_000;
-
     let mut buf = [0u8; WAIT_INFO_SIZE];
     let mut put = |off: usize, v: u64| {
         if let Some(dst) = buf.get_mut(off..off.saturating_add(8)) {
@@ -4688,8 +4684,9 @@ pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; 
     let ws = found.to_wstatus() as u32;
     put(16, u64::from(ws)); // likewise: wstatus then zero pad
     let u = &found.usage;
-    put(24, u.user_ticks.saturating_mul(US_PER_TICK));
-    put(32, u.sys_ticks.saturating_mul(US_PER_TICK));
+    // Microseconds, truncated, of the precise split `ProcessUsage` holds.
+    put(24, u.utime_ns / 1_000);
+    put(32, u.stime_ns / 1_000);
     put(40, u.min_flt);
     put(48, u.maj_flt);
     put(56, u.nvcsw);
@@ -4938,10 +4935,13 @@ fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
     let pid = caller_pid().unwrap_or(0);
     let tid = sched::current_task_id();
 
-    let (user_ticks, sys_ticks) = match who {
-        rusage_who::THREAD => sched::cpu_ticks(tid).unwrap_or((0, 0)),
-        rusage_who::CHILDREN => pcb::process_child_ticks(pid),
-        _ => crate::proc::thread::process_cpu_ticks(pid),
+    // The precise run time split by the tick ratio (Linux's
+    // `cputime_adjust`): the thread's, the process's, or its reaped
+    // children's.
+    let (utime_ns, stime_ns) = match who {
+        rusage_who::THREAD => sched::thread_times(tid).unwrap_or((0, 0)),
+        rusage_who::CHILDREN => pcb::process_child_times(pid),
+        _ => pcb::process_times(pid).unwrap_or((0, 0)),
     };
     let (min_flt, maj_flt) = match who {
         rusage_who::THREAD => sched::fault_counts(tid).unwrap_or((0, 0)),
@@ -4966,8 +4966,8 @@ fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
 
     (
         crate::proc::thread::ProcessUsage {
-            user_ticks,
-            sys_ticks,
+            utime_ns,
+            stime_ns,
             min_flt,
             maj_flt,
             nvcsw,
@@ -4988,14 +4988,9 @@ pub(crate) fn rusage_info_image(
     usage: &crate::proc::thread::ProcessUsage,
     maxrss_kib: u64,
 ) -> [u8; RUSAGE_INFO_SIZE] {
-    /// One tick is 10 ms at `USER_HZ == 100`. Shared with `wait_info_image`
-    /// and `linux::sys_getrusage`, which consume the same counters and must
-    /// not disagree about what a tick is worth.
-    const US_PER_TICK: u64 = 10_000;
-
     let &crate::proc::thread::ProcessUsage {
-        user_ticks,
-        sys_ticks,
+        utime_ns,
+        stime_ns,
         min_flt,
         maj_flt,
         nvcsw,
@@ -5008,8 +5003,10 @@ pub(crate) fn rusage_info_image(
             dst.copy_from_slice(&v.to_le_bytes());
         }
     };
-    put(0, user_ticks.saturating_mul(US_PER_TICK));
-    put(8, sys_ticks.saturating_mul(US_PER_TICK));
+    // Microseconds, truncated, as `wait_info_image` and the Linux
+    // `getrusage` give them.
+    put(0, utime_ns / 1_000);
+    put(8, stime_ns / 1_000);
     put(16, min_flt);
     put(24, maj_flt);
     put(32, nvcsw);

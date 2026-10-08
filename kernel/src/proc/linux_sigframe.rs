@@ -393,14 +393,24 @@ pub fn compute_layout_below(base: u64, fp_size: u64) -> Option<FrameLayout> {
 /// stack and `fp_size` the FPU image's size.
 ///
 /// The red zone is stepped over first. Then, for an `SA_ONSTACK` handler with
-/// a stack set and the thread not on it -- judged, as Linux judges it, at the
-/// pointer below the red zone -- the frame moves to the stack's top, with no
-/// red zone kept there, since nothing was interrupted on it. A frame meant for
-/// the alternate stack -- because it moved there, or because the thread was
-/// already running on it -- that does not fit inside it is refused (`None`)
-/// rather than written past its bottom over whatever lies below; Linux
-/// answers that with `SIGSEGV` (its `get_sigframe` returns a bogus address),
-/// and so do the callers here.
+/// a stack set and the thread not on it, the frame moves to the stack's top,
+/// with no red zone kept there, since nothing was interrupted on it. A frame
+/// meant for the alternate stack -- because it moved there, or because the
+/// thread was already running on it -- that does not fit inside it is
+/// refused (`None`) rather than written past its bottom over whatever lies
+/// below; Linux answers that with `SIGSEGV` (its `get_sigframe` returns a
+/// bogus address), and so do the callers here.
+///
+/// "Not on it" is judged at the pointer below the red zone, as Linux judges
+/// it -- except that a thread whose interrupted pointer *is* on the stack
+/// never moves to its top. Linux moves it when that pointer is within the red
+/// zone's 128 bytes of the stack's bottom, so the pointer below the red zone
+/// is off the stack: a signal nested that deep starts again at the top, over
+/// the frames of every handler still running there. Here it is the frame
+/// that does not fit, and `SIGSEGV`. Only the size of a frame decides whether
+/// a program meets that window -- the alternate-stack ring-3 test met it with
+/// this kernel's frames, never with Linux's -- and no program can mean to
+/// have its live frames written over (debug boot 13 of lane-a, 0x3A).
 #[must_use]
 pub fn place_frame(
     user_rsp: u64,
@@ -410,7 +420,7 @@ pub fn place_frame(
 ) -> Option<FrameLayout> {
     let nested = alt.on_stack(user_rsp);
     let below_red_zone = user_rsp.checked_sub(RED_ZONE)?;
-    let entering = onstack && alt.mode_at(below_red_zone) == 0;
+    let entering = onstack && !nested && alt.mode_at(below_red_zone) == 0;
     let base = if entering {
         alt.sp.checked_add(alt.size)?
     } else {
@@ -737,6 +747,13 @@ fn test_place_frame() -> crate::error::KernelResult<()> {
         || place_frame(SP + 600, false, &alt, FP).is_some()
     {
         return fail("a frame past the stack's bottom must be refused");
+    }
+    // Nested within the red zone of the bottom: refused too, never taken back
+    // to the top over the running handlers' frames (Linux's window).
+    if place_frame(SP + 32, true, &alt, FP).is_some() {
+        return fail(
+            "a nested frame 32 bytes above the bottom must be refused, not moved to the top",
+        );
     }
     // A stack too small for the frame is refused at entry.
     let small = AltStack {

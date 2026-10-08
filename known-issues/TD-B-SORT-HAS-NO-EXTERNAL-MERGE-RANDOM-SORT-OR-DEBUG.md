@@ -61,3 +61,20 @@ printf '1m\n2K\n1k\n3g\n1M\n900\n' | sort -hf
   before: 1m 3g 900 1k 2K 1M
   GNU:    900 1k 2K 1M 1m 3g
 ```
+
+### Also fixed, 2026-10-08: five comparisons that were not GNU's
+
+Found reading the parsers for `--debug`, and each measured against GNU 9.4
+before it was changed (`|` is a line break, `#` a NUL):
+
+| what | input | GNU | ours, before |
+|---|---|---|---|
+| `-g`: what `strtold` cannot read sorts first, then the NaNs, then numbers | `abc 0 -1 nan (empty) " x"` | `(empty) " x" abc nan -1 0` | `nan -1 (empty) " x" 0 abc` -- NaN first, and a non-number read as zero |
+| `-g` compares 80-bit `long double`s | `-gs` of `9223372036854775809`, `9223372036854775808` | `...808` first | input order: one `double` |
+| `-g` skips `strtold`'s white space, `\v` and `\f` included | `\v5`, `4` | `4 \v5` | `\v5 4`: no number, so zero |
+| `-h` knows ronna `R` and quetta `Q` | `1Q 1Y 1R 2Z` | `2Z 1Y 1R 1Q` | `1Q 1R 2Z 1Y` |
+| a newline is a blank (`field_sep`): under `-z` it separates fields, `-b` skips it, `-d` keeps it | `-z -k2,2n` of `x\n1#y 2#z\n\n0#` | `z\n\n0#x\n1#y 2#` | `x\n1#z\n\n0#y 2#` |
+
+`-g` is upstream's `general_numcompare` now, over `coreutils::extfloat`'s
+`strtold` -- the x87 format GNU computes with, already used by `seq` and
+`printf`. `sort-diff.sh` has 18 cases for the five; 427 pass.

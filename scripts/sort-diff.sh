@@ -296,6 +296,37 @@ run_case -gf general.txt
 run_case -Mf months.txt
 run_case -nf spellings.txt
 
+# -g reads with strtold, into an 80-bit long double: a key it cannot read at
+# all sorts before everything, the NaNs next (-nan before nan), then the
+# numbers -- and two numbers a double cannot tell apart are still two. Its
+# leading white space is isspace's, vertical tab and form feed included.
+printf 'abc\n0\n-1\nnan\n\n x\n-nan\ninf\n-inf\n'        > gwords.txt
+printf '9223372036854775809\n9223372036854775808\n1.0000000000000000009\n1\n' > gprec.txt
+printf '\v5\n4\n\f3\n\r2\n'                             > gspace.txt
+run_case -g gwords.txt
+run_case -gr gwords.txt
+run_case -gu gwords.txt
+run_case -gs gwords.txt
+run_case -k1,1g gwords.txt
+run_case -g gprec.txt
+run_case -gs gprec.txt
+run_case -gsr gprec.txt
+run_case -g gspace.txt
+# -h knows ronna and quetta, the SI prefixes of 2022.
+printf '1Q\n1Y\n1R\n2Z\n-1Q\n1k\n-1R\n'                   > units.txt
+run_case -h units.txt
+run_case -hr units.txt
+# Under -z a record may hold a newline, and the newline is a blank: it
+# separates fields, -b skips it, and -d keeps it.
+printf 'x\n1\0y 2\0z\n\n0\0'                            > znl.txt
+run_case -z -k2,2n znl.txt
+run_case -z -k2,2 znl.txt
+run_case -z -k2 znl.txt
+run_case -z -k2b,2 znl.txt
+run_stdin '\nb\0a\0' -zb
+run_stdin 'a\nc\0a\nb\0ab\0' -zd
+run_stdin ' \n2\0 1\0' -zn
+
 # --- -R: shuffled by a salted MD5 of the key ---------------------------------
 # With a fixed --random-source the "random" order is a function of the salt
 # (the source's first sixteen bytes) and the keys, so it compares byte for

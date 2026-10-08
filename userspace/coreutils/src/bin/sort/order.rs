@@ -18,6 +18,8 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
+use coreutils::extfloat::{self, ExtF80};
+
 /// Which characters a key ignores before it is compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ignore {
@@ -27,10 +29,13 @@ pub enum Ignore {
     NonPrinting,
 }
 
-/// Whether a byte counts as a blank. `sort` means space and tab, not the
-/// whole of `isspace` — a form feed is not a field separator.
+/// Whether a byte counts as a blank: upstream's `field_sep`, which is
+/// `isblank` -- space and tab, not the whole of `isspace`, so a form feed is
+/// not a field separator -- *and the newline*. A line can only hold a newline
+/// under `-z`, and there it separates fields, is skipped by `-b`, and is kept
+/// by `-d`, as GNU's are.
 pub fn is_blank(b: u8) -> bool {
-    b == b' ' || b == b'\t'
+    b == b' ' || b == b'\t' || b == b'\n'
 }
 
 /// The default ordering: bytes, after dropping ignored characters and folding
@@ -262,157 +267,46 @@ fn compare_magnitude(x: &Number<'_>, y: &Number<'_>) -> Ordering {
     x.fraction.cmp(y.fraction)
 }
 
-// ── -g, the ordering that goes through a double ─────────────────────────────
+// ── -g, the ordering that goes through a long double ────────────────────────
 
-/// `-g`: compare as C's `strtod` would read them, exponents and all.
+/// `-g`: upstream's `general_numcompare`. Each key is read by `strtold`, into
+/// the x87 80-bit `long double` glibc computes with -- not a `double`, whose 53
+/// bits tie `9223372036854775808` with `9223372036854775809` where GNU's 64 do
+/// not ([`coreutils::extfloat`]) -- and the readings are ordered:
 ///
-/// This is the lossy one, and deliberately so — it is what buys `1e3` and
-/// `0x10` and `inf`. GNU documents it as slower and less accurate than `-n`;
-/// the inaccuracy is the point of keeping the two separate.
+/// 1. a key `strtold` cannot read at all (`abc`, or an empty key) before
+///    everything else, all such keys equal;
+/// 2. then the NaNs, ordered among themselves by how `%Lf` prints them, which
+///    puts `-nan` before `nan` (upstream's `nan_compare`);
+/// 3. then the numbers by value, `-0` equal to `0`.
+///
+/// So a key that is not a number is *not* zero here, as it is to `-n`:
+/// measured, GNU puts `abc` before `-1`. And `strtold` skips any leading white
+/// space, vertical tab and form feed included, which is wider than `sort`'s
+/// blanks.
 pub fn general(a: &[u8], b: &[u8]) -> Ordering {
-    let x = strtod(a);
-    let y = strtod(b);
-    // A NaN sorts below everything, including another NaN, which is the only
-    // way an ordering with NaN in it can be a total order at all.
+    let (x, y) = (extfloat::strtold(a), extfloat::strtold(b));
+    match (x.consumed == 0, y.consumed == 0) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => {}
+    }
+    let (x, y) = (x.value, y.value);
+    if let Some(order) = x.partial_cmp(y) {
+        return order;
+    }
     match (x.is_nan(), y.is_nan()) {
-        (true, true) => Ordering::Equal,
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        (false, false) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        _ => nan_text(x).cmp(nan_text(y)),
     }
 }
 
-/// The longest prefix of `s` that C's `strtod` accepts, as a value.
-///
-/// A key with no number at the front is zero, matching `-n`.
-fn strtod(s: &[u8]) -> f64 {
-    let start = s.iter().position(|&c| !is_blank(c)).unwrap_or(s.len());
-    let rest = s.get(start..).unwrap_or_default();
-    // C's `strtod` reads `0x10` as sixteen and Rust's parser does not, so the
-    // hex form is handled before falling through to the decimal one. This is
-    // the difference `-g` exists for: `-n` reads `0x10` as zero, and a column
-    // of hex needs the other answer.
-    if let Some(value) = hex_float(rest) {
-        return value;
-    }
-    // Walk back from the whole slice: the parser is the authority on what its
-    // own syntax is, so the longest prefix it accepts is the answer. The keys
-    // this runs on are short.
-    for end in (1..=rest.len()).rev() {
-        let Some(candidate) = rest.get(..end) else {
-            continue;
-        };
-        let Ok(text) = std::str::from_utf8(candidate) else {
-            continue;
-        };
-        // Rust accepts forms C does not: reject the ones that would make
-        // `-g` disagree with `strtod` on real input.
-        // `infinity` is the case where C is the *more* permissive of the two:
-        // `strtod` takes the long spelling, so take it here rather than let the
-        // walk-back settle for the `inf` prefix.
-        if text.eq_ignore_ascii_case("infinity") {
-            if let Ok(v) = text.parse::<f64>() {
-                return v;
-            }
-            continue;
-        }
-        // A trailing sign, exponent marker or point is where Rust and C part
-        // company; drop the character and let the walk-back find what `strtod`
-        // would have stopped at.
-        if text.ends_with(['+', '-', 'e', 'E', '.']) {
-            continue;
-        }
-        if let Ok(v) = text.parse::<f64>() {
-            return v;
-        }
-    }
-    0.0
-}
-
-/// C99's hexadecimal float, or `None` if `s` does not start with one.
-///
-/// `0x1.8p3` is twelve: the digits are base 16, the exponent after `p` is a
-/// power of *two*, and it is decimal. A `0x` with no digit after it is not a
-/// hex float — C reads it as a plain zero and leaves the `x` — so this returns
-/// `None` and the decimal path answers.
-fn hex_float(s: &[u8]) -> Option<f64> {
-    let mut i = 0usize;
-    let sign = match s.first() {
-        Some(b'-') => {
-            i = 1;
-            -1.0f64
-        }
-        Some(b'+') => {
-            i = 1;
-            1.0f64
-        }
-        _ => 1.0f64,
-    };
-    if s.get(i) != Some(&b'0') {
-        return None;
-    }
-    if !matches!(s.get(i.saturating_add(1)), Some(b'x' | b'X')) {
-        return None;
-    }
-    i = i.saturating_add(2);
-
-    let mut mantissa = 0.0f64;
-    let mut any = false;
-    while let Some(digit) = s.get(i).and_then(|c| hex_value(*c)) {
-        mantissa = mantissa.mul_add(16.0, f64::from(digit));
-        any = true;
-        i = i.saturating_add(1);
-    }
-    if s.get(i) == Some(&b'.') {
-        i = i.saturating_add(1);
-        let mut place = 1.0f64 / 16.0;
-        while let Some(digit) = s.get(i).and_then(|c| hex_value(*c)) {
-            mantissa += f64::from(digit) * place;
-            place /= 16.0;
-            any = true;
-            i = i.saturating_add(1);
-        }
-    }
-    if !any {
-        return None;
-    }
-
-    let mut exponent = 0i32;
-    if matches!(s.get(i), Some(b'p' | b'P')) {
-        let mut j = i.saturating_add(1);
-        let negative = s.get(j) == Some(&b'-');
-        if negative || s.get(j) == Some(&b'+') {
-            j = j.saturating_add(1);
-        }
-        let mut digits = 0usize;
-        let mut value = 0i32;
-        while let Some(c) = s.get(j).copied().filter(u8::is_ascii_digit) {
-            value = value
-                .saturating_mul(10)
-                .saturating_add(i32::from(c.wrapping_sub(b'0')));
-            digits = digits.saturating_add(1);
-            j = j.saturating_add(1);
-        }
-        // A `p` with no digits after it is not an exponent; the number simply
-        // ends before it.
-        if digits > 0 {
-            exponent = if negative {
-                value.saturating_neg()
-            } else {
-                value
-            };
-        }
-    }
-    Some(sign * mantissa * (2.0f64).powi(exponent))
-}
-
-fn hex_value(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c.wrapping_sub(b'0')),
-        b'a'..=b'f' => Some(c.wrapping_sub(b'a').saturating_add(10)),
-        b'A'..=b'F' => Some(c.wrapping_sub(b'A').saturating_add(10)),
-        _ => None,
-    }
+/// How `%Lf` prints a NaN, which is all `nan_compare` compares: glibc writes
+/// the sign and never the payload.
+fn nan_text(v: ExtF80) -> &'static str {
+    if v.sign_bit() { "-nan" } else { "nan" }
 }
 
 // ── -h, the ordering that understands K and M ───────────────────────────────
@@ -478,6 +372,10 @@ fn unit_order(key: &[u8]) -> i32 {
         Some(b'E') => 6,
         Some(b'Z') => 7,
         Some(b'Y') => 8,
+        // Ronna and quetta, the SI prefixes of 2022, which coreutils 9.4's
+        // table carries: measured, GNU sorts `2Z 1Y 1R 1Q` in that order.
+        Some(b'R') => 9,
+        Some(b'Q') => 10,
         _ => 0,
     };
     if negative {
@@ -644,8 +542,59 @@ mod tests {
     fn general_understands_what_numeric_refuses() {
         assert_eq!(general(b"1e3", b"999"), Ordering::Greater);
         assert_eq!(general(b"+5", b"1"), Ordering::Greater);
-        assert_eq!(general(b"abc", b"0"), Ordering::Equal);
+        // Not a number is not zero: it sorts before every number.
+        assert_eq!(general(b"abc", b"0"), Ordering::Less);
         assert_eq!(general(b"-inf", b"0"), Ordering::Less);
+    }
+
+    #[test]
+    fn general_puts_the_unreadable_first_then_the_nans_then_numbers() {
+        // Measured against GNU sort 9.4: `abc`, an empty key and ` x` tie
+        // with each other below everything; `-nan` and `nan` follow, in that
+        // order; then the numbers.
+        let mut keys: Vec<&[u8]> = vec![b"0", b"nan", b"abc", b"-1", b"", b"-nan", b"-inf"];
+        keys.sort_by(|a, b| general(a, b));
+        let want: Vec<&[u8]> = vec![b"abc", b"", b"-nan", b"nan", b"-inf", b"-1", b"0"];
+        assert_eq!(keys, want);
+        assert_eq!(general(b"abc", b" x"), Ordering::Equal);
+        assert_eq!(general(b"-0", b"0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn general_has_a_long_doubles_precision() {
+        // 2^63 and 2^63 + 1 are one double and two long doubles.
+        assert_eq!(
+            general(b"9223372036854775808", b"9223372036854775809"),
+            Ordering::Less
+        );
+        assert_eq!(general(b"1", b"1.0000000000000000009"), Ordering::Less);
+    }
+
+    #[test]
+    fn general_skips_what_strtold_skips() {
+        // Vertical tab and form feed are white space to `strtold`, though
+        // they are no blanks of `sort`'s.
+        assert_eq!(general(b"\x0b5", b"4"), Ordering::Greater);
+        assert_eq!(general(b"\x0c3", b"4"), Ordering::Less);
+    }
+
+    #[test]
+    fn human_knows_ronna_and_quetta() {
+        assert_eq!(human(b"1R", b"2Y"), Ordering::Greater);
+        assert_eq!(human(b"1Q", b"1R"), Ordering::Greater);
+        assert_eq!(human(b"-1Q", b"-1R"), Ordering::Less);
+    }
+
+    #[test]
+    fn a_newline_is_a_blank() {
+        assert!(is_blank(b'\n'));
+        assert!(!is_blank(b'\x0c'));
+        // So `-n` steps over it, and `-d` keeps it.
+        assert_eq!(numeric(b"\n2", b"1"), Ordering::Greater);
+        assert_eq!(
+            default_order(b"a\nb", b"ab", Some(Ignore::NonDictionary), false),
+            Ordering::Less
+        );
     }
 
     /// The MD5 state after sixteen zero bytes: the salt a `--random-source`

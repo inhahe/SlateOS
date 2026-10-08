@@ -358,8 +358,9 @@ fn compare(cfg: &Config, a: &[u8], b: &[u8]) -> Ordering {
 
 /// Which stage of reading a `--files0-from` list failed: upstream says
 /// `open failed: F: reason` for the one and `cannot read file names from 'F'`,
-/// with no reason, for the other. (The inputs themselves are read by
-/// [`read_inputs`], in upstream's order.)
+/// with no reason, for the other. (The inputs themselves are read a buffer at
+/// a time by [`external::sort`], [`external::merge`] and [`external::check`],
+/// in upstream's order.)
 enum ReadFailure {
     Open(io::Error),
     Read,

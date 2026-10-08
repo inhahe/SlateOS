@@ -374,70 +374,21 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_leap_year(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
-fn days_in_month(year: i64, month: u32) -> i64 {
-    match month {
-        1 => 31,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        3 => 31,
-        4 => 30,
-        5 => 31,
-        6 => 30,
-        7 => 31,
-        8 => 31,
-        9 => 30,
-        10 => 31,
-        11 => 30,
-        12 => 31,
-        _ => 30,
-    }
-}
-
 /// Convert unix timestamp to "YYYY-MM-DD HH:MM:SS" string.
+///
+/// Through `journalrec::Utc`, in a fixed number of steps: this counted a
+/// year at a time from 1970, so one record with a `ts` near `u64::MAX` --
+/// which anything able to write a line into the log can put there -- kept
+/// every listing busy for many minutes.
 fn format_timestamp(unix_secs: u64) -> String {
     if unix_secs == 0 {
         return "0000-00-00 00:00:00".to_string();
     }
-
-    let secs = unix_secs;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    let mut remaining_days = (secs / 86400) as i64;
-    let mut year: i64 = 1970;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-
-    let mut month = 1u32;
-    loop {
-        let dim = days_in_month(year, month);
-        if remaining_days < dim {
-            break;
-        }
-        remaining_days -= dim;
-        month += 1;
-    }
-    let day = remaining_days + 1;
-
-    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}")
+    let t = journalrec::Utc::from_unix(unix_secs);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    )
 }
 
 /// Format with microsecond precision: "YYYY-MM-DD HH:MM:SS.UUUUUU".
@@ -449,11 +400,18 @@ fn format_timestamp_precise(unix_secs: u64, usec: u64) -> String {
 /// Parse a datetime string into a unix timestamp.
 ///
 /// Supported formats:
-/// - "YYYY-MM-DD HH:MM:SS"
+/// - "YYYY-MM-DD HH:MM:SS", with "HH" or "HH:MM" also allowed
 /// - "YYYY-MM-DD"
-/// - "today"
-/// - "yesterday"
-/// - "-Nd" / "-Nh" / "-Nm" (relative: N days/hours/minutes ago)
+/// - "now", "today", "yesterday"
+/// - "-Nd" / "-Nh" / "-Nm" / "-Ns" (relative: N days/hours/minutes/seconds ago)
+///
+/// A date that is not a real one -- February 30, an hour of 25 -- is
+/// refused, and so is one before 1970, where no record can be. Until
+/// 2026-10-08 such a date rolled over into the next month or hour, a date
+/// before 1970 was taken as the same day of 1970, a time field that did not
+/// parse was taken as 0, a year was counted to one step at a time (without
+/// end, for a large enough year), a large relative count overflowed, and a
+/// relative form ending in a multi-byte character panicked.
 fn parse_datetime(s: &str) -> Option<u64> {
     let s = s.trim();
 
@@ -467,68 +425,53 @@ fn parse_datetime(s: &str) -> Option<u64> {
     }
     if s.eq_ignore_ascii_case("yesterday") {
         let now = now_secs();
-        return Some(now - (now % 86400) - 86400);
+        return Some((now - (now % 86400)).saturating_sub(86400));
     }
 
     // Relative: -Nd, -Nh, -Nm, -Ns
-    if s.starts_with('-') && s.len() >= 3 {
-        let suffix = s.as_bytes()[s.len() - 1];
-        let num_str = &s[1..s.len() - 1];
-        if let Ok(n) = num_str.parse::<u64>() {
-            let secs = match suffix {
-                b'd' => n * 86400,
-                b'h' => n * 3600,
-                b'm' => n * 60,
-                b's' => n,
-                _ => return None,
-            };
-            return Some(now_secs().saturating_sub(secs));
-        }
+    if let Some(rest) = s.strip_prefix('-') {
+        let per: u64 = match rest.as_bytes().last() {
+            Some(b'd') => 86400,
+            Some(b'h') => 3600,
+            Some(b'm') => 60,
+            Some(b's') => 1,
+            _ => return None,
+        };
+        // The unit is one ASCII byte, so this cut is between characters.
+        let n: u64 = rest.get(..rest.len() - 1)?.parse().ok()?;
+        return Some(now_secs().saturating_sub(n.checked_mul(per)?));
     }
 
     // "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
-    let parts: Vec<&str> = s.splitn(2, ' ').collect();
-    let date_part = parts.first()?;
-    let time_part = if parts.len() > 1 {
-        Some(parts[1])
-    } else {
-        None
+    let (date_part, time_part) = match s.split_once(' ') {
+        Some((date, time)) => (date, Some(time)),
+        None => (s, None),
     };
-
     let date_fields: Vec<&str> = date_part.split('-').collect();
-    if date_fields.len() != 3 {
+    let [year, month, day] = date_fields.as_slice() else {
         return None;
-    }
-    let year: i64 = date_fields[0].parse().ok()?;
-    let month: u32 = date_fields[1].parse().ok()?;
-    let day: u32 = date_fields[2].parse().ok()?;
-
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-
-    let (hours, minutes, seconds) = if let Some(t) = time_part {
-        let tf: Vec<&str> = t.split(':').collect();
-        let h: u64 = tf.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let m: u64 = tf.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-        let s: u64 = tf.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
-        (h, m, s)
-    } else {
-        (0, 0, 0)
     };
-
-    // Convert to unix timestamp (UTC).
-    let mut total_days: i64 = 0;
-    for y in 1970..year {
-        total_days += if is_leap_year(y) { 366 } else { 365 };
+    let (hour, minute, second) = match time_part {
+        None => (0, 0, 0),
+        Some(time) => {
+            let fields: Vec<&str> = time.split(':').collect();
+            if fields.len() > 3 {
+                return None;
+            }
+            // A field that is there must be a number; one left off is 0.
+            let field = |i: usize| fields.get(i).map_or(Some(0), |f| f.parse().ok());
+            (field(0)?, field(1)?, field(2)?)
+        }
+    };
+    journalrec::Utc {
+        year: year.parse().ok()?,
+        month: month.parse().ok()?,
+        day: day.parse().ok()?,
+        hour,
+        minute,
+        second,
     }
-    for m in 1..month {
-        total_days += days_in_month(year, m);
-    }
-    total_days += (day as i64) - 1;
-
-    let ts = (total_days as u64) * 86400 + hours * 3600 + minutes * 60 + seconds;
-    Some(ts)
+    .to_unix()
 }
 
 // ============================================================================
@@ -2951,23 +2894,50 @@ mod tests {
     }
 
     // =========================================================================
-    // Leap year / date helpers
+    // Dates (the calendar itself is journalrec::Utc's, tested there)
     // =========================================================================
 
+    /// A date that is not a real one, or is before any record, is refused
+    /// rather than rolled over; a time field that does not parse is refused
+    /// rather than taken as 0.
     #[test]
-    fn test_is_leap_year() {
-        assert!(is_leap_year(2000));
-        assert!(is_leap_year(2024));
-        assert!(!is_leap_year(1900));
-        assert!(!is_leap_year(2023));
+    fn a_date_that_is_not_one_is_refused() {
+        for bad in [
+            "2024-02-30",
+            "2023-02-29",
+            "1969-12-31",
+            "1960-06-01",
+            "2024-01-01 25:00",
+            "2024-01-01 10:60",
+            "2024-01-01 10:00:60",
+            "2024-01-01 10:xx",
+            "2024-01-01 1:2:3:4",
+            "2024-01",
+            "2024-01-01-01",
+        ] {
+            assert_eq!(parse_datetime(bad), None, "{bad}");
+        }
+        assert_eq!(parse_datetime("2024-02-29"), Some(1_709_164_800));
+        assert_eq!(
+            parse_datetime("2024-02-29 12"),
+            Some(1_709_164_800 + 12 * 3600)
+        );
+        assert_eq!(
+            parse_datetime("2024-02-29 12:30"),
+            Some(1_709_164_800 + 12 * 3600 + 1800)
+        );
     }
 
+    /// What used to hang, overflow or panic is answered at once.
     #[test]
-    fn test_days_in_month() {
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2023, 2), 28);
-        assert_eq!(days_in_month(2024, 1), 31);
-        assert_eq!(days_in_month(2024, 4), 30);
+    fn extreme_dates_are_answered_at_once() {
+        assert_eq!(parse_datetime("9223372036854775807-01-01"), None);
+        assert_eq!(parse_datetime("-18446744073709551615d"), None);
+        assert_eq!(parse_datetime("-99999999999999999999d"), None);
+        assert_eq!(parse_datetime("-5\u{e9}"), None);
+        assert_eq!(parse_datetime("-d"), None);
+        assert_eq!(format_timestamp(u64::MAX), "584554051223-11-09 07:00:15");
+        assert_eq!(format_timestamp(1_716_000_000), "2024-05-18 02:40:00");
     }
 
     // =========================================================================

@@ -28,6 +28,10 @@ mod read;
 
 pub use read::{Value, parse_object};
 
+mod utc;
+
+pub use utc::Utc;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;

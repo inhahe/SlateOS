@@ -78,54 +78,22 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ`: a record's `time` as `log` writes it, and its
+/// time as the reading commands show it.
+///
+/// Through `journalrec::Utc`, in a fixed number of steps: this counted a
+/// year at a time from 1970, so one record with a `ts` near `u64::MAX` --
+/// which anything able to write a line into the log can put there -- kept
+/// `tail`, `query` and `follow` busy for many minutes.
 fn format_timestamp(unix_secs: u64) -> String {
     if unix_secs == 0 {
         return "unknown".to_string();
     }
-
-    let secs = unix_secs;
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    let mut y = 1970i64;
-    let mut remaining_days = days as i64;
-
-    loop {
-        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        y += 1;
-    }
-
-    let month_days: [i64; 12] = if is_leap_year(y) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month = 0u32;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining_days < md {
-            month = i as u32 + 1;
-            break;
-        }
-        remaining_days -= md;
-    }
-    if month == 0 {
-        month = 12;
-    }
-    let day = remaining_days + 1;
-
-    format!("{y:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-}
-
-fn is_leap_year(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    let t = journalrec::Utc::from_unix(unix_secs);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    )
 }
 
 // ============================================================================
@@ -1373,6 +1341,16 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.lines().count(), USAGE.len());
         assert!(text.contains("  tail [n]"));
+    }
+
+    /// The value that kept the old year-by-year count busy for minutes.
+    #[test]
+    fn a_time_is_formatted_at_once() {
+        assert_eq!(format_timestamp(0), "unknown");
+        assert_eq!(format_timestamp(1_716_000_000), "2024-05-18T02:40:00Z");
+        assert_eq!(format_timestamp(u64::MAX), "584554051223-11-09T07:00:15Z");
+        let record = shown(r#"{"ts":18446744073709551615,"level":"info","msg":"m"}"#);
+        assert!(short(&record).starts_with(b"584554051223-11-09T07:00:15Z info"));
     }
 
     #[test]

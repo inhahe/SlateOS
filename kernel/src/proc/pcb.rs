@@ -1916,28 +1916,29 @@ pub fn fork_create(
         )
     };
 
-    // Enforce RLIMIT_NPROC (resource index 6): per-uid count of live
-    // processes owned by `credentials.uid` must remain below the
-    // soft limit, else fork returns EAGAIN.  Linux exempts processes
-    // with CAP_SYS_RESOURCE / CAP_SYS_ADMIN; we don't have those caps
-    // wired up yet, so we exempt uid 0 (root) by convention — it's
-    // the same effective behaviour for the systems we run.
+    // Enforce RLIMIT_NPROC (resource index 6) as Linux's `copy_process`
+    // does: the processes whose *real* user id is the child's -- its
+    // parent's -- must stay within the soft limit, else fork returns
+    // EAGAIN. Exempt, as on Linux, the root user (a real id of 0,
+    // `INIT_USER`) and a caller with CAP_SYS_RESOURCE or CAP_SYS_ADMIN,
+    // which here is root's authority: an effective id of 0
+    // (`proc::setid`). Until 2026-10-08 the count and the exemption both
+    // read the effective id, so a `seteuid` moved a process's fork budget
+    // to another user's, and root with an effective id of 1000 was held to
+    // user 1000's limit.
     //
     // RLIM_INFINITY skips the check.  This runs against the just-
     // snapshotted parent rlimits and credentials; we already hold
     // the PROCESS_TABLE lock so the count is consistent with the
     // limit decision.
     let nproc_soft = rlimits[6].0;
-    if credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
-        let target_uid = credentials.uid;
+    if credentials.ruid != 0 && credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
+        let target_uid = credentials.ruid;
         let mut count: u64 = 0;
         for p in table.values() {
-            // Count only live processes (not Zombie/Exited): a zombie
-            // still occupies a PID slot until reaped, but Linux
-            // includes them in RLIMIT_NPROC since they still hold the
-            // uid quota.  We follow Linux and count all non-finalised
-            // processes regardless of state.
-            if p.credentials.uid == target_uid {
+            // Every process not yet reaped counts, zombies included: Linux
+            // gives a user's count back only when the process is released.
+            if p.credentials.ruid == target_uid {
                 count = count.saturating_add(1);
             }
         }

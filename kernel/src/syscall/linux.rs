@@ -63456,6 +63456,80 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 .expect("uid 0 fork exempt from NPROC");
                 pcb::destroy(root_child);
                 pcb::destroy(root_parent);
+
+                // The count and the exemption are the *real* user's, as
+                // Linux's `copy_process` reads them. Each check below would
+                // come out the other way if the effective id were read, as it
+                // was until 2026-10-08.
+                let ids = |ruid: u32, euid: u32| {
+                    let mut c = pcb::ProcessCredentials::new(ruid, ruid);
+                    c.uid = euid;
+                    c.suid = euid;
+                    c.fsuid = euid;
+                    c
+                };
+                let real = pcb::create("rlimit-nproc-test-real", 0);
+                let other = pcb::create("rlimit-nproc-test-other", 0);
+                let stranger1 = pcb::create("rlimit-nproc-test-stranger1", 0);
+                let stranger2 = pcb::create("rlimit-nproc-test-stranger2", 0);
+                let nproc = |n: u64| {
+                    pcb::set_rlimit(
+                        real,
+                        6,
+                        n,
+                        pcb::RLIM_INFINITY,
+                        pcb::LimitAuthority::Unprivileged,
+                    )
+                };
+                let fork =
+                    || pcb::fork_create(real, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new());
+                // A step that cannot be set up fails its check: each result
+                // carries the set-up's error rather than the fork's.
+                //
+                // 1. One of user 1000's whose effective id is 2000 counts:
+                //    `real` and `other` are two, so a third is over a limit
+                //    of 2. (By effective id there is one.)
+                let crowded = pcb::set_credentials(real, ids(1000, 1000))
+                    .and_then(|()| pcb::set_credentials(other, ids(1000, 2000)))
+                    .and_then(|()| nproc(2))
+                    .and_then(|()| fork());
+                // 2. Two of user 2000's whose effective id is 1000 do not:
+                //    still two of 1000's, so a third fits a limit of 3. (By
+                //    effective id there are three, and a fourth would not.)
+                let roomy = pcb::set_credentials(stranger1, ids(2000, 1000))
+                    .and_then(|()| pcb::set_credentials(stranger2, ids(2000, 1000)))
+                    .and_then(|()| nproc(3))
+                    .and_then(|()| fork());
+                // 3. Root's authority, an effective id of 0, is exempt.
+                let authority = pcb::set_credentials(real, ids(1000, 0))
+                    .and_then(|()| nproc(0))
+                    .and_then(|()| fork());
+                // 4. So is the root user, a real id of 0, whatever its
+                //    effective id. (By effective id it is one of 1000's.)
+                let root_user = pcb::set_credentials(real, ids(0, 1000))
+                    .and_then(|()| nproc(0))
+                    .and_then(|()| fork());
+                let verdict = (
+                    matches!(crowded, Err(KernelError::WouldBlock)),
+                    roomy.is_ok(),
+                    authority.is_ok(),
+                    root_user.is_ok(),
+                );
+                for child in [crowded, roomy, authority, root_user].into_iter().flatten() {
+                    pcb::destroy(child);
+                }
+                for pid in [real, other, stranger1, stranger2] {
+                    pcb::destroy(pid);
+                }
+                if verdict != (true, true, true, true) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: NPROC by real uid: (another effective id of \
+                         the same real user counted, another real user's not counted, an \
+                         effective 0 exempt, a real 0 exempt) = {:?}",
+                        verdict
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
 
             // RLIMIT_AS accounting via pcb::linux_as_charge /

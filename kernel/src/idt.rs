@@ -2003,6 +2003,10 @@ fn linux_fault_mapping(code: crate::proc::exception::ExceptionCode) -> Option<(u
         | E::GeneralProtectionFault => (SIGSEGV, SI_KERNEL),
         // #PF handled separately with the precise present-bit si_code.
         E::AccessViolation => return None,
+        // A Linux process's `int3` is sent as `do_int3_user` sends it
+        // (`handle_breakpoint`), before any mapping; this is for
+        // completeness.
+        E::Breakpoint => (5, SI_KERNEL), // SIGTRAP
     })
 }
 
@@ -2930,16 +2934,30 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     BP_ENTRY_AC.store(rflags & RFLAGS_AC != 0, Ordering::Relaxed);
     // A user program's `int3`: SIGTRAP from the kernel, `rip` already past
     // the instruction, as Linux's `do_int3_user` sends it -- a debugger's
-    // breakpoint (`user_trap`). A native program's is logged below and runs
-    // on, as before.
-    if is_userspace_exception(frame)
-        && (crate::proc::ptrace::is_traced(sched::current_task_id())
-            || crate::proc::thread::owner_process(sched::current_task_id())
-                .and_then(crate::proc::pcb::get_abi_mode)
-                == Some(crate::proc::pcb::AbiMode::Linux))
-    {
-        const SIGTRAP: u32 = 5;
-        user_trap(frame, SIGTRAP, crate::proc::signal::si_code::SI_KERNEL, 0);
+    // breakpoint (`user_trap`). A native program no debugger traces gets a
+    // `Breakpoint` exception -- its handler's, or the end of the program,
+    // as any other fault it does not handle. Until the gate let ring 3 in
+    // (2026-10-08), a user `int3` was a #GP and ended the same way; for the
+    // few hours after, a native one was logged here and ran on, and the
+    // native probes that pad with `int3` after a call that must not return
+    // ran past their code when it did.
+    if is_userspace_exception(frame) {
+        let task = sched::current_task_id();
+        if crate::proc::ptrace::is_traced(task)
+            || crate::proc::thread::owner_process(task).and_then(crate::proc::pcb::get_abi_mode)
+                == Some(crate::proc::pcb::AbiMode::Linux)
+        {
+            const SIGTRAP: u32 = 5;
+            user_trap(frame, SIGTRAP, crate::proc::signal::si_code::SI_KERNEL, 0);
+            return;
+        }
+        log_exception(3, frame.rip, 0);
+        dispatch_or_kill_userspace(
+            "Breakpoint (#BP)",
+            frame,
+            crate::proc::exception::ExceptionCode::Breakpoint,
+            0,
+        );
         return;
     }
     // Say whether this breakpoint was asked for. The serial log is the only
@@ -3763,12 +3781,13 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
 /// only.  A `#TS` is therefore a kernel bug by construction, and halting is the
 /// correct response rather than a missing branch.
 ///
-/// Giving it a ring-3 path would also mean appending a twelfth value to
+/// Giving it a ring-3 path would also mean appending a value to
 /// `proc::exception::ExceptionCode`, which is a contiguous *userspace ABI*
-/// (`DivideError = 1` … `SimdFloatingPoint = 11`) with no `InvalidTss` variant.
+/// (`DivideError = 1` … `Breakpoint = 12`) with no `InvalidTss` variant.
 /// Appending is safe in that it renumbers nothing, but it is an ABI change made
 /// on the strength of symmetry alone, for a case the hardware cannot produce.
-/// **Do not add `ExceptionCode::InvalidTss`.**
+/// (`Breakpoint` was appended for one it can: a ring-3 `int3`, once the
+/// vector's gate let ring 3 in.) **Do not add `ExceptionCode::InvalidTss`.**
 ///
 /// The corollary is that this vector needs the fatal-fault hardening *more*
 /// unambiguously than its siblings, not less: every `#TS` is by the above a

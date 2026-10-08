@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -72,3 +72,9 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   file in the middle of a name and `..` after a link, `-n` (refused for two
   operands), `-z`, last-wins `-q`/`-s`/`-v`, and every descriptor: 243 agree,
   0 differ, 4 differ on purpose. The 2026-10-03 port needed no change.
+* **`realpath`, 2026-10-07** -- `scripts/realpath-diff.sh`, run the same way
+  as `readlink`'s. The three modes, `-P`/`-L`/`-s` (last one wins),
+  `--relative-to` and `--relative-base` alone and together -- inside,
+  outside and equal to the base, through links, with a missing base -- `-z`,
+  `-q`, and every descriptor: 284 agree, 0 differ, 4 differ on purpose. No
+  change needed.

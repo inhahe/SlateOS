@@ -4643,6 +4643,7 @@ pub fn self_test() -> KernelResult<()> {
                     EntryType::CharDevice => "CHR ",
                     EntryType::BlockDevice => "BLK ",
                     EntryType::Socket => "SOCK",
+                    EntryType::Fifo => "FIFO",
                 };
                 crate::serial_println!(
                     "[fat]     {} {:12} {} bytes",

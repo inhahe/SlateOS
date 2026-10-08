@@ -6926,6 +6926,39 @@ pub const CPU_CLOCK_GETRES: u64 = 1;
 /// [`SYS_CPU_CLOCK`] operation: sleep until the clock reads a time.
 pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
 
+/// `SYS_FS_MKFIFO` (1157) -- make a named pipe's node: Linux's
+/// `mknod(path, S_IFIFO | mode, 0)`, which `mkfifo` is.
+///
+/// `arg0`/`arg1` the path, `arg2` the permission bits, already less the
+/// caller's umask (the native umask is the C library's). Returns 0.
+/// `AlreadyExists` for a name that exists, of any type; `NotSupported` on a
+/// filesystem that cannot hold one (FAT -- Linux's `EPERM`); otherwise what
+/// creating a file there answers. Needs the File capability with `CREATE`, as
+/// `SYS_FS_MKDIR_MODE` does.
+pub const SYS_FS_MKFIFO: u64 = 1157;
+
+/// `SYS_FIFO_OPEN` (1158) -- open a named pipe: Linux's `open` of a FIFO's
+/// node, which `SYS_FS_OPEN` answers `NoSuchDeviceOrAddress` (`ENXIO`), as it
+/// answers a socket's: there is nothing behind the node to read. A C library
+/// that meets that answer asks this call with the same path and flags.
+///
+/// `arg0`/`arg1` the path, `arg2` the native open flags -- `READ`, `WRITE` or
+/// both, and `NOFOLLOW`/`NO_SYMLINKS` for the walk; the others are ignored, a
+/// FIFO being made by [`SYS_FS_MKFIFO`] -- and `arg3` bit 0 nonblocking
+/// (`O_NONBLOCK`). Returns a pipe handle -- the read end, the write end, or
+/// for `READ | WRITE` both ends in one handle -- that `SYS_PIPE_READ`,
+/// `SYS_PIPE_WRITE`, `SYS_PIPE_POLL` and `SYS_PIPE_CLOSE` take as any pipe
+/// end's.
+///
+/// The open waits as POSIX says (`kernel/src/ipc/fifo.rs`): for reading,
+/// until a writer has opened; for writing, until a reader has; for both,
+/// never. Nonblocking, a reader opens at once and a writer with no reader is
+/// `NoSuchDeviceOrAddress`. A signal while it waits is `Interrupted`, with
+/// nothing left open. `NoSuchDeviceOrAddress` too for a path that names no
+/// FIFO; `InvalidArgument` for neither `READ` nor `WRITE`. Needs the File
+/// capability with `READ`, as `SYS_FS_OPEN` does.
+pub const SYS_FIFO_OPEN: u64 = 1158;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

@@ -104,6 +104,14 @@ pub enum EntryType {
     /// whose socket has closed stays, and `connect` to it is refused.
     /// Opening one is `ENXIO`: it has no contents to read.
     Socket,
+
+    /// A named pipe's node (`S_IFIFO`), made by `mkfifo` or
+    /// `mknod(S_IFIFO)`.
+    ///
+    /// Like a socket's, the node holds nothing. Opening it attaches the opener
+    /// to the kernel pipe kept for the node while anyone has it open, found by
+    /// the node's identity ([`FileId`]): [`crate::ipc::fifo`].
+    Fifo,
 }
 
 impl EntryType {
@@ -125,6 +133,7 @@ impl EntryType {
             Self::CharDevice => 4,
             Self::BlockDevice => 5,
             Self::Socket => 6,
+            Self::Fifo => 7,
         }
     }
 }
@@ -1184,6 +1193,17 @@ pub trait FileSystem: Send {
     /// Default: not supported -- a filesystem that cannot hold one makes
     /// `bind` there fail as Linux's does on, say, FAT (`EPERM`).
     fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        let _ = (path, mode);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Create a named pipe's node ([`EntryType::Fifo`]) at `path`, with
+    /// permission bits `mode`, and return its inode number -- as
+    /// [`mknod_socket`](Self::mknod_socket), whose rules it shares: what it
+    /// names is kept by [`crate::ipc::fifo`], by the node's identity.
+    ///
+    /// Default: not supported (`EPERM` from `mknod`, as Linux's on FAT).
+    fn mknod_fifo(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
         let _ = (path, mode);
         Err(KernelError::NotSupported)
     }
@@ -4605,6 +4625,50 @@ impl Vfs {
         }
     }
 
+    /// Hold the named pipe's node at already-resolved `path` -- what its pipe
+    /// keeps while anyone has it open ([`crate::ipc::fifo`]): the node is
+    /// pinned, so a name unlinked meanwhile leaves it, and its mount cannot
+    /// be unmounted, until the hold goes. Counted on the mount first, as
+    /// [`Vfs::open_object`] counts one.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` if `path` names something other than a FIFO, or one
+    /// with no stable inode; the lookup's and the pin's own.
+    pub fn hold_fifo(path: impl AsRef<Path>) -> KernelResult<FileHold> {
+        let path = path.as_ref();
+        let (fs, fs_id, relative) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.objects = mp.objects.saturating_add(1);
+            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+        };
+        let pinned = {
+            let mut guard = fs.lock();
+            match guard.metadata(&relative) {
+                Ok(meta) if meta.entry_type == EntryType::Fifo && meta.ino != 0 => {
+                    guard.pin_ino(meta.ino).map(|()| Some(meta.ino))
+                }
+                Ok(_) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        match pinned {
+            Ok(Some(ino)) => {
+                note_hold(FileId { fs_id, ino });
+                Ok(FileHold(FileObject { fs, fs_id, ino }))
+            }
+            Ok(None) => {
+                release_mount_hold(fs_id);
+                Err(KernelError::NotSupported)
+            }
+            Err(e) => {
+                release_mount_hold(fs_id);
+                Err(e)
+            }
+        }
+    }
+
     /// Make a regular file with no name in already-resolved directory `dir`,
     /// held: Linux's `O_TMPFILE` (`fs::handle::open_tmpfile`).
     ///
@@ -7507,7 +7571,24 @@ impl Vfs {
     /// cannot hold a socket node, or reports no stable inode for it;
     /// otherwise what path resolution and the checks above report.
     pub fn mknod_socket(path: impl AsRef<Path>, mode: u16) -> KernelResult<FileId> {
-        let path = path.as_ref();
+        Self::mknod_node(path.as_ref(), mode, EntryType::Socket)
+    }
+
+    /// Create a named pipe's node at `path` (`mknod(S_IFIFO)`, `mkfifo`),
+    /// with permission bits `mode`, as [`Vfs::mknod_socket`] makes a socket's:
+    /// the same checks, the same refusals.
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::mknod_socket`]; `NotSupported` on a filesystem that cannot
+    /// hold one (FAT: `EPERM`).
+    pub fn mknod_fifo(path: impl AsRef<Path>, mode: u16) -> KernelResult<FileId> {
+        Self::mknod_node(path.as_ref(), mode, EntryType::Fifo)
+    }
+
+    /// The body of [`Vfs::mknod_socket`] and [`Vfs::mknod_fifo`]: a node of
+    /// `kind`, which is one of the two.
+    fn mknod_node(path: &Path, mode: u16, kind: EntryType) -> KernelResult<FileId> {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -7531,7 +7612,11 @@ impl Vfs {
                 umask,
                 false,
             );
-            let ino = guard.mknod_socket(&relative, perm)?;
+            let ino = if kind == EntryType::Fifo {
+                guard.mknod_fifo(&relative, perm)?
+            } else {
+                guard.mknod_socket(&relative, perm)?
+            };
             init_new_owner(&mut **guard, &relative, creator, false)?;
             acls.store(
                 &mut **guard,

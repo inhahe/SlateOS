@@ -106,6 +106,10 @@ enum MemFsNodeKind {
     /// nothing: the socket bound to it is found by this node's inode number
     /// in [`crate::ipc::unix_socket`]'s table.
     Socket,
+    /// A named pipe's node ([`EntryType::Fifo`]). It holds nothing either:
+    /// the pipe opening it leads to is [`crate::ipc::fifo`]'s, found by this
+    /// node's inode number.
+    Fifo,
 }
 
 /// A single node in the memory filesystem tree.
@@ -231,7 +235,7 @@ impl MemFsNode {
     /// answers); anything else that is not a file is a directory here, since
     /// symlinks are followed before a node is read.
     fn not_a_file(&self) -> KernelError {
-        if matches!(self.kind, MemFsNodeKind::Socket) {
+        if matches!(self.kind, MemFsNodeKind::Socket | MemFsNodeKind::Fifo) {
             KernelError::NoSuchDeviceOrAddress
         } else {
             KernelError::IsADirectory
@@ -384,7 +388,7 @@ impl MemFsNode {
     fn size(&self) -> u64 {
         match &self.kind {
             MemFsNodeKind::File(data) => data.len() as u64,
-            MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket => 0,
+            MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
             MemFsNodeKind::Symlink(target) => target.len() as u64,
         }
     }
@@ -396,6 +400,7 @@ impl MemFsNode {
             MemFsNodeKind::Dir(_) => EntryType::Directory,
             MemFsNodeKind::Symlink(_) => EntryType::Symlink,
             MemFsNodeKind::Socket => EntryType::Socket,
+            MemFsNodeKind::Fifo => EntryType::Fifo,
         }
     }
 
@@ -921,6 +926,20 @@ impl MemFs {
             }
         }
     }
+
+    /// A node that holds nothing -- a socket's or a named pipe's, `kind` --
+    /// at `path`, with permission bits `mode`: its inode number.
+    fn mknod_empty(&mut self, path: &Path, mode: u16, kind: MemFsNodeKind) -> KernelResult<u64> {
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        if self.child_ino(parent_ino, name)?.is_some() {
+            return Err(KernelError::AlreadyExists);
+        }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
+        let node = MemFsNode::new(kind, mode & 0o7777);
+        let ino = node.ino;
+        self.insert_new(parent_ino, name.to_path_buf(), node)?;
+        Ok(ino)
+    }
 }
 
 impl FileSystem for MemFs {
@@ -1108,8 +1127,9 @@ impl FileSystem for MemFs {
 
     fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
         let node = self.node_mut(ino)?;
-        // Only regular files are held; anything else stays path-addressed.
-        if !node.is_file() {
+        // Regular files and named pipes' nodes are held; anything else stays
+        // path-addressed.
+        if !node.is_file() && !matches!(node.kind, MemFsNodeKind::Fifo) {
             return Err(KernelError::NotSupported);
         }
         node.opens = node
@@ -1386,6 +1406,7 @@ impl FileSystem for MemFs {
         let mut dirs = 0usize;
         let mut links = 0usize;
         let mut sockets = 0usize;
+        let mut fifos = 0usize;
         let mut bytes = 0u64;
         for node in self.inodes.values() {
             match &node.kind {
@@ -1396,6 +1417,7 @@ impl FileSystem for MemFs {
                 MemFsNodeKind::Dir(_) => dirs = dirs.wrapping_add(1),
                 MemFsNodeKind::Symlink(_) => links = links.wrapping_add(1),
                 MemFsNodeKind::Socket => sockets = sockets.wrapping_add(1),
+                MemFsNodeKind::Fifo => fifos = fifos.wrapping_add(1),
             }
         }
 
@@ -1403,8 +1425,8 @@ impl FileSystem for MemFs {
         let mut s = String::new();
         let _ = write!(
             s,
-            "memfs: {} files, {} dirs, {} symlinks, {} sockets, {} bytes",
-            files, dirs, links, sockets, bytes
+            "memfs: {} files, {} dirs, {} symlinks, {} sockets, {} fifos, {} bytes",
+            files, dirs, links, sockets, fifos, bytes
         );
         s
     }
@@ -1579,15 +1601,11 @@ impl FileSystem for MemFs {
     }
 
     fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
-        let (parent_ino, name) = self.resolve_parent(path)?;
-        if self.child_ino(parent_ino, name)?.is_some() {
-            return Err(KernelError::AlreadyExists);
-        }
-        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
-        let node = MemFsNode::new(MemFsNodeKind::Socket, mode & 0o7777);
-        let ino = node.ino;
-        self.insert_new(parent_ino, name.to_path_buf(), node)?;
-        Ok(ino)
+        self.mknod_empty(path, mode, MemFsNodeKind::Socket)
+    }
+
+    fn mknod_fifo(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        self.mknod_empty(path, mode, MemFsNodeKind::Fifo)
     }
 
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
@@ -1652,7 +1670,7 @@ impl FileSystem for MemFs {
             .map(|n| match &n.kind {
                 MemFsNodeKind::File(data) => blocks_for(data.len()),
                 MemFsNodeKind::Symlink(target) => blocks_for(target.as_bytes().len()),
-                MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket => 0,
+                MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
             })
             .fold(0u64, u64::saturating_add);
         // memfs has no cap of its own: it grows until memory runs out. So its

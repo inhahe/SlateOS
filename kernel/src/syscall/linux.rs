@@ -6580,11 +6580,17 @@ fn open_common(
             }
             r
         }
-        Ok(None) => handlers::fs_open_kernel_path_mode(
+        Ok(None) => match handlers::fs_open_node_kernel_path_mode(
             canon_path,
             translate_open_flags(flags) | no_symlinks_bit,
             linux_create_mode(mode),
-        ),
+        ) {
+            handlers::NodeOpen::Done(r) => r,
+            // A named pipe: the opener gets its pipe, not the node.
+            handlers::NodeOpen::Fifo(node) => {
+                return open_fifo_fd(|a, nb| crate::ipc::fifo::open(&node, a, nb), flags);
+            }
+        },
     };
     if r.value < 0 {
         return linux_from_native(r);
@@ -6635,6 +6641,82 @@ fn open_common(
                 arg4: 0,
                 arg5: 0,
             });
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// How Linux `open` flags `flags` open a named pipe: `O_RDONLY` for reading,
+/// `O_WRONLY` for writing, `O_RDWR` for both. Access mode 3 -- neither, which
+/// Linux keeps for `ioctl`-only opens -- is answered `EINVAL` by
+/// [`open_fifo_fd`] before this is asked.
+fn fifo_access(flags: u32) -> crate::ipc::pipe::FifoAccess {
+    use crate::ipc::pipe::FifoAccess;
+    match flags & oflags::O_ACCMODE {
+        oflags::O_WRONLY => FifoAccess::Write,
+        oflags::O_RDWR => FifoAccess::Both,
+        _ => FifoAccess::Read,
+    }
+}
+
+/// Open a named pipe's node for the caller -- an `open` of it by `flags` --
+/// and give it a descriptor for the end: `open` makes the FIFO open
+/// (`ipc::fifo::open`, or `open_held` for a reopen), with the access and the
+/// nonblocking that `flags` say.
+///
+/// The FIFO open's own refusals are Linux's: `ENXIO` for a nonblocking write
+/// open with no reader; a signal while waiting for the other side restarts the
+/// call or, with a handler that did not ask for that, `EINTR`
+/// (`-ERESTARTSYS`). Access mode 3 is `EINVAL`, as `fifo_open`'s default
+/// case, before anything is opened.
+///
+/// One reference per process per pipe end, as for every pipe end here: an end
+/// this process holds already is shared by the new descriptor, and the open's
+/// own reference goes back.
+fn open_fifo_fd(
+    open: impl FnOnce(
+        crate::ipc::pipe::FifoAccess,
+        bool,
+    ) -> crate::error::KernelResult<crate::ipc::pipe::PipeHandle>,
+    flags: u32,
+) -> SyscallResult {
+    use crate::cap::ResourceType;
+    if flags & oflags::O_ACCMODE == oflags::O_ACCMODE {
+        return linux_err(errno::EINVAL);
+    }
+    let opened = open(fifo_access(flags), flags & oflags::O_NONBLOCK != 0);
+    let handle = match opened {
+        Ok(h) => h,
+        Err(KernelError::Interrupted) => {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let Some(pid) = caller_pid() else {
+        crate::ipc::pipe::close(handle);
+        return linux_err(errno::EBADF);
+    };
+    let raw = handle.raw();
+    let took = if pcb::owns_ipc_handle(pid, ResourceType::Pipe, raw) {
+        crate::ipc::pipe::close(handle);
+        false
+    } else {
+        pcb::register_ipc_handle(pid, ResourceType::Pipe, raw);
+        true
+    };
+    let status = flags & (oflags::O_ACCMODE | oflags::O_APPEND | oflags::O_NONBLOCK);
+    let mut entry = FdEntry::pipe(raw, status);
+    if flags & oflags::O_CLOEXEC != 0 {
+        entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+    }
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            if took {
+                // The open's own reference, given back; the table's error
+                // is the caller's.
+                let _ = close_handle(entry);
+            }
             linux_err(linux_errno_for(e))
         }
     }
@@ -6774,6 +6856,21 @@ fn reopen_own_fd(pid: u64, fd: i32, flags: u32) -> SyscallResult {
             };
             took_reference = true;
             FdEntry::file(new, status)
+        }
+        // A named pipe's end: its node opened again, as Linux opens the
+        // inode -- with the open's waits -- whatever its name is now.
+        HandleKind::Pipe
+            if crate::ipc::pipe::fifo_node(PipeHandle::from_raw(entry.raw_handle)).is_some() =>
+        {
+            let Some((hold, path)) =
+                crate::ipc::pipe::fifo_node(PipeHandle::from_raw(entry.raw_handle))
+            else {
+                return linux_err(errno::ENXIO);
+            };
+            return open_fifo_fd(
+                |a, nb| crate::ipc::fifo::open_held(hold, &path, a, nb),
+                flags,
+            );
         }
         HandleKind::Pipe => {
             let raw = entry.raw_handle;
@@ -7071,11 +7168,23 @@ fn open_kernel_path_install(
     // would be the same mistake one layer down.
     let create_mode = linux_create_mode(mode);
     let opened = match (beneath, tmpfile.is_some()) {
-        (Some(b), false) => crate::fs::handle::open_beneath_with_mode(b, kernel_flags, create_mode),
-        (None, false) => crate::fs::handle::open_with_mode(path, kernel_flags, create_mode),
+        (Some(b), false) => {
+            crate::fs::handle::open_node_beneath_with_mode(b, kernel_flags, create_mode)
+        }
+        (None, false) => crate::fs::handle::open_node_with_mode(path, kernel_flags, create_mode),
         // O_TMPFILE: a file with no name, in the directory the path names.
-        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode),
-        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode),
+        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode)
+            .map(crate::fs::handle::Opened::File),
+        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode)
+            .map(crate::fs::handle::Opened::File),
+    };
+    // A named pipe: the opener gets its pipe, not the node.
+    let opened = match opened {
+        Ok(crate::fs::handle::Opened::Fifo(node)) => {
+            return open_fifo_fd(|a, nb| crate::ipc::fifo::open(&node, a, nb), flags);
+        }
+        Ok(crate::fs::handle::Opened::File(h)) => Ok(h),
+        Err(e) => Err(e),
     };
     let raw_handle = match opened {
         Ok(h) => h,
@@ -20471,12 +20580,12 @@ fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
 /// | `mknod("/x", S_IFCHR, 0)`          | `EPERM`     | `EPERM`   | `EPERM`    | `EPERM` |
 /// | `mknod("/x", S_IFREG, 0)`          | 0, a file   | `EPERM`   | `EPERM`    | 0, a file |
 /// | `mknod("/x", S_IFSOCK, 0)`         | 0, a node   | `EPERM`   | `EPERM`    | 0, a node |
-/// | `mknod("/x", S_IFIFO, 0)`          | 0, a FIFO   | `EPERM`   | `EPERM`    | `EPERM`** |
+/// | `mknod("/x", S_IFIFO, 0)`          | 0, a FIFO   | `EPERM`   | `EPERM`    | 0, a FIFO** |
 ///
 /// *Linux's `may_mknod` returns `EPERM` for `S_IFDIR`; we agree on that
 /// terminal value — it just arrives via the mode-switch, not the
-/// `CAP_MKNOD` check. **No named pipes exist to make (known-issues
-/// `A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES`).
+/// `CAP_MKNOD` check. **Since 2026-10-08 (`ipc::fifo`); `EPERM` before, for
+/// want of named pipes.
 ///
 /// ## Why it matters
 ///
@@ -20513,12 +20622,10 @@ fn sys_mknodat(args: &SyscallArgs) -> SyscallResult {
 ///
 /// As Linux's `vfs_mknod`, only a device node needs `CAP_MKNOD`, which no
 /// caller here holds, so `S_IFCHR`/`S_IFBLK` are `EPERM`. A regular file
-/// (`S_IFREG`, or no type) and a socket's node (`S_IFSOCK` -- one nothing is
-/// bound to, which `connect` then refuses) are made, with the mode's
-/// permission bits less the umask. A FIFO is `EPERM` too, but for want of
-/// named pipes rather than of authority (known-issues
-/// `A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES`). All of these
-/// were `EPERM` until 2026-10-02.
+/// (`S_IFREG`, or no type), a socket's node (`S_IFSOCK` -- one nothing is
+/// bound to, which `connect` then refuses) and a named pipe's (`S_IFIFO`,
+/// `ipc::fifo`) are made, with the mode's permission bits less the umask.
+/// All of these were `EPERM` until 2026-10-02, the FIFO until 2026-10-08.
 fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
     // S_IF* constants mirrored locally — `umode_t` is 16-bit on x86_64
     // Linux, but the bit fields are the same as our module-level u32
@@ -20554,10 +20661,9 @@ fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
     let mode = (mode_raw as u16) as u32;
     let kind = mode & S_IFMT_BITS;
     match kind {
-        0 | S_IFREG_BITS | S_IFSOCK_BITS => {}
-        S_IFCHR_BITS | S_IFBLK_BITS | S_IFIFO_BITS => {
-            // A device needs CAP_MKNOD, which no caller holds; a FIFO needs
-            // named pipes, which do not exist (see this function's doc).
+        0 | S_IFREG_BITS | S_IFSOCK_BITS | S_IFIFO_BITS => {}
+        S_IFCHR_BITS | S_IFBLK_BITS => {
+            // A device needs CAP_MKNOD, which no caller holds.
             return linux_err(errno::EPERM);
         }
         S_IFDIR_BITS => {
@@ -20578,9 +20684,17 @@ fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
         return r;
     }
     let perm = linux_create_mode(u64::from(mode & 0o7777));
-    if kind == S_IFSOCK_BITS {
-        return match crate::fs::Vfs::mknod_socket(&resolved, perm) {
+    if kind == S_IFSOCK_BITS || kind == S_IFIFO_BITS {
+        let made = if kind == S_IFIFO_BITS {
+            crate::fs::Vfs::mknod_fifo(&resolved, perm)
+        } else {
+            crate::fs::Vfs::mknod_socket(&resolved, perm)
+        };
+        return match made {
             Ok(_) => SyscallResult::ok(0),
+            // A filesystem that cannot hold the node (FAT): EPERM, as Linux's
+            // `vfs_mknod` answers for one without `mknod`.
+            Err(KernelError::NotSupported) => linux_err(errno::EPERM),
             Err(e) => linux_err(linux_errno_for(e)),
         };
     }
@@ -21155,6 +21269,9 @@ fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
         // stale socket it may remove (`bind` refuses an existing name) from a
         // file it must not.
         crate::fs::EntryType::Socket => (S_IFSOCK, 0o755),
+        // A named pipe's node: `S_ISFIFO` is how `mkfifo`'s caller, a shell's
+        // `[ -p ]` and `find -type p` know one.
+        crate::fs::EntryType::Fifo => (S_IFIFO, 0o644),
     };
     let perm = if meta.permissions == 0 {
         default_perm
@@ -21375,6 +21492,14 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
     if entry.kind == HandleKind::File
         && let Ok(meta) = crate::fs::handle::fstat(entry.raw_handle)
     {
+        fill_stat_from_meta(buf, &meta);
+        return;
+    }
+
+    // A named pipe's end: its node, as Linux's fstat of a FIFO reports the
+    // node's inode -- its owner, mode and times, and a link count of 0 once
+    // its name is gone.
+    if let Some(meta) = fifo_meta(entry) {
         fill_stat_from_meta(buf, &meta);
         return;
     }
@@ -21793,6 +21918,18 @@ const STATX_BASIC_STATS: u32 = STATX_TYPE
     | STATX_CTIME
     | STATX_INO;
 
+/// The metadata of the named pipe's node an fd is an end of
+/// (`ipc::pipe::fifo_node`), or `None` for any other fd -- an ordinary pipe's
+/// included -- or a node whose metadata cannot be read.
+fn fifo_meta(entry: &crate::proc::linux_fd::FdEntry) -> Option<crate::fs::FileMeta> {
+    if entry.kind != crate::proc::linux_fd::HandleKind::Pipe {
+        return None;
+    }
+    let (hold, _) =
+        crate::ipc::pipe::fifo_node(crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle))?;
+    crate::fs::Vfs::object_metadata(&hold).ok()
+}
+
 /// Fill a 256-byte struct statx for the given fd-table entry.
 fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::FdEntry) {
     use crate::proc::linux_fd::HandleKind;
@@ -21801,6 +21938,12 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
     if entry.kind == HandleKind::File
         && let Ok(meta) = crate::fs::handle::fstat(entry.raw_handle)
     {
+        fill_statx_from_meta(buf, &meta);
+        return;
+    }
+
+    // A named pipe's end: its node's metadata, as `fill_stat_for_fd` takes it.
+    if let Some(meta) = fifo_meta(entry) {
         fill_statx_from_meta(buf, &meta);
         return;
     }
@@ -46578,6 +46721,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::CharDevice => 2,  // DT_CHR
             crate::fs::EntryType::BlockDevice => 6, // DT_BLK
             crate::fs::EntryType::Socket => 12,     // DT_SOCK
+            crate::fs::EntryType::Fifo => 1,        // DT_FIFO
         };
 
         out.extend_from_slice(&d_ino.to_le_bytes());

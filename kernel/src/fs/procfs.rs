@@ -3806,7 +3806,8 @@ fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
 /// entry, mirroring Linux's magic fd links.
 ///
 /// Every target is derived from the real fd entry — a regular file
-/// resolves to its VFS path, a pipe to `pipe:[id]`, and anonymous kernel
+/// resolves to its VFS path, a pipe to `pipe:[id]` (both ends the same id), a
+/// named pipe's end to its node, and anonymous kernel
 /// objects (eventfd / pidfd / memfd) to Linux's `anon_inode:[type]`
 /// labels.  The console maps to `/dev/console`.  Nothing here is
 /// fabricated: if a File handle can no longer be resolved (it raced a
@@ -3817,7 +3818,20 @@ pub(crate) fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf 
         HandleKind::Console => PathBuf::from("/dev/console"),
         HandleKind::File => crate::fs::handle::handle_name(entry.raw_handle)
             .unwrap_or_else(|_| PathBuf::from("anon_inode:[file]")),
-        HandleKind::Pipe => PathBuf::from(format!("pipe:[{}]", entry.raw_handle)),
+        // A named pipe's end names its node, as Linux's link does; an
+        // ordinary pipe's, the pipe.
+        HandleKind::Pipe => {
+            match crate::ipc::pipe::fifo_node(crate::ipc::pipe::PipeHandle::from_raw(
+                entry.raw_handle,
+            )) {
+                Some((_, path)) => path,
+                // Both ends name the one pipe, as Linux's one inode.
+                None => PathBuf::from(format!(
+                    "pipe:[{}]",
+                    crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle).pipe_number()
+                )),
+            }
+        }
         HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),
         HandleKind::PidFd => PathBuf::from("anon_inode:[pidfd]"),
         HandleKind::MemFd => PathBuf::from("anon_inode:[memfd]"),
@@ -16466,7 +16480,9 @@ pub fn self_test() -> KernelResult<()> {
         use crate::proc::linux_fd::FdEntry;
         let renders: &[(FdEntry, &str)] = &[
             (FdEntry::console(0), "/dev/console"),
-            (FdEntry::pipe(42, 0), "pipe:[42]"),
+            // Both ends of pipe 21 (handles 42 and 43) name the one pipe.
+            (FdEntry::pipe(42, 0), "pipe:[21]"),
+            (FdEntry::pipe(43, 0), "pipe:[21]"),
             (FdEntry::eventfd(0, 0), "anon_inode:[eventfd]"),
             (FdEntry::pidfd(7, 0), "anon_inode:[pidfd]"),
             (FdEntry::memfd(0, 0), "anon_inode:[memfd]"),

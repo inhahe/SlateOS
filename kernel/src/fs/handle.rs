@@ -342,7 +342,58 @@ pub fn open_with_mode(
     flags: OpenFlags,
     create_mode: u16,
 ) -> KernelResult<u64> {
+    file_only(open_impl(path.as_ref(), flags, create_mode, None))
+}
+
+/// What an open came to: a handle, or a named pipe's node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    /// A file or directory, open: its handle.
+    File(u64),
+    /// A named pipe's node, at this resolved path -- every check an open
+    /// makes passed. It has no contents to hold a handle on; its pipe is
+    /// opened instead ([`crate::ipc::fifo`]), by a caller that can give the
+    /// opener a pipe end.
+    Fifo(PathBuf),
+}
+
+/// [`open_with_mode`], answering a named pipe's node with
+/// [`Opened::Fifo`] rather than refusing it: the Linux `open`, which gives
+/// the opener the pipe, and the native `SYS_FIFO_OPEN`.
+///
+/// # Errors
+///
+/// As [`open_with_mode`].
+pub fn open_node_with_mode(
+    path: impl AsRef<Path>,
+    flags: OpenFlags,
+    create_mode: u16,
+) -> KernelResult<Opened> {
     open_impl(path.as_ref(), flags, create_mode, None)
+}
+
+/// [`open_beneath_with_mode`], answering a named pipe's node as
+/// [`open_node_with_mode`] does.
+///
+/// # Errors
+///
+/// As [`open_beneath_with_mode`].
+pub fn open_node_beneath_with_mode(
+    b: Beneath<'_>,
+    flags: OpenFlags,
+    create_mode: u16,
+) -> KernelResult<Opened> {
+    open_impl(b.rel, flags, create_mode, Some(b))
+}
+
+/// An open's handle, for a caller that can take nothing else: a named pipe's
+/// node is `NoSuchDeviceOrAddress` (`ENXIO`), as a socket's is -- there is
+/// nothing behind the name such a caller could read.
+fn file_only(opened: KernelResult<Opened>) -> KernelResult<u64> {
+    match opened? {
+        Opened::File(handle) => Ok(handle),
+        Opened::Fifo(_) => Err(KernelError::NoSuchDeviceOrAddress),
+    }
 }
 
 /// Set an open description's status flags, as Linux's `fcntl(F_SETFL)` does
@@ -534,7 +585,7 @@ pub fn open_beneath_with_mode(
     flags: OpenFlags,
     create_mode: u16,
 ) -> KernelResult<u64> {
-    open_impl(b.rel, flags, create_mode, Some(b))
+    file_only(open_impl(b.rel, flags, create_mode, Some(b)))
 }
 
 fn open_impl(
@@ -542,7 +593,7 @@ fn open_impl(
     flags: OpenFlags,
     create_mode: u16,
     beneath: Option<Beneath<'_>>,
-) -> KernelResult<u64> {
+) -> KernelResult<Opened> {
     // Must have at least READ or WRITE.
     if !flags.is_readable() && !flags.is_writable() {
         return Err(KernelError::InvalidArgument);
@@ -603,7 +654,7 @@ fn open_impl(
         } else {
             crate::fs::Vfs::resolve_beneath(b.base, b.rel, true, no_symlinks)?
         };
-        return open_resolved(norm, flags, create_mode).map(|h| marked(h, ro_volume));
+        return open_resolved(norm, flags, create_mode).map(|o| marked_open(o, ro_volume));
     }
 
     // Read-only volume enforcement: if this open would mutate the file
@@ -654,7 +705,7 @@ fn open_impl(
         crate::fs::Vfs::resolve_path(path)?
     };
 
-    open_resolved(norm, flags, create_mode).map(|h| marked(h, ro_volume))
+    open_resolved(norm, flags, create_mode).map(|o| marked_open(o, ro_volume))
 }
 
 /// `handle`, marked as opened in a read-only volume when `ro_volume`
@@ -667,6 +718,15 @@ fn marked(handle: u64, ro_volume: bool) -> u64 {
     handle
 }
 
+/// What an open came to, its handle [`marked`]. A named pipe's node has no
+/// handle to mark.
+fn marked_open(opened: Opened, ro_volume: bool) -> Opened {
+    match opened {
+        Opened::File(handle) => Opened::File(marked(handle, ro_volume)),
+        fifo @ Opened::Fifo(_) => fifo,
+    }
+}
+
 /// Everything an open does once the path has been resolved.
 ///
 /// Split out so `RESOLVE_BENEATH` can reach it: that mode resolves by a
@@ -674,7 +734,7 @@ fn marked(handle: u64, ro_volume: bool) -> u64 {
 /// [`open_impl`]) but must then do exactly what every other open does.
 /// Sharing the tail is what keeps the two from drifting, which is the same
 /// failure mode lane B found between the kernel's `openat2` and libc's.
-fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelResult<u64> {
+fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelResult<Opened> {
     open_resolved_within(norm, flags, create_mode, CREATE_RACE_RETRIES)
 }
 
@@ -691,7 +751,7 @@ fn open_resolved_within(
     flags: OpenFlags,
     create_mode: u16,
     create_races_left: u32,
-) -> KernelResult<u64> {
+) -> KernelResult<Opened> {
     // Check capability tags and POSIX ACLs — the process must be a member of
     // all groups required for this path (or any ancestor with tags), and the
     // path's ACL, if it has one, must grant the access this open asks for.
@@ -737,7 +797,7 @@ fn open_resolved_within(
                 {
                     return Err(KernelError::IsADirectory);
                 }
-                return allocate_dir_handle(norm.clone(), flags);
+                return allocate_dir_handle(norm.clone(), flags).map(Opened::File);
             }
 
             // Regular file.
@@ -752,6 +812,13 @@ fn open_resolved_within(
             // that meets this.
             if entry.entry_type == crate::fs::EntryType::Socket {
                 return Err(KernelError::NoSuchDeviceOrAddress);
+            }
+
+            // A named pipe's node: its pipe is opened, not the node, by the
+            // caller that can give the opener a pipe end (`Opened::Fifo`).
+            // `O_TRUNC` does nothing to one, as on Linux.
+            if entry.entry_type == crate::fs::EntryType::Fifo {
+                return Ok(Opened::Fifo(norm));
             }
 
             // `chattr +i` and `+a`: refused at the open, as Linux's
@@ -794,7 +861,7 @@ fn open_resolved_within(
             // pay nothing when no watch is watching for opens.
             let handle = allocate_handle(norm.clone(), offset, size, flags)?;
             crate::fs::notify::emit_opened(&norm);
-            Ok(handle)
+            Ok(Opened::File(handle))
         }
         Err(KernelError::NotFound) => {
             // File doesn't exist — create if CREATE is set.
@@ -840,7 +907,7 @@ fn open_resolved_within(
 
             let handle = allocate_handle(norm.clone(), 0, 0, flags)?;
             crate::fs::notify::emit_opened(&norm);
-            Ok(handle)
+            Ok(Opened::File(handle))
         }
         Err(e) => Err(e),
     }

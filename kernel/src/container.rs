@@ -2719,6 +2719,12 @@ pub fn tar_tree<B: AsRef<Path> + ?Sized>(base: &B) -> KernelResult<Vec<u8>> {
                     // skip sockets for the same reason (GNU tar: "socket
                     // ignored").
                 }
+                EntryType::Fifo => {
+                    // A named pipe is kept by tar as type '6', which our ustar
+                    // writer has no kind for yet: skipped, not archived as a
+                    // file it is not (known-issues
+                    // A-CONTAINER-TAR-HAS-NO-FIFO-ENTRY).
+                }
             }
         }
     }

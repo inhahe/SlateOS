@@ -2458,7 +2458,7 @@ fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallRes
     if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
         return SyscallResult::err(e);
     }
-    if handle.end() != pipe::PipeEnd::Write {
+    if !handle.writes() {
         return SyscallResult::err(KernelError::InvalidHandle);
     }
     let (buf, len) = (args.arg1, args.arg2 as usize);
@@ -2479,6 +2479,11 @@ fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallRes
     // slice into a dangling pointer.  Copying first makes both impossible.
     // (Non-blocking calls are bounced too: `try_write` still touches the
     // buffer from supervisor mode, which SMAP forbids outside a STAC window.)
+    // A blocking write longer than one bounce takes every byte all the same,
+    // as POSIX asks of a blocking write (`write_all_blocking`).
+    if patience == pipe::Patience::Forever && len > PIPE_CALL_MAX {
+        return count_or_err(write_all_blocking(handle, buf, len));
+    }
     let data = match read_call_buffer(buf, len, PIPE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
@@ -2488,6 +2493,37 @@ fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallRes
         pipe::Patience::Never => pipe::try_write(handle, &data),
         pipe::Patience::Upto(ns) => pipe::write_timeout(handle, &data, ns),
     })
+}
+
+/// A blocking pipe write of `len` bytes at user `buf`, more than one bounce
+/// ([`PIPE_CALL_MAX`]) holds: every byte goes in, a bounce at a time, as
+/// POSIX asks of a blocking write and Linux's `pipe_write` does. A signal or
+/// a reader gone after some went in ends it with the count so far -- the
+/// bounce's own write answers that way -- and so does a buffer that cannot
+/// be read further on.
+fn write_all_blocking(handle: PipeHandle, buf: u64, len: usize) -> KernelResult<usize> {
+    let mut done = 0usize;
+    while done < len {
+        let at = buf
+            .checked_add(done as u64)
+            .ok_or(KernelError::InvalidAddress)?;
+        let data = match read_call_buffer(at, len.saturating_sub(done), PIPE_CALL_MAX) {
+            Ok(d) => d,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        };
+        match pipe::write(handle, &data) {
+            Ok(n) => {
+                done = done.saturating_add(n);
+                if n < data.len() {
+                    break;
+                }
+            }
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(done)
 }
 
 /// The body of the three pipe reads; `patience` says which.
@@ -2503,7 +2539,7 @@ fn pipe_read_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallResu
     if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
         return SyscallResult::err(e);
     }
-    if handle.end() != pipe::PipeEnd::Read {
+    if !handle.reads() {
         return SyscallResult::err(KernelError::InvalidHandle);
     }
     let (buf, cap) = (args.arg1, args.arg2 as usize);
@@ -12585,6 +12621,124 @@ pub fn fs_open_kernel_path_mode(
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// What [`fs_open_node_kernel_path_mode`] came to.
+pub enum NodeOpen {
+    /// The open's answer: a file's handle, registered to the caller, or its
+    /// error -- what [`fs_open_kernel_path_mode`] answers.
+    Done(SyscallResult),
+    /// The path names a named pipe's node, at this resolved path, and every
+    /// check an open makes passed: the caller opens its pipe
+    /// (`ipc::fifo::open`).
+    Fifo(crate::fs::path::PathBuf),
+}
+
+/// [`fs_open_kernel_path_mode`], answering a named pipe's node with
+/// [`NodeOpen::Fifo`] rather than refusing it: the Linux `open`, which gives
+/// the opener the pipe.
+pub fn fs_open_node_kernel_path_mode(
+    path: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> NodeOpen {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return NodeOpen::Done(SyscallResult::err(e));
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_node_with_mode(path, flags, create_mode) {
+        Ok(crate::fs::handle::Opened::File(handle)) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            NodeOpen::Done(SyscallResult::ok(handle as i64))
+        }
+        Ok(crate::fs::handle::Opened::Fifo(node)) => NodeOpen::Fifo(node),
+        Err(e) => NodeOpen::Done(SyscallResult::err(e)),
+    }
+}
+
+/// `SYS_FS_MKFIFO` -- make a named pipe's node (`mkfifo`). See
+/// [`SYS_FS_MKFIFO`](super::number::SYS_FS_MKFIFO).
+pub fn sys_fs_mkfifo(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
+        return SyscallResult::err(e);
+    }
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Twelve bits, as a file's create takes them (`SYS_FS_OPEN_MODE`).
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = (args.arg2 as u16) & 0o7777;
+    match crate::fs::Vfs::mknod_fifo(&path, mode) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FIFO_OPEN` -- open a named pipe, for a pipe handle. See
+/// [`SYS_FIFO_OPEN`](super::number::SYS_FIFO_OPEN).
+pub fn sys_fifo_open(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::handle::{OpenFlags, Opened};
+    use crate::ipc::pipe::FifoAccess;
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let given = OpenFlags::from_bits(args.arg2 as u32);
+    // The access mode and the walk's flags; a FIFO is never made by an open.
+    let kept = [
+        OpenFlags::READ,
+        OpenFlags::WRITE,
+        OpenFlags::NOFOLLOW,
+        OpenFlags::NO_SYMLINKS,
+    ]
+    .into_iter()
+    .filter(|&f| given.contains(f))
+    .fold(OpenFlags::NONE, OpenFlags::union);
+    let access = match (kept.is_readable(), kept.is_writable()) {
+        (true, false) => FifoAccess::Read,
+        (false, true) => FifoAccess::Write,
+        (true, true) => FifoAccess::Both,
+        (false, false) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let node = match crate::fs::handle::open_node_with_mode(&path, kept, 0) {
+        Ok(Opened::Fifo(node)) => node,
+        Ok(Opened::File(handle)) => {
+            // Something else opened: not a FIFO, so the open the caller
+            // asked first answers as it did. Nothing was read through it.
+            let _ = crate::fs::handle::close(handle);
+            return SyscallResult::err(KernelError::NoSuchDeviceOrAddress);
+        }
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = match crate::ipc::fifo::open(&node, access, args.arg3 & 1 != 0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // One reference per process per pipe end, as `SYS_PIPE_CREATE`'s ends
+    // are held: an end the caller holds already is the one it gets.
+    if let Some(pid) = caller_pid() {
+        if pcb::owns_ipc_handle(pid, ResourceType::Pipe, handle.raw()) {
+            crate::ipc::pipe::close(handle);
+        } else {
+            pcb::register_ipc_handle(pid, ResourceType::Pipe, handle.raw());
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(handle.raw() as i64)
 }
 
 /// A file with no name in directory `dir` (`fs::handle::open_tmpfile`), its

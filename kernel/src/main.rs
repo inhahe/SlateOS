@@ -3647,6 +3647,17 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_cpu_timers(),
     );
+    // Named pipes: the opens that need no second task in the kernel, the
+    // rest -- blocking opens across a fork among them -- from ring 3
+    // (crate::ipc::fifo).
+    selftest::dispatch("Named pipes (FIFOs)", selftest::Severity::Integrity, || {
+        ipc::fifo::self_test()
+    });
+    selftest::dispatch_debug(
+        "Linux named pipes (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_fifo(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

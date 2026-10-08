@@ -17,6 +17,14 @@
 //! - **Close detection**: when the writer closes, reads drain remaining
 //!   bytes then return 0. When the reader closes, writes fail with
 //!   `ChannelClosed` (broken pipe).
+//! - **Whole writes**: a blocking write returns once every byte is in, and
+//!   one of at most [`PIPE_BUF`] bytes goes in whole -- never split around
+//!   another writer's -- as POSIX requires and Linux's `pipe_write` does.
+//! - **Named pipes**: a FIFO's node leads to a pipe of this table
+//!   ([`crate::ipc::fifo`]). Such a pipe starts with no end open, its ends
+//!   open and close again as the node is opened and closed, and a handle may
+//!   hold both ends at once (`O_RDWR`, [`PipeEnd::Both`]). It goes, with its
+//!   bytes, when the last end closes.
 //!
 //! ## Performance
 //!
@@ -83,10 +91,22 @@ fn alloc_pipe_id() -> PipeId {
     NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A handle to one end of a pipe.
+/// A handle to one end of a pipe -- or, for a named pipe opened for reading
+/// and writing, to both.
 ///
-/// Encodes the pipe ID and end (read=0, write=1) in a single `u64`.
-/// Bit 0 = end (0=read, 1=write), bits 1–63 = pipe ID.
+/// Encodes the pipe ID and the end in a single `u64`:
+///
+/// | bits | holds |
+/// |---|---|
+/// | 0 | the end: 0 read, 1 write |
+/// | 1-40 | the pipe ID |
+/// | 41-60 | a FIFO reader's open-time writer count ([`Self::seen_writers`]) |
+/// | 61 | both ends ([`PipeEnd::Both`]) |
+/// | 62 | bits 41-60 are set |
+///
+/// Bit 63 is never set, so a handle is a positive syscall answer. The two
+/// ends of an ordinary pipe differ only in bit 0, which `/proc/<pid>/fd`'s
+/// re-open relies on.
 ///
 /// Pipe handles occupy a different namespace from channel handles.
 /// The syscall layer distinguishes them by which syscall is used
@@ -94,11 +114,56 @@ fn alloc_pipe_id() -> PipeId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PipeHandle(u64);
 
+/// Bits of a [`PipeHandle`] that hold the pipe ID, above the end bit.
+const ID_BITS: u32 = 40;
+/// Where a FIFO reader's open-time writer count sits in its handle.
+const SEEN_SHIFT: u32 = 41;
+/// How many bits of that count are kept.
+const SEEN_BITS: u32 = 20;
+/// The handle holds both ends.
+const BOTH_BIT: u64 = 1 << 61;
+/// The handle carries an open-time writer count.
+const SEEN_FLAG: u64 = 1 << 62;
+
 impl PipeHandle {
     /// Create a handle for a given pipe and end.
     #[allow(clippy::arithmetic_side_effects)]
     fn new(pipe_id: PipeId, end: PipeEnd) -> Self {
-        Self((pipe_id << 1) | end.as_bit())
+        let id = (pipe_id & ((1u64 << ID_BITS) - 1)) << 1;
+        match end {
+            PipeEnd::Read => Self(id),
+            PipeEnd::Write => Self(id | 1),
+            PipeEnd::Both => Self(id | BOTH_BIT),
+        }
+    }
+
+    /// This read handle, remembering `writers` -- the count of opens for
+    /// writing its FIFO had when it was opened, with no writer: until another
+    /// writer has come, the empty pipe is not end-of-file to `poll` (Linux's
+    /// `f_version`, which `fifo_open` sets for exactly this case).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn with_seen(self, writers: u32) -> Self {
+        let seen = u64::from(writers) & ((1u64 << SEEN_BITS) - 1);
+        Self(self.0 | SEEN_FLAG | (seen << SEEN_SHIFT))
+    }
+
+    /// The writer count [`Self::with_seen`] remembered, if any.
+    #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
+    fn seen_writers(self) -> Option<u32> {
+        (self.0 & SEEN_FLAG != 0)
+            .then_some(((self.0 >> SEEN_SHIFT) & ((1u64 << SEEN_BITS) - 1)) as u32)
+    }
+
+    /// Whether the handle may read: a read end, or both.
+    #[must_use]
+    pub fn reads(self) -> bool {
+        matches!(self.end(), PipeEnd::Read | PipeEnd::Both)
+    }
+
+    /// Whether the handle may write: a write end, or both.
+    #[must_use]
+    pub fn writes(self) -> bool {
+        matches!(self.end(), PipeEnd::Write | PipeEnd::Both)
     }
 
     /// Reconstruct a handle from its raw u64 representation.
@@ -119,12 +184,21 @@ impl PipeHandle {
     /// Extract the pipe ID.
     #[allow(clippy::arithmetic_side_effects)]
     fn pipe_id(self) -> PipeId {
-        self.0 >> 1
+        (self.0 >> 1) & ((1u64 << ID_BITS) - 1)
+    }
+
+    /// The pipe's identity, the same for both ends: what `/proc/<pid>/fd`
+    /// shows as `pipe:[N]`, as Linux shows one inode for both.
+    #[must_use]
+    pub fn pipe_number(self) -> u64 {
+        self.pipe_id()
     }
 
     /// Extract which end this handle refers to.
     pub fn end(self) -> PipeEnd {
-        if self.0 & 1 == 0 {
+        if self.0 & BOTH_BIT != 0 {
+            PipeEnd::Both
+        } else if self.0 & 1 == 0 {
             PipeEnd::Read
         } else {
             PipeEnd::Write
@@ -135,17 +209,13 @@ impl PipeHandle {
 /// Which end of the pipe a handle refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeEnd {
+    /// The read end.
     Read,
+    /// The write end.
     Write,
-}
-
-impl PipeEnd {
-    const fn as_bit(self) -> u64 {
-        match self {
-            Self::Read => 0,
-            Self::Write => 1,
-        }
-    }
+    /// Both: a named pipe opened for reading and writing (`O_RDWR`), which
+    /// counts as a reader and a writer of its own.
+    Both,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +232,34 @@ pub use super::waiters::Patience;
 use super::waiters::{
     Deadline, WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
+use crate::fs::path::PathBuf;
+use crate::fs::vfs::{FileHold, FileId};
 use crate::sched::task::TaskId;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+
+/// The most bytes a write puts in whole (POSIX `PIPE_BUF`, Linux's 4096): a
+/// write of at most this many waits for room for all of them, and is never
+/// split around another writer's.
+pub const PIPE_BUF: usize = 4096;
+
+/// A named pipe's tie to its node ([`crate::ipc::fifo`]).
+struct FifoLink {
+    /// The node's identity, by which `fifo` finds this pipe.
+    id: FileId,
+    /// The node, held: pinned while the pipe lasts, and what `fstat` of an
+    /// end describes.
+    hold: Arc<FileHold>,
+    /// The name it was first opened by, for `/proc/<pid>/fd`.
+    path: PathBuf,
+    /// Opens for reading so far (Linux's `r_counter`): what an open for
+    /// writing that waits for a reader watches change.
+    r_counter: u32,
+    /// Opens for writing so far (`w_counter`), likewise for readers.
+    w_counter: u32,
+    /// Opens waiting for the other side ([`fifo_wait_partner`]).
+    open_waiters: WaiterSet,
+}
 
 /// A kernel pipe: a ring buffer with reader/writer state.
 struct Pipe {
@@ -191,6 +288,8 @@ struct Pipe {
     /// Reference count for the write end.  Symmetric with
     /// `reader_refcount`.  Hitting 0 wakes blocked readers with EOF.
     writer_refcount: u32,
+    /// The named pipe this pipe serves, if it is one.
+    fifo: Option<Box<FifoLink>>,
 }
 
 impl Pipe {
@@ -206,7 +305,21 @@ impl Pipe {
             writer_waiters: WaiterSet::new(),
             reader_refcount: 1,
             writer_refcount: 1,
+            fifo: None,
         }
+    }
+
+    /// Whether a read end with `handle`'s open-time writer count is at end of
+    /// file: no writer -- and, for a FIFO reader opened before any writer
+    /// came, one has come and gone since ([`PipeHandle::with_seen`]).
+    fn eof_for(&self, handle: PipeHandle) -> bool {
+        self.write_closed
+            && match (handle.seen_writers(), self.fifo.as_ref()) {
+                (Some(seen), Some(link)) => {
+                    link.w_counter & ((1u32 << SEEN_BITS).wrapping_sub(1)) != seen
+                }
+                _ => true,
+            }
     }
 
     /// How many bytes can be read without blocking.
@@ -367,12 +480,16 @@ pub enum WriteFrom<'a> {
 /// [`probe_write`]: they differ only in how long they wait for room
 /// ([`Patience`]) and in what they put there.
 ///
-/// A reader gone is `ChannelClosed` first, whatever the room. With room, the
-/// bytes go in -- as many as fit -- and readers are woken; without, the wait
-/// `patience` allows: `WouldBlock`, `TimedOut`, or a park that a deliverable
-/// signal ends with `Interrupted`.
+/// A reader gone is `ChannelClosed` first, whatever the room. A write of at
+/// most [`PIPE_BUF`] bytes goes in whole once there is room for all of it --
+/// never split around another writer's; a longer one goes in as room comes,
+/// and readers are woken as it does. A blocking write returns once every byte
+/// is in. What the wait `patience` allows ends it early: with nothing written
+/// that is `WouldBlock`, `TimedOut`, or -- a deliverable signal -- `Interrupted`;
+/// with some written, the count so far, as Linux's `pipe_write` answers. A
+/// reader gone after some went in is the count so far too.
 fn write_with(handle: PipeHandle, from: &WriteFrom<'_>, patience: Patience) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Write {
+    if !handle.writes() {
         return Err(KernelError::InvalidHandle);
     }
     if let WriteFrom::Data(data) = from
@@ -384,6 +501,8 @@ fn write_with(handle: PipeHandle, from: &WriteFrom<'_>, patience: Patience) -> K
     let pid = current_user_pid();
     let task = sched::current_task_id();
     let mut deadline = Deadline::new();
+    // How much of the data is in so far.
+    let mut done: usize = 0;
 
     loop {
         {
@@ -397,15 +516,28 @@ fn write_with(handle: PipeHandle, from: &WriteFrom<'_>, patience: Patience) -> K
             // entry), and every path below either returns or re-registers.
             pipe.writer_waiters.remove(task);
 
-            // A reader gone is a broken pipe, before anything else.
+            // A reader gone is a broken pipe, before anything else -- once
+            // nothing went in; after, the count so far.
             if pipe.read_closed {
-                return Err(KernelError::ChannelClosed);
+                return if done > 0 {
+                    Ok(done)
+                } else {
+                    Err(KernelError::ChannelClosed)
+                };
             }
 
             match from {
                 WriteFrom::Data(data) => {
-                    let written = pipe.write_bytes(data);
-                    if written > 0 {
+                    let rest = data.get(done..).unwrap_or_default();
+                    // At most PIPE_BUF bytes go in whole or not at all.
+                    let fits = if data.len() <= PIPE_BUF {
+                        pipe.writable() >= rest.len()
+                    } else {
+                        pipe.writable() > 0
+                    };
+                    if fits {
+                        let written = pipe.write_bytes(rest);
+                        done = done.saturating_add(written);
                         // Wake readers blocked waiting for data.
                         let pipe_id = handle.pipe_id();
                         let readers = pipe.reader_waiters.take_all();
@@ -421,7 +553,12 @@ fn write_with(handle: PipeHandle, from: &WriteFrom<'_>, patience: Patience) -> K
                             );
                         }
                         super::stats::pipe_write(written as u64);
-                        return Ok(written);
+                        if done >= data.len() {
+                            return Ok(done);
+                        }
+                        // More to put in: look again, with the lock taken
+                        // anew, before waiting for room.
+                        continue;
                     }
                 }
                 WriteFrom::Probe => {
@@ -431,16 +568,21 @@ fn write_with(handle: PipeHandle, from: &WriteFrom<'_>, patience: Patience) -> K
                 }
             }
 
-            // Full: no wait, a timeout, or a park.
+            // Full: no wait, a timeout, or a park -- or, with some in, the
+            // count so far.
             if let Some(e) = deadline.ends_now(patience, task) {
-                return Err(e);
+                return if done > 0 { Ok(done) } else { Err(e) };
             }
 
             // Before parking, honour a deliverable signal -- otherwise a
             // blocked writer could never be interrupted. A timed wait maps
             // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
-                return Err(KernelError::Interrupted);
+                return if done > 0 {
+                    Ok(done)
+                } else {
+                    Err(KernelError::Interrupted)
+                };
             }
 
             // Block until space is available.
@@ -501,7 +643,7 @@ fn read_with(
     into: &mut ReadInto<'_>,
     patience: Patience,
 ) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Read {
+    if !handle.reads() {
         return Err(KernelError::InvalidHandle);
     }
     if let ReadInto::Buffer(buf) = into
@@ -632,7 +774,7 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
 /// - `Err(InvalidArgument)` — `buf` is empty.
 /// - `Err(InvalidHandle)` — handle is a write handle, or the pipe is gone.
 pub fn peek_at(handle: PipeHandle, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Read {
+    if !handle.reads() {
         return Err(KernelError::InvalidHandle);
     }
     if buf.is_empty() {
@@ -752,18 +894,29 @@ pub fn dup(handle: PipeHandle) -> KernelResult<PipeHandle> {
         .get_mut(&handle.pipe_id())
         .ok_or(KernelError::InvalidHandle)?;
 
-    let slot = match handle.end() {
-        PipeEnd::Read => &mut pipe.reader_refcount,
-        PipeEnd::Write => &mut pipe.writer_refcount,
-    };
-
-    // If the end is already at refcount 0 it should have been removed,
-    // but defensively reject dup against a zero refcount.
-    if *slot == 0 {
+    // Each end the handle holds gains a reference -- both, for a FIFO opened
+    // for reading and writing.
+    let (read, write) = (handle.reads(), handle.writes());
+    // If an end is already at refcount 0 it should have been removed, but
+    // defensively reject dup against a zero refcount.
+    if (read && pipe.reader_refcount == 0) || (write && pipe.writer_refcount == 0) {
         return Err(KernelError::InvalidHandle);
     }
-
-    *slot = slot.checked_add(1).ok_or(KernelError::InvalidHandle)?;
+    let readers = if read {
+        pipe.reader_refcount.checked_add(1)
+    } else {
+        Some(pipe.reader_refcount)
+    };
+    let writers = if write {
+        pipe.writer_refcount.checked_add(1)
+    } else {
+        Some(pipe.writer_refcount)
+    };
+    let (Some(readers), Some(writers)) = (readers, writers) else {
+        return Err(KernelError::InvalidHandle);
+    };
+    pipe.reader_refcount = readers;
+    pipe.writer_refcount = writers;
     Ok(handle)
 }
 
@@ -782,40 +935,44 @@ pub fn close(handle: PipeHandle) {
     // are broadcast conditions — they stay true forever, so a task left
     // parked here would never be woken by anything else.
     let mut wake_tasks = Vec::new();
+    // A named pipe's tie to its node, when its last end closed: given back
+    // with no lock held (`FileHold`, `fifo::forget`).
+    let mut gone_fifo = None;
 
     {
         let mut table = PIPES.lock();
         if let Some(pipe) = table.get_mut(&handle.pipe_id()) {
-            match handle.end() {
-                PipeEnd::Read => {
-                    pipe.reader_refcount = pipe.reader_refcount.saturating_sub(1);
-                    if pipe.reader_refcount > 0 {
-                        // Still referenced — keep the end open.
-                        return;
-                    }
+            if handle.reads() {
+                pipe.reader_refcount = pipe.reader_refcount.saturating_sub(1);
+                if pipe.reader_refcount == 0 && !pipe.read_closed {
                     pipe.read_closed = true;
                     // Wake blocked writers — they will see ChannelClosed.
-                    wake_tasks = pipe.writer_waiters.take_all();
+                    wake_tasks.extend(pipe.writer_waiters.take_all());
                 }
-                PipeEnd::Write => {
-                    pipe.writer_refcount = pipe.writer_refcount.saturating_sub(1);
-                    if pipe.writer_refcount > 0 {
-                        return;
-                    }
+            }
+            if handle.writes() {
+                pipe.writer_refcount = pipe.writer_refcount.saturating_sub(1);
+                if pipe.writer_refcount == 0 && !pipe.write_closed {
                     pipe.write_closed = true;
                     // Wake blocked readers — they will see EOF (0 bytes).
-                    wake_tasks = pipe.reader_waiters.take_all();
+                    wake_tasks.extend(pipe.reader_waiters.take_all());
                 }
             }
 
             // Remove pipe if both ends are fully closed.
             if pipe.read_closed && pipe.write_closed {
-                table.remove(&handle.pipe_id());
+                gone_fifo = table
+                    .remove(&handle.pipe_id())
+                    .and_then(|mut gone| gone.fifo.take());
             }
         }
     }
 
     wake_all(wake_tasks);
+    if let Some(link) = gone_fifo {
+        super::fifo::forget(link.id, handle.pipe_id());
+        // `link` goes here, its hold on the node with it.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -942,7 +1099,7 @@ pub fn readable(handle: PipeHandle) -> bool {
         return false;
     };
     // Readable if there's data, or if writer closed (EOF).
-    pipe.len > 0 || pipe.write_closed
+    pipe.len > 0 || pipe.eof_for(handle)
 }
 
 /// Check if a pipe write-end has buffer space available.
@@ -957,8 +1114,9 @@ pub fn writable(handle: PipeHandle) -> bool {
     let Some(pipe) = table.get(&handle.pipe_id()) else {
         return false;
     };
-    // Writable if there's space, or if reader closed (broken pipe).
-    (pipe.buf.len() - pipe.len) > 0 || pipe.read_closed
+    // Writable with room for a whole PIPE_BUF write, or if reader closed
+    // (broken pipe): as `poll_status`.
+    pipe.writable() >= PIPE_BUF.min(pipe.buf.len()) || pipe.read_closed
 }
 
 /// Park `task` on this pipe so that any state change wakes it.
@@ -1030,19 +1188,24 @@ pub fn poll_status(handle: PipeHandle) -> u16 {
         return 0x10; // POLL_HANGUP
     };
 
-    let is_read_end = handle.end() == PipeEnd::Read;
-
-    if is_read_end {
-        // Read end: readable if data available or writer closed (EOF).
-        if pipe.len > 0 || pipe.write_closed {
+    if handle.reads() {
+        // Read end: readable if data available or writer closed (EOF) -- for
+        // a FIFO reader opened before any writer, not until one has come and
+        // gone (`Pipe::eof_for`).
+        let eof = pipe.eof_for(handle);
+        if pipe.len > 0 || eof {
             flags |= 0x01; // POLL_READABLE
         }
-        if pipe.write_closed {
+        if eof {
             flags |= 0x10; // POLL_HANGUP (writer gone)
         }
-    } else {
-        // Write end: writable if space available or reader closed (EPIPE).
-        if (pipe.buf.len() - pipe.len) > 0 || pipe.read_closed {
+    }
+    if handle.writes() {
+        // Write end: writable with room for a whole PIPE_BUF write -- what
+        // Linux's free buffer slot means -- or with the reader gone (EPIPE).
+        // With less, a write of PIPE_BUF bytes would wait, and a poller told
+        // to write would spin on EAGAIN.
+        if pipe.writable() >= PIPE_BUF.min(pipe.buf.len()) || pipe.read_closed {
             flags |= 0x04; // POLL_WRITABLE
         }
         if pipe.read_closed {
@@ -1067,12 +1230,222 @@ pub fn readable_bytes(handle: PipeHandle) -> u64 {
         return 0;
     };
 
-    if handle.end() == PipeEnd::Read {
+    if handle.reads() {
         pipe.len as u64
     } else {
         // Write end: report writable space (less useful but consistent).
         pipe.buf.len().saturating_sub(pipe.len) as u64
     }
+}
+
+// ---------------------------------------------------------------------------
+// Named pipes ([`crate::ipc::fifo`])
+// ---------------------------------------------------------------------------
+
+/// How a FIFO is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoAccess {
+    /// For reading (`O_RDONLY`).
+    Read,
+    /// For writing (`O_WRONLY`).
+    Write,
+    /// For both (`O_RDWR`).
+    Both,
+}
+
+/// What an open of a FIFO waits for ([`fifo_wait_partner`]): an open of the
+/// other side, seen as its count of opens changing from this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoPartner {
+    /// A writer: the count of opens for writing was this.
+    Writer(u32),
+    /// A reader: the count of opens for reading was this.
+    Reader(u32),
+}
+
+/// Make the pipe of FIFO node `id`, held by `hold`, opened by `path`
+/// (`fifo::open`): no end is open yet, so both read as closed until one is
+/// attached ([`fifo_attach`]).
+pub(crate) fn fifo_create(id: FileId, hold: Arc<FileHold>, path: PathBuf) -> PipeId {
+    let pipe_id = alloc_pipe_id();
+    let mut pipe = Pipe::new(DEFAULT_BUFFER_CAPACITY);
+    pipe.reader_refcount = 0;
+    pipe.writer_refcount = 0;
+    pipe.read_closed = true;
+    pipe.write_closed = true;
+    pipe.fifo = Some(Box::new(FifoLink {
+        id,
+        hold,
+        path,
+        r_counter: 0,
+        w_counter: 0,
+        open_waiters: WaiterSet::new(),
+    }));
+    PIPES.lock().insert(pipe_id, pipe);
+    super::stats::pipe_created();
+    pipe_id
+}
+
+/// Whether FIFO pipe `pipe_id` is still there: its last end may have closed
+/// since `fifo` looked it up.
+pub(crate) fn fifo_alive(pipe_id: PipeId) -> bool {
+    PIPES.lock().contains_key(&pipe_id)
+}
+
+/// Attach an opener of FIFO pipe `pipe_id` for `access`, counting it as
+/// Linux's `fifo_open` counts one, and return its handle and what it must
+/// wait for before the open is complete, if anything:
+///
+/// - for reading, a writer when there is none -- unless `nonblock`, when the
+///   handle instead remembers the writer count, so that `poll` sees no
+///   hang-up until a writer has come ([`PipeHandle::with_seen`]);
+/// - for writing, a reader when there is none; with `nonblock` and no reader,
+///   `NoSuchDeviceOrAddress` (`ENXIO`), and nothing attached;
+/// - for both, nothing: the opener is its own reader and writer.
+///
+/// An opener whose side had nobody wakes the other side's waiting opens.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the pipe has gone (its last end closed since it was
+/// looked up -- the caller makes a new one), or is no FIFO's;
+/// `NoSuchDeviceOrAddress` as above; `Overflow` past `u32::MAX` openers.
+pub(crate) fn fifo_attach(
+    pipe_id: PipeId,
+    access: FifoAccess,
+    nonblock: bool,
+) -> KernelResult<(PipeHandle, Option<FifoPartner>)> {
+    let mut table = PIPES.lock();
+    let pipe = table.get_mut(&pipe_id).ok_or(KernelError::InvalidHandle)?;
+    let (readers, writers) = (pipe.reader_refcount, pipe.writer_refcount);
+    let link = pipe.fifo.as_mut().ok_or(KernelError::InvalidHandle)?;
+    let (read, write) = match access {
+        FifoAccess::Read => (true, false),
+        FifoAccess::Write => (false, true),
+        FifoAccess::Both => (true, true),
+    };
+    if write && !read && nonblock && readers == 0 {
+        return Err(KernelError::NoSuchDeviceOrAddress);
+    }
+    let new_readers = if read {
+        readers.checked_add(1).ok_or(KernelError::Overflow)?
+    } else {
+        readers
+    };
+    let new_writers = if write {
+        writers.checked_add(1).ok_or(KernelError::Overflow)?
+    } else {
+        writers
+    };
+    if read {
+        link.r_counter = link.r_counter.wrapping_add(1);
+    }
+    if write {
+        link.w_counter = link.w_counter.wrapping_add(1);
+    }
+    let (handle, partner) = match access {
+        FifoAccess::Read if writers == 0 && nonblock => (
+            PipeHandle::new(pipe_id, PipeEnd::Read).with_seen(link.w_counter),
+            None,
+        ),
+        FifoAccess::Read => (
+            PipeHandle::new(pipe_id, PipeEnd::Read),
+            (writers == 0).then_some(FifoPartner::Writer(link.w_counter)),
+        ),
+        FifoAccess::Write => (
+            PipeHandle::new(pipe_id, PipeEnd::Write),
+            (readers == 0).then_some(FifoPartner::Reader(link.r_counter)),
+        ),
+        FifoAccess::Both => (PipeHandle::new(pipe_id, PipeEnd::Both), None),
+    };
+    // An opener on a side that had nobody: the other side's waiting opens
+    // may go on (Linux's `wake_up_partner`).
+    let wake = if (read && readers == 0) || (write && writers == 0) {
+        link.open_waiters.take_all()
+    } else {
+        Vec::new()
+    };
+    pipe.reader_refcount = new_readers;
+    pipe.writer_refcount = new_writers;
+    if read {
+        pipe.read_closed = false;
+    }
+    if write {
+        pipe.write_closed = false;
+    }
+    drop(table);
+    wake_all(wake);
+    Ok((handle, partner))
+}
+
+/// Wait, as an open of a FIFO through `handle`, until the other side has
+/// opened since ([`fifo_attach`]'s `partner`). A deliverable signal ends the
+/// wait with `Interrupted`: the caller then closes `handle`, undoing the open,
+/// as Linux's `fifo_open` does before it answers `-ERESTARTSYS`.
+///
+/// # Errors
+///
+/// `Interrupted`; `InvalidHandle` for a pipe that is no FIFO's.
+pub(crate) fn fifo_wait_partner(handle: PipeHandle, partner: FifoPartner) -> KernelResult<()> {
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    loop {
+        {
+            let mut table = PIPES.lock();
+            let link = table
+                .get_mut(&handle.pipe_id())
+                .and_then(|p| p.fifo.as_mut())
+                .ok_or(KernelError::InvalidHandle)?;
+            link.open_waiters.remove(task);
+            let came = match partner {
+                FifoPartner::Writer(seen) => link.w_counter != seen,
+                FifoPartner::Reader(seen) => link.r_counter != seen,
+            };
+            if came {
+                return Ok(());
+            }
+            if deliverable_signal_pending(pid) {
+                return Err(KernelError::Interrupted);
+            }
+            link.open_waiters.insert(task);
+        }
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
+    }
+}
+
+/// Take FIFO pipe `pipe_id` away if it has no end open -- made for an open
+/// that then failed before attaching (`fifo::open`). Returns the node it was
+/// tied to, for the caller to forget with no lock held.
+pub(crate) fn fifo_drop_if_unused(pipe_id: PipeId) -> Option<FileId> {
+    let link = {
+        let mut table = PIPES.lock();
+        let unused = table
+            .get(&pipe_id)
+            .is_some_and(|p| p.fifo.is_some() && p.reader_refcount == 0 && p.writer_refcount == 0);
+        if !unused {
+            return None;
+        }
+        table.remove(&pipe_id).and_then(|mut p| p.fifo.take())?
+    };
+    let id = link.id;
+    drop(link);
+    Some(id)
+}
+
+/// The node of the named pipe `handle` is an end of, held, and the name it
+/// was opened by -- `None` for an ordinary pipe. What `fstat` of the end
+/// describes and `/proc/<pid>/fd` shows.
+#[must_use]
+pub fn fifo_node(handle: PipeHandle) -> Option<(Arc<FileHold>, PathBuf)> {
+    PIPES
+        .lock()
+        .get(&handle.pipe_id())
+        .and_then(|p| p.fifo.as_ref())
+        .map(|link| (Arc::clone(&link.hold), link.path.clone()))
 }
 
 // ---------------------------------------------------------------------------

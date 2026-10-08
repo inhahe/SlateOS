@@ -678,8 +678,10 @@ impl FileSystem for Ext4Fs {
     fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
         let ino = ext4_ino(ino)?;
         let inode = self.driver.read_inode(ino)?;
-        // Only regular files are held; anything else stays path-addressed.
-        if inode.i_mode & file_type::S_IFMT != file_type::S_IFREG {
+        // Regular files and named pipes' nodes are held; anything else stays
+        // path-addressed.
+        let kind = inode.i_mode & file_type::S_IFMT;
+        if kind != file_type::S_IFREG && kind != file_type::S_IFIFO {
             return Err(KernelError::NotSupported);
         }
         let count = self.pins.entry(ino).or_insert(0);
@@ -1043,43 +1045,23 @@ impl FileSystem for Ext4Fs {
     /// `ext4_mknod` makes one -- no extent tree (Linux gives one only to
     /// directories, files and symlinks), `i_block` zero.
     fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
-        let (parent_path, name) = split_parent_name(path)?;
-        let parent_ino = self.driver.resolve_path(parent_path)?;
-        let mut parent_inode = self.driver.read_inode(parent_ino)?;
-
-        if (parent_inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
-            return Err(KernelError::NotADirectory);
-        }
-        if self
-            .driver
-            .dir_lookup(&parent_inode, parent_ino, name)
-            .is_ok()
-        {
-            return Err(KernelError::AlreadyExists);
-        }
-
-        let preferred_group = self.driver.superblock().inode_group(parent_ino);
-        let (sock_ino, mut sock_inode) = self
-            .driver
-            .create_inode(file_type::S_IFSOCK | (mode & 0o7777), preferred_group)?;
-        sock_inode.i_flags &= !inode_flags::EXTENTS;
-        super::driver::inode_block_as_bytes_mut(&mut sock_inode).fill(0);
-        sock_inode.i_size_lo = 0;
-        sock_inode.i_size_high = 0;
-        self.driver.write_inode(sock_ino, &sock_inode)?;
-
-        self.driver.add_dir_entry(
-            &mut parent_inode,
-            parent_ino,
-            sock_ino,
-            name,
+        self.mknod_empty(
+            path,
+            mode,
+            file_type::S_IFSOCK,
             super::ondisk::dir_type::SOCK,
-        )?;
+        )
+    }
 
-        self.driver.write_superblock()?;
-        self.driver.write_group_descs()?;
-        self.driver.flush()?;
-        Ok(u64::from(sock_ino))
+    /// A named pipe's node: an inode of type `S_IFIFO` with no data, made as
+    /// a socket's is.
+    fn mknod_fifo(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        self.mknod_empty(
+            path,
+            mode,
+            file_type::S_IFIFO,
+            super::ondisk::dir_type::FIFO,
+        )
     }
 
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
@@ -1228,6 +1210,45 @@ impl FileSystem for Ext4Fs {
 }
 
 impl Ext4Fs {
+    /// A node that holds nothing -- `ifmt` `S_IFSOCK` or `S_IFIFO`, listed
+    /// as `dtype` -- at `path`, with permission bits `mode`: an inode with no
+    /// extent tree and `i_block` zero, as Linux's `ext4_mknod` makes one.
+    /// Returns its inode number.
+    fn mknod_empty(&mut self, path: &Path, mode: u16, ifmt: u16, dtype: u8) -> KernelResult<u64> {
+        let (parent_path, name) = split_parent_name(path)?;
+        let parent_ino = self.driver.resolve_path(parent_path)?;
+        let mut parent_inode = self.driver.read_inode(parent_ino)?;
+
+        if (parent_inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+        if self
+            .driver
+            .dir_lookup(&parent_inode, parent_ino, name)
+            .is_ok()
+        {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        let preferred_group = self.driver.superblock().inode_group(parent_ino);
+        let (ino, mut inode) = self
+            .driver
+            .create_inode(ifmt | (mode & 0o7777), preferred_group)?;
+        inode.i_flags &= !inode_flags::EXTENTS;
+        super::driver::inode_block_as_bytes_mut(&mut inode).fill(0);
+        inode.i_size_lo = 0;
+        inode.i_size_high = 0;
+        self.driver.write_inode(ino, &inode)?;
+
+        self.driver
+            .add_dir_entry(&mut parent_inode, parent_ino, ino, name, dtype)?;
+
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(u64::from(ino))
+    }
+
     /// Replace inode `ino`'s whole contents with `data`: what `write_file`
     /// does to a file that exists, and what an in-place write falls back to
     /// when the extent tree cannot be extended.
@@ -2034,8 +2055,8 @@ fn dir_type_to_entry_type(ftype: u8) -> EntryType {
         dir_type::SOCK => EntryType::Socket,
         dir_type::CHRDEV => EntryType::CharDevice,
         dir_type::BLKDEV => EntryType::BlockDevice,
-        // Fallback for a FIFO, which the VFS has no type for yet: known-issues
-        // A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES.
+        dir_type::FIFO => EntryType::Fifo,
+        // UNKNOWN, or a byte no type has: a regular file, as before.
         _ => EntryType::File,
     }
 }
@@ -2053,6 +2074,7 @@ fn mode_to_entry_type(mode: u16) -> EntryType {
         // one yet.)
         file_type::S_IFCHR => EntryType::CharDevice,
         file_type::S_IFBLK => EntryType::BlockDevice,
+        file_type::S_IFIFO => EntryType::Fifo,
         _ => EntryType::File,
     }
 }
@@ -2555,10 +2577,11 @@ fn test_dir_type_conversions() -> KernelResult<()> {
         crate::serial_println!("[ext4-vfs]   FAIL: mode BLK");
         return Err(KernelError::InternalError);
     }
-    // A FIFO mode still falls back to File — same catch-all reasoning as the
-    // dir_type arm above.
-    if mode_to_entry_type(file_type::S_IFIFO) != EntryType::File {
-        crate::serial_println!("[ext4-vfs]   FAIL: mode FIFO fallback");
+    // A FIFO is a FIFO, by its mode and by its directory entry.
+    if mode_to_entry_type(file_type::S_IFIFO) != EntryType::Fifo
+        || dir_type_to_entry_type(super::ondisk::dir_type::FIFO) != EntryType::Fifo
+    {
+        crate::serial_println!("[ext4-vfs]   FAIL: FIFO type");
         return Err(KernelError::InternalError);
     }
 

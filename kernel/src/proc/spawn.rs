@@ -24087,6 +24087,114 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of named pipes through the Linux ABI:
+/// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
+/// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a
+/// writer with no reader `ENXIO`, a reader at once, with no `POLLHUP` until a
+/// writer has come), bytes through, `fstat` of an end naming the node; whole
+/// writes of at most `PIPE_BUF` and no `POLLOUT` without room for one;
+/// blocking opens across a fork in both orders and a blocking write of more
+/// than the FIFO holds; `O_RDWR`, which never waits; a broken pipe; an end
+/// opened again through `/proc/self/fd`; and a FIFO unlinked while open
+/// (`crate::ipc::fifo`).
+pub fn self_test_linux_fifo() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux named pipes (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_fifo_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fifo"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fifo",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: named pipes spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: named pipes (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "a child's blocking write-only open, or its 100000-byte blocking write, failed"
+            }
+            Some(0x32 | 0x33) => "a child's nonblocking writer did not open or write",
+            Some(0x3f) => "mmap of the test's buffers failed",
+            Some(0x40..=0x43) => {
+                "mknod(S_IFIFO) did not make a FIFO that stat, a second mknod and getdents see"
+            }
+            Some(0x44) => "a nonblocking writer with no reader was not ENXIO",
+            Some(0x45..=0x47) => {
+                "a nonblocking reader did not open at once, read end of file, and poll nothing"
+            }
+            Some(0x48..=0x4c) => {
+                "bytes did not go from a writer to the reader (or EAGAIN when empty)"
+            }
+            Some(0x4d | 0x4e) => "fstat of an end did not say S_IFIFO and the node's inode",
+            Some(0x4f | 0x50) => "the writer's close was not POLLHUP and end of file",
+            Some(0x51 | 0x52) => "a writer did not open, or F_GETPIPE_SZ was not 65536",
+            Some(0x53..=0x56) => {
+                "a 200-byte nonblocking write into a FIFO with 100 bytes of room was not EAGAIN \
+                 with no POLLOUT, or the fill and drain failed"
+            }
+            Some(0x57..=0x5b) => {
+                "a child's blocking writer did not meet the parent's reader, or its 100000 bytes \
+                 did not all arrive"
+            }
+            Some(0x5c..=0x60) => "the parent's blocking reader did not meet a child's writer",
+            Some(0x61..=0x67) => {
+                "O_RDWR waited, or did not read what it wrote, or its bytes outlived the last close"
+            }
+            Some(0x68..=0x6a) => "a writer whose reader had gone did not get EPIPE",
+            Some(0x6b..=0x6e) => "/proc/self/fd of an end did not name the FIFO or open it again",
+            Some(0x6f..=0x73) => "a FIFO unlinked while open did not go on",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: named pipes (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux named pipes (ring 3: mknod S_IFIFO, nonblocking and blocking opens, \
+         whole writes, O_RDWR, a broken pipe, /proc/self/fd, unlinked while open): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of the `SIGCHLD` a parent is sent when its child stops or
 /// continues, through the Linux ABI: [`elf::build_linux_sigchld_stop_test_elf`]
 /// (`build/sigchldstoptest.c`). The parent's handler is called with

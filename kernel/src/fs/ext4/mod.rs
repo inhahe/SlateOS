@@ -127,6 +127,7 @@ pub fn self_test() -> KernelResult<()> {
             crate::fs::EntryType::CharDevice => "CHR ",
             crate::fs::EntryType::BlockDevice => "BLK ",
             crate::fs::EntryType::Socket => "SOCK",
+            crate::fs::EntryType::Fifo => "FIFO",
         };
         serial_println!(
             "[ext4]     {} {:20} {} bytes",

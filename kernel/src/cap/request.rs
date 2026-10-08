@@ -1378,10 +1378,11 @@ fn self_test_with(asker: u64, handler_pid: u64) -> KernelResult<()> {
         event_parts(&ev) == Some((EVENT_ENDED, RequestStatus::TimedOut.code(), id)),
         "no EVENT_ENDED for a timed-out request",
     )?;
+    // `TimedOut`, as `decide` documents it: too late, not malformed.
     check(
-        decide(id, true, Decider::Handler(handler_pid)) == Err(KernelError::InvalidArgument)
+        decide(id, true, Decider::Handler(handler_pid)) == Err(KernelError::TimedOut)
             && !pcb::has_capability_for(asker, ResourceType::SystemClock, 0, Rights::WRITE),
-        "a timed-out request was granted",
+        "a timed-out request was granted, or its answer was not TimedOut",
     )?;
 
     // 8. The asker's exit cancels what it had pending.

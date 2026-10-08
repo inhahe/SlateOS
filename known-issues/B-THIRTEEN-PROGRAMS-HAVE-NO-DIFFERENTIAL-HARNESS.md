@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `sleep` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -78,3 +78,8 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   outside and equal to the base, through links, with a missing base -- `-z`,
   `-q`, and every descriptor: 284 agree, 0 differ, 4 differ on purpose. No
   change needed.
+* **`true` and `false`, 2026-10-07** -- `scripts/true-diff.sh`, one harness
+  for both as upstream is one program for both. Every argument ignored,
+  options too, except `--help` and `--version` spelled in full and alone, and
+  those two followed by `close_stdout`, so even `true --help >/dev/full` is a
+  write error: 68 agree, 0 differ, 4 differ on purpose. No change needed.

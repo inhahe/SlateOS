@@ -498,6 +498,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |
+| `scripts/true-diff.sh` | Differential test: our `true` and `false` against GNU coreutils 9.4's. |
 | `scripts/truncate-diff.sh` | truncate-diff.sh — compare our `truncate` against the real GNU one, in WSL. |
 | `scripts/tsort-diff.sh` | Differential test: our tsort against GNU tsort. |
 | `scripts/tsort-probe.py` | Ad-hoc measurement of GNU `tsort`. Not part of the build; kept only so the |
@@ -529,4 +530,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_519 scripts._
+_520 scripts._

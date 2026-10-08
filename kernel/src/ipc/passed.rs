@@ -134,6 +134,13 @@ impl Passed {
             HandleKind::UnixSocket => {
                 super::unix_socket::dup(super::unix_socket::UnixHandle::from_raw(raw)).map(|_| ())
             }
+            HandleKind::Namespace => {
+                if crate::nsfs::retain(raw) {
+                    Ok(())
+                } else {
+                    Err(KernelError::InvalidHandle)
+                }
+            }
         };
         held.map_err(|_| KernelError::InvalidHandle)?;
         if entry.kind == HandleKind::UnixSocket {

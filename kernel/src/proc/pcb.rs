@@ -1322,6 +1322,10 @@ pub struct Process {
     /// file reads end-of-file, as Linux's (which holds the `mm` it opened)
     /// does (`fs::procfs`, [`note_exec`]).
     pub exec_gen: u64,
+    /// The UTS namespace the process is in (`crate::utsns`): the host and
+    /// domain names it sees and sets. Holds one reference on it, given up
+    /// when the record goes (`finish_process`); inherited by fork and spawn.
+    pub uts_ns: crate::utsns::UtsNsId,
 
     // --- Per-process page-fault accounting (minflt/majflt) ---
     //
@@ -1608,6 +1612,7 @@ impl Process {
             child_stime_ns: 0,
             prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
             exec_gen: 0,
+            uts_ns: crate::utsns::ROOT_UTS,
             acct_min_flt: 0,
             acct_maj_flt: 0,
             child_min_flt: 0,
@@ -1808,6 +1813,7 @@ pub fn fork_create(
         mmap_commit_policy,
         parent_pgid,
         parent_sid,
+        uts_ns,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1906,6 +1912,7 @@ pub fn fork_create(
             // its own (unless it later calls setpgid/setsid).
             parent.pgid,
             parent.sid,
+            parent.uts_ns,
         )
     };
 
@@ -2158,6 +2165,9 @@ pub fn fork_create(
         child_stime_ns: 0,
         prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
         exec_gen: 0,
+        // The parent's UTS namespace, held once more below
+        // (`clone(CLONE_NEWUTS)` moves the child to a new one afterwards).
+        uts_ns,
         // Page-fault accounting also resets on fork.
         acct_min_flt: 0,
         acct_maj_flt: 0,
@@ -2181,6 +2191,9 @@ pub fn fork_create(
 
     table.insert(pid, child);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
+    // The child's hold on its UTS namespace. Under the process table, which
+    // `utsns` never takes: the order is one way only.
+    crate::utsns::retain(uts_ns);
     drop(table);
 
     // Bump the backing-file reference for each file-backed VMA the child
@@ -5536,6 +5549,8 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     let ipc_handles = core::mem::take(&mut proc.ipc_handles);
     let killed_on_cpu = core::mem::take(&mut proc.killed_on_cpu);
     let pml4_phys = proc.pml4_phys;
+    // Its hold on its UTS namespace, which goes with the last.
+    crate::utsns::release(proc.uts_ns);
     // The rest of the record holds nothing that needs a lock to release.
     drop(proc);
     destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);
@@ -9100,6 +9115,49 @@ pub fn cap_count(pid: ProcessId) -> Option<usize> {
 pub fn cap_entries(pid: ProcessId) -> Option<Vec<crate::cap::table::CapEntry>> {
     let table = PROCESS_TABLE.lock();
     table.get(&pid).map(|p| p.cap_table.valid_entries())
+}
+
+/// The UTS namespace process `pid` is in, or `None` if there is no such
+/// process.
+#[must_use]
+pub fn uts_ns(pid: ProcessId) -> Option<crate::utsns::UtsNsId> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.uts_ns)
+}
+
+/// Put process `pid` in UTS namespace `id`, handing it the caller's hold on
+/// `id` and giving up its hold on the one it leaves -- `unshare`, `setns`,
+/// `clone(CLONE_NEWUTS)`, a container's `--hostname`. Without such a
+/// process the caller's hold is given up instead.
+///
+/// # Errors
+///
+/// `NoSuchProcess`.
+pub fn set_uts_ns(pid: ProcessId, id: crate::utsns::UtsNsId) -> KernelResult<()> {
+    let old = {
+        let mut table = PROCESS_TABLE.lock();
+        match table.get_mut(&pid) {
+            Some(p) => core::mem::replace(&mut p.uts_ns, id),
+            None => {
+                drop(table);
+                crate::utsns::release(id);
+                return Err(KernelError::NoSuchProcess);
+            }
+        }
+    };
+    crate::utsns::release(old);
+    Ok(())
+}
+
+/// Spawn: `child` goes in `parent`'s UTS namespace, as a fork's child does.
+/// A no-op when either is not there.
+pub fn inherit_uts_ns(parent: ProcessId, child: ProcessId) {
+    let Some(id) = uts_ns(parent) else {
+        return;
+    };
+    if crate::utsns::retain(id) {
+        // A child gone meanwhile: `set_uts_ns` gives the hold back itself.
+        let _ = set_uts_ns(child, id);
+    }
 }
 
 /// Get the credentials for a process.

@@ -3898,6 +3898,11 @@ pub(crate) fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf 
         // As Linux names every socket: `socket:[<inode>]`, the handle standing
         // in for the inode.
         HandleKind::UnixSocket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),
+        // A namespace, as its `/proc/<pid>/ns` link names it: `uts:[N]`.
+        HandleKind::Namespace => match crate::nsfs::decode(entry.raw_handle) {
+            Some((kind, id)) => PathBuf::from(crate::nsfs::link_text(kind, id)),
+            None => PathBuf::from("anon_inode:[namespace]"),
+        },
     }
 }
 
@@ -14771,6 +14776,14 @@ enum ProcPath<'a> {
     PidFdInfoDir(u64),
     /// A `/proc/<pid>/fdinfo/<n>` regular file describing fd `n` (pos/flags).
     PidFdInfoFile(u64, i32),
+    /// The `/proc/<pid>/ns` directory: one link per kind of namespace
+    /// (`crate::nsfs::KINDS`).
+    PidNsDir(u64),
+    /// A `/proc/<pid>/ns/<kind>` magic link: to the namespace of that kind
+    /// the process is in (`crate::nsfs`). Its text is `uts:[N]`; opening it
+    /// (the system-call layer, [`namespace_at`]) gives a handle on the
+    /// namespace, which `setns` takes.
+    PidNsLink(u64, crate::nsfs::NsKind),
     /// A directory in the `/proc/sys` sysctl tree.  The `&str` is the path
     /// *under* `/proc/sys` (`""` is `/proc/sys` itself, `"kernel"` is
     /// `/proc/sys/kernel`, etc.).
@@ -14897,14 +14910,16 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
         "kernel/ostype" => format!("{}\n", crate::uname::SYSNAME),
         "kernel/osrelease" => format!("{}\n", crate::uname::RELEASE),
         "kernel/version" => format!("{}\n", crate::uname::VERSION),
-        "kernel/hostname" => {
-            crate::fs::nameservice::init_defaults();
-            format!("{}\n", crate::fs::nameservice::get_hostname())
-        }
-        "kernel/domainname" => {
-            crate::fs::nameservice::init_defaults();
-            format!("{}\n", crate::fs::nameservice::get_domain())
-        }
+        // The reader's UTS namespace's names, as Linux's `proc_do_uts_string`
+        // reads `current->nsproxy->uts_ns`: the system's in the root.
+        "kernel/hostname" => format!(
+            "{}\n",
+            crate::utsns::hostname(crate::utsns::of_current()).unwrap_or_default()
+        ),
+        "kernel/domainname" => format!(
+            "{}\n",
+            crate::utsns::domainname(crate::utsns::of_current()).unwrap_or_default()
+        ),
         // Real PID ceiling (the per-namespace process cap).
         "kernel/pid_max" => format!("{}\n", crate::pidns::MAX_PIDS_PER_NS),
         // Real per-process fd-table size.
@@ -15065,6 +15080,18 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         return ProcPath::NotFound;
     }
 
+    // The `ns/` subtree: `<pid>/ns` (directory) and `<pid>/ns/<kind>` (a
+    // magic link to the namespace of that kind the process is in).
+    if rest == "ns" {
+        return ProcPath::PidNsDir(pid);
+    }
+    if let Some(sub) = rest.strip_prefix("ns/") {
+        return match crate::nsfs::NsKind::from_name(sub.as_bytes()) {
+            Some(kind) => ProcPath::PidNsLink(pid, kind),
+            None => ProcPath::NotFound,
+        };
+    }
+
     // The `task/` subtree: `<pid>/task`, `<pid>/task/<tid>`, and
     // `<pid>/task/<tid>/<file>` (the only nested directories in procfs).
     if rest == "task" {
@@ -15222,6 +15249,36 @@ impl FileSystem for ProcFs {
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
+                // The `ns/` subdirectory (the namespaces it is in).
+                entries.push(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from("ns"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+                Ok(entries)
+            }
+            ProcPath::PidNsDir(pid) => {
+                // `/proc/<pid>/ns` -- one link per kind of namespace this
+                // kernel has, for a process; a kernel task is in none. Only a
+                // reader who may inspect the process lists it, as Linux's
+                // `dr-x--x--x` lets only its owner read it.
+                if !pid_dir_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
+                }
+                let entries = crate::nsfs::KINDS
+                    .iter()
+                    .filter(|&&kind| namespace_of(pid, kind).is_some())
+                    .map(|kind| DirEntry {
+                        ino: 0,
+                        name: PathBuf::from(kind.name()),
+                        entry_type: EntryType::Symlink,
+                        size: 0,
+                    })
+                    .collect();
                 Ok(entries)
             }
             ProcPath::PidFdInfoDir(pid) => {
@@ -15315,6 +15372,7 @@ impl FileSystem for ProcFs {
             | ProcPath::PidTaskFile(_, _, _)
             | ProcPath::PidFdLink(_, _)
             | ProcPath::PidFdInfoFile(_, _)
+            | ProcPath::PidNsLink(_, _)
             | ProcPath::SysFile(_) => Err(KernelError::NotADirectory),
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
@@ -15386,6 +15444,7 @@ impl FileSystem for ProcFs {
             | ProcPath::PidTaskTidDir(_, _)
             | ProcPath::PidFdDir(_)
             | ProcPath::PidFdInfoDir(_)
+            | ProcPath::PidNsDir(_)
             | ProcPath::SysDir(_) => Err(KernelError::IsADirectory),
             ProcPath::SysFile(rel) => gen_sys(rel),
             ProcPath::RootFile(name) => generate(name),
@@ -15404,9 +15463,10 @@ impl FileSystem for ProcFs {
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
             // symlink opened without O_PATH.
-            ProcPath::PidLink(_, _) | ProcPath::SelfLink | ProcPath::PidFdLink(_, _) => {
-                Err(KernelError::InvalidArgument)
-            }
+            ProcPath::PidLink(_, _)
+            | ProcPath::SelfLink
+            | ProcPath::PidFdLink(_, _)
+            | ProcPath::PidNsLink(_, _) => Err(KernelError::InvalidArgument),
             ProcPath::PidFdInfoFile(pid, fd) => {
                 if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
@@ -15468,7 +15528,8 @@ impl FileSystem for ProcFs {
         let link = classify_path(rel);
         // Where a process runs from, what it runs and what it has open: only
         // a reader who may inspect it, as Linux's `proc_fd_access_allowed`.
-        if let ProcPath::PidLink(pid, _) | ProcPath::PidFdLink(pid, _) = link
+        if let ProcPath::PidLink(pid, _) | ProcPath::PidFdLink(pid, _) | ProcPath::PidNsLink(pid, _) =
+            link
             && pid_dir_exists(pid)
             && !reader_may_inspect(pid)
         {
@@ -15512,6 +15573,12 @@ impl FileSystem for ProcFs {
                 let entry =
                     crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
                 Ok(fd_link_target(&entry))
+            }
+            // `/proc/<pid>/ns/<kind>` → the namespace, as Linux names it:
+            // `uts:[4026531838]`.
+            ProcPath::PidNsLink(pid, kind) => {
+                let id = namespace_of(pid, kind).ok_or(KernelError::NotFound)?;
+                Ok(PathBuf::from(crate::nsfs::link_text(kind, id)))
             }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
@@ -15711,6 +15778,28 @@ fn proc_stat(path: &Path, with_size: bool) -> KernelResult<DirEntry> {
                 size: 0,
             })
         }
+        ProcPath::PidNsDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("ns"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidNsLink(pid, kind) => {
+            // A link while the process is in a namespace of the kind: not for
+            // a kernel task, nor a zombie ([`namespace_of`]).
+            namespace_of(pid, kind).ok_or(KernelError::NotFound)?;
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(kind.name()),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            })
+        }
         ProcPath::PidFdInfoFile(pid, fd) => {
             // A regular file, present only for a currently-open fd -- which is
             // what making it finds out, so it is made either way.
@@ -15744,6 +15833,44 @@ fn proc_stat(path: &Path, with_size: bool) -> KernelResult<DirEntry> {
         }
         ProcPath::NotFound => Err(KernelError::NotFound),
     }
+}
+
+/// The namespace of `kind` that `/proc/<pid>`'s process is in (`crate::nsfs`):
+/// `None` for a kernel task, which belongs to no process, and for a zombie,
+/// which has left its namespaces as Linux's exiting task drops its
+/// `nsproxy`.
+fn namespace_of(pid: u64, kind: crate::nsfs::NsKind) -> Option<u64> {
+    let process = proc_target(pid)?;
+    if is_zombie(process) {
+        return None;
+    }
+    crate::nsfs::of_process(kind, process)
+}
+
+/// The namespace a path names when it is a `/proc/<pid>/ns/<kind>` link --
+/// `self` for the caller's own -- for the system-call layer, which opens and
+/// stats such a path as Linux follows the link, to the namespace itself.
+/// `path` is the whole canonical path: procfs is at `/proc`.
+///
+/// `None` for any other path. `Some(Err(NotFound))` when the process is not
+/// there or is a zombie, `Some(Err(PermissionDenied))` when the caller may
+/// not inspect it -- Linux's `proc_ns_get_link`, `PTRACE_MODE_READ_FSCREDS`.
+pub(crate) fn namespace_at(path: &[u8]) -> Option<KernelResult<(crate::nsfs::NsKind, u64)>> {
+    let rel = core::str::from_utf8(path.strip_prefix(b"/proc/")?).ok()?;
+    let ProcPath::PidNsLink(pid, kind) = classify_path(rel) else {
+        return None;
+    };
+    if !pid_dir_exists(pid) {
+        return Some(Err(KernelError::NotFound));
+    }
+    if !reader_may_inspect(pid) {
+        return Some(Err(KernelError::PermissionDenied));
+    }
+    Some(
+        namespace_of(pid, kind)
+            .map(|id| (kind, id))
+            .ok_or(KernelError::NotFound),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -16563,11 +16690,17 @@ pub fn self_test() -> KernelResult<()> {
             ("5/fdinfo/255", "fdinfofile"),
             ("5/fdinfo/abc", "notfound"), // non-numeric fd
             ("5/fdinfo/0/x", "notfound"), // nested beyond an fd
+            ("5/ns", "nsdir"),
+            ("5/ns/uts", "nslink"),
+            ("5/ns/net", "notfound"),   // a kind this kernel has not got
+            ("5/ns/uts/x", "notfound"), // nested beyond a link
         ];
         for (path, want) in cases {
             let got = match classify_path(path) {
                 ProcPath::PidFdInfoDir(5) => "fdinfodir",
                 ProcPath::PidFdInfoFile(5, _) => "fdinfofile",
+                ProcPath::PidNsDir(5) => "nsdir",
+                ProcPath::PidNsLink(5, crate::nsfs::NsKind::Uts) => "nslink",
                 ProcPath::NotFound => "notfound",
                 _ => "other",
             };

@@ -72,7 +72,6 @@ use crate::serial_println;
 use crate::sync::Mutex;
 use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -336,21 +335,10 @@ static PROCESS_MOUNTS: Mutex<BTreeMap<u64, Vec<VolumeMount>>> = Mutex::new(BTree
 /// is ignored.  A process absent from this set has a writable rootfs.
 static PROCESS_ROOT_RO: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
-/// Per-process UTS hostname override (the Docker `--hostname` mechanism).
-///
-/// A process present in this map sees the stored hostname from `uname(2)` /
-/// `gethostname(2)` instead of the global system hostname.  This models a
-/// per-container UTS namespace: a container's init process is given the
-/// container hostname, so a Linux program inside the container reads it
-/// rather than the host's name.  Absent → the process sees the global
-/// hostname (`nameservice::get_hostname`).
-///
-/// Like the other per-process namespace maps it is keyed by PID and cleared
-/// in [`detach`], so a later process reusing the PID does not inherit a stale
-/// hostname.  (Child processes do not currently inherit it automatically —
-/// the same limitation as `PROCESS_ROOT`; container children are expected to
-/// be registered via the container layer.)
-static PROCESS_HOSTNAME: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
+// A container's hostname (Docker `--hostname`) was a per-process override
+// here until 2026-10-08; it is the container's UTS namespace now
+// (`crate::utsns`, `pcb::Process::uts_ns`), which children inherit with the
+// process record.
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -586,12 +574,13 @@ pub fn detach(process_id: u64) {
     PROCESS_ROOT.lock().remove(&process_id);
     PROCESS_MOUNTS.lock().remove(&process_id);
     PROCESS_ROOT_RO.lock().remove(&process_id);
-    PROCESS_HOSTNAME.lock().remove(&process_id);
 }
 
 /// Give process `child` the view `parent` has: its namespace (bind and hide
-/// rules), its root jail, its volumes, its read-only root and its hostname --
-/// what a fork or a spawn leaves the child of a container's process with.
+/// rules), its root jail, its volumes and its read-only root -- what a fork
+/// or a spawn leaves the child of a container's process with. (Its UTS
+/// namespace, the hostname, goes with the process record:
+/// `pcb::Process::uts_ns`.)
 ///
 /// Until 2026-10-08 a child got the namespace's rules alone, so a container's
 /// shell ran every command it started outside the container: on the host's
@@ -624,10 +613,6 @@ pub fn inherit(parent: u64, child: u64) -> KernelResult<()> {
     }
     if PROCESS_ROOT_RO.lock().contains(&parent) {
         PROCESS_ROOT_RO.lock().insert(child);
-    }
-    let hostname = PROCESS_HOSTNAME.lock().get(&parent).cloned();
-    if let Some(hostname) = hostname {
-        PROCESS_HOSTNAME.lock().insert(child, hostname);
     }
     Ok(())
 }
@@ -701,42 +686,6 @@ pub fn set_root_read_only(process_id: u64, read_only: bool) {
 /// Query whether a process's container root filesystem is read-only.
 pub fn is_root_read_only(process_id: u64) -> bool {
     PROCESS_ROOT_RO.lock().contains(&process_id)
-}
-
-/// Set a process's UTS hostname override (the Docker `--hostname` mechanism).
-///
-/// After this call, `uname(2)`/`gethostname(2)` from the process (and any
-/// process the container layer registers with the same hostname) report
-/// `name` instead of the global system hostname.
-///
-/// # Errors
-///
-/// - `InvalidArgument` if `name` is empty, longer than 64 bytes (the
-///   `__NEW_UTS_LEN` field width), or contains a NUL byte.
-pub fn set_hostname(process_id: u64, name: &str) -> KernelResult<()> {
-    if name.is_empty() || name.len() > 64 || name.as_bytes().contains(&0) {
-        return Err(KernelError::InvalidArgument);
-    }
-    PROCESS_HOSTNAME
-        .lock()
-        .insert(process_id, String::from(name));
-    Ok(())
-}
-
-/// Query a process's UTS hostname override, if any.
-///
-/// Returns `None` when the process has no override and should see the global
-/// system hostname.
-#[must_use]
-pub fn hostname_for(process_id: u64) -> Option<String> {
-    PROCESS_HOSTNAME.lock().get(&process_id).cloned()
-}
-
-/// Clear a process's UTS hostname override (return it to the global hostname).
-///
-/// Idempotent: clearing a process with no override is a no-op.
-pub fn clear_hostname(process_id: u64) {
-    PROCESS_HOSTNAME.lock().remove(&process_id);
 }
 
 /// Query a process's filesystem root, if any.
@@ -1369,10 +1318,9 @@ fn normalize_jailed(path: &Path) -> PathBuf {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Run namespace self-tests.
-/// [`inherit`]: a child gets its parent's namespace, root jail, volumes,
-/// read-only root and hostname -- and resolves a path as the parent does --
-/// while a parent with none of them leaves the child with none.
+/// [`inherit`]: a child gets its parent's namespace, root jail, volumes and
+/// read-only root -- and resolves a path as the parent does -- while a
+/// parent with none of them leaves the child with none.
 fn test_inherit() -> KernelResult<()> {
     const PARENT: u64 = 0xFFFF_0101;
     const CHILD: u64 = 0xFFFF_0102;
@@ -1388,7 +1336,6 @@ fn test_inherit() -> KernelResult<()> {
             detach(pid);
             clear_root(pid);
             clear_mounts(pid);
-            clear_hostname(pid);
         }
         let _ = destroy(ns);
     };
@@ -1397,7 +1344,6 @@ fn test_inherit() -> KernelResult<()> {
         set_root(PARENT, "/containers/inherit-test/rootfs")?;
         add_volume(PARENT, "/data", "/host/shared", false)?;
         set_root_read_only(PARENT, true);
-        set_hostname(PARENT, "jailed")?;
         inherit(PARENT, CHILD)?;
         inherit(PLAIN, PLAIN_CHILD)
     })();
@@ -1408,8 +1354,7 @@ fn test_inherit() -> KernelResult<()> {
     let same_view = query(CHILD) == ns
         && get_root(CHILD) == get_root(PARENT)
         && volume_count(CHILD) == 1
-        && is_root_read_only(CHILD)
-        && hostname_for(CHILD).as_deref() == Some("jailed");
+        && is_root_read_only(CHILD);
     let same_path = resolve_path_for(CHILD, "/etc/passwd").map(Cow::into_owned)
         == resolve_path_for(PARENT, "/etc/passwd").map(Cow::into_owned)
         && resolve_path_for(CHILD, "/data/x").map(Cow::into_owned)
@@ -1417,13 +1362,10 @@ fn test_inherit() -> KernelResult<()> {
     let plain = query(PLAIN_CHILD) == ROOT_NAMESPACE
         && get_root(PLAIN_CHILD).is_none()
         && volume_count(PLAIN_CHILD) == 0
-        && !is_root_read_only(PLAIN_CHILD)
-        && hostname_for(PLAIN_CHILD).is_none();
+        && !is_root_read_only(PLAIN_CHILD);
     cleanup(ns);
     if !same_view {
-        return fail(
-            "a child did not get its parent's namespace, root, volume, read-only root and hostname",
-        );
+        return fail("a child did not get its parent's namespace, root, volume and read-only root");
     }
     if !same_path {
         return fail("a child resolved a path other than as its parent does");
@@ -1431,10 +1373,11 @@ fn test_inherit() -> KernelResult<()> {
     if !plain {
         return fail("a parent with no view gave its child one");
     }
-    serial_println!("[namespace]   inherit (a child's jail, volumes, hostname): OK");
+    serial_println!("[namespace]   inherit (a child's jail and volumes): OK");
     Ok(())
 }
 
+/// Run namespace self-tests.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[namespace] Running self-tests...");
 
@@ -1450,7 +1393,6 @@ pub fn self_test() -> KernelResult<()> {
     test_process_attach_detach()?;
     test_process_root()?;
     test_volume_mounts()?;
-    test_hostname()?;
     test_inherit()?;
 
     // Restore the fast path that the tests above disabled. `attach`,
@@ -1598,43 +1540,6 @@ fn test_ns_fast_path_flag() -> KernelResult<()> {
     assert!(reset_ns_features_if_trivial(), "site 3 leaked state");
 
     serial_println!("[namespace]   fast-path flag: OK (3 sites, each from clean state)");
-    Ok(())
-}
-
-/// Test the per-process UTS hostname override (Docker `--hostname`).
-fn test_hostname() -> KernelResult<()> {
-    // A synthetic, never-scheduled PID so there is no live process to clear
-    // the override mid-test (mirrors test_process_root / test_volume_mounts).
-    const PID: u64 = 77_777;
-
-    // No override by default.
-    assert!(hostname_for(PID).is_none());
-
-    // Set and read back.
-    set_hostname(PID, "web-01")?;
-    assert_eq!(hostname_for(PID).as_deref(), Some("web-01"));
-
-    // Replace.
-    set_hostname(PID, "db-02")?;
-    assert_eq!(hostname_for(PID).as_deref(), Some("db-02"));
-
-    // Invalid names are rejected and leave the prior value intact.
-    assert!(set_hostname(PID, "").is_err());
-    let too_long = "x".repeat(65);
-    assert!(set_hostname(PID, &too_long).is_err());
-    assert!(set_hostname(PID, "a\0b").is_err());
-    assert_eq!(hostname_for(PID).as_deref(), Some("db-02"));
-
-    // Clear returns to the global hostname.
-    clear_hostname(PID);
-    assert!(hostname_for(PID).is_none());
-
-    // detach() must also drop the override (PID-reuse safety).
-    set_hostname(PID, "ephemeral")?;
-    detach(PID);
-    assert!(hostname_for(PID).is_none());
-
-    serial_println!("[namespace]   Per-process hostname (--hostname): OK");
     Ok(())
 }
 

@@ -582,6 +582,12 @@ struct Container {
     user_ns: u32,
     /// Network namespace ID (from netns module).
     net_ns: u32,
+    /// The container's UTS namespace (`crate::utsns`): the host and domain
+    /// names its processes see -- `--hostname`'s, or the system's as they
+    /// were at creation -- and the only ones a `sethostname` inside changes.
+    /// Holds one reference, given up at [`delete`]; each process that joins
+    /// holds its own.
+    uts_ns: crate::utsns::UtsNsId,
     /// Cgroup ID (from cgroup module).
     cgroup_id: u32,
     /// Veth pair connecting this container's namespace to the host.
@@ -656,11 +662,10 @@ struct Container {
     /// each process launched by [`run`] via
     /// [`crate::ipc::namespace::set_root_read_only`].
     read_only_root: bool,
-    /// UTS hostname for the container (Docker `--hostname`).  Empty means the
-    /// container's processes see the global system hostname.  When set, each
-    /// process launched by [`run`] is given this hostname via
-    /// [`crate::ipc::namespace::set_hostname`], so `uname(2)`/`gethostname(2)`
-    /// inside the container report it.
+    /// UTS hostname for the container (Docker `--hostname`), as configured.
+    /// Empty means its UTS namespace ([`uts_ns`](Self::uts_ns)) started with
+    /// the system's names. The namespace holds the live name, which a
+    /// `sethostname` inside may since have changed.
     hostname: String,
     /// The container's own IPv4 address inside its network namespace, captured
     /// from [`ContainerConfig::net_ip`] at create time.  `None` when no
@@ -795,6 +800,7 @@ impl Container {
             pid_ns: 0,
             user_ns: 0,
             net_ns: 0,
+            uts_ns: crate::utsns::ROOT_UTS,
             cgroup_id: 0,
             veth_pair: None,
             memberships: Vec::new(),
@@ -1211,15 +1217,34 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
 
     // --- Phase 2: Create sub-resources (with rollback on failure). ---
 
+    // 2-: UTS namespace, named by `--hostname` or with the system's names.
+    // First, so each rollback below gives it back with the rest.
+    let uts_ns = crate::utsns::create_from(crate::utsns::ROOT_UTS).inspect_err(|&e| {
+        serial_println!("[container] Failed to create UTS namespace: {:?}", e);
+    })?;
+    if !config.hostname.is_empty()
+        && let Err(e) = crate::utsns::set_hostname(uts_ns, &config.hostname)
+    {
+        serial_println!(
+            "[container] Hostname {:?} refused: {:?}",
+            config.hostname,
+            e
+        );
+        crate::utsns::release(uts_ns);
+        return Err(e);
+    }
+
     // 2a: PID namespace.
     let pid_ns = crate::pidns::create(crate::pidns::ROOT_NS).inspect_err(|&e| {
         serial_println!("[container] Failed to create PID namespace: {:?}", e);
+        crate::utsns::release(uts_ns);
     })?;
 
     // 2b: User namespace.
     let user_ns = crate::userns::create(crate::userns::ROOT_NS, 0).inspect_err(|&e| {
         serial_println!("[container] Failed to create user namespace: {:?}", e);
         let _ = crate::pidns::delete(pid_ns);
+        crate::utsns::release(uts_ns);
     })?;
 
     // 2c: Network namespace.
@@ -1227,6 +1252,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         serial_println!("[container] Failed to create network namespace: {:?}", e);
         let _ = crate::userns::delete(user_ns);
         let _ = crate::pidns::delete(pid_ns);
+        crate::utsns::release(uts_ns);
     })?;
 
     // 2d: Cgroup.
@@ -1235,6 +1261,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         let _ = crate::netns::delete(net_ns);
         let _ = crate::userns::delete(user_ns);
         let _ = crate::pidns::delete(pid_ns);
+        crate::utsns::release(uts_ns);
     })?;
 
     // --- Phase 3: Apply configuration. ---
@@ -1248,6 +1275,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
             let _ = crate::netns::delete(net_ns);
             let _ = crate::userns::delete(user_ns);
             let _ = crate::pidns::delete(pid_ns);
+            crate::utsns::release(uts_ns);
             return Err(e);
         }
     }
@@ -1260,6 +1288,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
             let _ = crate::netns::delete(net_ns);
             let _ = crate::userns::delete(user_ns);
             let _ = crate::pidns::delete(pid_ns);
+            crate::utsns::release(uts_ns);
             return Err(e);
         }
     }
@@ -1344,6 +1373,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.pid_ns = pid_ns;
         ct.user_ns = user_ns;
         ct.net_ns = net_ns;
+        ct.uts_ns = uts_ns;
         ct.cgroup_id = cgroup_id;
         ct.veth_pair = veth_pair;
         ct.memberships.clear();
@@ -1651,6 +1681,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         pid_ns,
         user_ns,
         net_ns,
+        uts_ns,
         cgroup_id,
         veth_pairs,
         name,
@@ -1684,6 +1715,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
             ct.pid_ns,
             ct.user_ns,
             ct.net_ns,
+            ct.uts_ns,
             ct.cgroup_id,
             veth_pairs,
             ct.name.clone(),
@@ -1736,6 +1768,7 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     let _ = crate::netns::delete(net_ns);
     let _ = crate::userns::delete(user_ns);
     let _ = crate::pidns::delete(pid_ns);
+    crate::utsns::release(uts_ns);
 
     // Release the container's overlay rootfs mount, if it owns one.  Done
     // outside the table lock (VFS has its own per-mount locking) and only
@@ -1833,23 +1866,24 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
 /// [`run`] always uses this entry point with both ids from the spawn
 /// result.
 pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult<()> {
-    let (pid_ns, user_ns, net_ns, cgroup_id, root_path, volumes, read_only_root, hostname, frozen) =
+    let (pid_ns, user_ns, net_ns, uts_ns, cgroup_id, root_path, volumes, read_only_root, frozen) =
         with_table(|table| {
-            let idx = id as usize;
-            if idx >= MAX_CONTAINERS || !table.containers[idx].active {
-                return Err(KernelError::InvalidArgument);
-            }
-            table.containers[idx].pids.push(pid);
+            let ct = table
+                .containers
+                .get_mut(id as usize)
+                .filter(|ct| ct.active)
+                .ok_or(KernelError::InvalidArgument)?;
+            ct.pids.push(pid);
             Ok((
-                table.containers[idx].pid_ns,
-                table.containers[idx].user_ns,
-                table.containers[idx].net_ns,
-                table.containers[idx].cgroup_id,
-                table.containers[idx].root_path.clone(),
-                table.containers[idx].volumes.clone(),
-                table.containers[idx].read_only_root,
-                table.containers[idx].hostname.clone(),
-                table.containers[idx].frozen,
+                ct.pid_ns,
+                ct.user_ns,
+                ct.net_ns,
+                ct.uts_ns,
+                ct.cgroup_id,
+                ct.root_path.clone(),
+                ct.volumes.clone(),
+                ct.read_only_root,
+                ct.frozen,
             ))
         })?;
 
@@ -1899,14 +1933,13 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
         crate::ipc::namespace::set_root_read_only(pid, true);
     }
 
-    // Apply the container's UTS hostname (Docker `--hostname`), if set.  Unlike
-    // the chroot/volume/read-only state this is independent of the rootfs jail
-    // (a container can override its hostname without a rootfs), so it is keyed
-    // only on a non-empty hostname.  A malformed name (rejected by
-    // `set_hostname`) is skipped — the value is validated at config time, so
-    // this is purely defensive.
-    if !hostname.is_empty() {
-        let _ = crate::ipc::namespace::set_hostname(pid, &hostname);
+    // Put the process in the container's UTS namespace (Docker `--hostname`):
+    // it, and every child it has, sees the container's names, and a
+    // `sethostname` inside renames the container alone. Independent of the
+    // rootfs jail. A pid with no process record (a self-test's synthetic one)
+    // is left be: `set_uts_ns` gives the hold back.
+    if crate::utsns::retain(uts_ns) {
+        let _ = crate::proc::pcb::set_uts_ns(pid, uts_ns);
     }
 
     // If the container is currently frozen (Docker `pause`), suspend the newly
@@ -1973,10 +2006,9 @@ pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelRes
     crate::ipc::namespace::clear_root(pid);
     crate::ipc::namespace::clear_mounts(pid);
 
-    // Drop the per-process UTS hostname override (keyed on the global PID),
-    // symmetric with the `set_hostname` call in `add_process_task`.
-    // Idempotent if the container had no hostname configured.
-    crate::ipc::namespace::clear_hostname(pid);
+    // Back to the system's UTS namespace, symmetric with `add_process_task`.
+    // A pid with no process record has nothing to move.
+    let _ = crate::proc::pcb::set_uts_ns(pid, crate::utsns::ROOT_UTS);
 
     Ok(())
 }
@@ -3028,15 +3060,30 @@ pub fn set_hostname(id: ContainerId, name: &str) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     with_table(|table| {
-        let idx = id as usize;
-        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
+        let ct = table
+            .containers
+            .get_mut(id as usize)
+            .filter(|ct| ct.active)
+            .ok_or(KernelError::InvalidArgument)?;
+        if ct.state != ContainerState::Created {
             return Err(KernelError::InvalidArgument);
         }
-        if table.containers[idx].state != ContainerState::Created {
-            return Err(KernelError::InvalidArgument);
-        }
-        table.containers[idx].hostname = String::from(name);
+        // The namespace's name is what processes see; under the container
+        // table's lock, which `utsns` never takes.
+        crate::utsns::set_hostname(ct.uts_ns, name)?;
+        ct.hostname = String::from(name);
         Ok(())
+    })
+}
+
+/// Container `id`'s UTS namespace, if it exists (self-tests).
+fn uts_ns_of(id: ContainerId) -> Option<crate::utsns::UtsNsId> {
+    with_table_ref(|table| {
+        table
+            .containers
+            .get(id as usize)
+            .filter(|ct| ct.active)
+            .map(|ct| ct.uts_ns)
     })
 }
 
@@ -5534,13 +5581,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
     serial_println!("[container]   Read-only root (--read-only) for init process: OK");
 
-    // Test 19c: UTS hostname (Docker `--hostname`).  A container created with a
-    // hostname gives its registered processes that name via the per-process UTS
-    // override, independent of any rootfs jail.  Uses a synthetic, never-
-    // scheduled PID for determinism (same reasoning as Test 19).
+    // Test 19c: UTS hostname (Docker `--hostname`).  A container has its own
+    // UTS namespace, named as configured (independent of any rootfs jail);
+    // `set_hostname` renames it while the container is Created and not after;
+    // the system's name is untouched; delete frees the namespace. Which
+    // namespace a real process is in is the ring-3 UTS test's to check.
     {
-        const HN_PID: u64 = 88893;
-
+        let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
         let hn_cfg = ContainerConfig::new("test-hostname-ct").hostname("web-01");
         assert_eq!(hn_cfg.hostname, "web-01", "builder must set hostname");
         let ct_hn = create(&hn_cfg).expect("create hostname container");
@@ -5549,24 +5596,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "web-01",
             "ContainerInfo must report hostname",
         );
-        // No rootfs jail set — hostname applies regardless of chroot.
-        add_process(ct_hn, HN_PID).expect("register hostname process");
-        assert_eq!(
-            crate::ipc::namespace::hostname_for(HN_PID).as_deref(),
-            Some("web-01"),
-            "registered process must see the container hostname",
+        let uts = uts_ns_of(ct_hn).unwrap_or(crate::utsns::ROOT_UTS);
+        assert_ne!(
+            uts,
+            crate::utsns::ROOT_UTS,
+            "the container has a UTS namespace of its own"
         );
-
-        // Teardown clears the per-process hostname override (PID-reuse safety).
-        remove_process(ct_hn, HN_PID).expect("deregister hostname process");
+        assert_eq!(
+            crate::utsns::hostname(uts).as_deref(),
+            Some("web-01"),
+            "the container's UTS namespace must carry its hostname",
+        );
         assert!(
-            crate::ipc::namespace::hostname_for(HN_PID).is_none(),
-            "hostname override must be cleared after deregistering",
+            set_hostname(ct_hn, "web-02").is_ok(),
+            "rename while Created"
+        );
+        assert_eq!(crate::utsns::hostname(uts).as_deref(), Some("web-02"));
+        assert_eq!(
+            crate::utsns::hostname(crate::utsns::ROOT_UTS),
+            system,
+            "a container's hostname must not touch the system's",
         );
         // Setting the hostname is rejected once the container is past Created.
         stop(ct_hn).expect("stop hostname container");
         assert!(set_hostname(ct_hn, "late").is_err());
         delete(ct_hn).expect("delete hostname container");
+        assert!(
+            !crate::utsns::exists(uts),
+            "delete must free the container's UTS namespace",
+        );
     }
     serial_println!("[container]   UTS hostname (--hostname) for init process: OK");
 

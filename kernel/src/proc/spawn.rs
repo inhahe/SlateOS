@@ -1890,6 +1890,10 @@ fn spawn_process_inner(
         pcb::destroy(pid);
         return Err(e);
     }
+    // And in its parent's UTS namespace, as a fork's child is.
+    if options.parent != 0 {
+        pcb::inherit_uts_ns(options.parent, pid);
+    }
 
     // Step 5d: Apply fd inheritance map.
     //
@@ -24209,6 +24213,128 @@ pub fn self_test_linux_setid() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux user and group ids (ring 3: seteuid away and back, the saved id, \
          setfsuid, group ids, a drop for good, setreuid and setuid): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of UTS namespaces and the handles on them through the Linux
+/// ABI: [`elf::build_linux_uts_namespaces_test_elf`] (`build/nstest.c`), run
+/// as root. `/proc/self/ns/uts` is a link whose descriptor `stat`, `fstat`
+/// and `NS_GET_NSTYPE` describe alike; `unshare(CLONE_NEWUTS)` gives the
+/// process a host name of its own; a fork child shares its namespace and
+/// leaves it with `setns`; `setns` moves between two handles' namespaces;
+/// `clone(CLONE_NEWUTS)` makes one for the child; `setns` takes a pidfd; a
+/// process that gave up root is refused all of it; the system's names are
+/// untouched at the end (`crate::utsns`, `crate::nsfs`).
+pub fn self_test_linux_uts_namespaces() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux UTS namespaces (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_uts_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-utsns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens `/proc` files: `sys_fs_open` wants a wildcard File capability.
+    // Nothing else: its right to make and enter namespaces is root's, an
+    // effective user id of 0, which its child gives up.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-utsns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
+    let before = crate::utsns::count();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: UTS namespaces spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x32) => {
+                "a fork child was not in its parent's namespace, or setns did not take it to \
+                 the system's names"
+            }
+            Some(0x33..=0x35) => {
+                "clone(CLONE_NEWUTS) did not give the child a namespace of its own"
+            }
+            Some(0x36..=0x38) => "the pidfd test's child could not make a namespace and name it",
+            Some(0x39..=0x3d) => {
+                "a process that gave up root made or entered a namespace, or set its host name"
+            }
+            Some(0x3e) => "a process that gave up root could not open its own namespace",
+            Some(0x40 | 0x41) => "uname, or /proc/self/ns/uts's link text (uts:[N]), failed",
+            Some(0x42..=0x45) => {
+                "/proc/self/ns/uts did not open, or stat, fstat and lstat of it disagree with \
+                 Linux's"
+            }
+            Some(0x46 | 0x47) => "O_NOFOLLOW opened the link, or a read of the handle did not fail",
+            Some(0x48 | 0x49) => "NS_GET_NSTYPE or NS_GET_PARENT answered wrongly",
+            Some(0x4a | 0x4b) => "/proc/self/fd or /proc/self/ns did not name the namespace",
+            Some(0x4c..=0x4f) => "unshare(CLONE_NEWUTS) did not give a host name of its own",
+            Some(0x50 | 0x51) => "the fork child's setns moved its parent, or did not end 0x2B",
+            Some(0x52 | 0x53) => "setns did not move between the two handles' namespaces",
+            Some(0x54..=0x56) => {
+                "setns took a mismatched kind, or something that is not an open namespace handle"
+            }
+            Some(0x57 | 0x58) => "the clone(CLONE_NEWUTS) child did not end 0x2C, or renamed us",
+            Some(0x59..=0x5f) => "setns with a pidfd did not take its process's namespace",
+            Some(0x60) => "setns with the pidfd of a reaped process was not ESRCH",
+            Some(0x61 | 0x62) => "a namespace did not outlive its creator while still in use",
+            Some(0x63) => "the child that gave up root did not end 0x2D",
+            Some(0x64) => "back in the first namespace, the system's names were not as they were",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Nothing it made outlives it, and the system's name is as it was.
+    if crate::utsns::count() != before || crate::utsns::hostname(crate::utsns::ROOT_UTS) != system {
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — {} namespaces outlived the program, or \
+             the system's host name changed",
+            crate::utsns::count().saturating_sub(before)
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux UTS namespaces (ring 3: /proc/self/ns/uts, unshare and sethostname, \
+         setns by handle and by pidfd, clone(CLONE_NEWUTS), refused without root, every \
+         namespace freed): OK"
     );
     Ok(())
 }

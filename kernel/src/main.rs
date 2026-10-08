@@ -149,6 +149,7 @@ mod mouse;
 mod msi;
 mod net;
 mod netns;
+mod nsfs;
 mod numa;
 mod nvme;
 mod oci;
@@ -197,6 +198,7 @@ mod udriver;
 mod uname;
 mod unicode;
 mod userns;
+mod utsns;
 mod virtio;
 mod vmguest;
 mod volume;
@@ -3674,6 +3676,13 @@ extern "C" fn kernel_main() -> ! {
         "Linux user and group ids (ring 3)",
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_setid(),
+    );
+    // UTS namespaces and the handles on them: unshare, setns by handle and by
+    // pidfd, clone(CLONE_NEWUTS), /proc/<pid>/ns (crate::utsns, crate::nsfs).
+    selftest::dispatch_debug(
+        "Linux UTS namespaces (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_uts_namespaces(),
     );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
@@ -8084,6 +8093,15 @@ extern "C" fn kernel_main() -> ! {
     userns::init();
     selftest::dispatch_debug("Userns", selftest::Severity::Integrity, || {
         userns::self_test()
+    });
+
+    // UTS namespaces: the host and domain names each process sees; and the
+    // handles on namespaces that /proc/<pid>/ns gives and setns takes.
+    selftest::dispatch_debug("UTS namespaces", selftest::Severity::Integrity, || {
+        utsns::self_test()
+    });
+    selftest::dispatch_debug("Namespace handles", selftest::Severity::Integrity, || {
+        nsfs::self_test()
     });
 
     // Step 22e⅞++++p8: Network namespace subsystem init + self-test.

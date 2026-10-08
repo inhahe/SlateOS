@@ -2077,19 +2077,12 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
         return Err(errno::EINVAL);
     }
 
-    // Reject any namespace clone.  Linux's clone3 honours these but
-    // we have no namespace subsystem.
-    const NAMESPACE_BITS: u64 = clone_flags::CLONE_NEWNS
-        | clone_flags::CLONE_NEWCGROUP
-        | clone_flags::CLONE_NEWUTS
-        | clone_flags::CLONE_NEWIPC
-        | clone_flags::CLONE_NEWUSER
-        | clone_flags::CLONE_NEWPID
-        | clone_flags::CLONE_NEWNET
-        | clone_flags::CLONE_NEWTIME;
-    if flags_user & NAMESPACE_BITS != 0 {
+    // Namespaces: as clone(2) (`clone_namespaces`). A new mount namespace
+    // is not yet: EINVAL here, as the rest this kernel cannot make.
+    if flags_user & clone_flags::CLONE_NEWNS != 0 {
         return Err(errno::EINVAL);
     }
+    clone_namespaces(flags_user)?;
 
     // Translate stack base + size to clone(2)'s "stack top" register.
     // clone(2) wants the value of the new RSP at child entry; on x86_64
@@ -2852,6 +2845,51 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
 /// The frame is still needed so the new task can inherit the parent's
 /// register state — both `thread_clone::clone_thread` and
 /// `fork::fork_process` read it for the child's saved-context image.
+/// Whether the caller may make a namespace or enter one -- what Linux asks
+/// `CAP_SYS_ADMIN` for. Here an effective user id of 0 (`proc::setid`'s Linux
+/// authority), or the native authority to make and attach namespaces: a
+/// `Namespace` capability with `WRITE` (`SYS_NS_CREATE`, `SYS_NS_ATTACH`).
+/// A kernel task may.
+fn caller_may_change_namespaces() -> bool {
+    caller_pid().is_none_or(|pid| {
+        pcb::get_credentials(pid).is_some_and(|c| c.uid == 0)
+            || pcb::has_capability_type(
+                pid,
+                crate::cap::ResourceType::Namespace,
+                crate::cap::Rights::WRITE,
+            )
+    })
+}
+
+/// The namespace bits of a `clone` or `clone3` flag word: what this kernel
+/// can make, for whom. `CLONE_NEWUTS` for a new process (`proc::fork`) by a
+/// caller that may ([`caller_may_change_namespaces`]): a thread shares its
+/// process's namespaces here, as it cannot on Linux, so a thread asking is
+/// `EINVAL`. The namespaces not built yet are `EINVAL` too -- until
+/// 2026-10-08 `clone(2)` took them and made nothing, so a program believed
+/// itself isolated and was not. `CLONE_NEWNS` keeps its own answer, `ENOSYS`,
+/// at its call sites. `Err(errno)`; `EPERM` for a caller that may not.
+fn clone_namespaces(flags: u64) -> Result<(), i32> {
+    const NOT_YET: u64 = clone_flags::CLONE_NEWIPC
+        | clone_flags::CLONE_NEWUSER
+        | clone_flags::CLONE_NEWPID
+        | clone_flags::CLONE_NEWNET
+        | clone_flags::CLONE_NEWCGROUP
+        | clone_flags::CLONE_NEWTIME;
+    if flags & NOT_YET != 0 {
+        return Err(errno::EINVAL);
+    }
+    if flags & clone_flags::CLONE_NEWUTS != 0 {
+        if flags & clone_flags::CLONE_THREAD != 0 {
+            return Err(errno::EINVAL);
+        }
+        if !caller_may_change_namespaces() {
+            return Err(errno::EPERM);
+        }
+    }
+    Ok(())
+}
+
 fn linux_clone_inner(
     flags: u64,
     child_stack: u64,
@@ -2861,6 +2899,11 @@ fn linux_clone_inner(
     frame: &mut crate::syscall::entry::SyscallFrame,
 ) -> i64 {
     use crate::proc::{thread, thread_clone};
+
+    // (0) Namespaces: CLONE_NEWUTS for a new process, nothing else yet.
+    if let Err(errno) = clone_namespaces(flags) {
+        return linux_err(errno).value;
+    }
 
     // (1) Thread-creation path: requires CLONE_VM | CLONE_THREAD AND
     //     a non-zero child_stack.  glibc's pthread_create wrapper
@@ -4301,6 +4344,19 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::unix_socket::close(unix_handle(&entry));
             SyscallResult::ok(0)
         }
+        HandleKind::Namespace => {
+            // Deregister, then give this process's hold on the namespace
+            // back; it ends with its last holder, process or handle.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Namespace,
+                    entry.raw_handle,
+                );
+            }
+            crate::nsfs::release(entry.raw_handle);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -4397,7 +4453,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         | HandleKind::Inotify
         | HandleKind::AlsaControl
         | HandleKind::Evdev
-        | HandleKind::DrmCard => linux_err(errno::EINVAL),
+        | HandleKind::DrmCard
+        | HandleKind::Namespace => linux_err(errno::EINVAL),
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
         // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
         HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
@@ -4932,7 +4989,9 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
         // The ALSA control device is ioctl-only: read(2) → EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl | HandleKind::Namespace => {
+            linux_err(errno::EINVAL)
+        }
         // A DRM card fd delivers queued KMS events (flip-complete) via read(2).
         HandleKind::DrmCard => dispatch_drm_card_read(&entry, buf, cap),
         HandleKind::Evdev => dispatch_evdev_read(&entry, buf, cap),
@@ -6012,7 +6071,8 @@ fn fcntl_flock_apply(
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => {
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => {
             return linux_err(errno::EBADF);
         }
     };
@@ -6144,7 +6204,8 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -6565,6 +6626,18 @@ fn open_common(
             }
             return reopen_own_fd(pid, fd, flags);
         }
+        // A namespace's link, `/proc/<pid>/ns/<kind>`: Linux's open follows
+        // it to the namespace itself (`crate::nsfs`), a handle `setns` takes.
+        // Where VFS resolution would follow its text, `uts:[N]`, to nothing.
+        if let Some(found) = crate::fs::procfs::namespace_at(canon.as_slice()) {
+            if no_symlinks {
+                return linux_err(errno::ELOOP);
+            }
+            return match found {
+                Ok((kind, id)) => open_namespace(pid, kind, id, flags),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
     }
 
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
@@ -6726,6 +6799,60 @@ fn open_fifo_fd(
                 // is the caller's.
                 let _ = close_handle(entry);
             }
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// Open namespace `id` of `kind` for process `pid` -- an `open` of its
+/// `/proc/<pid>/ns` link -- and give it a descriptor that holds the namespace
+/// (`crate::nsfs`).
+///
+/// As Linux's nsfs file: the link exists, so `O_CREAT | O_EXCL` is `EEXIST`;
+/// it is a link, which `O_NOFOLLOW` refuses to follow (`ELOOP`); it is no
+/// directory (`ENOTDIR` for `O_DIRECTORY`). Any access mode is taken, as
+/// this kernel enforces no mode bits (design-decisions 31); a write is
+/// `EINVAL`, as on Linux.
+///
+/// One hold per process per namespace, shared by every descriptor the
+/// process has on it, as for every object here: the open takes one, and gives
+/// it back if the process held the namespace already --
+/// `pcb::linux_fd_install_passed` decides that and installs in one step, so a
+/// concurrent close of the process's last descriptor for it cannot leave the
+/// new one holding nothing.
+fn open_namespace(pid: u64, kind: crate::nsfs::NsKind, id: u64, flags: u32) -> SyscallResult {
+    if flags & oflags::O_CREAT != 0 && flags & oflags::O_EXCL != 0 {
+        return linux_err(errno::EEXIST);
+    }
+    if flags & oflags::O_NOFOLLOW != 0 {
+        return linux_err(errno::ELOOP);
+    }
+    if flags & oflags::O_DIRECTORY != 0 {
+        return linux_err(errno::ENOTDIR);
+    }
+    let raw = crate::nsfs::encode(kind, id);
+    if !crate::nsfs::retain(raw) {
+        // Gone since the link was read: its last holder let it go.
+        return linux_err(errno::ENOENT);
+    }
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let mut entry = FdEntry::namespace(raw, fd_flags);
+    entry.status_flags = flags & (oflags::O_ACCMODE | oflags::O_NONBLOCK);
+    match pcb::linux_fd_install_passed(pid, entry) {
+        Ok((fd, held)) => {
+            if held {
+                // The process holds the namespace already, and one hold per
+                // object is all it keeps.
+                crate::nsfs::release(raw);
+            }
+            SyscallResult::ok(i64::from(fd))
+        }
+        Err(e) => {
+            crate::nsfs::release(raw);
             linux_err(linux_errno_for(e))
         }
     }
@@ -10876,11 +11003,45 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                     crate::proc::linux_fd::HandleKind::Evdev => {
                         return evdev_ioctl(&entry, request, args.arg2);
                     }
+                    crate::proc::linux_fd::HandleKind::Namespace => {
+                        return namespace_ioctl(&entry, request);
+                    }
                     _ => {}
                 }
             }
             linux_err(errno::ENOTTY)
         }
+    }
+}
+
+/// The `NS_GET_*` requests (`<linux/nsfs.h>`, magic `0xb7`) on a namespace's
+/// descriptor (`crate::nsfs`), as Linux's `ns_ioctl` answers them:
+///
+/// | request | answer |
+/// |---|---|
+/// | `NS_GET_NSTYPE` | the kind's `CLONE_NEW*` bit |
+/// | `NS_GET_PARENT` | `EINVAL`: a UTS namespace has no parent, it is not nested |
+/// | `NS_GET_OWNER_UID` | `EINVAL`: only a user namespace has an owner |
+/// | `NS_GET_USERNS` | `EPERM`: no user namespace can be named by a handle yet |
+/// | anything else | `ENOTTY` |
+///
+/// `NS_GET_USERNS` is where Linux gives a descriptor for the user namespace
+/// owning this one, and `EPERM` its answer when that lies outside what the
+/// caller may see: the honest one while this kernel has no user namespace a
+/// handle can name.
+fn namespace_ioctl(entry: &FdEntry, request: u32) -> SyscallResult {
+    const NS_GET_USERNS: u32 = 0xb701;
+    const NS_GET_PARENT: u32 = 0xb702;
+    const NS_GET_NSTYPE: u32 = 0xb703;
+    const NS_GET_OWNER_UID: u32 = 0xb704;
+    let Some((kind, _)) = crate::nsfs::decode(entry.raw_handle) else {
+        return linux_err(errno::ENOTTY);
+    };
+    match request {
+        NS_GET_NSTYPE => SyscallResult::ok(i64::try_from(kind.clone_flag()).unwrap_or(0)),
+        NS_GET_PARENT | NS_GET_OWNER_UID => linux_err(errno::EINVAL),
+        NS_GET_USERNS => linux_err(errno::EPERM),
+        _ => linux_err(errno::ENOTTY),
     }
 }
 
@@ -18305,7 +18466,8 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::EINVAL),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::EINVAL),
     }
 }
 
@@ -18511,7 +18673,7 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     // setdomainname has had this shape since the original landing;
     // sethostname is brought into sister alignment here.
     if len == 0 {
-        if let Err(e) = crate::fs::nameservice::set_hostname("") {
+        if let Err(e) = crate::utsns::set_hostname_here("") {
             return linux_err(linux_errno_for(e));
         }
         return SyscallResult::ok(0);
@@ -18532,7 +18694,8 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    if let Err(e) = crate::fs::nameservice::set_hostname(name) {
+    // The caller's UTS namespace's, which is the system's only in the root.
+    if let Err(e) = crate::utsns::set_hostname_here(name) {
         return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
@@ -18593,7 +18756,7 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
 
     // setdomainname(NULL, 0) is "clear the domain" — Linux accepts.
     if len == 0 {
-        if let Err(e) = crate::fs::nameservice::set_domain("") {
+        if let Err(e) = crate::utsns::set_domainname_here("") {
             return linux_err(linux_errno_for(e));
         }
         return SyscallResult::ok(0);
@@ -18611,7 +18774,7 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    if let Err(e) = crate::fs::nameservice::set_domain(name) {
+    if let Err(e) = crate::utsns::set_domainname_here(name) {
         return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
@@ -19186,7 +19349,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => return linux_err(errno::EINVAL),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -21324,6 +21488,20 @@ fn rdev_for_fd(entry: &crate::proc::linux_fd::FdEntry) -> crate::fs::devnum::Dev
     }
 }
 
+/// The device number (`st_dev`'s minor, under major 0) and inode number of a
+/// namespace's descriptor: nsfs's own device ([`crate::nsfs::dev`]) and the
+/// number its `/proc/<pid>/ns` link shows ([`crate::nsfs::inum`]), so `stat`
+/// of the link, `fstat` of an opened one and the link's text agree, as
+/// `lsns` and `ip netns identify` compare them. `None` for any other
+/// descriptor.
+fn nsfs_identity(entry: &crate::proc::linux_fd::FdEntry) -> Option<(u32, u64)> {
+    if entry.kind != HandleKind::Namespace {
+        return None;
+    }
+    let (kind, id) = crate::nsfs::decode(entry.raw_handle)?;
+    Some((crate::nsfs::dev(), crate::nsfs::inum(kind, id)))
+}
+
 /// Fill a 144-byte struct stat for the given Linux fd-table entry.
 fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::FdEntry) {
     use crate::proc::linux_fd::HandleKind;
@@ -21403,10 +21581,15 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         HandleKind::Channel | HandleKind::ServiceListener | HandleKind::UnixSocket => {
             (S_IFSOCK | 0o777, 4096)
         }
+        // A namespace: a regular file, read-only, as Linux's nsfs inode.
+        HandleKind::Namespace => (S_IFREG | 0o444, 4096),
     };
 
-    // Inode: use the raw_handle as a stable-ish identity.
-    let st_ino: u64 = entry.raw_handle;
+    // Inode: use the raw_handle as a stable-ish identity -- but a namespace's
+    // is the number its link shows, on nsfs's own device (`nsfs_identity`).
+    let (st_dev, st_ino) = nsfs_identity(entry).map_or((0, entry.raw_handle), |(dev, ino)| {
+        (crate::fs::vfs::linux_dev_t(dev), ino)
+    });
     // For memfd, surface the live data length as st_size so callers
     // (notably libraries that ftruncate+stat-loop to size a mapping)
     // observe the resize they just performed.  Other kinds report 0.
@@ -21435,7 +21618,7 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         buf[off..off + 4].copy_from_slice(&bytes);
     }
 
-    put_u64(buf, 0, 0); // st_dev
+    put_u64(buf, 0, st_dev); // st_dev
     put_u64(buf, 8, st_ino); // st_ino
     put_u64(buf, 16, 1); // st_nlink
     put_u32(buf, 24, mode); // st_mode
@@ -21548,11 +21731,22 @@ fn stat_path_common(path_ptr: u64, statbuf_ptr: u64, follow: bool) -> SyscallRes
 /// So `stat("/dev/stdin")` reports what descriptor 0 holds, as `fstat(0)`
 /// does: `[ -p /dev/stdin ]` asks about the pipe the shell connected, not
 /// devfs's console node (lane B's request, alongside [`reopen_own_fd`]).
+///
+/// A namespace's link, `/proc/<pid>/ns/<kind>`, is the namespace the same
+/// way: the entry a descriptor opened on it would have, so `stat` of the link
+/// and `fstat` of the descriptor agree (`nsfs_identity`), as `lsns` and
+/// `ip netns identify` compare them. Only read, so it holds nothing.
 fn own_fd_stat_target(path: &[u8], follow: bool) -> Option<Result<FdEntry, SyscallResult>> {
     if !follow {
         return None;
     }
     let pid = caller_pid()?;
+    if let Some(found) = crate::fs::procfs::namespace_at(path) {
+        return Some(match found {
+            Ok((kind, id)) => Ok(FdEntry::namespace(crate::nsfs::encode(kind, id), 0)),
+            Err(e) => Err(linux_err(linux_errno_for(e))),
+        });
+    }
     let fd = own_fd_name(path, pid)?;
     Some(pcb::linux_fd_lookup(pid, fd).ok_or_else(|| linux_err(errno::ENOENT)))
 }
@@ -21835,8 +22029,12 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         HandleKind::Channel | HandleKind::ServiceListener | HandleKind::UnixSocket => {
             ((S_IFSOCK | 0o777) as u16, 4096)
         }
+        // A namespace: a regular file, read-only, as Linux's nsfs inode.
+        HandleKind::Namespace => ((S_IFREG | 0o444) as u16, 4096),
     };
-    let st_ino: u64 = entry.raw_handle;
+    // A namespace's inode and device are nsfs's (`nsfs_identity`).
+    let identity = nsfs_identity(entry);
+    let st_ino: u64 = identity.map_or(entry.raw_handle, |(_, ino)| ino);
     // Surface the live memfd data length so stx_size reflects what callers
     // (notably libraries that ftruncate+stat-loop) just wrote.
     let st_size: u64 = match entry.kind {
@@ -21897,6 +22095,11 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
     let rdev = rdev_for_fd(entry);
     put_u32(buf, 128, rdev.major); // stx_rdev_major
     put_u32(buf, 132, rdev.minor); // stx_rdev_minor
+    // A namespace lives on nsfs's device; stx_dev_major is 0, as for every
+    // anonymous device.
+    if let Some((dev, _)) = identity {
+        put_u32(buf, 140, dev); // stx_dev_minor
+    }
     // Remaining fields (dev/mnt_id/dio/subvol/atomic/spare3) stay zero --
     // these objects live on no filesystem.
 }
@@ -23579,7 +23782,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::EINVAL),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::EINVAL),
     }
 }
 
@@ -30205,14 +30409,35 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
     if flags == 0 {
         return SyscallResult::ok(0);
     }
-    linux_err(errno::EPERM)
+    // CLONE_NEWUTS (0x0400_0000): the caller into a new UTS namespace, a
+    // copy of the one it leaves (`crate::utsns`) -- for a caller that may
+    // (`caller_may_change_namespaces`). Every thread of the process goes with
+    // it: here namespaces are the process's, where Linux's are the thread's.
+    // The other namespaces and the sharing flags are not yet: EPERM, as
+    // before.
+    const CLONE_NEWUTS: u64 = 0x0400_0000;
+    if flags & !CLONE_NEWUTS != 0 {
+        return linux_err(errno::EPERM);
+    }
+    if !caller_may_change_namespaces() {
+        return linux_err(errno::EPERM);
+    }
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    let from = pcb::uts_ns(pid).unwrap_or(crate::utsns::ROOT_UTS);
+    match crate::utsns::create_from(from).and_then(|id| pcb::set_uts_ns(pid, id)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
-/// `setns(fd, nstype)`.
+/// `setns(fd, nstype)`: the caller's process into a namespace.
 ///
-/// Linux's `kernel/nsproxy.c::SYSCALL_DEFINE2(setns)` accepts an `fd`
-/// referring to either a `/proc/PID/ns/*` namespace file or a pidfd,
-/// and validates `nstype` against the namespace-type mask:
+/// Linux's `kernel/nsproxy.c::SYSCALL_DEFINE2(setns)` takes an `fd` that is
+/// either a namespace's descriptor -- `/proc/<pid>/ns/<kind>` opened
+/// (`crate::nsfs`) -- or a pidfd, and checks `nstype` against the
+/// namespace-type mask:
 ///
 ///   * `CLONE_NEWNS`     = 0x0002_0000
 ///   * `CLONE_NEWCGROUP` = 0x0200_0000
@@ -30223,25 +30448,17 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
 ///   * `CLONE_NEWNET`    = 0x4000_0000
 ///   * `CLONE_NEWTIME`   = 0x0000_0080
 ///
-/// Validation differs per fd kind:
-///   * `proc_ns_file` path: `nstype == 0` is accepted (matches any
-///     type); non-zero must exactly equal the file's `ns->ops->type`.
-///   * pidfd path: `check_setns_flags` requires `nstype != 0` AND
-///     `nstype & ~CLONE_NEWNS_FLAGS == 0`.
+/// Any bit outside the mask is `EINVAL` on both paths, before the descriptor
+/// is looked at. Then by the descriptor's kind:
+///   * a namespace's: `nstype` 0 takes it whatever its kind; a non-zero one
+///     must be its kind's bit ([`setns_namespace`]);
+///   * a pidfd: `nstype` names which of the process's namespaces to enter,
+///     at least one ([`setns_process`]);
+///   * anything else: `EINVAL`.
 ///
-/// We can't distinguish the two fd kinds in kernel context (no real
-/// fds exist), but **both paths uniformly reject** any bit outside the
-/// `CLONE_NEWNS_FLAGS` mask.  Pre-batch we skipped nstype validation
-/// entirely, so a probe passing `nstype = 0xDEAD_BEEF` saw EPERM
-/// instead of the EINVAL Linux returns.  Mirror the mask check ahead
-/// of the terminal EPERM so feature-detection sees the same shape.
-///
-/// `nstype == 0` is left to flow through to EPERM: it's accepted on
-/// the proc_ns_file path and rejected on the pidfd path, and we have
-/// no way to choose between them.  Linux's behaviour for an
-/// unprivileged caller is EPERM on either path (the ns_capable check
-/// runs after the flag check on the pidfd path but before any work on
-/// the proc_ns_file path), so EPERM is the truthful answer.
+/// A kernel task -- where the boot's fidelity probes call this -- is in no
+/// namespace to leave: `EPERM` after the mask check, the answer every caller
+/// had before a namespace could be entered.
 fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     // Union of CLONE_NEW* namespace bits.  Any nstype bit outside this
     // mask is rejected by both setns code paths in Linux.
@@ -30264,9 +30481,7 @@ fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     // visible to the kernel function body.  Pre-batch we masked
     // args.arg1 raw, so a probe with `nstype = 0x1_0002_0000` (high
     // bit 32 + CLONE_NEWNS) returned EINVAL where Linux truncates to
-    // 0x20000 (CLONE_NEWNS) and falls through to the resource-failure
-    // arm (EPERM in our model since the namespace fd plumbing is not
-    // implemented).
+    // 0x20000 (CLONE_NEWNS) and goes on to the descriptor.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let nstype_i32 = args.arg1 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -30274,7 +30489,95 @@ fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     if nstype & !CLONE_NEWNS_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::EPERM)
+    // A kernel task is in no namespace to leave: the boot's fidelity probes
+    // run here, and have always been told EPERM.
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EPERM);
+    };
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return linux_err(errno::EBADF);
+    };
+    match entry.kind {
+        HandleKind::Namespace => setns_namespace(pid, entry.raw_handle, nstype),
+        HandleKind::PidFd => setns_process(pid, entry.raw_handle, nstype),
+        // Neither a namespace nor a process: Linux's EINVAL.
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// `setns` with a handle on a namespace (`crate::nsfs`): the caller's process
+/// into it. `nstype` 0 takes the namespace whatever its kind; another must be
+/// its kind's `CLONE_NEW*` bit (`EINVAL` otherwise). `EPERM` for a caller
+/// that may not ([`caller_may_change_namespaces`]) -- even into the namespace
+/// it is already in, as Linux's `utsns_install` asks the same question
+/// either way.
+///
+/// The whole process moves, every thread: namespaces are a process's here,
+/// where Linux's are a thread's (design-decisions 1554).
+fn setns_namespace(pid: u64, raw: u64, nstype: u64) -> SyscallResult {
+    let Some((kind, id)) = crate::nsfs::decode(raw) else {
+        return linux_err(errno::EINVAL);
+    };
+    if nstype != 0 && nstype != kind.clone_flag() {
+        return linux_err(errno::EINVAL);
+    }
+    if !caller_may_change_namespaces() {
+        return linux_err(errno::EPERM);
+    }
+    enter_namespace(pid, kind, id)
+}
+
+/// `setns` with a pidfd: the caller's process into the namespaces `nstype`
+/// names of the process the pidfd refers to -- Linux 5.8's form. `nstype`
+/// must name at least one, and only kinds this kernel has (`EINVAL`), as
+/// `clone` refuses to make the rest (`clone_namespaces`); the process must
+/// still be running (`ESRCH`, a zombie included, which has left its
+/// namespaces), one the caller may inspect (`EPERM`, Linux's
+/// `PTRACE_MODE_READ` check), and the caller must be one that may change
+/// namespaces (`EPERM`).
+fn setns_process(pid: u64, target: u64, nstype: u64) -> SyscallResult {
+    use crate::nsfs::{KINDS, NsKind};
+    let known = KINDS
+        .iter()
+        .fold(0u64, |bits, kind| bits | kind.clone_flag());
+    if nstype == 0 || nstype & !known != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if pcb::state(target).is_none_or(|s| s == pcb::ProcessState::Zombie) {
+        return linux_err(errno::ESRCH);
+    }
+    if !pcb::may_inspect(Some(pid), Some(target)) {
+        return linux_err(errno::EPERM);
+    }
+    if !caller_may_change_namespaces() {
+        return linux_err(errno::EPERM);
+    }
+    if nstype & NsKind::Uts.clone_flag() != 0 {
+        let Some(id) = crate::nsfs::of_process(NsKind::Uts, target) else {
+            return linux_err(errno::ESRCH);
+        };
+        let r = enter_namespace(pid, NsKind::Uts, id);
+        if r.value < 0 {
+            return r;
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// Put process `pid` in namespace `id` of `kind`, holding it: `ESRCH` if the
+/// namespace went with its last holder meanwhile (a handle closed by another
+/// thread, the process the pidfd names leaving it).
+fn enter_namespace(pid: u64, kind: crate::nsfs::NsKind, id: u64) -> SyscallResult {
+    if !crate::nsfs::retain(crate::nsfs::encode(kind, id)) {
+        return linux_err(errno::ESRCH);
+    }
+    let entered = match kind {
+        crate::nsfs::NsKind::Uts => pcb::set_uts_ns(pid, id),
+    };
+    match entered {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `mount(source, target, fstype, mountflags, data)`.
@@ -32181,6 +32484,11 @@ pub(crate) fn revents_for_handle(
             }
             r
         }
+        // A namespace's file has no readiness of its own: always ready, as
+        // Linux answers (`DEFAULT_POLLMASK`) for a file with no `poll`.
+        HandleKind::Namespace => {
+            poll_bits::POLLIN | poll_bits::POLLRDNORM | poll_bits::POLLOUT | poll_bits::POLLWRNORM
+        }
     }
 }
 
@@ -33278,9 +33586,11 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
     // Gate 4: file_can_poll(tf) -> EPERM if the target does not support
     // poll.  Regular files (File, MemFd) have no .poll in Linux, so
     // epoll rejects them with EPERM — userspace relies on this to fall
-    // back to thread-pool I/O for regular files.
+    // back to thread-pool I/O for regular files.  Nor has a namespace's.
     match target_entry.kind {
-        HandleKind::File | HandleKind::MemFd => return linux_err(errno::EPERM),
+        HandleKind::File | HandleKind::MemFd | HandleKind::Namespace => {
+            return linux_err(errno::EPERM);
+        }
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -36166,6 +36476,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Channel => 15,
         HandleKind::ServiceListener => 16,
         HandleKind::UnixSocket => 17,
+        HandleKind::Namespace => 18,
     }
 }
 
@@ -36741,7 +37052,8 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 | HandleKind::Socket
                 | HandleKind::Channel
                 | HandleKind::ServiceListener
-                | HandleKind::UnixSocket => {
+                | HandleKind::UnixSocket
+                | HandleKind::Namespace => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -45841,7 +46153,8 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45913,7 +46226,8 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47787,7 +48101,8 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47833,7 +48148,8 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47910,7 +48226,8 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47969,7 +48286,8 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -49673,18 +49991,15 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // domainname via `setdomainname("", 0)`, the corresponding
     // field is emitted as zero bytes (empty C string), exactly
     // as Linux's `newuname` would.
-    // A process inside a container with a `--hostname` override (a per-process
-    // UTS hostname) sees that name; otherwise it falls back to the global
-    // system hostname.  This models a per-container UTS namespace.
-    let task_id = crate::sched::current_task_id();
-    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-    let nodename = crate::ipc::namespace::hostname_for(process_id)
-        .unwrap_or_else(crate::fs::nameservice::get_hostname);
+    // The caller's UTS namespace's names (`crate::utsns`): the system's in
+    // the root, a container's or an `unshare`d copy's otherwise.
+    let uts = crate::utsns::of_current();
+    let nodename = crate::utsns::hostname(uts).unwrap_or_default();
     fill(&mut buf, 1, nodename.as_bytes());
     fill(&mut buf, 2, crate::uname::RELEASE.as_bytes()); // release
     fill(&mut buf, 3, crate::uname::VERSION.as_bytes()); // version
     fill(&mut buf, 4, crate::uname::MACHINE.as_bytes()); // machine
-    let domain = crate::fs::nameservice::get_domain();
+    let domain = crate::utsns::domainname(uts).unwrap_or_default();
     fill(&mut buf, 5, domain.as_bytes());
 
     // SAFETY: copy_to_user validates the user range.

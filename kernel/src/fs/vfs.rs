@@ -1738,6 +1738,18 @@ fn assign_dev(fs_id: u64) {
     devs.insert(fs_id, dev);
 }
 
+/// A device number, for good, for a filesystem of the kernel's own that is
+/// never mounted -- nsfs (`crate::nsfs`), whose files only `/proc/<pid>/ns`
+/// names. From the numbering the mounted filesystems take theirs from
+/// ([`assign_dev`]), under an `fs_id` no mount will have, so no file on a
+/// mount shares it.
+#[must_use]
+pub fn reserve_dev() -> u32 {
+    let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
+    assign_dev(fs_id);
+    dev_of(fs_id)
+}
+
 /// Mount `fs_id` is gone: its device number is free again.
 fn release_dev(fs_id: u64) {
     MOUNT_DEVS.lock().remove(&fs_id);

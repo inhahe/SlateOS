@@ -6237,7 +6237,7 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     lifecycle-owned). Honest limitation: the netns L3 config still tracks only the
     primary interface; additional networks provide L2 bridge reachability + IPAM
     lease + embedded DNS + a connected route.
-  - [ ] `[A]` The Linux namespace calls, over the namespaces above: `unshare(2)`
+  - [-] `[A]` The Linux namespace calls, over the namespaces above: `unshare(2)`
     (`CLONE_NEWNS`, `NEWUTS`, `NEWIPC`, `NEWNET`, `NEWPID`, `NEWUSER`,
     `NEWCGROUP`, `NEWTIME`), `setns(2)`, `/proc/<pid>/ns/*` opening to namespace
     handles, `/proc/self/{uid_map,gid_map,setgroups}` for `--map-root-user`, and
@@ -6245,7 +6245,11 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     Waiting on it: util-linux's `unshare` and `nsenter`, which refuse until then
     (`requests/b-ad-unshare-and-nsenter-wait-on-unshare-and-setns.md`), lane D's
     libc `unshare()`/`setns()`, and any later `runc`, `podman` or `bubblewrap`,
-    which call the same set.
+    which call the same set. **UTS done 2026-10-08** (design-decisions 1554):
+    `unshare`/`clone`/`clone3` with `CLONE_NEWUTS`, `setns` by handle and by
+    pidfd, `/proc/<pid>/ns/uts` (`kernel/src/utsns.rs`, `kernel/src/nsfs.rs`),
+    and containers' `--hostname` as their own UTS namespace. The other six
+    kinds remain: `known-issues/A-ONLY-THE-UTS-NAMESPACE-HAS-LINUX-CALLS.md`.
 
 ### 5.6 Additional software
 - [-] `[E]` Speech input / speech output — **output, step 1 of 4 done

@@ -242,6 +242,14 @@ pub enum HandleKind {
     /// count (`ipc::unix_socket::dup`), so `needs_kernel_close()` is `true`:
     /// close drops one, and the socket ends with the last.
     UnixSocket,
+    /// A handle on a namespace (`crate::nsfs`): what opening
+    /// `/proc/<pid>/ns/<kind>` gives, and `setns(2)` takes. `raw_handle` is
+    /// `nsfs::encode`'s: the kind and the namespace. It holds the namespace:
+    /// one hold per process per namespace, shared by every descriptor the
+    /// process has on it, as a pipe end is, given back with the last
+    /// (`needs_kernel_close()` is `true`). `read`/`write` are `EINVAL`, as on
+    /// Linux.
+    Namespace,
 }
 
 impl HandleKind {
@@ -265,7 +273,8 @@ impl HandleKind {
             | Self::Socket
             | Self::Channel
             | Self::ServiceListener
-            | Self::UnixSocket => true,
+            | Self::UnixSocket
+            | Self::Namespace => true,
         }
     }
 
@@ -292,6 +301,10 @@ impl HandleKind {
             Self::Channel => Some(ResourceType::Channel),
             Self::ServiceListener => Some(ResourceType::Service),
             Self::UnixSocket => Some(ResourceType::UnixSocket),
+            // The only `Namespace` entries in a process's `ipc_handles` are
+            // these handles; the authority to make and attach namespaces is a
+            // capability, in the capability table, as `Service` is.
+            Self::Namespace => Some(ResourceType::Namespace),
         }
     }
 }
@@ -571,6 +584,21 @@ impl FdEntry {
             raw_handle: handle,
             fd_flags,
             status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a handle on a namespace (`crate::nsfs`).
+    /// `handle` is `nsfs::encode`'s raw u64; `fd_flags` carries `FD_CLOEXEC`
+    /// when opened with `O_CLOEXEC`. Opened for reading, as Linux's are.
+    #[must_use]
+    pub const fn namespace(handle: u64, fd_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Namespace,
+            raw_handle: handle,
+            fd_flags,
+            status_flags: O_RDONLY,
             f_owner: 0,
             f_owner_sig: 0,
         }

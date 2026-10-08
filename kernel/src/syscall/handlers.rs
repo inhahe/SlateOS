@@ -8155,7 +8155,8 @@ pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
     name_set_gated(
         args,
         crate::cap::Rights::SET_HOSTNAME,
-        crate::fs::nameservice::set_hostname,
+        // The caller's UTS namespace's: the system's only in the root.
+        crate::utsns::set_hostname_here,
     )
 }
 
@@ -8167,7 +8168,7 @@ pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
     name_set_gated(
         args,
         crate::cap::Rights::SET_HOSTNAME,
-        crate::fs::nameservice::set_domain,
+        crate::utsns::set_domainname_here,
     )
 }
 

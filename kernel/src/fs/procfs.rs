@@ -11121,17 +11121,19 @@ fn gen_powerwake() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// `/proc/diskio` -- every registered block device's I/O together, from the
+/// block layer's own counts (`fs::diskio`'s projection). Until 2026-10-08 it
+/// read a table nothing fed, and an `ops` line counting calls into that table.
 fn gen_diskio() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Disk I/O ===\n");
-    let (dev_count, reads, writes, bytes_read, bytes_written, ops) = crate::fs::diskio::stats();
+    let (dev_count, reads, writes, bytes_read, bytes_written) = crate::fs::diskio::stats();
     out.push_str(&format!("device_count: {}\n", dev_count));
     out.push_str(&format!("global_reads: {}\n", reads));
     out.push_str(&format!("global_writes: {}\n", writes));
     out.push_str(&format!("global_bytes_read: {}\n", bytes_read));
     out.push_str(&format!("global_bytes_written: {}\n", bytes_written));
-    out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
 
@@ -13669,26 +13671,32 @@ fn gen_netlat() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// `/proc/diskstat` -- each registered block device's I/O, from the block
+/// layer's own counts (`fs::diskio`'s projection). Until 2026-10-08 it read
+/// `fs::diskstat`, a table nothing fed; its flush and merge counts, which
+/// nothing here does, went with it rather than staying as zeros.
 fn gen_diskstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
-    let (devs, reads, writes, rb, wb, ops) = super::diskstat::stats();
+    let (devs, reads, writes, rb, wb) = super::diskio::stats();
     out.push_str("=== Disk Stats ===\n");
     out.push_str(&format!(
-        "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}\n\n",
-        devs, reads, writes, rb, wb, ops
+        "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}\n\n",
+        devs, reads, writes, rb, wb
     ));
     out.push_str("Per-device:\n");
-    for d in super::diskstat::per_device() {
-        let avg_r = if d.reads > 0 { d.read_ns / d.reads } else { 0 };
-        let avg_w = if d.writes > 0 {
-            d.write_ns / d.writes
-        } else {
-            0
-        };
-        out.push_str(&format!("  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}  flush={}  merges: r={} w={}\n",
-            d.name, d.reads, d.read_bytes, avg_r, d.writes, d.write_bytes, avg_w,
-            d.discards, d.flushes, d.merges_read, d.merges_write));
+    for d in super::diskio::all_devices() {
+        out.push_str(&format!(
+            "  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}\n",
+            d.device_name,
+            d.reads,
+            d.bytes_read,
+            d.avg_read_latency_ns(),
+            d.writes,
+            d.bytes_written,
+            d.avg_write_latency_ns(),
+            d.discards
+        ));
     }
     out.into_bytes()
 }

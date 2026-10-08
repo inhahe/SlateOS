@@ -286,18 +286,31 @@ pub struct DeviceStats {
     pub read_sectors: u64,
     /// Nanoseconds they took.
     pub read_ns: u64,
+    /// The longest one, in nanoseconds.
+    pub read_max_ns: u64,
+    /// How many of them the driver failed.
+    pub read_errors: u64,
     /// Write requests completed.
     pub writes: u64,
     /// Sectors they wrote.
     pub write_sectors: u64,
     /// Nanoseconds they took.
     pub write_ns: u64,
+    /// The longest one, in nanoseconds.
+    pub write_max_ns: u64,
+    /// How many of them the driver failed.
+    pub write_errors: u64,
     /// Discard requests completed.
     pub discards: u64,
     /// Sectors they discarded.
     pub discard_sectors: u64,
     /// Nanoseconds they took.
     pub discard_ns: u64,
+    /// When the first request of any kind began (`hrtimer::now_ns`); 0
+    /// until there has been one.
+    pub first_io_ns: u64,
+    /// When the last request of any kind began; 0 until there has been one.
+    pub last_io_ns: u64,
 }
 
 impl DeviceStats {
@@ -312,6 +325,14 @@ impl DeviceStats {
     }
 }
 
+/// Which way a request [`Accounted`] counts went.
+#[derive(Clone, Copy)]
+enum Direction {
+    Read,
+    Write,
+    Discard,
+}
+
 /// A registered device seen through its statistics: each request a caller
 /// of [`with_device`] or [`try_with_device`] makes is passed to the driver
 /// and counted -- one request, its sectors and its time -- whatever it
@@ -322,9 +343,37 @@ struct Accounted<'a> {
 }
 
 impl Accounted<'_> {
-    /// Nanoseconds since `start` (`crate::hrtimer::now_ns`).
-    fn since(start: u64) -> u64 {
-        crate::hrtimer::now_ns().saturating_sub(start)
+    /// Count one request of `sectors` that began at `start`
+    /// (`crate::hrtimer::now_ns`) and answered `result`.
+    fn count(&mut self, way: Direction, sectors: u64, start: u64, result: &KernelResult<()>) {
+        let took = crate::hrtimer::now_ns().saturating_sub(start);
+        let s = &mut *self.stats;
+        if s.first_io_ns == 0 {
+            s.first_io_ns = start;
+        }
+        s.last_io_ns = start;
+        let failed = u64::from(result.is_err());
+        match way {
+            Direction::Read => {
+                s.reads = s.reads.saturating_add(1);
+                s.read_sectors = s.read_sectors.saturating_add(sectors);
+                s.read_ns = s.read_ns.saturating_add(took);
+                s.read_max_ns = s.read_max_ns.max(took);
+                s.read_errors = s.read_errors.saturating_add(failed);
+            }
+            Direction::Write => {
+                s.writes = s.writes.saturating_add(1);
+                s.write_sectors = s.write_sectors.saturating_add(sectors);
+                s.write_ns = s.write_ns.saturating_add(took);
+                s.write_max_ns = s.write_max_ns.max(took);
+                s.write_errors = s.write_errors.saturating_add(failed);
+            }
+            Direction::Discard => {
+                s.discards = s.discards.saturating_add(1);
+                s.discard_sectors = s.discard_sectors.saturating_add(sectors);
+                s.discard_ns = s.discard_ns.saturating_add(took);
+            }
+        }
     }
 }
 
@@ -336,36 +385,28 @@ impl BlockDevice for Accounted<'_> {
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
         let start = crate::hrtimer::now_ns();
         let r = self.device.read_sector(lba, buf);
-        self.stats.reads = self.stats.reads.saturating_add(1);
-        self.stats.read_sectors = self.stats.read_sectors.saturating_add(1);
-        self.stats.read_ns = self.stats.read_ns.saturating_add(Self::since(start));
+        self.count(Direction::Read, 1, start, &r);
         r
     }
 
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
         let start = crate::hrtimer::now_ns();
         let r = self.device.write_sector(lba, buf);
-        self.stats.writes = self.stats.writes.saturating_add(1);
-        self.stats.write_sectors = self.stats.write_sectors.saturating_add(1);
-        self.stats.write_ns = self.stats.write_ns.saturating_add(Self::since(start));
+        self.count(Direction::Write, 1, start, &r);
         r
     }
 
     fn read_sectors(&mut self, start_lba: u64, count: u32, buf: &mut [u8]) -> KernelResult<()> {
         let start = crate::hrtimer::now_ns();
         let r = self.device.read_sectors(start_lba, count, buf);
-        self.stats.reads = self.stats.reads.saturating_add(1);
-        self.stats.read_sectors = self.stats.read_sectors.saturating_add(u64::from(count));
-        self.stats.read_ns = self.stats.read_ns.saturating_add(Self::since(start));
+        self.count(Direction::Read, u64::from(count), start, &r);
         r
     }
 
     fn write_sectors(&mut self, start_lba: u64, count: u32, buf: &[u8]) -> KernelResult<()> {
         let start = crate::hrtimer::now_ns();
         let r = self.device.write_sectors(start_lba, count, buf);
-        self.stats.writes = self.stats.writes.saturating_add(1);
-        self.stats.write_sectors = self.stats.write_sectors.saturating_add(u64::from(count));
-        self.stats.write_ns = self.stats.write_ns.saturating_add(Self::since(start));
+        self.count(Direction::Write, u64::from(count), start, &r);
         r
     }
 
@@ -379,9 +420,7 @@ impl BlockDevice for Accounted<'_> {
         // Only a discard the device takes is one; a refusal of the call
         // itself (`NotSupported`) moved nothing.
         if !matches!(r, Err(KernelError::NotSupported)) {
-            self.stats.discards = self.stats.discards.saturating_add(1);
-            self.stats.discard_sectors = self.stats.discard_sectors.saturating_add(count);
-            self.stats.discard_ns = self.stats.discard_ns.saturating_add(Self::since(start));
+            self.count(Direction::Discard, count, start, &r);
         }
         r
     }

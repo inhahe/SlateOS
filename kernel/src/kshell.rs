@@ -21574,9 +21574,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     serial_println!(
         "  kshell::self_test 104: the guess that was already being rejected by \
-         accident is rejected on purpose -- a mistyped port, sample window, \
-         byte count or pid is named, and no invented answer, filed measurement \
-         or truncated listing is reported in its place"
+         accident is rejected on purpose -- a mistyped port, sample window \
+         or pid is named, and no invented answer or truncated listing is \
+         reported in its place"
     );
     {
         // Rung 104 -- batch 40, the last of the four-site functions. Every
@@ -21584,8 +21584,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // the old confident output is asserted absent, because a fix that
         // refuses and then acts anyway would satisfy the first half alone.
         //
-        // The four cases are chosen for the four distinct ways the old code
-        // survived review, not for coverage of four commands.
+        // The four cases were chosen for the four distinct ways the old code
+        // survived review, not for coverage of four commands; the fourth's
+        // command has since gone (see 4 below), so three remain.
 
         // 1. The guard that worked by luck. `upnp remove` had no guard at all
         // behind the guess, so a mistyped port fell through to 0 and the shell
@@ -21634,19 +21635,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "`sres avg 1O` errors");
         assert_output_lacks("and no average is captioned with it", &out, b"Average CPU");
 
-        // 4. The operand that is a measurement being *filed*. `diskstat read`
-        // does not merely act on its byte count -- it adds it to the device's
-        // cumulative I/O counters, where a guessed 4096 becomes indistinguishable
-        // from an observed one the moment it lands. This is the one case in the
-        // rung where refusing late would already be too late.
-        let out = capture_command("diskstat read zzdev 4O96");
-        assert_output_contains(
-            "a mistyped byte count is refused before it becomes a statistic",
-            &out,
-            b"`4O96' is not a byte count",
-        );
-        assert_eq!(last_exit(), 1, "`diskstat read zzdev 4O96` errors");
-        assert_output_lacks("and nothing is reported read", &out, b"diskstat: read ");
+        // 4. The operand that was a measurement being *filed* -- `diskstat
+        // read`, which added its byte count to the device's cumulative I/O
+        // counters, where a guessed 4096 became indistinguishable from an
+        // observed one the moment it landed -- went on 2026-10-08 with the
+        // table it filed into: `diskstat` shows the block layer's own counts
+        // now, and nothing is typed in. Rung 106's `ttystat read` keeps the
+        // shape covered.
 
         // A fifth, pinning the gate rather than the shell. Five of these arms
         // were converted by a whole-file replace of a block that was not unique
@@ -21876,9 +21871,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "`timezone detect 51.5 0.1O` errors");
         assert_output_lacks("and no timezone is reported detected", &out, b"Detected:");
 
-        // 4. The measurement being filed, as in rung 104's `diskstat read` --
-        // repeated here because batch 41 found it three more times and it is the
-        // one shape where refusing late is already too late. `ttystat read` adds
+        // 4. The measurement being filed, as in rung 104's `diskstat read` (a
+        // subcommand since removed with its table, 2026-10-08) -- repeated here
+        // because batch 41 found it three more times and it is the one shape
+        // where refusing late is already too late. `ttystat read` adds
         // its byte count to the device's cumulative totals; a guessed 1 is
         // indistinguishable from an observed 1 the instant it lands, and every
         // later reading of `ttystat stats` is quietly wrong by that much.
@@ -96157,27 +96153,35 @@ fn cmd_powerwake(args: &str) {
     }
 }
 
-/// `diskio` / `dio` — disk I/O statistics.
+/// `diskio` / `dio` -- disk I/O statistics: the block layer's own per-device
+/// counts, as `fs::diskio` projects them.
+///
+/// Usage:
+///   diskio [stats]        - every device together
+///   diskio list           - one line per device
+///   diskio device NAME    - one device in full
+///
+/// `reset` went on 2026-10-08 with the table it cleared: the counts are the
+/// block layer's now, which -- as Linux's `/proc/diskstats` -- run from the
+/// device's registration and are not reset.
 fn cmd_diskio(args: &str) {
     use crate::fs::diskio;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "stats" | "" => {
-            let (dev_count, reads, writes, br, bw, ops) = diskio::stats();
+            let (dev_count, reads, writes, br, bw) = diskio::stats();
             shell_println!("=== Disk I/O ===");
             shell_println!("  Devices:        {}", dev_count);
             shell_println!("  Global reads:   {}", reads);
             shell_println!("  Global writes:  {}", writes);
             shell_println!("  Bytes read:     {}", br);
             shell_println!("  Bytes written:  {}", bw);
-            shell_println!("  Ops:            {}", ops);
         }
         "list" => {
-            diskio::init_defaults();
             let devs = diskio::all_devices();
             if devs.is_empty() {
-                shell_println!("No I/O recorded yet.");
+                shell_println!("No block devices registered.");
             } else {
                 shell_println!(
                     "{:<12} {:>8} {:>8} {:>12} {:>12} {:>10} {:>10}",
@@ -96214,6 +96218,11 @@ fn cmd_diskio(args: &str) {
                             d.writes,
                             d.bytes_written
                         );
+                        shell_println!(
+                            "  Discards:       {} ({} bytes)",
+                            d.discards,
+                            d.bytes_discarded
+                        );
                         shell_println!("  Avg read lat:   {} ns", d.avg_read_latency_ns());
                         shell_println!("  Max read lat:   {} ns", d.read_latency_max_ns);
                         shell_println!("  Avg write lat:  {} ns", d.avg_write_latency_ns());
@@ -96221,29 +96230,18 @@ fn cmd_diskio(args: &str) {
                         shell_println!("  Read errors:    {}", d.read_errors);
                         shell_println!("  Write errors:   {}", d.write_errors);
                     }
-                    None => shell_println!("Device '{}' not found", name),
+                    None => {
+                        shell_println!("Device '{}' not found", name);
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: diskio device <name>");
                 set_exit(1);
             }
         }
-        "reset" => {
-            if let Some(name) = parts.get(1) {
-                match diskio::reset_device(name) {
-                    Ok(()) => shell_println!("Stats for '{}' reset", name),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
-                shell_println!("Usage: diskio reset <device>");
-                set_exit(1);
-            }
-        }
         _ => {
-            shell_println!("Usage: diskio [stats|list|device|reset]");
+            shell_println!("Usage: diskio [stats|list|device NAME]");
             set_exit(1);
         }
     }
@@ -107801,140 +107799,56 @@ fn cmd_netlat(args: &str) {
     }
 }
 
-/// `diskstat` / `dstat` — block device I/O statistics.
+/// `diskstat` / `dstat` -- block device I/O statistics, one line per device:
+/// the block layer's own counts, as `fs::diskio` projects them.
+///
+/// Usage:
+///   diskstat list    - one line per device
+///   diskstat stats   - every device together
+///   diskstat test    - the projection's self-test
+///
+/// Until 2026-10-08 this read `fs::diskstat`, a table of its own that
+/// nothing in the I/O path fed, and its `init`, `register`, `read`, `write`,
+/// `discard` and `flush` arms were the only way numbers got into it: a user
+/// typing measurements in. They went with the table.
 fn cmd_diskstat(args: &str) {
-    use crate::fs::diskstat;
+    use crate::fs::diskio;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
-        "init" => {
-            diskstat::init_defaults();
-            shell_println!("diskstat: initialized");
-        }
-        "register" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            if name.is_empty() {
-                shell_println!("Usage: diskstat register <name>");
-                set_exit(1);
-                return;
-            }
-            match diskstat::register(name) {
-                Ok(()) => shell_println!("diskstat: registered {}", name),
-                Err(e) => {
-                    shell_println!("diskstat: register error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "read" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            // Both operands are measurements being *filed*: they do not merely
-            // control this command, they are added to the device's cumulative
-            // I/O counters and read back later as though observed.  A guessed
-            // 4096 is indistinguishable from a real 4096 the moment it lands,
-            // so the typo is unrecoverable rather than merely wrong.
-            let Some(bytes) = optional_num::<u64>(&parts, 2, "diskstat", sub, "byte count", 4096)
-            else {
-                return;
-            };
-            let Some(ns) = optional_num::<u64>(&parts, 3, "diskstat", sub, "duration in ns", 1000)
-            else {
-                return;
-            };
-            match diskstat::record_read(name, bytes, ns) {
-                Ok(()) => shell_println!("diskstat: read {} bytes {}ns on {}", bytes, ns, name),
-                Err(e) => {
-                    shell_println!("diskstat: read error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "write" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            // As in the `read` arm above: both operands are filed into the
-            // device's cumulative counters rather than merely steering this
-            // one command.  The defaults differ from `read`'s (a write is
-            // modelled as slower), so the two arms cannot share a line.
-            let Some(bytes) = optional_num::<u64>(&parts, 2, "diskstat", sub, "byte count", 4096)
-            else {
-                return;
-            };
-            let Some(ns) = optional_num::<u64>(&parts, 3, "diskstat", sub, "duration in ns", 2000)
-            else {
-                return;
-            };
-            match diskstat::record_write(name, bytes, ns) {
-                Ok(()) => shell_println!("diskstat: write {} bytes {}ns on {}", bytes, ns, name),
-                Err(e) => {
-                    shell_println!("diskstat: write error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "discard" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            match diskstat::record_discard(name) {
-                Ok(()) => shell_println!("diskstat: discard on {}", name),
-                Err(e) => {
-                    shell_println!("diskstat: discard error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
-        "flush" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            match diskstat::record_flush(name) {
-                Ok(()) => shell_println!("diskstat: flush on {}", name),
-                Err(e) => {
-                    shell_println!("diskstat: flush error: {:?}", e);
-                    set_exit(1);
-                }
-            }
-        }
         "list" => {
-            for d in diskstat::per_device() {
-                let avg_r = if d.reads > 0 { d.read_ns / d.reads } else { 0 };
-                let avg_w = if d.writes > 0 {
-                    d.write_ns / d.writes
-                } else {
-                    0
-                };
+            for d in diskio::all_devices() {
                 shell_println!(
-                    "  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}  flush={}",
-                    d.name,
+                    "  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}",
+                    d.device_name,
                     d.reads,
-                    d.read_bytes,
-                    avg_r,
+                    d.bytes_read,
+                    d.avg_read_latency_ns(),
                     d.writes,
-                    d.write_bytes,
-                    avg_w,
-                    d.discards,
-                    d.flushes
+                    d.bytes_written,
+                    d.avg_write_latency_ns(),
+                    d.discards
                 );
             }
         }
         "stats" => {
-            let (devs, reads, writes, rb, wb, ops) = diskstat::stats();
+            let (devs, reads, writes, rb, wb) = diskio::stats();
             shell_println!(
-                "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}",
+                "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}",
                 devs,
                 reads,
                 writes,
                 rb,
-                wb,
-                ops
+                wb
             );
         }
         "test" => {
-            let _ = diskstat::self_test();
+            if diskio::self_test().is_err() {
+                set_exit(1);
+            }
         }
         _ => {
-            shell_println!(
-                "Usage: diskstat <init|register|read|write|discard|flush|list|stats|test>"
-            );
-            shell_println!("  register <name>              — register device");
-            shell_println!("  read <name> <bytes> [ns]     — record read I/O");
-            shell_println!("  write <name> <bytes> [ns]    — record write I/O");
+            shell_println!("Usage: diskstat <list|stats|test>");
             set_exit(1);
         }
     }

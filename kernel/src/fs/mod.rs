@@ -114,7 +114,6 @@ pub mod diskhealth;
 pub mod diskio;
 pub mod diskquota;
 pub mod disksmart;
-pub mod diskstat;
 pub mod display;
 pub mod displayarrange;
 pub mod displaycal;

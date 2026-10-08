@@ -5008,16 +5008,9 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Irqstat", selftest::Severity::Diagnostic, || {
                 fs::irqstat::self_test()
             });
-            // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
-            // latency, queue depth, merges); like its siblings the self-test now builds
-            // fixtures via the real register/record_read/record_write/record_discard/
-            // record_flush/record_merge API and resets the table afterward (leaving no
-            // fabricated rows), so it is safe at boot and gives the module automated
-            // coverage it previously lacked (it was only reachable via the
-            // `diskstat test` kshell subcommand).
-            selftest::dispatch_debug("Diskstat", selftest::Severity::Diagnostic, || {
-                fs::diskstat::self_test()
-            });
+            // (fs::diskstat, which backed /proc/diskstat with a table nothing fed,
+            // went on 2026-10-08: /proc/diskstat is a view of fs::diskio's
+            // projection of the block layer's own counts, tested as "Diskio".)
             // acpistat backs /proc/acpistat (ACPI event counts, GPE firings, S-state
             // suspend/resume); like its siblings the self-test now builds fixtures via
             // the real register_gpe/record_event/record_gpe/set_s_state API and resets
@@ -6493,6 +6486,10 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Diskencrypt", selftest::Severity::Diagnostic, || {
                 fs::diskencrypt::self_test()
             });
+            // diskio projects the block layer's per-device counts (blkdev's
+            // Accounted wrapper) for /proc/diskio, /proc/diskstat and the
+            // shell: its test registers a scratch RAM disk, does I/O through
+            // the registry and checks the view, then unregisters it.
             selftest::dispatch_debug("Diskio", selftest::Severity::Diagnostic, || {
                 fs::diskio::self_test()
             });

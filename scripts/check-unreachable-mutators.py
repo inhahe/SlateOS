@@ -114,7 +114,11 @@ MUTATOR_RE = re.compile(
 # lane A's batch), where the checker reported two mutators wired since the
 # ceiling was last pinned.  Lowered, as the message asks, so the next one
 # to become unreachable is caught rather than absorbed by the slack.
-CEILING = 501
+# 501 -> 481 on 2026-10-08, measured on lane-a-wip's batch of that day (main
+# merged in at e3fbd8e7c): fifteen gone since the last pin by other work, and five by
+# fs::diskio becoming a projection of blkdev's per-device counts and
+# fs::diskstat going (diskio's four record_*, diskstat's record_merge).
+CEILING = 481
 
 
 def main() -> int:

@@ -24756,7 +24756,7 @@ pub fn self_test_linux_posix_timers() -> KernelResult<()> {
             Some(0x35) => "an unknown clock was not EINVAL",
             Some(0x36) => "CLOCK_MONOTONIC_RAW was not EOPNOTSUPP",
             Some(0x37) => "CLOCK_REALTIME_ALARM was not EPERM",
-            Some(0x38) => "a CPU-time clock was not EOPNOTSUPP",
+            Some(0x38) => "timer_create on a CPU-time clock (2, or -6) failed",
             Some(0x39) => "a bad sigev_notify was not EINVAL",
             Some(0x3A) => "SIGEV_THREAD_ID naming no thread of ours was not EINVAL",
             Some(0x3B) => "SIGEV_THREAD_ID naming our own thread failed",

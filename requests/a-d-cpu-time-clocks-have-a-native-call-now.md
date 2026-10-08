@@ -77,6 +77,10 @@ not a CPU-time one, and for an unknown `op`.
    `SIGKILL` at the hard one), and `RLIMIT_RTTIME` likewise for a real-time
    thread that runs without blocking; nothing to call, but a fixture may want
    them.
+11. `profil` (`posix/src/legacy.rs`) answers `ENOSYS` to starting, "there
+    being no profiling timer (`setitimer`'s `ITIMER_PROF`) to drive it" --
+    there is one now; glibc drives `profil` with `ITIMER_PROF` and a
+    `SIGPROF` handler that samples the interrupted PC.
 10. Nothing to change, but worth knowing: `SYS_PROCESS_GET_RUSAGE` and the
     wait-status image now carry the precise run time, split between user and
     system by the tick ratio as Linux's `getrusage` does, rather than whole

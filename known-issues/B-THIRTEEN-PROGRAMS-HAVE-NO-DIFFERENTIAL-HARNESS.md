@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `mkdir`, `mkfifo`, `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `mkfifo`, `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -40,3 +40,15 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   on dangling symlink` for a link named on the command line. All fixed; it
   now agrees with GNU 9.4 on every case but its own help and version text,
   including standard error full and closed.
+* **`mkdir`, 2026-10-07** -- `scripts/mkdir-diff.sh`, the same shape, with a
+  set-group-ID parent and eight umasks. Its first run found 28 differences,
+  and they were one cause: `mkdir` had a walk of its own. `-p` named the
+  wrong component or gave the wrong reason when it stopped (`File exists`
+  for a file in the way, where upstream's step into it says `Not a
+  directory`), failed `./a/./b/.`, and made ancestors under the bare umask;
+  `-m` set special bits upstream leaves to the kernel and kept ones it takes
+  away. It is a port of `mkdir.c` over the crate's `mkdirp` now -- gnulib's
+  `make_dir_parents`, which `install` already used -- with upstream's two
+  umasks, and `-Z`/`--context` as upstream takes them without SELinux
+  (design-decisions §1064). The walk fix reached `install` too, whose harness
+  gained the cases. 284 agree, 4 differ on purpose (help and version text).

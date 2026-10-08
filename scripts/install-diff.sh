@@ -96,7 +96,12 @@ cat > "$proto/fakestrip" <<'SH'
 printf '%s\n' "$@" >> stripped.log
 SH
 chmod 755 "$proto/fakestrip"
+mkdir "$proto/nox"
 find "$proto" -exec touch -h -d "$STAMP" {} +
+# A directory that can be listed and not entered: the walk to a missing
+# ancestor stops at the step into it, and upstream names it rather than the
+# component it could not then make.
+chmod 666 "$proto/nox"
 stamp_epoch=$(stat -c %Y "$proto/a.txt")
 
 # --- comparing a whole tree ---------------------------------------------------
@@ -146,6 +151,8 @@ compare() {
   o_msg=$(od -An -c <"$o_err"); g_msg=$(od -An -c <"$g_err")
   o_tree=$(snap "$o_dir"); g_tree=$(snap "$g_dir")
   rm -f "$o_bin" "$g_bin" "$o_err" "$g_err"
+  # `nox` cannot be entered, and neither can anything a case left unsearchable.
+  chmod -R u+rwx "$o_dir" "$g_dir" 2>/dev/null
   rm -rf "$o_dir" "$g_dir"
   if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] \
      && [ "$o_msg" = "$g_msg" ] && [ "$o_tree" = "$g_tree" ]; then
@@ -280,6 +287,8 @@ run_case -d -s newdir
 run_case -d -t dest newdir
 run_case -d -m bad newdir
 run_case -d nosuch/../made
+run_case -d nox/x
+run_case -d nox/x/y
 
 # --- -D: leading directories --------------------------------------------------------------------
 run_case -D a.txt x/y/z.txt
@@ -291,6 +300,8 @@ run_case -D a.txt a.txt/sub/f
 run_case -D a.txt x/
 run_case -D -T a.txt q/r/s
 run_case -D -m 600 a.txt deep/er/f
+run_case -D a.txt nox/f
+run_case -D a.txt nox/x/f
 
 # --- backups ---------------------------------------------------------------------------------------
 run_case -b b.txt dst.txt

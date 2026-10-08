@@ -244,14 +244,23 @@ impl Ms {
         if self.had_err() {
             return 0;
         }
-        let len: i64 = piece.as_ref().map_or(-1, |p| i64::try_from(p.len()).unwrap_or(i64::MAX));
+        let len: i64 = piece
+            .as_ref()
+            .map_or(-1, |p| i64::try_from(p.len()).unwrap_or(i64::MAX));
         let blen = self.o_blen;
         let over = len < 0
             || len > 1024
-            || usize::try_from(len).unwrap_or(usize::MAX).saturating_add(blen) > 1024 * 1024;
+            || usize::try_from(len)
+                .unwrap_or(usize::MAX)
+                .saturating_add(blen)
+                > 1024 * 1024;
         let Some(piece) = piece.filter(|_| !over) else {
             self.clearbuf();
-            let msg = format!("Output buffer space exceeded {}+{}", len.clamp(i64::from(i32::MIN), i64::from(i32::MAX)), blen);
+            let msg = format!(
+                "Output buffer space exceeded {}+{}",
+                len.clamp(i64::from(i32::MIN), i64::from(i32::MAX)),
+                blen
+            );
             self.error(None, msg.as_bytes());
             return -1;
         };
@@ -281,7 +290,11 @@ impl Ms {
             self.clearbuf();
             self.printf(b"line %zu:", &[Arg::I64(lineno as u64)]);
         }
-        if self.o_buf.as_ref().is_some_and(|b| b.first().is_some_and(|&c| c != 0)) {
+        if self
+            .o_buf
+            .as_ref()
+            .is_some_and(|b| b.first().is_some_and(|&c| c != 0))
+        {
             self.printf(b" ", &[]);
         }
         self.append(Some(msg.to_vec()));
@@ -444,7 +457,8 @@ impl Ms {
     /// its match.
     pub fn check_mem(&mut self, level: usize) {
         if level >= self.c.len() {
-            self.c.resize(level.saturating_add(20), LevelInfo::default());
+            self.c
+                .resize(level.saturating_add(20), LevelInfo::default());
         }
         if let Some(li) = self.c.get_mut(level) {
             li.got_match = false;
@@ -562,7 +576,11 @@ fn checkfield(fmt: &[u8], p: &mut usize, what: &str) -> Result<(), Vec<u8>> {
     if fw < 1024 {
         return Ok(());
     }
-    Err(format!("field {what} too large: {}", i32::try_from(fw).unwrap_or(i32::MAX)).into_bytes())
+    Err(format!(
+        "field {what} too large: {}",
+        i32::try_from(fw).unwrap_or(i32::MAX)
+    )
+    .into_bytes())
 }
 
 /// `file_checkfmt`: the format a description may be -- no `*`, widths and
@@ -668,7 +686,6 @@ pub struct RegFlags {
     pub newline: bool,
 }
 
-
 /// The number glibc's `regcomp` returns for an error.
 fn regcode_number(code: ere::RegCode) -> i32 {
     use ere::RegCode as C;
@@ -696,8 +713,17 @@ fn check_regex(ms: &Ms, pat: &[u8]) -> bool {
     let mut oc = 0u8;
     for &c in pat {
         if c == oc && b"?*+{".contains(&c) {
-            let mut w = format!("repetition-operator operand `{}' invalid in regex `", char::from(c)).into_bytes();
-            w.extend_from_slice(&file_printable(ms.flags & MAGIC_RAW != 0, 512, pat, pat.len()));
+            let mut w = format!(
+                "repetition-operator operand `{}' invalid in regex `",
+                char::from(c)
+            )
+            .into_bytes();
+            w.extend_from_slice(&file_printable(
+                ms.flags & MAGIC_RAW != 0,
+                512,
+                pat,
+                pat.len(),
+            ));
             w.push(b'\'');
             ms.magwarn(&w);
             return false;
@@ -707,7 +733,12 @@ fn check_regex(ms: &Ms, pat: &[u8]) -> bool {
             continue;
         }
         let mut w = format!("non-ascii characters in regex \\{} `", c_octal_alt(c)).into_bytes();
-        w.extend_from_slice(&file_printable(ms.flags & MAGIC_RAW != 0, 512, pat, pat.len()));
+        w.extend_from_slice(&file_printable(
+            ms.flags & MAGIC_RAW != 0,
+            512,
+            pat,
+            pat.len(),
+        ));
         w.push(b'\'');
         ms.magwarn(&w);
         return false;
@@ -717,7 +748,11 @@ fn check_regex(ms: &Ms, pat: &[u8]) -> bool {
 
 /// `%#o`: octal with a leading zero, or `0` for zero.
 fn c_octal_alt(c: u8) -> String {
-    if c == 0 { "0".to_string() } else { format!("0{c:o}") }
+    if c == 0 {
+        "0".to_string()
+    } else {
+        format!("0{c:o}")
+    }
 }
 
 /// `file_regcomp`: `Err(-1)` for a pattern `check_regex` refused, `Err(rc)`
@@ -741,7 +776,12 @@ pub fn file_regcomp(ms: &mut Ms, pat: &[u8], fl: RegFlags) -> Result<ere::Regex,
             let rc = regcode_number(e.code);
             if ms.flags & MAGIC_CHECK != 0 {
                 let mut msg = format!("regex error {rc} for `").into_bytes();
-                msg.extend_from_slice(&file_printable(ms.flags & MAGIC_RAW != 0, 512, pat, pat.len()));
+                msg.extend_from_slice(&file_printable(
+                    ms.flags & MAGIC_RAW != 0,
+                    512,
+                    pat,
+                    pat.len(),
+                ));
                 msg.extend_from_slice(b"', (");
                 msg.extend_from_slice(e.message().as_bytes());
                 msg.push(b')');
@@ -776,7 +816,11 @@ pub fn file_replace(ms: &mut Ms, pat: &[u8], rep: &[u8]) -> i32 {
         // `ms->o.buf[rm.rm_so] = '\0'`, then append the replacement and the
         // rest after the match to what is left.
         let head = buf.get(..so).unwrap_or_default().to_vec();
-        let tail = if eo != 0 { cstr(buf.get(eo..).unwrap_or_default()).to_vec() } else { Vec::new() };
+        let tail = if eo != 0 {
+            cstr(buf.get(eo..).unwrap_or_default()).to_vec()
+        } else {
+            Vec::new()
+        };
         ms.o_buf = Some(head.clone());
         ms.o_blen = head.len();
         if ms.printf(b"%s%s", &[Arg::Str(rep), Arg::Str(&tail)]) == -1 {
@@ -789,7 +833,13 @@ pub fn file_replace(ms: &mut Ms, pat: &[u8], rep: &[u8]) -> i32 {
 
 /// `file_buffer`: identify `buf`, the first bytes of the file -- by every
 /// test in turn, in upstream's order. 1 found, 0 not, -1 an error.
-pub fn file_buffer(ms: &mut Ms, fd: Option<&File>, st: Option<Stat>, inname: Option<&[u8]>, buf: &[u8]) -> i32 {
+pub fn file_buffer(
+    ms: &mut Ms,
+    fd: Option<&File>,
+    st: Option<Stat>,
+    inname: Option<&[u8]>,
+    buf: &[u8],
+) -> i32 {
     let nb = buf.len();
     let mut m = 0;
     let mut rv = 0;
@@ -941,7 +991,10 @@ mod tests {
         let big = vec![b'x'; 1025];
         assert_eq!(ms.print_str(&big), -1);
         assert!(ms.had_err());
-        assert_eq!(ms.o_buf.as_deref(), Some(&b"Output buffer space exceeded 1025+7"[..]));
+        assert_eq!(
+            ms.o_buf.as_deref(),
+            Some(&b"Output buffer space exceeded 1025+7"[..])
+        );
         assert_eq!(ms.getbuffer(), None);
         // Nothing more is written after an error.
         assert_eq!(ms.print_str(b"more"), 0);
@@ -951,12 +1004,24 @@ mod tests {
     fn a_bad_description_format_is_refused() {
         let mut ms = Ms::new(0);
         assert_eq!(ms.printf(b"%*d", &[Arg::I32(1), Arg::I32(2)]), -1);
-        assert_eq!(ms.o_buf.as_deref(), Some(&b"Bad magic format `%*d' (* not allowed in format)"[..]));
+        assert_eq!(
+            ms.o_buf.as_deref(),
+            Some(&b"Bad magic format `%*d' (* not allowed in format)"[..])
+        );
         assert!(file_checkfmt(b"%-10.3s and %#x").is_ok());
-        assert_eq!(file_checkfmt(b"%2000d").unwrap_err(), b"field width too large: 2000");
+        assert_eq!(
+            file_checkfmt(b"%2000d").unwrap_err(),
+            b"field width too large: 2000"
+        );
         // `.` is among the flags skipped first, so this is a width.
-        assert_eq!(file_checkfmt(b"%.2000d").unwrap_err(), b"field width too large: 2000");
-        assert_eq!(file_checkfmt(b"%5.2000d").unwrap_err(), b"field precision too large: 2000");
+        assert_eq!(
+            file_checkfmt(b"%.2000d").unwrap_err(),
+            b"field width too large: 2000"
+        );
+        assert_eq!(
+            file_checkfmt(b"%5.2000d").unwrap_err(),
+            b"field precision too large: 2000"
+        );
         assert_eq!(file_checkfmt(b"%5!").unwrap_err(), b"bad format char: !");
     }
 
@@ -966,10 +1031,16 @@ mod tests {
         ms.print_str(b"partial");
         ms.line = 12;
         ms.magerror(b"zerodivide in mconvert()");
-        assert_eq!(ms.o_buf.as_deref(), Some(&b"line 12: zerodivide in mconvert()"[..]));
+        assert_eq!(
+            ms.o_buf.as_deref(),
+            Some(&b"line 12: zerodivide in mconvert()"[..])
+        );
         // Only the first error is kept.
         ms.error(None, b"second");
-        assert_eq!(ms.o_buf.as_deref(), Some(&b"line 12: zerodivide in mconvert()"[..]));
+        assert_eq!(
+            ms.o_buf.as_deref(),
+            Some(&b"line 12: zerodivide in mconvert()"[..])
+        );
     }
 
     #[test]
@@ -1013,7 +1084,10 @@ mod tests {
 
     #[test]
     fn guids_print_as_microsoft_writes_them() {
-        let g = [0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let g = [
+            0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
         assert_eq!(file_print_guid(&g), b"00112233-4455-6677-8899-AABBCCDDEEFF");
     }
 
@@ -1021,15 +1095,35 @@ mod tests {
     fn regexes_are_checked_then_compiled_in_the_c_locale() {
         let mut ms = Ms::new(MAGIC_CHECK);
         ms.quiet = true;
-        assert_eq!(file_regcomp(&mut ms, b"a**", RegFlags::default()).err(), Some(-1));
-        assert_eq!(file_regcomp(&mut ms, b"caf\xc3\xa9", RegFlags::default()).err(), Some(-1));
-        let rx = file_regcomp(&mut ms, b"^x.y$", RegFlags { icase: true, newline: true }).unwrap();
+        assert_eq!(
+            file_regcomp(&mut ms, b"a**", RegFlags::default()).err(),
+            Some(-1)
+        );
+        assert_eq!(
+            file_regcomp(&mut ms, b"caf\xc3\xa9", RegFlags::default()).err(),
+            Some(-1)
+        );
+        let rx = file_regcomp(
+            &mut ms,
+            b"^x.y$",
+            RegFlags {
+                icase: true,
+                newline: true,
+            },
+        )
+        .unwrap();
         assert_eq!(file_regexec(&rx, b"ab\nX-Y\nz").unwrap(), Some((3, 6)));
         assert_eq!(file_regexec(&rx, b"x\ny").unwrap(), None);
         // The subject ends at its NUL.
         assert_eq!(file_regexec(&rx, b"q\0x-y").unwrap(), None);
-        assert_eq!(file_regcomp(&mut ms, b"a[b", RegFlags::default()).err(), Some(7));
+        assert_eq!(
+            file_regcomp(&mut ms, b"a[b", RegFlags::default()).err(),
+            Some(7)
+        );
         // Line 0 is no line: no prefix.
-        assert_eq!(ms.o_buf.as_deref(), Some(&b"regex error 7 for `a[b', (Unmatched [, [^, [:, [., or [=)"[..]));
+        assert_eq!(
+            ms.o_buf.as_deref(),
+            Some(&b"regex error 7 for `a[b', (Unmatched [, [^, [:, [., or [=)"[..])
+        );
     }
 }

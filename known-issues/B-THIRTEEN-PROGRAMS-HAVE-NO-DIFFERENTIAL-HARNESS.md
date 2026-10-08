@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `chmod`, `mkdir`, `mkfifo`, `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `mkdir`, `mkfifo`, `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -28,3 +28,15 @@ device`, status 1), and no harness was there to show it.
 every message, and the descriptor cases (`<&-`, `>&-`, `>/dev/full`, `2>&-`) --
 and each divergence it finds fixed. `chmod` first, since it also still lacks
 the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
+
+### Progress
+
+* **`chmod`, 2026-10-07** -- `scripts/chmod-diff.sh`, which compares the tree
+  each side leaves (every path's type and mode) as well as what it said. Its
+  first run found nine differences: the panic above, the same panic part-way
+  through a `-v -R` walk with the rest of the tree unvisited, a closed
+  standard output passed as success, help and version written with
+  `println!`, and `cannot access` where upstream's `fts` says `cannot operate
+  on dangling symlink` for a link named on the command line. All fixed; it
+  now agrees with GNU 9.4 on every case but its own help and version text,
+  including standard error full and closed.

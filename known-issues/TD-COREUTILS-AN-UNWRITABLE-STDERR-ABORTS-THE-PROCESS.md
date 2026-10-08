@@ -216,8 +216,8 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Thirteen programs still lack it: `bc chmod df dir ed find hostname
-install kill ls more patch vdir`. That list is now
+all. Twelve programs still lack it: `bc df dir ed find hostname install
+kill ls more patch vdir`. That list is now
 pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
 a program is added without the guard, when one is converted without being
 taken off the list, and when a program has only one half of it. Two had
@@ -260,6 +260,14 @@ closed descriptor's `EBADF` with success, so `stat f >&-` exited 0), and it
 is written a call at a time where GNU's makes one -- a `putchar` per literal
 byte, a `printf` per directive -- so that a full disk leaves the same
 sentence, and a warning lands after the output before it.
+`chmod` followed, with the first harness it has had (`chmod-diff.sh`, every
+case comparing the tree left behind as well as the words): its `-v` and `-c`
+lines were `println!`, which panicked on the first one a full disk refused --
+status 101, with the rest of a `-R` tree never visited -- and a closed
+standard output was a quiet success. They go through standard output's
+`Stream` now, a write per upstream `printf`, to `close_stdout`, and a dangling
+symbolic link named on the command line is `cannot operate on dangling
+symlink`, as `fts` makes upstream say, where it was `cannot access`.
 `cmp` was converted on 2026-10-07 with diffutils'
 `xstdopen` and its own stdout checks: 163 rows agree with GNU 3.10, 10 differ
 on purpose. `sort` was converted on 2026-10-03, its output moved onto

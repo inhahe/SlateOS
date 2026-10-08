@@ -95,7 +95,6 @@ userspace/objdump/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string
 userspace/pkg/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string
-userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
 userspace/rfkill/src/main.rs:argv-as-string

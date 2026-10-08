@@ -323,6 +323,35 @@ Two measured examples:
   `<someone>` after a warning, and that stands: the banner then says plainly
   that the sender is unknown. Nothing to port.
 
+* **`pstree`** — **RETIRED 2026-10-08.** `coreutils/src/bin/pstree.rs` is
+  psmisc 23.7's `src/pstree.c`, its terminal handling through
+  `userspace/terminfo` (ncurses 6.4's, ported for it). `userspace/pstree`,
+  written from the manuals, called itself a multi-personality binary --
+  `pstree` and "a `pgrep` variant with a tree view" -- though only `pstree`
+  reached the image. `scripts/pstree-diff.sh` runs each case in a fresh pid
+  namespace over a tree a fixture builds one process at a time, so both sides
+  see the same pids:
+
+      coreutils pstree      629 passed,   0 differed,  2 differ on purpose
+      userspace/pstree        8 passed, 621 differed,  2 differ on purpose
+
+  It put every child on a line of its own -- `├──` and four columns a level,
+  in Unicode even through a pipe -- where upstream runs a chain along one line
+  (`python3---alpha---worker`) and draws ASCII off a terminal; it compacted
+  leaves but dropped whatever hung under a compacted subtree (`2*[group]`,
+  its `leaf` gone), went on compacting under `-p`, which upstream's `-p`
+  turns off, and showed no threads at all. It had none of `-s`, `-g`, `-S`,
+  `-N`, `-t`, `-T`, `-Z`, `-G`, `-U` or `-C` (`pstree: unknown option: -s`);
+  a user operand drew the tree of one process of the user's where upstream
+  draws every top-most one; and a user nobody is was `pstree: user
+  'nosuchuser' not found` where upstream says `No such user name:
+  nosuchuser`. Its eight passes are two processes with no children drawn
+  alone -- `pstree 7` and `pstree 9`, with and without `-p`, one line either
+  way -- and four runs whose standard output was closed or full, where
+  nothing written is seen. **What the loser knew that the winner did
+  not:** `-k` (`--show-kernel`), kernel threads hidden unless asked for.
+  psmisc has no such option and hides nothing. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

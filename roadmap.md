@@ -5968,6 +5968,18 @@ _Port ext4 first. Don't write a custom filesystem._
   `scripts/wall-diff.sh`: 240 cases agree and 3 differ on purpose, in a user
   and mount namespace over a fixture utmp and fixture terminals, as root and
   as a user);
+  `pstree` (2026-10-08, psmisc 23.7's, replacing `userspace/pstree`, which
+  drew a tree of its own shape (`├── `, four columns a level) and had none of
+  `-s`, `-g`, `-S`, `-N`, `-t`, `-T`, `-Z`, `-G`, `-U` or `-C`: upstream's tree --
+  threads under their process, compaction, the column-counted cut at the
+  width, `out_int`'s silent 0 and the bracket `while (closing--)` loses --
+  and its terminal handling through the new `userspace/terminfo`, ncurses
+  6.4's `setupterm`/`tgetent` verdicts, `tgetstr`'s trimmed `sgr0`, `tparm`
+  and `tputs`' padding, which `ulcolors` now answers through too;
+  `scripts/pstree-diff.sh`: 629 cases agree and 2 differ on purpose, each run
+  in a fresh pid namespace whose tree a fixture builds one process at a time,
+  so that every pid, thread, zombie, uid and namespace is the same on both
+  sides);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6155,7 +6167,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] useradd/userdel/usermod/groupadd/groupdel/groupmod/newgrp: user management (atomic file I/O, UID/GID auto-assign, skel copy, 106 tests)
   - [x] cron/crontab/anacron/at/atd/batch/atq/atrm: job scheduling (cron expressions, time parsing, 8 special strings, 103 tests)
   - [x] cryptsetup/veritysetup/integritysetup: disk encryption (SHA-256, PBKDF2, LUKS header, key slots, cipher benchmark, 144 tests)
-  - [x] pstree: process tree display (Unicode/ASCII tree drawing, PID/UID/threads, compact mode)
+  - [x] pstree: psmisc 23.7's, a coreutils program since 2026-10-08 (see the coreutils item) -- the tree, compaction, threads, `-a`/`-p`/`-g`/`-u`/`-S`/`-Z`, `-N`, `-s`, `-h`/`-H` through `userspace/terminfo` (`scripts/pstree-diff.sh`, 629 cases)
   - [x] findmnt/mountpoint: mounted filesystem finder (/proc/mountinfo, tree/list/JSON/raw/pairs output) -- since 2026-09-26 ports of util-linux 2.39.3's `findmnt` (with `--verify` and `--poll`) and `mountpoint`, reading tables through `userspace/ulmount` (libmount's table code, and libblkid's device cache) and printing through `smartcols`; `scripts/findmnt-diff.sh`: 4954 cases agree, 8 more where only upstream never finishes; `scripts/mountpoint-diff.sh` (400 cases); since 2026-09-27 devices are probed through `userspace/ulblkid`, the libblkid port, for every format libblkid knows
   - [x] lsns: namespace listing (8 namespace types, JSON output, per-PID filtering) -- since 2026-09-26 a port of util-linux 2.39.3's, printing through `smartcols` (process, owner and parent trees; NETNSID over netlink; NSFS and persistent namespaces through `ulmount`'s mountinfo); `scripts/lsns-diff.sh`: 483 cases agree inside a namespace world the harness builds, 4 more where only upstream crashes. On SlateOS itself it lists nothing: SlateOS's `/proc` has no `PID/ns` links, since it isolates with capabilities rather than Linux namespaces
   - [x] ldconfig: shared library cache manager (ELF header parsing, soname extraction, /etc/ld.so.conf)

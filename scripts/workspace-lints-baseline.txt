@@ -110,7 +110,6 @@ userspace/oils  # bare deny(clippy::all)
 userspace/passwd
 userspace/ping
 userspace/pkg
-userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
 userspace/rfkill  # bare deny(clippy::all)

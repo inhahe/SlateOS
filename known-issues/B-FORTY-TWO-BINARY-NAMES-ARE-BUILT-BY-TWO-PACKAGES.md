@@ -29,7 +29,8 @@ util-linux's in `coreutils` -- `lastb` by its `argv[0]` -- with shadow-utils'
 retired in the commit that added both. And `wall`: util-linux's in
 `coreutils` with `write` and `mesg`, `userspace/wall` -- all three by its
 `argv[0]`, though no alias put the other two on the image -- retired in the
-same commit.
+same commit. And `pstree`: psmisc's in `coreutils`, `userspace/pstree`
+retired in the same commit.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

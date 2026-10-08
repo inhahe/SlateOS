@@ -214,7 +214,7 @@ two disagree.
 | `printf` | Format and print data. | yes | `coreutils` |  |
 | `prlimit` | Get and set process resource limits. | yes |  |  |
 | `ps` | Report a snapshot of the current processes. | yes | `coreutils` |  |
-| `pstree` | Process tree display utilities. | yes |  |  |
+| `pstree` | Display a tree of processes: psmisc 23.7's, ported. | yes | `coreutils` |  |
 | `ptx` | Produce a permuted index of file contents. | yes | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). | yes |  |  |
 | `pwd` | Print the full filename of the current working directory. | yes | `coreutils` |  |

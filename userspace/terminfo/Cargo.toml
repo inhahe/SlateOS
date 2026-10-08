@@ -1,0 +1,12 @@
+[package]
+name = "terminfo"
+version = "0.1.0"
+edition = "2024"
+description = "ncurses 6.4's terminfo layer, as programs here ask it: setupterm, tgetent, tgetstr, tparm, tputs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The terminal's output speed, which `tputs` counts padding in.
+libcall = { path = "../../libcall" }

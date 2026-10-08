@@ -685,6 +685,7 @@ dependencies = [
  "sm3",
  "stdfdguard",
  "sysroot-dep",
+ "terminfo",
  "ulclosestream",
  "ulcolors",
  "ulstrutils",
@@ -3177,14 +3178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pstree"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "pv"
 version = "0.1.0"
 dependencies = [
@@ -4254,6 +4247,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminfo"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+]
+
+[[package]]
 name = "tetris"
 version = "0.1.0"
 dependencies = [
@@ -4455,6 +4455,9 @@ dependencies = [
 [[package]]
 name = "ulcolors"
 version = "0.1.0"
+dependencies = [
+ "terminfo",
+]
 
 [[package]]
 name = "ulmount"

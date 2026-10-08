@@ -4250,6 +4250,7 @@ dependencies = [
 name = "terminfo"
 version = "0.1.0"
 dependencies = [
+ "cstrtol",
  "libcall",
 ]
 
@@ -4356,14 +4357,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "tput"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
 ]
 
 [[package]]

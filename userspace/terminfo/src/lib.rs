@@ -48,14 +48,29 @@ use std::path::PathBuf;
 
 mod entry;
 mod fallback_data;
+pub mod names;
 mod sgr0;
 mod tparm;
 mod tputs;
 
-pub use entry::{ABSENT_NUMERIC, BOOLCOUNT, CANCELLED_NUMERIC, Entry, NUMCOUNT, STRCOUNT};
+pub use entry::{
+    ABSENT_NUMERIC, BOOLCOUNT, CANCELLED_NUMERIC, Entry, NUMCOUNT, STRCOUNT, TiString,
+};
+
+/// A capability's type -- `BOOLEAN`, `NUMBER`, `STRING`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A flag.
+    Boolean,
+    /// A number.
+    Number,
+    /// A string, perhaps with parameters.
+    String,
+}
+
 pub use sgr0::trim_sgr0;
-pub use tparm::{Analysis, NUM_PARM, Tparm, analyze};
-pub use tputs::{Padding, baudrate, tputs};
+pub use tparm::{Analysis, Arg, NUM_PARM, Tparm, analyze};
+pub use tputs::{Outc, Padding, baudrate, putp_to, tputs, tputs_affcnt, tputs_to};
 
 /// `TGETENT_YES`: the terminal was found.
 pub const TGETENT_YES: i32 = 1;
@@ -86,6 +101,8 @@ pub mod number {
 pub mod string {
     /// `clear`.
     pub const CLEAR_SCREEN: usize = 5;
+    /// `cmdch`: the prototype command character.
+    pub const COMMAND_CHARACTER: usize = 9;
     /// `cup`.
     pub const CURSOR_ADDRESS: usize = 10;
     /// `cud1`.
@@ -137,6 +154,11 @@ pub struct Env {
     /// `_nc_env_access ()`: whether the three may be used at all -- not by
     /// a program running set-user-id or set-group-id.
     pub trusted: bool,
+    /// `$CC`: a command character that, when it is one byte long, replaces
+    /// a terminal's `cmdch` in the strings of its [`legacy_copy`]. Read
+    /// whoever is running -- upstream does not ask `_nc_env_access` about
+    /// this one.
+    pub cc: Option<Vec<u8>>,
 }
 
 impl Env {
@@ -149,6 +171,7 @@ impl Env {
             home: var("HOME"),
             terminfo_dirs: var("TERMINFO_DIRS"),
             trusted: env_access(),
+            cc: var("CC"),
         }
     }
 }
@@ -406,9 +429,14 @@ pub struct Setup {
     /// The terminal, when [`Setup::status`] is [`TGETENT_YES`].
     pub entry: Option<Entry>,
     /// `_nc_baudrate (ospeed)`: the output speed of the terminal it was set
-    /// up on -- standard output, else standard error -- or 0 when neither
-    /// is one, or nothing was found.
+    /// up on, or 0 when its descriptor is no terminal, or nothing was found.
     pub baud: i32,
+    /// `PC` as `set_curterm` sets it: the first byte of `pad`, or NUL.
+    pub pad: u8,
+    /// `setenv`s upstream makes to keep `LINES` and `COLUMNS` in step with
+    /// the window (`use_tioctl` and `use_env` both on): the caller's to
+    /// make, since a library cannot know it is safe to.
+    pub env_updates: Vec<(&'static str, i32)>,
 }
 
 impl Setup {
@@ -419,6 +447,47 @@ impl Setup {
             complaint: Some(complaint),
             entry: None,
             baud: 0,
+            pad: 0,
+            env_updates: Vec::new(),
+        }
+    }
+
+    /// How `tputs` pads on the terminal set up: at its speed, with `PC`,
+    /// or by pausing where it has `npc`. With no terminal, not at all.
+    #[must_use]
+    pub fn padding(&self) -> Padding {
+        Padding {
+            terminal: self.entry.is_some(),
+            baud: self.baud,
+            pad: self.pad,
+            no_pad_char: self
+                .entry
+                .as_ref()
+                .is_some_and(|e| e.flag(boolean::NO_PAD_CHAR)),
+        }
+    }
+}
+
+/// How `setupterm` sizes the screen, and on which descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Options {
+    /// `Filedes`. Standard output that is no terminal is standard error
+    /// instead, as upstream has it.
+    pub fd: i32,
+    /// `use_env`: `LINES` and `COLUMNS` override the window's size.
+    pub use_env: bool,
+    /// `use_tioctl`: the window's size is asked for even without
+    /// `use_env`, and with it, `LINES` and `COLUMNS` are set to it.
+    pub use_tioctl: bool,
+}
+
+impl Default for Options {
+    /// Upstream's: standard output, `use_env` on, `use_tioctl` off.
+    fn default() -> Self {
+        Self {
+            fd: 1,
+            use_env: true,
+            use_tioctl: false,
         }
     }
 }
@@ -428,11 +497,109 @@ fn named(name: &[u8], message: &[u8]) -> Vec<u8> {
     [b"'", name, b"': ", message].concat()
 }
 
-/// `setupterm (tname, fd, &errret)`, or -- with the name given -- the
+/// `setupterm (tname, 1, &errret)`, or -- with the name given -- the
 /// `setupterm` inside `tgetent (buf, name)`. With `tname` `None` the name
 /// is `term`, the value of `TERM`.
 #[must_use]
 pub fn setupterm(tname: Option<&[u8]>, term: Option<&[u8]>, env: &Env) -> Setup {
+    setupterm_with(tname, term, env, &Options::default())
+}
+
+/// `isatty (fd)`, as `tcgetattr` answers it.
+fn is_tty(fd: i32) -> bool {
+    libcall::termios::get_attr(fd).is_ok()
+}
+
+/// `_nc_getenv_num (name)`: the variable as `strtol (s, &end, 0)` reads
+/// all of it, or -1 for none, a negative, trailing bytes or more than an
+/// `int`.
+fn getenv_num(name: &str) -> i32 {
+    let Some(value) = std::env::var_os(name).map(|v| bytes_of(&v)) else {
+        return -1;
+    };
+    let (n, used) = cstrtol::strtol(&value, 0);
+    if n < 0 || used == 0 || used != value.len() {
+        return -1;
+    }
+    i32::try_from(n).unwrap_or(-1)
+}
+
+/// `_nc_get_screensize`, its answer put into the entry's `lines` and
+/// `cols` "so tigetnum () and tgetnum () will do the right thing"; and the
+/// `setenv`s it makes, returned.
+fn screensize(entry: &mut Entry, fd: i32, opts: &Options) -> Vec<(&'static str, i32)> {
+    const COLUMNS: usize = 0;
+    const LINES: usize = 2;
+    let mut updates = Vec::new();
+    let mut linep = entry.number(LINES);
+    let mut colp = entry.number(COLUMNS);
+    if !(opts.use_env || opts.use_tioctl) {
+        return updates;
+    }
+    // "try asking the OS"
+    if is_tty(fd)
+        && let Ok(size) = libcall::pty::window_size(fd)
+    {
+        linep = i32::from(size.rows);
+        colp = i32::from(size.cols);
+    }
+    if opts.use_env {
+        if opts.use_tioctl {
+            // "If environment variables are used, update them."
+            if getenv_num("LINES") > 0 {
+                updates.push(("LINES", linep));
+            }
+            if getenv_num("COLUMNS") > 0 {
+                updates.push(("COLUMNS", colp));
+            }
+        }
+        let value = updated_num("LINES", &updates);
+        if value > 0 {
+            linep = value;
+        }
+        let value = updated_num("COLUMNS", &updates);
+        if value > 0 {
+            colp = value;
+        }
+        // `_nc_default_screensize`.
+        if linep <= 0 {
+            linep = entry.number(LINES);
+        }
+        if colp <= 0 {
+            colp = entry.number(COLUMNS);
+        }
+        if linep <= 0 {
+            linep = 24;
+        }
+        if colp <= 0 {
+            colp = 80;
+        }
+    }
+    // `lines = (NCURSES_INT2) (*linep)`, which with extended numbers is an
+    // `int`: whole. (The `short` copy the `CUR` macros read is the
+    // programs' to keep.)
+    entry.set_number(LINES, linep);
+    entry.set_number(COLUMNS, colp);
+    updates
+}
+
+/// `_nc_getenv_num (name)` after the `setenv`s in `updates`.
+fn updated_num(name: &str, updates: &[(&'static str, i32)]) -> i32 {
+    updates
+        .iter()
+        .rev()
+        .find(|(n, _)| *n == name)
+        .map_or_else(|| getenv_num(name), |&(_, v)| v)
+}
+
+/// `setupterm (tname, opts.fd, &errret)`, its screen sized by `opts`.
+#[must_use]
+pub fn setupterm_with(
+    tname: Option<&[u8]>,
+    term: Option<&[u8]>,
+    env: &Env,
+    opts: &Options,
+) -> Setup {
     let name = match tname {
         Some(n) => n,
         None => match term {
@@ -455,7 +622,7 @@ pub fn setupterm(tname: Option<&[u8]>, term: Option<&[u8]>, env: &Env) -> Setup 
             .into_bytes(),
         );
     }
-    let entry = match read_entry(name, env) {
+    let mut entry = match read_entry(name, env) {
         Ok(e) => e,
         // "try fallback list if entry on disk" -- whatever kept it off disk.
         Err(code) => match fallback(name) {
@@ -469,6 +636,30 @@ pub fn setupterm(tname: Option<&[u8]>, term: Option<&[u8]>, env: &Env) -> Setup 
             None => return Setup::failure(code, named(name, b"unknown terminal type.\n")),
         },
     };
+    // `set_curterm`: `PC = (VALID_STRING (pad_char) ? pad_char[0] : 0)`.
+    // (`_nc_tinfo_cmdch` comes next, but rewrites only the copy `CUR`'s
+    // macros read: see [`legacy_copy`].)
+    let pad = entry
+        .string(string::PAD_CHAR)
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0);
+    // "Allow output redirection. ... If stdout is directed to a file,
+    // screen updates go to standard error."
+    let fd = if opts.fd == 1 && !is_tty(1) {
+        2
+    } else {
+        opts.fd
+    };
+    let baud = terminal_baud(fd);
+    let env_updates = screensize(&mut entry, fd, opts);
+    let found = |complaint: Option<Vec<u8>>, entry: Entry, env_updates| Setup {
+        status: TGETENT_YES,
+        complaint,
+        entry: Some(entry),
+        baud,
+        pad,
+        env_updates,
+    };
     if entry.flag(boolean::GENERIC_TYPE) {
         // "BSD 4.3's termcap contains mis-typed "gn" for wy99. Do a sanity
         // check before giving up."
@@ -476,44 +667,64 @@ pub fn setupterm(tname: Option<&[u8]>, term: Option<&[u8]>, env: &Env) -> Setup 
         if (has(string::CURSOR_ADDRESS) || (has(string::CURSOR_DOWN) && has(string::CURSOR_HOME)))
             && has(string::CLEAR_SCREEN)
         {
-            return Setup {
-                status: TGETENT_YES,
-                complaint: Some(named(name, b"terminal is not really generic.\n")),
-                entry: Some(entry),
-                baud: terminal_baud(),
-            };
+            return found(
+                Some(named(name, b"terminal is not really generic.\n")),
+                entry,
+                env_updates,
+            );
         }
-        return Setup::failure(
+        // The size was taken, and any `setenv` made, before this test.
+        let mut failure = Setup::failure(
             TGETENT_NO,
             named(name, b"I need something more specific.\n"),
         );
+        failure.env_updates = env_updates;
+        return failure;
     }
     if entry.flag(boolean::HARD_COPY) {
-        return Setup {
-            status: TGETENT_YES,
-            complaint: Some(named(name, b"I can't handle hardcopy terminals.\n")),
-            entry: Some(entry),
-            baud: terminal_baud(),
-        };
+        return found(
+            Some(named(name, b"I can't handle hardcopy terminals.\n")),
+            entry,
+            env_updates,
+        );
     }
-    Setup {
-        status: TGETENT_YES,
-        complaint: None,
-        entry: Some(entry),
-        baud: terminal_baud(),
-    }
+    found(None, entry, env_updates)
 }
 
-/// The output speed of the terminal `setupterm` settles on -- standard
-/// output if it is one, else standard error (`def_prog_mode`, then
-/// `baudrate`) -- as `_nc_baudrate` gives it; 0 when neither is a terminal.
-fn terminal_baud() -> i32 {
-    for fd in [1, 2] {
-        if let Ok(t) = libcall::termios::get_attr(fd) {
-            return baudrate(libcall::termios::output_speed(&t));
-        }
+/// `cur_term->type`, the copy of the terminal that `term.h`'s `CUR` macros
+/// read -- `clear_screen`, `init_2string`, `key_backspace` in a program's
+/// own code -- as `setupterm` leaves its strings.
+///
+/// ncurses keeps the terminal twice, each copy with strings of its own, and
+/// `_nc_tinfo_cmdch` rewrites only this one: where the terminal has a
+/// command character (`cmdch`) and `$CC` is one byte long, that byte takes
+/// the command character's place in every string. `tigetstr` reads the
+/// other copy, and sees the strings as the entry has them. Measured: with
+/// `cmdch=@` and `CC=X`, `clear` sends `X[H` for `clear=@[H` while `tput
+/// clear`'s `E3`, which it asks `tigetstr` for, stays `@E3`.
+#[must_use]
+pub fn legacy_copy(entry: &Entry, env: &Env) -> Entry {
+    let mut copy = entry.clone();
+    // "Only use the character if the string is a single character, since
+    // it is fairly common for developers to set the C compiler name as an
+    // environment variable - using the same symbol."
+    if let Some(&proto) = entry
+        .string(string::COMMAND_CHARACTER)
+        .and_then(|c| c.first())
+        && let Some([cc]) = env.cc.as_deref()
+    {
+        copy.replace_in_strings(proto, *cc);
     }
-    0
+    copy
+}
+
+/// The output speed of the terminal on `fd` (`def_prog_mode`, then
+/// `baudrate`), as `_nc_baudrate` gives it; 0 when it is no terminal.
+fn terminal_baud(fd: i32) -> i32 {
+    match libcall::termios::get_attr(fd) {
+        Ok(t) => baudrate(libcall::termios::output_speed(&t)),
+        Err(_) => 0,
+    }
 }
 
 /// What `tgetent` leaves for the termcap functions: the terminal, the
@@ -526,17 +737,11 @@ pub struct Termcap {
 }
 
 impl Termcap {
-    /// What `setupterm` alone leaves the termcap functions: the terminal at
-    /// `baud`, its `sgr0` untrimmed and `PC` unset, since only `tgetent`
-    /// sets those.
+    /// What `setupterm` alone leaves the termcap functions: the terminal,
+    /// padded as `setupterm` left it ([`Setup::padding`]), its `sgr0`
+    /// untrimmed -- only `tgetent` trims it.
     #[must_use]
-    pub fn untrimmed(entry: Entry, baud: i32) -> Self {
-        let padding = Padding {
-            terminal: true,
-            baud,
-            pad: 0,
-            no_pad_char: entry.flag(boolean::NO_PAD_CHAR),
-        };
+    pub fn untrimmed(entry: Entry, padding: Padding) -> Self {
         Self {
             entry,
             fix_sgr0: None,
@@ -579,11 +784,12 @@ pub fn tgetent(name: &[u8], env: &Env) -> Result<Termcap, i32> {
     match setup.entry {
         Some(entry) if setup.status == TGETENT_YES => {
             let fix_sgr0 = trim_sgr0(&entry, &mut Tparm::new());
-            // `if (pad_char != NULL) PC = pad_char[0];`
+            // `if (pad_char != NULL) PC = pad_char[0];` -- again, and now
+            // after a `$CC` may have rewritten it.
             let pad = entry
                 .string(string::PAD_CHAR)
                 .and_then(|p| p.first().copied())
-                .unwrap_or(0);
+                .unwrap_or(setup.pad);
             let padding = Padding {
                 terminal: true,
                 baud: setup.baud,
@@ -646,6 +852,7 @@ mod tests {
             home: None,
             terminfo_dirs: None,
             trusted: true,
+            cc: None,
         }
     }
 
@@ -680,6 +887,7 @@ mod tests {
             home: None,
             terminfo_dirs: None,
             trusted: false,
+            cc: None,
         };
         let s = setupterm(Some(b"xterm-256color"), None, &env);
         assert_eq!((s.status, s.complaint), (TGETENT_YES, None));
@@ -693,6 +901,29 @@ mod tests {
                 .string(string::EXIT_ATTRIBUTE_MODE),
             Some(&b"\x1b[0m"[..])
         );
+    }
+
+    #[test]
+    fn a_one_byte_cc_rewrites_the_legacy_copy_and_nothing_else() {
+        let mut strs: Vec<Option<&[u8]>> = vec![None; string::CLEAR_SCREEN.max(9) + 1];
+        strs[string::COMMAND_CHARACTER] = Some(b"@");
+        strs[string::CLEAR_SCREEN] = Some(b"@[H@");
+        let entry = entry::read_termtype(&compile(b"zz-cmdch|a test", &[], &strs)).unwrap();
+        let with = |cc: &[u8]| Env {
+            cc: Some(cc.to_vec()),
+            ..Env::default()
+        };
+        let copy = legacy_copy(&entry, &with(b"X"));
+        assert_eq!(copy.string(string::CLEAR_SCREEN), Some(&b"X[HX"[..]));
+        assert_eq!(copy.string(string::COMMAND_CHARACTER), Some(&b"X"[..]));
+        // The terminal itself -- what `tigetstr` reads -- keeps its own.
+        assert_eq!(entry.string(string::CLEAR_SCREEN), Some(&b"@[H@"[..]));
+        // Two bytes, or none, are a compiler's name: nothing changes.
+        for cc in [&b"XY"[..], b""] {
+            let copy = legacy_copy(&entry, &with(cc));
+            assert_eq!(copy.string(string::CLEAR_SCREEN), Some(&b"@[H@"[..]));
+        }
+        assert_eq!(legacy_copy(&entry, &Env::default()), entry);
     }
 
     // A Windows path's drive colon is a search-list separator.
@@ -789,6 +1020,7 @@ mod tests {
                 .concat(),
             ),
             trusted: true,
+            cc: None,
         };
         let list = search_list(&env);
         assert_eq!(list.first(), Some(&a.bytes()));
@@ -806,6 +1038,7 @@ mod tests {
             home: None,
             terminfo_dirs: None,
             trusted: true,
+            cc: None,
         };
         assert_eq!(
             search_list(&env).first().map(Vec::as_slice),
@@ -826,6 +1059,7 @@ mod tests {
             home: None,
             terminfo_dirs: None,
             trusted: true,
+            cc: None,
         };
         assert!(read_entry(b"qd", &env).is_ok());
         assert!(read_entry(b"quick", &env).is_ok());

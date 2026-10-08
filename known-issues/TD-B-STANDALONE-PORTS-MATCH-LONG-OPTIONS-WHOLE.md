@@ -12,8 +12,10 @@ loop has its own edge cases around values, `=`, and operands.
 **Where:** the standalone ports that already share `usageerror` (the
 diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
 `hostnamectl`, `objdump`, `resolvectl`,
-`route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
-not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d. So
+`route`, `sanitize`, `systemctl` -- plus hand-parsed programs that do
+not use it yet. (`tput` was one; it is now ncurses 6.4's, with `clear` and
+`tset`, in coreutils, parsing as glibc's plain `getopt` does through the knob
+`getoptlong` gained for it, `short_only` -- 2026-10-08. `logger` was one; its port uses `getoptlong`, 413e56f1d. So
 was `getopt` itself -- now a port of util-linux's, whose script-facing parse
 is `getoptlong` with the knobs it gained for it: keep-going, long-only,
 distinct entries, `W;`. And `flock`, now a port of util-linux's, whose

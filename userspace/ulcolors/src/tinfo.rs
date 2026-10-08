@@ -24,6 +24,8 @@ pub fn colors(
         home: home.map(<[u8]>::to_vec),
         terminfo_dirs: terminfo_dirs.map(<[u8]>::to_vec),
         trusted: terminfo::env_access(),
+        // `$CC` rewrites strings only; `colors` is a number.
+        cc: None,
     };
     let setup = terminfo::setupterm(None, Some(term), &env);
     if setup.complaint.is_some() || setup.status != terminfo::TGETENT_YES {

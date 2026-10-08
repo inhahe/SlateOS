@@ -1388,8 +1388,10 @@ fn run(argv: &[OsString], argv0: &[u8], out: &mut ulclosestream::Stdout) -> Resu
             ulclosestream::stderr_write(&complaint);
             return Err(Die(1));
         }
-        let baud = setup.baud;
-        st.terminal = setup.entry.map(|e| terminfo::Termcap::untrimmed(e, baud));
+        let padding = setup.padding();
+        st.terminal = setup
+            .entry
+            .map(|e| terminfo::Termcap::untrimmed(e, padding));
     }
 
     let mut operands: Vec<Vec<u8>> = Vec::new();

@@ -5980,6 +5980,17 @@ _Port ext4 first. Don't write a custom filesystem._
   in a fresh pid namespace whose tree a fixture builds one process at a time,
   so that every pid, thread, zombie, uid and namespace is the same on both
   sides);
+  `tput`, `clear`, `tset` and `tabs` (2026-10-08, ncurses 6.4's `progs/`,
+  `reset` being `tset` by another name, replacing `userspace/tput`, which
+  carried a table of five terminals of its own rather than reading the
+  terminfo database: capabilities and their parameters -- numbers, and the
+  strings `pfkey`, `Cs` and `Ms` take -- `-S`, `init` and `reset` with every
+  init and reset string, file and program, margins and tab stops, `tset`'s
+  mappings, its questions and the line put right, `tabs`' lists and ruler,
+  through `userspace/terminfo`, which learned the two copies ncurses keeps of
+  a terminal and `putp`'s padding; `scripts/tput-diff.sh`: 1260 cases agree and 11 differ on purpose,
+  each side on a pseudo-terminal of its own, compared by what it wrote and
+  the settings and window it left);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6115,7 +6126,7 @@ _Port ext4 first. Don't write a custom filesystem._
     as upstream's -- and checked against Ubuntu's build by `scripts/uu-diff.sh` (433 cases), 2026-09-27.
   - [x] install: copy files with attributes (octal/symbolic mode parsing, backup, compare, strip, ownership, -D parent creation)
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
-  - [x] tput/reset/clear: terminal capability tools (built-in terminfo database, parameterized string expansion, terminal reset)
+  - [x] tput/clear/tset/reset/tabs: ncurses 6.4's, coreutils programs since 2026-10-08 (see the coreutils item) -- capabilities, `-S`, `init`/`reset`, the init and reset strings, margins, tab stops, `tset`'s mappings and questions, the line put right, `tabs`' lists, through `userspace/terminfo` (`scripts/tput-diff.sh`)
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)

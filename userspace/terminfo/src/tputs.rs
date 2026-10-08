@@ -4,12 +4,15 @@
 //! A program that has set a terminal up with `setupterm` or `tgetent` but
 //! has no curses screen calls `tputs` through a stand-in screen of
 //! upstream's making, one with no terminal of its own -- and for that
-//! screen upstream applies every delay (`normal_delay`), mandatory or not.
-//! A delay of `n` milliseconds is then `n * baud / 9000` copies of `PC`
-//! (`pad_char`, else NUL) at the speed of the terminal `setupterm` found,
-//! which is none -- so nothing -- when neither standard output nor standard
-//! error is a terminal; or, for a terminal with `npc`, a pause instead.
-//! With no terminal set up at all, `delay_output` does nothing.
+//! screen upstream applies every delay (`normal_delay`), mandatory or not
+//! ([`tputs_to`]). `putp` makes no stand-in: it hands `tputs` the current
+//! screen, which is none, and then only a mandatory delay (`$<n/>`) applies
+//! ([`putp_to`]). A delay of `n` milliseconds is `n * baud / 9000` copies of
+//! `PC` (`pad_char`, else NUL) at the speed of the terminal `setupterm`
+//! found, which is none -- so nothing -- when neither standard output nor
+//! standard error is a terminal; or, for a terminal with `npc`, a pause
+//! instead, after what came before it is flushed. With no terminal set up
+//! at all, `delay_output` does nothing.
 
 use std::time::Duration;
 
@@ -26,7 +29,8 @@ pub struct Padding {
     /// `_nc_baudrate (ospeed)`: the terminal's output speed in bits per
     /// second, 0 when it was found on no terminal.
     pub baud: i32,
-    /// `PC`: `pad_char`'s first byte, set by `tgetent`; NUL otherwise.
+    /// `PC`: `pad_char`'s first byte, as `setupterm` (in `set_curterm`) and
+    /// `tgetent` set it; NUL for a terminal with no `pad`.
     pub pad: u8,
     /// `no_pad_char` (`npc`): pause rather than pad.
     pub no_pad_char: bool,
@@ -37,14 +41,39 @@ fn at(s: &[u8], i: usize) -> u8 {
     s.get(i).copied().unwrap_or(0)
 }
 
+/// Where `tputs` puts what it makes: its `outc`, a byte at a time, and the
+/// stream `_nc_flush` empties -- standard output, with no curses screen --
+/// before it pauses a terminal that cannot be padded.
+///
+/// The flush is what makes the pause visible: `flash` on an xterm is
+/// `\E[?5h$<100/>\E[?5l`, and its first half has to reach the terminal before
+/// the 100 ms, not with the second half after it.
+pub trait Outc {
+    /// `outc (c)`, for each of `bytes`.
+    fn put(&mut self, bytes: &[u8]);
+    /// `_nc_flush ()`: `fflush (stdout)`.
+    fn flush(&mut self);
+}
+
+/// Bytes collected, for a caller that writes them itself: a pause still
+/// happens, but before any of them are written.
+impl Outc for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+
+    fn flush(&mut self) {}
+}
+
 /// `delay_output (ms)`, its pad characters onto `out`.
-fn delay_output(out: &mut Vec<u8>, ms: i32, padding: &Padding) {
+fn delay_output(out: &mut dyn Outc, ms: i32, padding: &Padding) {
     let ms = ms.min(MAX_DELAY_MSECS);
     if !padding.terminal {
         return;
     }
     if padding.no_pad_char {
-        // `napms (ms)`.
+        // `_nc_flush (); napms (ms);`
+        out.flush();
         std::thread::sleep(Duration::from_millis(u64::try_from(ms).unwrap_or(0)));
     } else {
         // `(ms * _nc_baudrate (ospeed)) / (BAUDBYTE * 1000)`, in `int`s.
@@ -52,10 +81,7 @@ fn delay_output(out: &mut Vec<u8>, ms: i32, padding: &Padding) {
             .wrapping_mul(padding.baud)
             .checked_div(BAUDBYTE * 1000)
             .unwrap_or(0);
-        out.extend(std::iter::repeat_n(
-            padding.pad,
-            usize::try_from(nullcount).unwrap_or(0),
-        ));
+        out.put(&vec![padding.pad; usize::try_from(nullcount).unwrap_or(0)]);
     }
 }
 
@@ -63,7 +89,45 @@ fn delay_output(out: &mut Vec<u8>, ms: i32, padding: &Padding) {
 /// `outc` is given.
 #[must_use]
 pub fn tputs(string: &[u8], padding: &Padding) -> Vec<u8> {
+    tputs_affcnt(string, 1, padding)
+}
+
+/// `tputs (string, affcnt, outc)`: [`tputs`] with `affcnt` lines affected,
+/// which a `*` in a delay multiplies it by.
+#[must_use]
+pub fn tputs_affcnt(string: &[u8], affcnt: i32, padding: &Padding) -> Vec<u8> {
     let mut out = Vec::with_capacity(string.len());
+    tputs_to(string, affcnt, padding, &mut out);
+    out
+}
+
+/// `tputs (string, affcnt, outc)` through `outc` itself, so that a pause on
+/// a terminal with `npc` comes after what precedes it has been flushed.
+///
+/// With no curses screen the public `tputs` makes a stand-in one with no
+/// terminal of its own, and for that one every delay applies.
+pub fn tputs_to(string: &[u8], affcnt: i32, padding: &Padding, out: &mut dyn Outc) {
+    tputs_screen(string, affcnt, padding, out, true);
+}
+
+/// `putp (string)`: `tputs (string, 1, putchar)` -- but handed
+/// `CURRENT_SCREEN`, which with no curses screen is no screen at all, so
+/// that only the delays a capability marks mandatory (`$<n/>`) apply: `tput
+/// flash` pauses on an xterm, `tput bold` on a vt100 sends no padding.
+pub fn putp_to(string: &[u8], padding: &Padding, out: &mut dyn Outc) {
+    tputs_screen(string, 1, padding, out, false);
+}
+
+/// `NCURSES_SP_NAME (tputs)`: `normal_delay` is whether a delay that is not
+/// mandatory applies -- with a screen and no terminal of its own, always;
+/// with no screen, never.
+fn tputs_screen(
+    string: &[u8],
+    affcnt: i32,
+    padding: &Padding,
+    out: &mut dyn Outc,
+    normal_delay: bool,
+) {
     let mut s = 0usize;
     while at(string, s) != 0 {
         if at(string, s) == b'$' {
@@ -79,7 +143,7 @@ pub fn tputs(string: &[u8], padding: &Padding) -> Vec<u8> {
                 {
                     // Not padding after all: `$<` as it is, and on from
                     // the byte after it.
-                    out.extend_from_slice(b"$<");
+                    out.put(b"$<");
                     continue;
                 }
                 // Tenths of a millisecond: the digits, and one after a dot.
@@ -101,29 +165,34 @@ pub fn tputs(string: &[u8], padding: &Padding) -> Vec<u8> {
                         s = s.saturating_add(1);
                     }
                 }
-                // `*` multiplies by the lines affected, which is 1 here;
-                // `/` makes it mandatory, which with no screen it is anyway.
+                // `*` multiplies by the lines affected; `/` makes it
+                // mandatory.
+                let mut mandatory = false;
                 while at(string, s) == b'*' || at(string, s) == b'/' {
+                    if at(string, s) == b'*' {
+                        number = number.wrapping_mul(affcnt);
+                    } else {
+                        mandatory = true;
+                    }
                     s = s.saturating_add(1);
                 }
-                if number > 0 {
-                    delay_output(&mut out, number / 10, padding);
+                if number > 0 && (normal_delay || mandatory) {
+                    delay_output(out, number / 10, padding);
                 }
             } else {
-                out.push(b'$');
+                out.put(b"$");
                 if at(string, s) != 0 {
-                    out.push(at(string, s));
+                    out.put(&[at(string, s)]);
                 }
             }
         } else {
-            out.push(at(string, s));
+            out.put(&[at(string, s)]);
         }
         if at(string, s) == 0 {
             break;
         }
         s = s.saturating_add(1);
     }
-    out
 }
 
 /// `_nc_baudrate (ospeed)`: the bits per second of a `B*` speed, -1 for a
@@ -218,6 +287,51 @@ mod tests {
         assert_eq!(tputs(b"x$<2>", &pc), b"x********");
         let pipe = Padding { baud: 0, ..pty };
         assert_eq!(tputs(b"x$<2>", &pipe), b"x");
+    }
+
+    #[test]
+    fn putp_pads_only_what_is_mandatory() {
+        // Measured: `tput bold` on a vt100 sends no padding at all, where
+        // pstree's `tputs` of the same string sends eight NULs.
+        let pty = Padding {
+            terminal: true,
+            baud: 38400,
+            pad: 0,
+            no_pad_char: false,
+        };
+        let mut out = Vec::new();
+        putp_to(b"\x1b[1m$<2>", &pty, &mut out);
+        assert_eq!(out, b"\x1b[1m");
+        let mut out = Vec::new();
+        putp_to(b"a$<2/>b$<2*/>c", &pty, &mut out);
+        assert_eq!(out, b"a\0\0\0\0\0\0\0\0b\0\0\0\0\0\0\0\0c");
+    }
+
+    /// What a flush interleaves with what was put, recorded.
+    #[derive(Default)]
+    struct Recorder(Vec<u8>);
+
+    impl Outc for Recorder {
+        fn put(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+        fn flush(&mut self) {
+            self.0.push(b'|');
+        }
+    }
+
+    #[test]
+    fn a_pause_comes_after_a_flush() {
+        // `npc`: the first half reaches the terminal before the pause.
+        let npc = Padding {
+            terminal: true,
+            baud: 38400,
+            pad: 0,
+            no_pad_char: true,
+        };
+        let mut r = Recorder::default();
+        tputs_to(b"on$<1/>off", 1, &npc, &mut r);
+        assert_eq!(r.0, b"on|off");
     }
 
     #[test]

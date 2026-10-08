@@ -328,11 +328,97 @@ struct Data {
     strings: [Option<Vec<u8>>; NUM_PARM],
 }
 
+/// One of `tparm`'s variable arguments: a `long`, or a string pointer
+/// (`None` is a null one, which upstream reads as an empty string).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arg<'a> {
+    /// `TPARM_ARG`, a `long`.
+    Num(i64),
+    /// `char *`.
+    Str(Option<&'a [u8]>),
+}
+
+/// `check_string_caps`: whether `string`, whose analysis gives string
+/// parameters `tparm_type`, is one of the few capabilities that take them --
+/// its value the terminal's `pfkey`, `pfloc`, `pfx` or `pln` (a number and
+/// a string), `pfxl` (a number and two strings), or its own `Cs` (a string)
+/// or `Ms` (two).
+fn check_string_caps(entry: &Entry, string: &[u8], tparm_type: u32) -> bool {
+    let is = |name: &str| match entry.tigetstr(name.as_bytes()) {
+        crate::TiString::Value(v) => v == string,
+        crate::TiString::Absent | crate::TiString::NotAString => false,
+    };
+    let mut want: u32 = 0;
+    if is("pfkey") || is("pfloc") || is("pfx") || is("pln") {
+        want = 2;
+    } else if is("pfxl") {
+        want = 6;
+    } else {
+        if is("Cs") {
+            want = 1;
+        }
+        if is("Ms") {
+            want = 3;
+        }
+    }
+    want == tparm_type
+}
+
 impl Tparm {
-    /// A terminal's, fresh.
+    /// A terminal's, fresh: what `setupterm` leaves. (`tput` calls
+    /// `_nc_reset_tparm (NULL)` before each capability, but a null terminal
+    /// there is the no-terminal state, not the one set up: the static
+    /// variables a capability sets are still set for the next.)
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// `tparm (string, ...)` -- the variable-argument form -- for the
+    /// terminal `entry`: `None` for a capability that takes string
+    /// parameters and is not one of those that may. The first
+    /// `num_actual` arguments are taken, each as the analysis says: a string
+    /// where `%s` or `%l` reads one, a `long` elsewhere.
+    #[must_use]
+    pub fn tparm(&mut self, entry: &Entry, string: &[u8], args: &[Arg<'_>]) -> Option<Vec<u8>> {
+        let analysis = analyze(string);
+        let tparm_type = analysis.tparm_type();
+        // `ValidCap (TRUE)`.
+        if tparm_type != 0 && !check_string_caps(entry, string, tparm_type) {
+            return None;
+        }
+        let mut data = Data {
+            analysis,
+            param: [0; NUM_PARM],
+            strings: Default::default(),
+        };
+        // `tparm_copy_valist (&myData, TRUE, ap)`.
+        for k in 0..analysis.actual().min(NUM_PARM) {
+            let wants_string = analysis.is_string.get(k).copied().unwrap_or(false);
+            match (wants_string, args.get(k)) {
+                (true, Some(Arg::Str(s))) => {
+                    if let Some(slot) = data.strings.get_mut(k) {
+                        *slot = Some(s.unwrap_or_default().to_vec());
+                    }
+                }
+                (false, Some(Arg::Num(n))) => {
+                    if let Some(slot) = data.param.get_mut(k) {
+                        *slot = *n;
+                    }
+                }
+                // A number where a string is read, or the reverse: upstream
+                // reads the one as the other, which is undefined; here a
+                // string is empty and a number 0. Past the arguments given,
+                // the same.
+                (true, _) => {
+                    if let Some(slot) = data.strings.get_mut(k) {
+                        *slot = Some(Vec::new());
+                    }
+                }
+                (false, _) => {}
+            }
+        }
+        Some(self.tparam_internal(string, &mut data))
     }
 
     /// `_nc_tiparm (expected, string, ...)` for the terminal `entry`, with

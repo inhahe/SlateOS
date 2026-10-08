@@ -352,6 +352,38 @@ Two measured examples:
   not:** `-k` (`--show-kernel`), kernel threads hidden unless asked for.
   psmisc has no such option and hides nothing. Nothing to port.
 
+* **`tput`** — **RETIRED 2026-10-08.** `coreutils/src/bin/tput.rs`,
+  `clear.rs` and `tset.rs` are ncurses 6.4's `progs/tput.c`, `clear.c` and
+  `tset.c` (with `tabs.c` beside them, new), sharing `coreutils::ncurses` --
+  `tty_settings.c`, `reset_cmd.c`, `clear_cmd.c` -- over `userspace/terminfo`.
+  `userspace/tput`, written from the manuals, was `tput`, `clear`, `reset`
+  and `tset` by its `argv[0]`, through the manifest aliases. Measured by
+  `scripts/tput-diff.sh` on its `tput`, `clear` and `tset` cases (before
+  `tabs` joined it), each side on a pseudo-terminal of its own:
+
+      coreutils tput/clear/tset   957 passed,   0 differed,  9 differ on purpose
+      userspace/tput              120 passed, 836 differed,  9 differ on purpose, 1 never ended
+
+  It read no terminfo database: it carried a table of its own for five
+  terminals (`xterm`, `vt100`, `linux`, `dumb` and `slateos`), so every
+  other name was its idea of an xterm and every crafted entry the harness
+  compiles was refused, and even the five were wrong where they mattered --
+  `sgr0` `\E[0m` where xterm's is `\E(B\E[m`, `clear` without the
+  scrollback's `E3`, a `longname` of its own invention with a newline after
+  it. A boolean it did not list, `bw` among them, was an unknown
+  capability, and an unknown capability exited 1 where ncurses exits 4.
+  As `tset` and `reset` it took no options at all -- `tset -q` was
+  `invalid option -- 'q'` -- and sent a hard reset of its own (`\Ec`, the
+  screen cleared, the cursor shown) and then `Terminal reset to sane
+  state.`, where ncurses sends the terminal's own init or reset strings
+  and reports the erase, interrupt and kill characters it changed. As
+  `init` it was plain `tput`, so `init -S` sat waiting on the terminal for
+  commands -- the case that never ended -- where ncurses refuses `-S` from
+  its other names. Its 120 passes are capabilities its table happened to
+  hold as the database does, `cols`, `colors`, `bold` and `el` on the
+  xterms among them. **What the loser knew that the winner did not:**
+  nothing that ships.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

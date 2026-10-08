@@ -12,6 +12,8 @@
 //! `TGETENT_NO` -- the entry is not there -- exactly as upstream's is, so
 //! the search goes on to the next directory.
 
+use crate::{Kind, names};
+
 /// `BOOLCOUNT`: the standard booleans.
 pub const BOOLCOUNT: usize = 44;
 /// `NUMCOUNT`: the standard numbers.
@@ -84,37 +86,121 @@ impl Entry {
         self.strings.get(index)?.as_deref()
     }
 
+    /// Where the capability `name` of `kind` is: its standard index, else
+    /// the index past the standard ones of the entry's own extended one of
+    /// that name -- `_nc_find_type_entry`, then the extended names in order.
+    fn index_of(&self, kind: Kind, name: &[u8]) -> Option<usize> {
+        let (standard, count, first_name, ext_count): (&[&str], usize, usize, usize) = match kind {
+            Kind::Boolean => (&names::BOOLNAMES, BOOLCOUNT, 0, self.ext_booleans),
+            Kind::Number => (
+                &names::NUMNAMES,
+                NUMCOUNT,
+                self.ext_booleans,
+                self.ext_numbers,
+            ),
+            Kind::String => (
+                &names::STRNAMES,
+                STRCOUNT,
+                self.ext_booleans.saturating_add(self.ext_numbers),
+                self.ext_strings,
+            ),
+        };
+        if let Some(i) = standard.iter().position(|n| n.as_bytes() == name) {
+            return Some(i);
+        }
+        (0..ext_count)
+            .find(|&j| {
+                self.ext_names
+                    .get(first_name.saturating_add(j))
+                    .and_then(Option::as_deref)
+                    == Some(name)
+            })
+            .map(|j| count.saturating_add(j))
+    }
+
     /// The extended string capability called `name` -- `tigetstr` for a name
     /// that is not a standard one -- or `None`.
     #[must_use]
     pub fn ext_string(&self, name: &[u8]) -> Option<&[u8]> {
-        let first = self.ext_booleans.saturating_add(self.ext_numbers);
-        (0..self.ext_strings)
-            .find(|&j| {
-                self.ext_names
-                    .get(first.saturating_add(j))
-                    .and_then(Option::as_deref)
-                    == Some(name)
-            })
-            .and_then(|j| self.string(STRCOUNT.saturating_add(j)))
+        match self.tigetstr(name) {
+            TiString::Value(s) => Some(s),
+            TiString::Absent | TiString::NotAString => None,
+        }
     }
 
-    /// The extended number called `name`: [`ABSENT_NUMERIC`] when there is
-    /// none, as `tigetnum` answers for a valid name the entry lacks.
+    /// `tigetflag (name)`: 1 or 0 for a boolean capability, standard or the
+    /// entry's own, and -1 (`ABSENT_BOOLEAN`) for a name that is neither.
     #[must_use]
-    pub fn ext_number(&self, name: &[u8]) -> i32 {
-        (0..self.ext_numbers)
-            .find(|&j| {
-                self.ext_names
-                    .get(self.ext_booleans.saturating_add(j))
-                    .and_then(Option::as_deref)
-                    == Some(name)
-            })
-            .map_or(ABSENT_NUMERIC, |j| {
-                let n = self.number(NUMCOUNT.saturating_add(j));
+    pub fn tigetflag(&self, name: &[u8]) -> i32 {
+        self.index_of(Kind::Boolean, name)
+            .map_or(-1, |i| i32::from(self.flag(i)))
+    }
+
+    /// `tigetnum (name)`: the number, [`ABSENT_NUMERIC`] for one the entry
+    /// does not give, and [`CANCELLED_NUMERIC`] for a name that is no
+    /// numeric capability at all.
+    #[must_use]
+    pub fn tigetnum(&self, name: &[u8]) -> i32 {
+        self.index_of(Kind::Number, name)
+            .map_or(CANCELLED_NUMERIC, |i| {
+                let n = self.number(i);
                 if n >= 0 { n } else { ABSENT_NUMERIC }
             })
     }
+
+    /// `tigetstr (name)`.
+    #[must_use]
+    pub fn tigetstr(&self, name: &[u8]) -> TiString<'_> {
+        match self.index_of(Kind::String, name) {
+            None => TiString::NotAString,
+            Some(i) => self.string(i).map_or(TiString::Absent, TiString::Value),
+        }
+    }
+
+    /// Set the number at `index` -- as `setupterm` puts the screen's size
+    /// into `lines` and `cols`.
+    pub fn set_number(&mut self, index: usize, value: i32) {
+        if let Some(n) = self.numbers.get_mut(index) {
+            *n = value;
+        }
+    }
+
+    /// `_nc_tinfo_cmdch`'s rewrite: every `proto` byte of every string,
+    /// standard and extended, made `cc`.
+    pub(crate) fn replace_in_strings(&mut self, proto: u8, cc: u8) {
+        for s in self.strings.iter_mut().flatten() {
+            for b in s.iter_mut().filter(|b| **b == proto) {
+                *b = cc;
+            }
+        }
+    }
+
+    /// `longname ()`: what follows the last `|` of the first 255 bytes of
+    /// the name field (`ttytype`), or all of them when there is none.
+    #[must_use]
+    pub fn longname(&self) -> &[u8] {
+        // `NAMESIZE - 1`.
+        let ttytype = self
+            .names
+            .get(..self.names.len().min(255))
+            .unwrap_or_default();
+        match ttytype.iter().rposition(|&b| b == b'|') {
+            Some(0) | None => ttytype,
+            Some(bar) => ttytype.get(bar.saturating_add(1)..).unwrap_or_default(),
+        }
+    }
+}
+
+/// What `tigetstr` answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TiString<'a> {
+    /// `CANCELLED_STRING`: the name is no string capability, standard or the
+    /// entry's own.
+    NotAString,
+    /// A null pointer: a string capability the terminal does not have.
+    Absent,
+    /// Its value.
+    Value(&'a [u8]),
 }
 
 /// `LOW_MSB`.
@@ -600,6 +686,11 @@ pub(crate) mod tests {
         );
         let e = read_termtype(&file).unwrap();
         assert_eq!(e.names(), b"t|test");
+        assert_eq!(e.longname(), b"test");
+        let solo = read_termtype(&compile(b"solo", &[], &[], &[], false)).unwrap();
+        assert_eq!(solo.longname(), b"solo");
+        let bar = read_termtype(&compile(b"|x", &[], &[], &[], false)).unwrap();
+        assert_eq!(bar.longname(), b"|x");
         assert!(!e.flag(0));
         assert!(e.flag(1));
         // Neither 0 nor 1: false, as `_nc_setup_tinfo` makes it.
@@ -668,7 +759,16 @@ pub(crate) mod tests {
         assert_eq!(e.ext_string(b"xm"), Some(&b"X"[..]));
         assert_eq!(e.ext_string(b"XT"), None);
         assert!(e.flag(BOOLCOUNT));
-        assert_eq!(e.ext_number(b"U8"), ABSENT_NUMERIC);
+        // tiget*: the extended names beside the standard ones.
+        assert_eq!(e.tigetflag(b"XT"), 1);
+        assert_eq!(e.tigetflag(b"bw"), 0);
+        assert_eq!(e.tigetflag(b"xm"), -1);
+        assert_eq!(e.tigetnum(b"U8"), CANCELLED_NUMERIC);
+        assert_eq!(e.tigetnum(b"cols"), ABSENT_NUMERIC);
+        assert_eq!(e.tigetstr(b"xm"), TiString::Value(b"X"));
+        assert_eq!(e.tigetstr(b"cbt"), TiString::Value(b"std"));
+        assert_eq!(e.tigetstr(b"bel"), TiString::Absent);
+        assert_eq!(e.tigetstr(b"cols"), TiString::NotAString);
     }
 
     #[test]

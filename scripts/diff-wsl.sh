@@ -1046,18 +1046,32 @@ diff_dep_sources() {
 # once WSL's lead is allowed for, with a note saying so -- or nothing. A listed
 # file that no longer exists is not counted: a deleted source is an edit the
 # build has already reacted to, or will on its retry.
+#
+# The lead is allowed for only on files under `$root`, which Windows stamps. A
+# file the build generated -- `file`'s `OUT_DIR/magic.mgc`, which its binary
+# carries -- sits in `$target_dir` beside the artifact, stamped by WSL's own
+# clock, so for it only "newer" is late. Until 2026-10-08 the lead applied to
+# every source, and `file-diff.sh` refused every run: the binary is linked a
+# second after the database is written, inside any lead of more than that, so
+# it read as older than its own input even after the clean rebuild that should
+# have settled it.
 diff_late_source() {
-  local diff_art diff_newest
+  local diff_art
   diff_art=$(stat -c %.9Y "$1" 2>/dev/null) || return 0
-  diff_newest=$(diff_dep_sources "$2" | xargs -d '\n' -r stat -c '%.9Y %n' 2>/dev/null \
-    | awk '$1 > m { m = $1; l = $0 } END { if (l != "") print l }')
-  [ -n "$diff_newest" ] || return 0
-  awk -v n="${diff_newest%% *}" -v a="$diff_art" -v l="${diff_clock_lead:-0}" \
-      -v p="${diff_newest#* }" 'BEGIN {
-    if (n > a) { printf "%s|\n", p; exit }
-    if (l > 0 && n > a - l - 1)
-      printf "%s|, once a WSL clock lead of %s s over the files is allowed for\n", p, l
-  }'
+  diff_dep_sources "$2" | xargs -d '\n' -r stat -c '%.9Y %n' 2>/dev/null \
+    | awk -v a="$diff_art" -v l="${diff_clock_lead:-0}" -v r="$root/" '
+      {
+        n = $1
+        p = substr($0, index($0, " ") + 1)
+        if (n > a) { if (hard == "") hard = p; next }
+        if (substr(p, 1, length(r)) != r) next
+        if (l > 0 && n > a - l - 1 && soft == "") soft = p
+      }
+      END {
+        if (hard != "") printf "%s|\n", hard
+        else if (soft != "")
+          printf "%s|, once a WSL clock lead of %s s over the files is allowed for\n", soft, l
+      }'
 }
 
 # The package whose manifest is nearest above file $1, by its `[package]`

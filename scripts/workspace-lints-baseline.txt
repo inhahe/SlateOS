@@ -126,7 +126,6 @@ userspace/screen
 userspace/service
 userspace/ss
 userspace/sysctl
-userspace/syslogd
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
 userspace/top

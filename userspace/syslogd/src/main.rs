@@ -281,7 +281,7 @@ fn rotate_journal(journal: &Path) -> Vec<(PathBuf, io::Error)> {
 
     // Shift N-1 → N, N-2 → N-1, etc.
     for i in (1..MAX_ROTATED_FILES).rev() {
-        let to = rotated_path_of(journal, i + 1);
+        let to = rotated_path_of(journal, i.saturating_add(1));
         step(rotated_path_of(journal, i), &|held| held.rename_to(&to));
     }
 
@@ -606,7 +606,7 @@ fn cmd_stats() -> u8 {
         let p = rotated_path(i);
         match fs::metadata(&p) {
             Ok(meta) => {
-                rotated += 1;
+                rotated = rotated.saturating_add(1);
                 rotated_size = rotated_size.saturating_add(meta.len());
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -622,8 +622,10 @@ fn cmd_stats() -> u8 {
     let mut level_counts: BTreeMap<&str, u64> = BTreeMap::new();
     let mut service_counts: BTreeMap<&[u8], u64> = BTreeMap::new();
     for record in &all {
-        *level_counts.entry(record.level.as_str()).or_insert(0) += 1;
-        *service_counts.entry(record.service.as_slice()).or_insert(0) += 1;
+        let level = level_counts.entry(record.level.as_str()).or_insert(0);
+        *level = level.saturating_add(1);
+        let service = service_counts.entry(record.service.as_slice()).or_insert(0);
+        *service = service.saturating_add(1);
     }
     let mut by_level: Vec<(&str, u64)> = journalrec::PRIORITY_NAMES
         .iter()
@@ -733,7 +735,7 @@ fn clean_file(path: &Path, cutoff: u64) -> Result<Cleaned, String> {
         // else's record, and a cleaner that deletes what it does not recognise
         // is a cleaner that loses data on a format change.
         if Shown::of(line).is_some_and(|record| record.timestamp < cutoff) {
-            removed += 1;
+            removed = removed.saturating_add(1);
         } else {
             kept.push(line);
         }

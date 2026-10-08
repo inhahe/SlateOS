@@ -53,7 +53,7 @@ impl Complaint {
         let now = Instant::now();
         if self
             .last
-            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(60))
+            .is_some_and(|t| now.duration_since(t) < Duration::from_mins(1))
         {
             self.held = self.held.saturating_add(1);
             return;

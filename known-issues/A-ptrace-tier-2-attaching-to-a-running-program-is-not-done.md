@@ -32,12 +32,15 @@ Tier 2 but attaching
   its former id, is its id still. The fix: the exec'ing thread takes the
   leader's task id (`pcb::claim_leader_id`'s id), which needs the scheduler
   to re-key a live task.
-- **A traced child's end reaches its real parent at once.** Linux hides a
-  traced child's zombie from its real parent until its tracer -- when that is
-  not the parent -- has reaped it (`wait_consider_task`); here both are told
-  at once (`ptrace::on_thread_exit`, `pcb::peek_exit*`). Only a child of a
-  traced program that its tracer keeps tracing (`TRACEFORK` with the child
-  not detached) is affected.
+- ~~**A traced child's end reaches its real parent at once.**~~ Fixed on
+  lane-a-wip 2026-10-08, awaiting a boot: a process traced by one that is
+  not its parent ends for its tracer first (`pcb::Process::exit_held`,
+  decided as it becomes a zombie); its parent's `wait` does not see it and
+  is sent no `SIGCHLD` until the tracer has waited for it or exited
+  (`thread::release_traced_exit`), as Linux's `wait_consider_task` and
+  `wait_task_zombie` do. A first thread that ends while its process has
+  threads left is reported with the process, once it has ended
+  (`delay_group_leader`). Checked by the tier-2 ring-3 test's sixth part.
 - ~~**`/proc/<pid>/mem` across an exec.**~~ Fixed on lane-a-wip
   2026-10-08, awaiting a boot: an open of it is bound to its process's exec
   generation (`Process::exec_gen`, the VFS's `open_binding` hook kept by the

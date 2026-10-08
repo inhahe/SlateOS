@@ -987,8 +987,8 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
 
     // Remove from the process's thread list.
     match pcb::remove_exiting_thread(pid, task_id) {
-        Ok((is_zombie, wake_task, any_waiter)) => {
-            if is_zombie {
+        Ok(removed) => {
+            if removed.zombie {
                 serial_println!("[thread] Process {} has no threads left — now zombie", pid);
 
                 // The threads it traced are let go -- or ended, under
@@ -1021,63 +1021,18 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // Release namespace reference so the namespace can be cleaned up.
                 crate::ipc::namespace::detach(pid);
 
-                // Wake a task blocked in `waitpid(pid)` for this process.
-                if let Some(waiter) = wake_task {
-                    crate::sched::wake(waiter);
-                }
-                // Wake a parent blocked in `waitpid(-1)` (wait for any
-                // child) so it can re-scan and reap this newly-zombied
-                // child.
-                if let Some(waiter) = any_waiter {
-                    crate::sched::wake(waiter);
-                }
-
-                // Whether the parent will collect this zombie, decided by
-                // `remove_thread` from its `SIGCHLD` disposition: a parent that
-                // ignores `SIGCHLD` is sent nothing and the process is
-                // released below; one with `SA_NOCLDWAIT` is still sent it.
-                let notice = pcb::exit_notice(pid).unwrap_or(pcb::ExitNotice::Zombie);
-
-                // Post SIGCHLD to the parent. This is distinct from the
-                // wait4() wakeups above (which target a thread parked in
-                // wait4()): SIGCHLD drives the *signal* path, used by a
-                // parent running a SIGCHLD handler or parked in
-                // sigsuspend()/pause() — e.g. dash's job-control `wait`
-                // builtin, which arms a SIGCHLD handler then sigsuspends,
-                // reaping with waitpid(WNOHANG) only after the signal wakes
-                // it.  Without this the parent livelocks in sigsuspend.
-                if let Some(parent) = pcb::parent(pid) {
-                    if parent != 0 && notice != pcb::ExitNotice::ReapSilently {
-                        // How the child ended, and who it was: `si_status`
-                        // and `si_uid` were 0 until 2026-10-01, so a handler
-                        // could not tell an exit from a kill
-                        // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
-                        let ended = pcb::exit_info(pid).unwrap_or_else(|| pcb::ExitInfo::exited(0));
-                        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
-                        let info = crate::proc::signal::SigInfo::child(
-                            u32::try_from(pid).unwrap_or(0),
-                            child_uid,
-                            ended.sigchld_code_and_status(),
-                        );
-                        // Linux-ABI parents: their per-signal rt_sigaction
-                        // disposition decides -- dropped as it is sent when
-                        // it ignores SIGCHLD and nothing blocks it, else
-                        // pending for deliver_linux_signal. Native parents go
-                        // through classify_post so a registered trampoline
-                        // handler runs and a no-handler parent correctly
-                        // drops it (SIGCHLD default action = ignore).
-                        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
-                            crate::syscall::linux::post_linux_sigchld(parent, info);
-                        } else {
-                            // Discarding the PostDecision is intentional:
-                            // SIGCHLD's default is ignore, so a no-handler
-                            // native parent yields Drop with no side effect;
-                            // a handler yields Deliver (already marked
-                            // pending). There is no Terminate case for 17.
-                            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
-                        }
-                    }
-                }
+                // Its parent is told of its end -- unless a tracer that is not
+                // the parent holds it, which is told first (`ptrace`); the
+                // parent's turn comes when that tracer has waited for it
+                // (`release_traced_exit`). Whether it was held was decided in
+                // the same step that made it a zombie, so exactly one of the
+                // two tells the parent.
+                crate::proc::ptrace::on_process_zombie(pid, removed.held);
+                let notice = if removed.held {
+                    None
+                } else {
+                    Some(tell_parent_of_end(pid, removed.wake, removed.any_waiter))
+                };
 
                 // Now that this process is a zombie and its children have
                 // been reparented to init, any group it used to guard may be
@@ -1087,18 +1042,9 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                     crate::syscall::handlers::kill_orphaned_pgrp(*pgrp);
                 }
 
-                // A zombie its parent asked never to be left is released now,
-                // last, once everything above that reads its record is done.
-                // No `wait` could have taken it first: every one treats it as
-                // already gone. Its address space is freed now too, or -- if a
-                // thread of it was killed while a CPU still ran it -- as soon
-                // as that CPU has switched away.
-                if notice != pcb::ExitNotice::Zombie && pcb::release_autoreaped(pid) {
-                    serial_println!(
-                        "[thread] Process {} released at exit: its parent does not wait \
-                         for its children",
-                        pid
-                    );
+                // Last, once everything above that reads its record is done.
+                if let Some(notice) = notice {
+                    release_if_unwanted(pid, notice);
                 }
             }
         }
@@ -1113,6 +1059,95 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     }
 
     Some(pid)
+}
+
+/// Tell zombie `pid`'s parent of its end: wake the parent's task waiting for
+/// it (`wake`) or for any child (`any_waiter`), and send the parent `SIGCHLD`
+/// as its disposition says. Returns the zombie's [`pcb::ExitNotice`], for
+/// [`release_if_unwanted`].
+///
+/// `SIGCHLD` is distinct from the wakeups (which target a thread parked in
+/// `wait4`): it drives the *signal* path, used by a parent running a
+/// `SIGCHLD` handler or parked in `sigsuspend`/`pause` -- e.g. dash's
+/// job-control `wait` builtin, which arms a handler, then sigsuspends, and
+/// reaps with `waitpid(WNOHANG)` only after the signal wakes it. Without it
+/// the parent livelocks in `sigsuspend`.
+fn tell_parent_of_end(
+    pid: ProcessId,
+    wake: Option<TaskId>,
+    any_waiter: Option<TaskId>,
+) -> pcb::ExitNotice {
+    for waiter in [wake, any_waiter].into_iter().flatten() {
+        sched::wake(waiter);
+    }
+    // Whether the parent will collect this zombie, decided from its `SIGCHLD`
+    // disposition by `pcb`: a parent that ignores `SIGCHLD` is sent nothing
+    // and the process is released; one with `SA_NOCLDWAIT` is still sent it.
+    let notice = pcb::exit_notice(pid).unwrap_or(pcb::ExitNotice::Zombie);
+    if let Some(parent) = pcb::parent(pid)
+        && parent != 0
+        && notice != pcb::ExitNotice::ReapSilently
+    {
+        // How the child ended, and who it was: `si_status` and `si_uid` were
+        // 0 until 2026-10-01, so a handler could not tell an exit from a kill
+        // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
+        let ended = pcb::exit_info(pid).unwrap_or_else(|| pcb::ExitInfo::exited(0));
+        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+        let info = crate::proc::signal::SigInfo::child(
+            u32::try_from(pid).unwrap_or(0),
+            child_uid,
+            ended.sigchld_code_and_status(),
+        );
+        // Linux-ABI parents: their per-signal rt_sigaction disposition
+        // decides -- dropped as it is sent when it ignores SIGCHLD and nothing
+        // blocks it, else pending for deliver_linux_signal. Native parents go
+        // through classify_post so a registered trampoline handler runs and a
+        // no-handler parent correctly drops it (SIGCHLD default action =
+        // ignore).
+        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
+            crate::syscall::linux::post_linux_sigchld(parent, info);
+        } else {
+            // Discarding the PostDecision is intentional: SIGCHLD's default
+            // is ignore, so a no-handler native parent yields Drop with no
+            // side effect; a handler yields Deliver (already marked pending).
+            // There is no Terminate case for 17.
+            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
+        }
+    }
+    notice
+}
+
+/// Release zombie `pid` now if its parent asked never to be left one
+/// (`notice` not [`pcb::ExitNotice::Zombie`]), once everything that reads its
+/// record is done. No `wait` could have taken it first: every one treats it
+/// as already gone. Its address space is freed now too, or -- if a thread of
+/// it was killed while a CPU still ran it -- as soon as that CPU has switched
+/// away.
+fn release_if_unwanted(pid: ProcessId, notice: pcb::ExitNotice) {
+    if notice != pcb::ExitNotice::Zombie && pcb::release_autoreaped(pid) {
+        serial_println!(
+            "[thread] Process {} released at exit: its parent does not wait for its children",
+            pid
+        );
+    }
+}
+
+/// Hand zombie `pid`, whose end a tracer held (`pcb::Process::exit_held`), to
+/// its parent: the tracer has waited for it, or has exited. The parent is
+/// told now, as at any other process's end -- woken, sent `SIGCHLD` -- and the
+/// process released at once if the parent does not wait for its children:
+/// Linux's `do_notify_parent` from `wait_task_zombie`'s `EXIT_TRACE` case, or
+/// from `__ptrace_detach` for a tracer's exit. A no-op for a process whose end
+/// was not held, or was handed over already.
+///
+/// Holding no lock: it takes the process table's, the scheduler's and the
+/// signal registry's.
+pub fn release_traced_exit(pid: ProcessId) {
+    let Some((wake, any_waiter)) = pcb::release_exit_hold(pid) else {
+        return;
+    };
+    let notice = tell_parent_of_end(pid, wake, any_waiter);
+    release_if_unwanted(pid, notice);
 }
 
 /// Get the process ID that owns a given thread.

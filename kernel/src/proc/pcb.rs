@@ -478,6 +478,15 @@ pub struct Process {
     /// from the parent's `SIGCHLD` disposition when the last thread leaves,
     /// and [`ExitNotice::Zombie`] until then.
     pub exit_notice: ExitNotice,
+    /// A zombie whose end is its tracer's to report first: its first thread
+    /// is traced by a process that is not its parent
+    /// (`crate::proc::ptrace::holds_exit`). Until that tracer has waited for
+    /// it -- or let it go, by exiting -- its parent's `wait` does not see it
+    /// and the parent is sent no `SIGCHLD`; then [`release_exit_hold`] hands
+    /// it to the parent, as Linux's `EXIT_TRACE` does (`wait_task_zombie`).
+    /// Its [`ExitNotice`] is decided then, from the parent's disposition at
+    /// that moment.
+    pub exit_held: bool,
     /// Threads of this process killed from elsewhere while some CPU was
     /// still executing them ([`crate::sched::task_is_on_cpu`]).
     ///
@@ -1417,6 +1426,7 @@ impl Process {
             wait_task: None,
             wait_any_task: None,
             exit_notice: ExitNotice::Zombie,
+            exit_held: false,
             killed_on_cpu: Vec::new(),
             ready: false,
             vmas: Vec::new(),
@@ -1894,6 +1904,7 @@ pub fn fork_create(
         wait_any_task: None,
         // Decided afresh at this child's own exit, from its own parent.
         exit_notice: ExitNotice::Zombie,
+        exit_held: false,
         killed_on_cpu: Vec::new(),
         ready: false,
         vmas,
@@ -2274,6 +2285,30 @@ fn exit_notice_for(parent: ProcessId) -> ExitNotice {
     }
 }
 
+/// Hand zombie `pid`, whose end its tracer held ([`Process::exit_held`]), to
+/// its parent: its tracer has waited for it, or has exited. Its
+/// [`ExitNotice`] is decided now, from the parent's `SIGCHLD` disposition as
+/// it is now, as Linux's `wait_task_zombie` asks `do_notify_parent` only
+/// then. Returns the waiters its end wakes -- a task waiting for `pid` itself
+/// and one of the parent's waiting for any child -- or `None` when it was not
+/// held (or is gone), and nothing changed: the caller then tells nobody.
+pub fn release_exit_hold(pid: ProcessId) -> Option<(Option<TaskId>, Option<TaskId>)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).filter(|p| p.exit_held)?;
+    proc.exit_held = false;
+    let parent = proc.parent;
+    if parent != pid {
+        proc.exit_notice = exit_notice_for(parent);
+    }
+    let wake = proc.wait_task.take();
+    let any = if parent == pid {
+        None
+    } else {
+        table.get_mut(&parent).and_then(|p| p.wait_any_task.take())
+    };
+    Some((wake, any))
+}
+
 /// The [`ExitNotice`] decided for `pid` when it became a zombie, or `None`
 /// if there is no such process.
 ///
@@ -2321,7 +2356,23 @@ pub fn remove_thread(
     task_id: TaskId,
     acct: ThreadExitAccounting,
 ) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
-    remove_thread_counting(pid, task_id, Some(acct))
+    remove_thread_counting(pid, task_id, Some(acct)).map(|r| (r.zombie, r.wake, r.any_waiter))
+}
+
+/// What taking a thread off its process came to ([`remove_exiting_thread`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadRemoved {
+    /// It was the last: the process is a zombie now.
+    pub zombie: bool,
+    /// A task blocked waiting for this process, to wake.
+    pub wake: Option<TaskId>,
+    /// A task of the parent's blocked waiting for any child, to wake.
+    pub any_waiter: Option<TaskId>,
+    /// The zombie's end is its tracer's to report first
+    /// ([`Process::exit_held`]): the parent is told nothing now -- that is
+    /// [`release_exit_hold`]'s, later, exactly once -- and `wake` and
+    /// `any_waiter` are `None`, left registered for then.
+    pub held: bool,
 }
 
 /// [`remove_thread`] for a thread that has run and is exiting
@@ -2330,10 +2381,7 @@ pub fn remove_thread(
 /// critical section that takes it off `threads` -- which is what lets
 /// [`process_counters`] count it exactly once. Its task must still be in the
 /// scheduler; the scheduler frees it later.
-pub fn remove_exiting_thread(
-    pid: ProcessId,
-    task_id: TaskId,
-) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
+pub fn remove_exiting_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<ThreadRemoved> {
     remove_thread_counting(pid, task_id, None)
 }
 
@@ -2343,7 +2391,7 @@ fn remove_thread_counting(
     pid: ProcessId,
     task_id: TaskId,
     given: Option<ThreadExitAccounting>,
-) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
+) -> KernelResult<ThreadRemoved> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
@@ -2379,16 +2427,24 @@ fn remove_thread_counting(
         // Capture the final exit code for the container layer (init-exit
         // notification) before the lock is dropped below.
         let zombie_exit_code = proc.exit_code.unwrap_or(0);
-        let wake = proc.wait_task.take();
         // Capture the parent before re-borrowing the table so we can
         // wake any `waitpid(-1)` waiter blocked in the parent.
         let parent_of_zombie = proc.parent;
+        // Traced by a process that is not its parent: its end goes to the
+        // tracer first (`Process::exit_held`), decided under this lock so
+        // that no `wait` of the parent's sees it in between. Its parent's
+        // waiters stay registered, to be woken when it is released.
+        proc.exit_held =
+            parent_of_zombie != pid && crate::proc::ptrace::holds_exit(pid, parent_of_zombie);
+        let held = proc.exit_held;
+        let wake = if held { None } else { proc.wait_task.take() };
         // Whether the parent will ever collect this zombie, decided now and
         // under this lock, so that no `wait` can see the process as a zombie
         // its parent asked never to be left (`ExitNotice`). The parent's
         // waiters are still woken below: one whose last child this was must
-        // learn there is nothing left (ECHILD).
-        if parent_of_zombie != pid {
+        // learn there is nothing left (ECHILD). A held zombie's is decided
+        // when it is released.
+        if parent_of_zombie != pid && !held {
             proc.exit_notice = exit_notice_for(parent_of_zombie);
         }
 
@@ -2409,7 +2465,7 @@ fn remove_thread_counting(
         // the parent re-registers on its next blocking wait if more
         // children remain.  Guard against a process being its own
         // parent (kernel pid 0 / pathological cases).
-        let any_waiter = if parent_of_zombie != pid {
+        let any_waiter = if parent_of_zombie != pid && !held {
             table
                 .get_mut(&parent_of_zombie)
                 .and_then(|p| p.wait_any_task.take())
@@ -2433,10 +2489,15 @@ fn remove_thread_counting(
         // A no-op for ordinary (non-container-init) processes.
         crate::container::notify_init_exit(pid, zombie_exit_code);
 
-        return Ok((true, wake, any_waiter));
+        return Ok(ThreadRemoved {
+            zombie: true,
+            wake,
+            any_waiter,
+            held,
+        });
     }
 
-    Ok((false, None, None))
+    Ok(ThreadRemoved::default())
 }
 
 /// Grant a capability to a process.
@@ -5285,8 +5346,9 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
             return Err(KernelError::PermissionDenied);
         }
 
-        if proc.state != ProcessState::Zombie {
-            return Ok(None); // Still running.
+        // Still running -- or ended, and its tracer's to report first.
+        if proc.state != ProcessState::Zombie || proc.exit_held {
+            return Ok(None);
         }
 
         let info = proc.exit_info();
@@ -5424,7 +5486,8 @@ pub fn peek_exit(
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
     }
-    if proc.state != ProcessState::Zombie {
+    // Still running, or a zombie its tracer holds ([`Process::exit_held`]).
+    if proc.state != ProcessState::Zombie || proc.exit_held {
         return Ok(None);
     }
     Ok(Some((proc.exit_info(), proc.credentials.uid)))
@@ -5479,7 +5542,9 @@ fn peek_exit_matching(
             && is_collectable(proc)
         {
             has_child = true;
-            if proc.state == ProcessState::Zombie {
+            // A zombie its tracer holds is a child still, but not one to
+            // report ([`Process::exit_held`]).
+            if proc.state == ProcessState::Zombie && !proc.exit_held {
                 return Ok(Some((proc.pid, proc.exit_info(), proc.credentials.uid)));
             }
         }

@@ -23903,7 +23903,9 @@ pub fn self_test_linux_exec_threads() -> KernelResult<()> {
 /// tracer reads and sets a child's signal mask -- the one it set, not
 /// `rt_sigsuspend`'s, which restarts when its signal is taken away -- and
 /// lists its pending signals (`PTRACE_GETSIGMASK`, `SETSIGMASK`,
-/// `PEEKSIGINFO`), its rseq area and its syscall user dispatch.
+/// `PEEKSIGINFO`), its rseq area and its syscall user dispatch; and a traced
+/// child's end is its tracer's to see before its parent's
+/// (`pcb::Process::exit_held`).
 pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 90_000_000_000;
@@ -23968,6 +23970,15 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
             Some(0x3b) => "the signals child's SIGUSR1 handler did not run exactly once",
             Some(0x3c) => {
                 "after rt_sigsuspend the child's mask was not the one its tracer set at the stop"
+            }
+            Some(0x3d) => "the holding child's fork failed",
+            Some(0x3e) => {
+                "a parent saw its traced child's end (wait4 WNOHANG) before the tracer waited \
+                 for it"
+            }
+            Some(0x3f) => {
+                "a parent could not reap its traced child's end, exit 7, after the tracer waited \
+                 for it"
             }
             Some(0x40 | 0x41) => "the thread child did not stop for its SIGSTOP",
             Some(0x42 | 0x43) => "SETOPTIONS(TRACECLONE|TRACEEXIT) or CONT failed",
@@ -24046,6 +24057,16 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
                  tracer set"
             }
             Some(0xce | 0xcf) => "the signals child did not end 0x2C",
+            Some(0xd0..=0xd6) => {
+                "the holding child's start, its PTRACE_EVENT_FORK or its traced grandchild's \
+                 SIGSTOP start failed"
+            }
+            Some(0xd7..=0xd9) => {
+                "the tracer's waitid(WNOWAIT) did not see the traced grandchild's exit 7"
+            }
+            Some(0xda | 0xdb) => "the holding child did not stop after its wait4(WNOHANG)",
+            Some(0xdc) => "the tracer's own wait for the traced grandchild did not reap exit 7",
+            Some(0xdd | 0xde) => "the holding child did not end 0x2D",
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };
@@ -24060,7 +24081,8 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
         "[spawn]   Linux ptrace tier 2 (ring 3: a traced thread from its first instruction, its \
          tgkill, int3 and exit stops and its exit report; fork and vfork events and a traced \
          grandchild; system-call entry and exit stops, a changed result, a skipped call; signal \
-         masks, pending signals, rseq and an rt_sigsuspend that restarts): OK"
+         masks, pending signals, rseq and an rt_sigsuspend that restarts; a traced child's end \
+         its tracer's before its parent's): OK"
     );
     Ok(())
 }

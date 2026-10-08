@@ -38,6 +38,16 @@
 //! `WUNTRACED` ([`take_stop_report`]), and lets the thread go with
 //! `PTRACE_CONT`, `PTRACE_SINGLESTEP`, `PTRACE_DETACH` or `PTRACE_KILL`.
 //!
+//! ## Ends
+//!
+//! A traced thread's end is its tracer's to report, by `wait`, when the
+//! tracer waits for it apart from its process ([`on_thread_exit`]). A traced
+//! process whose tracer is not its parent -- a traced program's child, traced
+//! with `PTRACE_O_TRACEFORK` -- ends for its tracer first: its parent's
+//! `wait` does not see it, and the parent is sent no `SIGCHLD`, until the
+//! tracer has waited for it or has exited ([`on_process_zombie`],
+//! `pcb::Process::exit_held`), as on Linux.
+//!
 //! The stopping thread publishes its stop, wakes the tracer, and parks; the
 //! tracer's resume sets what the thread does next and unparks it. Both take
 //! the one lock here, and the thread marks itself suspended under it, so a
@@ -489,6 +499,12 @@ struct Tracee {
     /// It has exited: its wait status, for its tracer's `wait`
     /// ([`on_thread_exit`]).
     exited: Option<i32>,
+    /// Its exit is not reported yet: a process's first thread, gone while
+    /// its process has threads left. Reported once the process has ended,
+    /// with the process's status ([`on_process_zombie`]), as Linux holds a
+    /// zombie group leader back while its group has threads
+    /// (`delay_group_leader`).
+    held: bool,
     /// Counted in [`SYSCALL_WORK`].
     work: bool,
 }
@@ -510,6 +526,7 @@ impl Tracee {
             pending_event: None,
             exit_code: None,
             exited: None,
+            held: false,
             work: false,
         }
     }
@@ -2252,6 +2269,10 @@ pub fn take_stop_report(
         .filter(|(_, t)| t.tracer == tracer)
         .filter_map(|(&tid, t)| {
             if let Some(status) = t.exited {
+                // A first thread's end waits for its process's.
+                if t.held {
+                    return None;
+                }
                 return Some((tid, t.pid, TraceReport::Exited(status)));
             }
             t.stop
@@ -2314,6 +2335,12 @@ pub fn note_exit_code(tid: TaskId, code: i32) {
 /// thread's (`exit_notify`), with its status: its process's when the process
 /// ended as a whole -- a group exit, a fatal signal, a crash -- and its own
 /// `exit` code otherwise.
+///
+/// A first thread's is reported only once its whole process has ended
+/// ([`on_process_zombie`]), and the process's parent hears of the end only
+/// after the tracer has waited for it (`pcb::Process::exit_held`): Linux's
+/// `wait_consider_task` shows a traced zombie to its tracer alone, and
+/// `wait_task_zombie` passes it on to the real parent.
 pub fn on_thread_exit(tid: TaskId) {
     FPU.lock().remove(&tid);
     let Some((pid, tracer, own)) = TRACEES
@@ -2328,6 +2355,7 @@ pub fn on_thread_exit(tid: TaskId) {
         remove_record(&mut TRACEES.lock_irqsave(), tid);
         return;
     }
+    let leader = tid == pid;
     let status =
         pcb::group_exit_wstatus(pid).unwrap_or_else(|| (own.unwrap_or(0) & 0xff).wrapping_shl(8));
     {
@@ -2336,14 +2364,77 @@ pub fn on_thread_exit(tid: TaskId) {
             return;
         };
         t.exited = Some(status);
+        t.held = leader;
         t.stop = None;
         t.first_stop = false;
         t.syscall_trace = SyscallTrace::Off;
         t.pending_event = None;
         sync_work(t);
     }
-    // A `wait` its tracer is blocked in looks again, and the tracer has its
-    // `SIGCHLD` (Linux's `do_notify_parent` for a traced thread).
+    if !leader {
+        report_exit(tid, pid, tracer, status);
+    }
+}
+
+/// Process `pid` has ended: its last thread is gone, and it is a zombie. If
+/// its first thread's end was held for a tracer ([`on_thread_exit`]), that
+/// tracer is told now, with the process's status -- the group exit's, if it
+/// ended by one, and the first thread's own `exit` code otherwise, as Linux's
+/// `wait_task_zombie` reads a zombie leader's. Its parent is told once the
+/// tracer has waited for it (`thread::release_traced_exit`).
+///
+/// `held` is whether the process table held the end for the tracer, decided
+/// as the process became a zombie ([`holds_exit`]). When it did not -- the
+/// tracer has become the parent since, as init does for an orphan -- the
+/// parent's own `wait` reports the end, and the tracer's record of the first
+/// thread is dropped, so that the end is not reported twice.
+pub fn on_process_zombie(pid: ProcessId, held: bool) {
+    if !held {
+        let mut table = TRACEES.lock_irqsave();
+        if table.get(&pid).is_some_and(|t| t.pid == pid && t.held) {
+            remove_record(&mut table, pid);
+        }
+        return;
+    }
+    let Some((tracer, own)) = TRACEES
+        .lock_irqsave()
+        .get(&pid)
+        .filter(|t| t.pid == pid && t.held)
+        .map(|t| (t.tracer, t.exit_code))
+    else {
+        return;
+    };
+    let status =
+        pcb::group_exit_wstatus(pid).unwrap_or_else(|| (own.unwrap_or(0) & 0xff).wrapping_shl(8));
+    {
+        let mut table = TRACEES.lock_irqsave();
+        // Let go meanwhile: its tracer exited (`on_process_exit`), which
+        // handed the end to the parent.
+        let Some(t) = table.get_mut(&pid).filter(|t| t.held) else {
+            return;
+        };
+        t.exited = Some(status);
+        t.held = false;
+    }
+    report_exit(pid, pid, tracer, status);
+}
+
+/// Whether process `pid`'s end is its tracer's to report first: its first
+/// thread is traced -- live, or gone and not yet waited for -- by a process
+/// other than `parent`. Asked by `pcb` as the process becomes a zombie, under
+/// the process table's lock, which may be held around this module's.
+#[must_use]
+pub fn holds_exit(pid: ProcessId, parent: ProcessId) -> bool {
+    TRACEES
+        .lock_irqsave()
+        .get(&pid)
+        .is_some_and(|t| t.pid == pid && t.tracer != parent)
+}
+
+/// Tell `tracer` of the end of its tracee, thread `tid` of process `pid`,
+/// with wait status `status`: a `wait` it is blocked in looks again, and it
+/// has its `SIGCHLD` (Linux's `do_notify_parent` for a traced thread).
+fn report_exit(tid: TaskId, pid: ProcessId, tracer: ProcessId, status: i32) {
     let (child_waiter, any_waiter) = pcb::take_trace_waiters(pid, tracer);
     for waiter in [child_waiter, any_waiter].into_iter().flatten() {
         sched::wake(waiter);
@@ -2400,6 +2491,8 @@ fn notify_tracer(
 /// `PTRACE_O_EXITKILL`, ended.
 pub fn on_process_exit(pid: ProcessId) {
     let mut kill: Vec<ProcessId> = Vec::new();
+    // Processes whose end this one held: their parents' now.
+    let mut ended: Vec<ProcessId> = Vec::new();
     {
         let mut table = TRACEES.lock_irqsave();
         let mine: Vec<TaskId> = table
@@ -2412,7 +2505,13 @@ pub fn on_process_exit(pid: ProcessId) {
                 continue;
             };
             if t.exited.is_some() {
-                // An exit no one will wait for now.
+                // An exit no one will wait for now. A process's goes to its
+                // parent (Linux's `__ptrace_detach`) -- a no-op for one whose
+                // process runs on, or has not become a zombie yet: with the
+                // record gone, `pcb` finds no tracer to hold its end for.
+                if t.pid == tid {
+                    ended.push(tid);
+                }
                 remove_record(&mut table, tid);
                 continue;
             }
@@ -2445,6 +2544,9 @@ pub fn on_process_exit(pid: ProcessId) {
     for victim in kill {
         // Gone already: nothing left to end.
         let _ = crate::syscall::handlers::post_kernel_signal(victim, SIGKILL);
+    }
+    for pid in ended {
+        crate::proc::thread::release_traced_exit(pid);
     }
 }
 

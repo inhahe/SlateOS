@@ -181,7 +181,8 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             }
             // No cleanup needed for these types — they're either
             // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw,
-            // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice) or
+            // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice,
+            // CapBroker) or
             // managed by other subsystems (Socket, Namespace).
             //
             // BlockDevice is a token and not a handle because an open of
@@ -211,6 +212,7 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::PrivilegedPort
             | ResourceType::ResourceLimit
             | ResourceType::BlockDevice
+            | ResourceType::CapBroker
             | ResourceType::Namespace => {}
         }
     }

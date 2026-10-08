@@ -122648,11 +122648,17 @@ fn cmd_cap_request(args: &str) {
             shell_println!("=== Pending Capability Requests ({}) ===", pending.len());
             for req in &pending {
                 shell_println!(
-                    "  #{}: pid={} ({}) wants {:?}/{:?}",
+                    "  #{}: pid={} ({}) wants {:?} {} {}{:?}",
                     req.id,
                     req.pid,
                     req.process_name,
                     req.resource_type,
+                    req.resource_id,
+                    if req.target_name.is_empty() {
+                        alloc::string::String::new()
+                    } else {
+                        alloc::format!("({}) ", req.target_name)
+                    },
                     req.rights
                 );
                 shell_println!("       Reason: {}", req.reason);
@@ -122674,12 +122680,13 @@ fn cmd_cap_request(args: &str) {
                     request::RequestStatus::Cancelled => "CANCEL",
                 };
                 shell_println!(
-                    "  #{}: [{}] pid={} ({}) {:?}/{:?} -- {}",
+                    "  #{}: [{}] pid={} ({}) {:?} {} {:?} -- {}",
                     req.id,
                     status_str,
                     req.pid,
                     req.process_name,
                     req.resource_type,
+                    req.resource_id,
                     req.rights,
                     req.reason
                 );
@@ -122695,14 +122702,17 @@ fn cmd_cap_request(args: &str) {
                     return;
                 }
             };
+            // The approval grants: until 2026-10-08 it only marked the request,
+            // and this message claimed a grant that had not happened.
             match request::approve(id) {
-                Ok(req) => {
+                Ok(request::RequestStatus::Approved) => {
+                    shell_println!("Approved #{}: granted", id);
+                }
+                Ok(status) => {
                     shell_println!(
-                        "Approved #{}: pid={} gets {:?}/{:?}",
+                        "#{} ended {:?}: the asker is gone, nothing granted",
                         id,
-                        req.pid,
-                        req.resource_type,
-                        req.rights
+                        status
                     );
                 }
                 Err(e) => {
@@ -122769,6 +122779,7 @@ fn cmd_cap_request(args: &str) {
                 1,
                 "kshell",
                 crate::cap::ResourceType::File,
+                0,
                 crate::cap::Rights::WRITE,
                 "Test request from kshell",
             ) {

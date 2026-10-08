@@ -454,6 +454,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::PrivilegedPort
         | ResourceType::ResourceLimit
         | ResourceType::BlockDevice
+        | ResourceType::CapBroker
         | ResourceType::Namespace => Ok(None),
     }
 }

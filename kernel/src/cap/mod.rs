@@ -90,7 +90,6 @@
 pub mod audit;
 pub mod file_tags;
 pub mod groups;
-#[allow(dead_code)] // API functions for future syscall interface and timer expiry.
 pub mod request;
 pub mod rights;
 pub mod table;
@@ -420,6 +419,20 @@ pub enum ResourceType {
     /// Not a capability anything is gated on: making a socket at all is
     /// `Socket`'s (11) to allow.
     NativeSocket = 34,
+
+    /// The right to answer the user's capability requests: to be the one
+    /// process -- the desktop's security dialog -- that the request broker
+    /// ([`crate::cap::request`]) tells of each request and that decides it,
+    /// an approval granting what was asked (`SYS_CAP_BROKER_REGISTER` needs
+    /// `Rights::WRITE` on it; design-decisions 1548).
+    ///
+    /// Class only (`resource_id` 0): there is one broker. Its holder can give
+    /// any process anything a request may name, by approving -- the user's own
+    /// authority, held by the program that asks the user -- so it belongs to
+    /// the desktop's session and nothing else, and it can never itself be
+    /// asked for (`request::requestable`). Pure authority: no per-open object
+    /// behind it, and it implies no Linux capability.
+    CapBroker = 35,
 }
 
 impl ResourceType {
@@ -429,7 +442,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::NativeSocket as u16;
+    pub const LAST: u16 = Self::CapBroker as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -514,7 +527,8 @@ impl ResourceType {
             | Self::BlockDevice
             | Self::Semaphore
             | Self::UnixSocket
-            | Self::NativeSocket => self as u16,
+            | Self::NativeSocket
+            | Self::CapBroker => self as u16,
         }
     }
 
@@ -585,6 +599,7 @@ impl ResourceType {
             32 => Self::Semaphore,
             33 => Self::UnixSocket,
             34 => Self::NativeSocket,
+            35 => Self::CapBroker,
             _ => return None,
         };
         Some(ty)
@@ -874,13 +889,17 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    one of the kernel's own TCP or UDP sockets -- a held object, which
     //    implies no Linux capability; told to lane D in
     //    requests/a-d-resource-type-34-is-nativesocket.md.
-    if ResourceType::LAST != 34 {
+    //    35 since 2026-10-08: `CapBroker`, the right to answer the user's
+    //    capability requests (design-decisions 1548) -- pure authority that
+    //    no Linux capability follows from; told to lane D in
+    //    requests/a-bd-resource-type-35-is-capbroker.md.
+    if ResourceType::LAST != 35 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 34 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 35 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-four types — it needs nothing, and \
+             answer, that file names seven of our thirty-five types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

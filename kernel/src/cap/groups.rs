@@ -252,6 +252,10 @@ pub fn init() {
         // And for native TCP and UDP socket handles: held objects; making a
         // socket is `Socket`'s to allow, which admin has above.
         ResourceType::NativeSocket,
+        // The right to answer capability requests, and so to approve any of
+        // them: every authority a request can name, which admin holds above
+        // already, reached through the broker.
+        ResourceType::CapBroker,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

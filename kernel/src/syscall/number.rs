@@ -1503,11 +1503,8 @@ pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
 /// Query the calling process's capabilities.
 pub const SYS_CAP_QUERY: u64 = 400;
 
-/// Request a capability the calling process does not hold.
-///
-/// Submits a request to the security policy handler (eventually a GUI
-/// dialog, initially console-based).  The request includes a reason
-/// string displayed to the user for approval/denial.
+/// Request authority over a whole class the calling process does not hold:
+/// [`SYS_CAP_REQUEST_FOR`] with object 0.
 ///
 /// `arg0`: resource type (`ResourceType` as u16, zero-extended).
 /// `arg1`: rights bitfield (`Rights` as u32, zero-extended).
@@ -1515,13 +1512,11 @@ pub const SYS_CAP_QUERY: u64 = 400;
 /// `arg3`: length of reason string in bytes (max 256).
 ///
 /// Returns: request ID (positive u64) on success, negative error on failure.
-///
-/// Errors:
-/// - `InvalidArgument` — invalid resource type or zero-length reason.
-/// - `ResourceExhausted` — too many pending requests.
+/// Errors as [`SYS_CAP_REQUEST_FOR`]'s.
 pub const SYS_CAP_REQUEST: u64 = 401;
 
-/// Check the status of a pending capability request.
+/// Check the status of a capability request -- the caller's own, or, for the
+/// handler ([`SYS_CAP_BROKER_REGISTER`]), any.
 ///
 /// `arg0`: request ID (from `SYS_CAP_REQUEST`).
 ///
@@ -1529,7 +1524,8 @@ pub const SYS_CAP_REQUEST: u64 = 401;
 ///          3=TimedOut, 4=Cancelled), negative error on failure.
 ///
 /// Errors:
-/// - `NotFound` — no request with that ID exists.
+/// - `NotFound` — no such request that the caller may see. Until 2026-10-08
+///   any process could read any request's status.
 pub const SYS_CAP_REQUEST_STATUS: u64 = 402;
 
 /// Cancel a pending capability request.
@@ -6794,6 +6790,89 @@ pub const SYS_RSEQ: u64 = 1148;
 /// caller did not start is `EPERM` (design-decisions 1547; lane D's
 /// `requests/d-a-a-debugger-needs-ptrace-for-native-programs.md`).
 pub const SYS_PTRACE: u64 = 1149;
+
+// ---------------------------------------------------------------------------
+// The capability request broker's answering side (1150-1155)
+// ---------------------------------------------------------------------------
+//
+// A program asks the user for authority it does not hold; one program -- the
+// desktop's security dialog -- is told of each request and answers it, an
+// approval granting what was asked (`crate::cap::request`, design-decisions
+// 1548; lane C's `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`).
+
+/// `cap_broker_register()` -- become the one process that answers capability
+/// requests. Needs `(CapBroker, 0, WRITE)`.
+///
+/// Returns the handle of a channel end on which the kernel tells the caller
+/// of requests: one message per event, a 16-byte header (`u32` kind, `u32`
+/// status, `u64` request id; little-endian) and, for a new request, its record
+/// (`crate::cap::request::RECORD_HEADER_LEN` has the layout). Kinds: 1 a new
+/// request, 2 a request ended (status: how), 3 events were lost (the queue
+/// was full) -- read the whole list again with [`SYS_CAP_REQUEST_LIST`].
+/// Requests already pending are sent at once. The channel can be waited on
+/// with [`SYS_WAIT_MULTIPLE`] (`POLLIN`); it closes when the caller stops
+/// being the handler.
+///
+/// The caller's exit unregisters it, refusing what was pending.
+///
+/// Errors: `PermissionDenied` without the capability; `AlreadyExists` if a
+/// process is the handler already.
+pub const SYS_CAP_BROKER_REGISTER: u64 = 1150;
+
+/// `cap_broker_unregister()` -- stop answering capability requests: every
+/// pending request is refused, and the channel closes.
+///
+/// Errors: `PermissionDenied` if the caller is not the handler.
+pub const SYS_CAP_BROKER_UNREGISTER: u64 = 1151;
+
+/// `cap_request_decide(id, verdict)` -- answer request `id`: `verdict` 1
+/// allows, which puts the capability in the asker's table in the same step;
+/// 0 denies. Returns the request's final status (1 Approved, 2 Denied, 4
+/// Cancelled when the asker was gone by the time it was allowed).
+///
+/// Errors: `PermissionDenied` if the caller is not the handler, or the
+/// request is its own; `NotFound` for no such request; `TimedOut` if it
+/// timed out before the answer; `InvalidArgument` if it had already ended or
+/// `verdict` is neither 0 nor 1.
+pub const SYS_CAP_REQUEST_DECIDE: u64 = 1152;
+
+/// `cap_request_list(buf, len)` -- every pending request's record, back to
+/// back (the layout of [`SYS_CAP_BROKER_REGISTER`]'s records), for a handler
+/// that starts -- or restarts after a crash -- with requests waiting.
+///
+/// Returns the bytes the list takes: with `len` 0, nothing is copied (ask the
+/// size first); otherwise all of it is copied. The handler's only.
+///
+/// Errors: `PermissionDenied` if the caller is not the handler;
+/// `BufferTooSmall` if `len` is non-zero and too small (the list may have
+/// grown: ask again).
+pub const SYS_CAP_REQUEST_LIST: u64 = 1153;
+
+/// `cap_request_for(type, id, rights, reason, reason_len)` -- ask the user for
+/// `rights` on the object `(type, id)`: a process, thread, port or interrupt
+/// line by its number, or 0 for the whole class. `reason` (UTF-8, at most 256
+/// bytes) is shown to the user. Returns the request's id.
+///
+/// With no handler registered the request is refused as it is filed (its
+/// status reads 2, Denied).
+///
+/// Errors: `InvalidArgument` for an object that cannot be asked for -- a
+/// handle (a channel, a pipe, a terminal end), the right to answer requests,
+/// or a numbered object of a class-only type -- no rights or a bit that is no
+/// declared right, or a reason that is empty, too long or not UTF-8; `NoSuchProcess` for a process or thread
+/// that is not there; `ResourceExhausted` when 32 requests are pending, or 4
+/// of the caller's.
+pub const SYS_CAP_REQUEST_FOR: u64 = 1154;
+
+/// `cap_request_wait(id, timeout_ns)` -- wait until the caller's request `id`
+/// is answered or ends; return its status as [`SYS_CAP_REQUEST_STATUS`] does.
+/// `timeout_ns` `u64::MAX` waits for as long as the request lasts (it times
+/// out on its own after 30 s); 0 asks without waiting.
+///
+/// Errors: `NotFound` if the caller filed no such request; `TimedOut` when
+/// `timeout_ns` passes first (the request goes on); `WouldBlock` for 0 on a
+/// pending request; `Interrupted` for a signal.
+pub const SYS_CAP_REQUEST_WAIT: u64 = 1155;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

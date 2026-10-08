@@ -2471,6 +2471,11 @@ pub fn exec_process(
         // So are its hardware breakpoints: their addresses were in it.
         crate::sched::clear_current_debug_regs();
     }
+    // Its capability requests were the old program's -- the user would be
+    // answering a question it asked, for the new one -- so they are
+    // cancelled; and if it answered requests, the new program does not
+    // until it registers itself (`cap::request`, design-decisions 1548).
+    crate::cap::request::on_process_exit(pid);
 
     // Step 3: Tear down the old user address space.
     //
@@ -24424,6 +24429,116 @@ pub fn self_test_native_device_door() -> KernelResult<()> {
     serial_println!(
         "[spawn]   native device door (ring 3: PCM configured, a blocking write and drain \
          through the pump, a non-blocking write, pause, close; the control device): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the capability request broker's answering side, through
+/// the native ABI: [`elf::build_native_cap_broker_test_elf`]
+/// (`build/capbrokertest.c`), started holding `(CapBroker, 0, WRITE)`. It
+/// registers as the handler and forks a child that asks: the handler is told
+/// of each request on its channel and finds it in the list, approves one --
+/// the child then holds it -- denies another, cannot approve its own, and
+/// unregisters; a handle or the broker's own right cannot be asked for, and a
+/// wait times out and a cancel ends a request (`crate::cap::request`,
+/// design-decisions 1548).
+///
+/// # Errors
+///
+/// `InternalError` if the program does not exit `0x2A`; the exit code names
+/// the step that failed.
+pub fn self_test_native_cap_broker() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running native capability broker (ring 3) integration test...");
+    let exe_elf = elf::build_native_cap_broker_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-cap-broker"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-cap-broker",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[(
+            crate::cap::ResourceType::CapBroker,
+            0,
+            crate::cap::Rights::WRITE,
+        )],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: capability broker spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: capability broker (ring 3) -- not a zombie after 60 s, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "a request with no handler was not refused as it was filed",
+            Some(0x32) => "registering as the handler failed",
+            Some(0x33) => "a second registration was not AlreadyExists",
+            Some(0x34) => "fork failed",
+            Some(0x50 | 0x51) => "no EVENT_NEW for the child's request",
+            Some(0x52 | 0x53) => "the record's id, pid, object, rights, time left, type or reason",
+            Some(0x54..=0x57) => "the list's size, its BufferTooSmall, or its record",
+            Some(0x58 | 0x59) => "the handler's own request, or its EVENT_NEW",
+            Some(0x5a) => "the handler approved its own request",
+            Some(0x5b | 0x5c) => "cancelling its own request, or its EVENT_ENDED",
+            Some(0x5d) => "the handler held what it asked for",
+            Some(0x5e) => "a verdict of 2 was not InvalidArgument",
+            Some(0x5f) => "allowing the child's request did not approve it",
+            Some(0x60) => "no EVENT_ENDED (Approved) for the allowed request",
+            Some(0x61) => "an ended request was decided again",
+            Some(0x62 | 0x63) => "no EVENT_NEW for the child's port 80 request",
+            Some(0x64 | 0x65) => "denying it did not deny, or no EVENT_ENDED (Denied)",
+            Some(0x66 | 0x67) => "no EVENT_NEW and EVENT_ENDED (Cancelled) for the cancelled one",
+            Some(0x68) => {
+                "the child did not end 0x2B (0x40-0x4E are its checks: 0x41/0x42 the \
+                 approval did not reach it, 0x44/0x45 the denial, 0x46/0x47/0x4E a handle, the \
+                 broker's right or an undeclared right could be asked for, 0x48 another's \
+                 request waited on, 0x4A/0x4B a wait that did not refuse or time out, 0x4C/0x4D \
+                 the cancel)"
+            }
+            Some(0x69 | 0x6a) => "unregistering failed, or a second one was not PermissionDenied",
+            Some(0x6b) => "the channel did not close at unregistration",
+            Some(0x6c) => "a request after unregistering was not refused",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: capability broker (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native capability broker (ring 3: refused with no handler, the handler told \
+         and listing, its own request refused, allow grants, deny, what cannot be asked for, \
+         a timed-out wait and a cancel, unregistration): OK"
     );
     Ok(())
 }

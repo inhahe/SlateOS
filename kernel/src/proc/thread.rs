@@ -1012,6 +1012,12 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // PTRACE_O_EXITKILL (Linux's `exit_ptrace`).
                 crate::proc::ptrace::on_process_exit(pid);
 
+                // Its capability requests are cancelled, the handler told; if
+                // it answered them, nobody does now, and what was pending is
+                // refused (`cap::request`). Before its handles close, so the
+                // kernel lets go of the handler's channel first.
+                crate::cap::request::on_process_exit(pid);
+
                 // Close all fd-bearing kernel resources NOW, at process
                 // exit — matching Linux's `exit_files()` in `do_exit`.
                 // This must happen before the reaper's `wait4()` (which

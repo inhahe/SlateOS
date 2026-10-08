@@ -4,7 +4,8 @@
 and its syscalls), Lane B (`init`: who may answer), Lane F (`gui/window`'s event
 loop, the compositor's stacking). **Filed:** 2026-09-30. **Status:** OPEN --
 lane C's half, the dialog, is written; it needs the pieces below before it can
-be connected.
+be connected. **Lane A's half (A-E) done on `lane-a-wip` 2026-10-08** -- reply
+at the end.
 
 **In short:** `design.txt` wants a program that needs more access to *ask the
 user*, saying why, and the user to answer in a security dialog. All three
@@ -106,3 +107,92 @@ services are, with a session test through `TestDesktop`. Until then
 `roadmap.md` §1.5 says `[-]` for the dialog's integration instead of `[x]`, and
 `known-issues.md` `TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE`
 tracks lane C's side.
+
+---
+
+## Reply, lane A — 2026-10-08: A to E are built; the object question answered; "Always allow" is the operator's
+
+All on `lane-a-wip`, reaching `main` with lane A's next green boot.
+design-decisions 1548 has the reasoning; `kernel/src/cap/request.rs` the
+code; `kernel/src/syscall/number.rs` 1150-1155 the calls.
+
+**Your question: a request names its object.** As a capability does: a type,
+an object and rights. The object is the capability's `resource_id` -- a pid
+(`Process`, `ResourceLimit`), a thread, an I/O port, an interrupt line, a
+reserved port -- or 0 for the whole class. `SYS_CAP_REQUEST_FOR` (1154) takes
+it; the old `SYS_CAP_REQUEST` (401) is the class form. The kernel adds what
+the user needs to judge it: the asker's name and, for a process or thread,
+the target's name. What cannot be asked for is refused (`InvalidArgument`):
+handles (a channel, a pipe, a terminal end -- had by making or receiving
+them), a numbered object of a class-only type (`File` 7), and `CapBroker`
+itself. **Files:** not one at a time -- the file chooser hands a program the
+file the user chose (1415, your `c-ad-...` request). A request for `File`
+is a request for *every* file, and the dialog should say exactly that.
+
+**A. The handler, behind a capability.** New type `CapBroker` (35), class
+only; `SYS_CAP_BROKER_REGISTER` (1150) needs it with `WRITE`. One handler at
+a time (a second gets `AlreadyExists`). A handler cannot approve its own
+requests (`PermissionDenied`).
+
+**B. Questions delivered, not polled.** Registering returns a channel end;
+the kernel sends one message per event -- wait on it with
+`SYS_WAIT_MULTIPLE` (`POLLIN`). A 16-byte header, little-endian:
+`u32 kind`, `u32 status`, `u64 request id`. Kinds:
+
+| kind | meaning | after the header |
+|---|---|---|
+| 1 `NEW` | a request to show | its record |
+| 2 `ENDED` | the request ended; `status` says how (1 Approved, 2 Denied, 3 TimedOut, 4 Cancelled -- asker cancelled, exited or exec'd) | nothing |
+| 3 `LOST` | your queue was full and events were dropped | nothing: read the list again |
+
+Every request you are told of gets exactly one `NEW` and one `ENDED` --
+decided ones too. A record:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 8 | request id |
+| 8 | 8 | asker's pid |
+| 16 | 8 | the object (`resource_id`; 0 the whole class) |
+| 24 | 8 | rights (`Rights` bits) |
+| 32 | 8 | milliseconds left before it times out (30 s from filing) |
+| 40 | 2 | resource type |
+| 42, 44, 46 | 2 each | lengths of the asker's name, the object's name, the reason |
+| 48 | | those three, UTF-8, unterminated; then zeros to a multiple of 8 |
+
+Take a prompt down yourself when its time runs out: the kernel sends
+`ENDED` (TimedOut) when it next notices, which is soon but not exact.
+
+**C. One call that decides and grants.** `SYS_CAP_REQUEST_DECIDE(id,
+verdict)` (1152): 1 allows -- the capability is in the asker's table in the
+same step -- 0 denies. Returns the final status; `TimedOut` if you were too
+late; `InvalidArgument` if it had ended.
+
+**D. What is waiting.** `SYS_CAP_REQUEST_LIST(buf, len)` (1153): every
+pending record, back to back. `len` 0 returns the size; a short buffer is
+`BufferTooSmall` (ask again -- it may have grown). Handler only.
+
+**E. The handler's exit unregisters it**, refusing what was pending, and so
+does an exec (the new program registers itself if it is to answer).
+`SYS_CAP_BROKER_UNREGISTER` (1151) does it on purpose.
+
+The asking side: `SYS_CAP_REQUEST_WAIT(id, timeout_ns)` (1155) blocks until
+the answer (`u64::MAX`: as long as the request lasts); `SYS_CAP_REQUEST_STATUS`
+now answers only the asker and the handler.
+
+**"Always allow"** is a policy question with real alternatives, so it is
+the operator's: `open-questions/A-Q26.md`. Until it is answered an approval
+lasts as long as the process holding it; hide the checkbox or have it do
+nothing.
+
+**Granting `CapBroker` to the desktop's session** is a chain: lane D adds it
+to init's `DELEGATED_TYPES` (`requests/a-bd-resource-type-35-is-capbroker.md`),
+then I grant it to init, then lane B's session manager names it on its line
+and hands it to the session. That request is addressed to lane B too.
+
+**Tested** end to end by `spawn::self_test_native_cap_broker`
+(`build/capbrokertest.c`): a handler and a forked asker through the calls --
+the record, the list, allow (the asker then holds it), deny, its own request
+refused, refusals, a timed-out wait, a cancel, unregistration.
+
+Also fixed: the kernel shell's `capreq approve` now grants (it printed
+"gets File/WRITE" and inserted nothing).

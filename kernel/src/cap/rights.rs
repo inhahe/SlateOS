@@ -264,6 +264,23 @@ impl Rights {
         Self::RELOAD_KERNEL,
     ];
 
+    /// Every declared right and no other bit: the union of the distinct
+    /// rights. For a caller that must refuse bits meaning nothing today -- a
+    /// capability request for one would be approved as nothing, and come to
+    /// mean something the day the bit is declared (`cap::request`).
+    // Evaluated at compile time: an index out of range or an overflow fails
+    // the build, never the kernel.
+    #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    pub const DECLARED: Self = {
+        let mut bits = 0u64;
+        let mut i = 0;
+        while i < Self::DISTINCT.len() {
+            bits |= Self::DISTINCT[i].0;
+            i += 1;
+        }
+        Self(bits)
+    };
+
     // --- Convenience combinations ---
 
     /// All rights.

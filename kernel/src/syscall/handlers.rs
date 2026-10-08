@@ -7538,138 +7538,200 @@ pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(out.len() as i64)
 }
 
-/// `SYS_CAP_REQUEST` — request a capability the caller does not hold.
-///
-/// Submits a request to the security policy handler.  The request
-/// includes a human-readable reason string that will be presented to
-/// the user for approval or denial.
-///
-/// `arg0`: resource type (`ResourceType` discriminant as u16).
-/// `arg1`: rights bitfield (`Rights` bits as u32).
-/// `arg2`: pointer to reason string (UTF-8, user buffer).
-/// `arg3`: length of reason string in bytes (max 256).
-///
-/// Returns: request ID (positive u64) on success.
-pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
+/// The calling process, for the broker's calls: `PermissionDenied` for a
+/// kernel task, which has no process to ask or answer for.
+fn broker_caller() -> KernelResult<crate::proc::pcb::ProcessId> {
+    match crate::proc::thread::owner_process(sched::current_task_id()) {
+        Some(pid) if pid != 0 => Ok(pid),
+        _ => Err(KernelError::PermissionDenied),
+    }
+}
+
+/// The body of [`sys_cap_request`] and [`sys_cap_request_for`]: the calling
+/// process asks for `rights_raw` on `(resource_type_raw, resource_id)`, for
+/// the reason at `reason_ptr`/`reason_len`.
+fn cap_request_common(
+    resource_type_raw: u64,
+    resource_id: u64,
+    rights_raw: u64,
+    reason_ptr: u64,
+    reason_len: u64,
+) -> KernelResult<u64> {
     use crate::cap::{self, Rights, request};
-    use crate::proc::{pcb, thread};
 
-    let resource_type_raw = args.arg0 as u16;
-    let rights_raw = args.arg1 as u32;
-    let reason_len = args.arg3 as usize;
+    // One table for the wire's numbers: `ResourceType::from_raw`, walked
+    // `1..=LAST` at boot (a hand-written copy here once stopped at 15).
+    let resource_type = u16::try_from(resource_type_raw)
+        .ok()
+        .and_then(cap::ResourceType::from_raw)
+        .ok_or(KernelError::InvalidArgument)?;
+    let rights = Rights::from_raw(rights_raw);
 
-    // Validate resource type.
-    //
-    // This used to be the same table written out by hand, and it had stopped at
-    // 15 (`Namespace`) while the enum grew to 30. A process asking the human to
-    // grant it `Drm`, `NetRaw`, `Pty`, `InputDevice`, `PrivilegedPort` or any
-    // of the other ten got `InvalidArgument` — the answer reserved for garbage
-    // — and there was no way to tell from the outside that the type existed and
-    // the list simply had not been updated. Nothing failed to compile, because
-    // an unmaintained list compiles perfectly.
-    //
-    // `ResourceType::from_raw` is now the one table, and
-    // `cap::groups::test_resource_type_from_raw` walks `1..=LAST` at boot so it
-    // cannot fall behind the enum again.
-    let Some(resource_type) = cap::ResourceType::from_raw(resource_type_raw) else {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    };
-
-    // Validate rights (must be non-zero).
-    let rights = Rights::from_raw(rights_raw as u64);
-    if rights.is_empty() {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    // An over-long reason is refused, not cut: it is shown to the human
+    // deciding, and a sentence cut short can read as more innocuous than it
+    // is.
+    let reason_len = usize::try_from(reason_len).map_err(|_| KernelError::InvalidArgument)?;
+    if reason_ptr == 0 || reason_len == 0 || reason_len > request::MAX_REASON_LEN {
+        return Err(KernelError::InvalidArgument);
     }
+    let reason_bytes = crate::mm::user::read_user_vec(reason_ptr, reason_len, CAP_REASON_MAX)?;
+    let reason = core::str::from_utf8(&reason_bytes).map_err(|_| KernelError::InvalidArgument)?;
 
-    // Validate reason string.  An over-long reason is rejected, not clipped
-    // at 256 as it used to be: this string is shown to the human deciding
-    // whether to grant the capability, and cutting it mid-sentence is a way
-    // to make a request read as more innocuous than it is.
-    if args.arg2 == 0 || reason_len == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    let pid = broker_caller()?;
+    let name =
+        crate::proc::pcb::name(pid).unwrap_or_else(|| alloc::string::String::from("unknown"));
+    request::request_capability(pid, &name, resource_type, resource_id, rights, reason)
+}
+
+/// A request id or a status as a system call's value.
+fn broker_value(v: u64) -> SyscallResult {
+    match i64::try_from(v) {
+        Ok(v) => SyscallResult::ok(v),
+        Err(_) => SyscallResult::err(KernelError::Overflow),
     }
-    let reason_bytes = match crate::mm::user::read_user_vec(args.arg2, reason_len, CAP_REASON_MAX) {
-        Ok(b) => b,
-        Err(e) => return SyscallResult::err(e),
-    };
-    let reason_str = match core::str::from_utf8(&reason_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
-    };
+}
 
-    // Get the calling process's PID and name.
-    let task_id = sched::current_task_id();
-    let pid = match thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return SyscallResult::err(KernelError::PermissionDenied),
-    };
-    let proc_name = pcb::name(pid).unwrap_or_else(|| alloc::string::String::from("unknown"));
-
-    // Submit the request.
-    match request::request_capability(pid, &proc_name, resource_type, rights, reason_str) {
-        Ok(id) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(id as i64)
-        }
+/// `SYS_CAP_REQUEST` (401) -- ask the user for authority over a whole class:
+/// [`sys_cap_request_for`] with object 0.
+///
+/// `arg0`: resource type; `arg1`: rights; `arg2`/`arg3`: the reason (UTF-8,
+/// at most 256 bytes). Returns the request's id.
+pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
+    match cap_request_common(args.arg0, 0, args.arg1, args.arg2, args.arg3) {
+        Ok(id) => broker_value(id),
         Err(e) => SyscallResult::err(e),
     }
 }
 
-/// `SYS_CAP_REQUEST_STATUS` — check the status of a capability request.
-///
-/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
-///
-/// Returns status as an integer:
-/// - 0 = Pending
-/// - 1 = Approved
-/// - 2 = Denied
-/// - 3 = TimedOut
-/// - 4 = Cancelled
+/// `SYS_CAP_REQUEST_FOR` (1154) -- ask the user for `arg2` rights on the
+/// object `(arg0 type, arg1 id)`, for the reason at `arg3`/`arg4`. Returns
+/// the request's id. See [`crate::cap::request`].
+pub fn sys_cap_request_for(args: &SyscallArgs) -> SyscallResult {
+    match cap_request_common(args.arg0, args.arg1, args.arg2, args.arg3, args.arg4) {
+        Ok(id) => broker_value(id),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_STATUS` (402) -- the status of request `arg0`, the
+/// caller's own or, for the handler, any: 0 Pending, 1 Approved, 2 Denied, 3
+/// TimedOut, 4 Cancelled. `NotFound` for one the caller may not see.
 pub fn sys_cap_request_status(args: &SyscallArgs) -> SyscallResult {
-    use crate::cap::request::{self, RequestStatus};
-
-    let request_id = args.arg0;
-
-    match request::get_status(request_id) {
-        Some(status) => {
-            let code = match status {
-                RequestStatus::Pending => 0,
-                RequestStatus::Approved => 1,
-                RequestStatus::Denied => 2,
-                RequestStatus::TimedOut => 3,
-                RequestStatus::Cancelled => 4,
-            };
-            SyscallResult::ok(code)
-        }
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::cap::request::status_for(args.arg0, pid) {
+        Some(status) => SyscallResult::ok(i64::from(status.code())),
         None => SyscallResult::err(KernelError::NotFound),
     }
 }
 
-/// `SYS_CAP_REQUEST_CANCEL` — cancel a pending capability request.
-///
-/// Only the process that submitted the request can cancel it.
-///
-/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
-///
-/// Returns 0 on success.
+/// `SYS_CAP_REQUEST_CANCEL` (403) -- cancel the caller's pending request
+/// `arg0`. Only the process that filed it may.
 pub fn sys_cap_request_cancel(args: &SyscallArgs) -> SyscallResult {
-    use crate::cap::request;
-    use crate::proc::thread;
-
-    let request_id = args.arg0;
-
-    // Get the calling process's PID.
-    let task_id = sched::current_task_id();
-    let pid = match thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return SyscallResult::err(KernelError::PermissionDenied),
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
     };
-
-    match request::cancel(request_id, pid) {
+    match crate::cap::request::cancel(args.arg0, pid) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_CAP_REQUEST_WAIT` (1155) -- wait until the caller's request `arg0`
+/// ends, for at most `arg1` nanoseconds (`u64::MAX`: as long as it lasts; 0:
+/// not at all), and return its status.
+pub fn sys_cap_request_wait(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::waiters::Patience;
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let patience = match args.arg1 {
+        0 => Patience::Never,
+        u64::MAX => Patience::Forever,
+        ns => Patience::Upto(ns),
+    };
+    match crate::cap::request::wait(args.arg0, pid, patience) {
+        Ok(status) => SyscallResult::ok(i64::from(status.code())),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_BROKER_REGISTER` (1150) -- the caller, holding `(CapBroker, 0,
+/// WRITE)`, becomes the process that answers capability requests. Returns the
+/// channel end it is told of them on.
+pub fn sys_cap_broker_register(_args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::{ResourceType, Rights};
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !pcb::has_capability_for(pid, ResourceType::CapBroker, 0, Rights::WRITE) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    match crate::cap::request::register_process_handler(pid) {
+        Ok(end) => broker_value(end.raw()),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_BROKER_UNREGISTER` (1151) -- the calling handler stops answering;
+/// what was pending is refused.
+pub fn sys_cap_broker_unregister(_args: &SyscallArgs) -> SyscallResult {
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::cap::request::unregister_process_handler(pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_DECIDE` (1152) -- the handler answers request `arg0`:
+/// `arg1` 1 allows (granting it), 0 denies. Returns the final status.
+pub fn sys_cap_request_decide(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::request::{self, Decider};
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let allow = match args.arg1 {
+        0 => false,
+        1 => true,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    match request::decide(args.arg0, allow, Decider::Handler(pid)) {
+        Ok(status) => SyscallResult::ok(i64::from(status.code())),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_LIST` (1153) -- the handler reads every pending request's
+/// record into `arg0` (`arg1` bytes; 0 asks the size). Returns the size.
+pub fn sys_cap_request_list(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::request;
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !request::is_handler(pid) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    let records = request::pending_records();
+    let len = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    if len != 0 {
+        if len < records.len() {
+            return SyscallResult::err(KernelError::BufferTooSmall);
+        }
+        if let Err(e) = crate::mm::user::write_user_items(args.arg0, &records) {
+            return SyscallResult::err(e);
+        }
+    }
+    broker_value(u64::try_from(records.len()).unwrap_or(u64::MAX))
 }
 
 /// `SYS_SET_EXCEPTION_HANDLER` — register a per-process exception handler.

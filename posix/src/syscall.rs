@@ -1134,6 +1134,17 @@ pub const SYS_SHM_UNMAP: u64 = 234;
 pub const SHM_MAP_READ: u64 = 1 << 0;
 /// `SYS_SHM_MAP`: map writable (the kernel's `MAP_WRITE`).
 pub const SHM_MAP_WRITE: u64 = 1 << 1;
+/// Map a region at an address the caller chooses: `shm_map_at(handle, flags,
+/// addr) -> addr`, System V `shmat` with an address. `addr` 16 KiB-aligned
+/// and, with the region, inside the general mapping window
+/// (`0x60_0000_0000..0x6f_0000_0000`); 0 lets the kernel choose, as
+/// [`SYS_SHM_MAP`]. An occupied range is `InvalidArgument` unless `flags` has
+/// [`SHM_MAP_FIXED`]. Lane A's (235); a kernel without it answers
+/// `NoSuchSyscall`.
+pub const SYS_SHM_MAP_AT: u64 = 235;
+/// [`SYS_SHM_MAP_AT`]'s flag: replace whatever is mapped in the range (Linux's
+/// `SHM_REMAP`) -- the native `MAP_FIXED`'s bit.
+pub const SHM_MAP_FIXED: u64 = 1 << 5;
 // Later pipe additions live in the free extension range (657+): the original
 // 220-229 block is full (230 starts shared memory). Backs tee(2) — peek copies
 // buffered bytes without consuming, wait_readable blocks for data/EOF.

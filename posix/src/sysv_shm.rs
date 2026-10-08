@@ -33,8 +33,13 @@
 //!
 //! ## Not Linux's
 //!
-//! - `shmat` at an address the caller chooses (`shmaddr` non-NULL) is refused
-//!   with `EINVAL`: the kernel's `SYS_SHM_MAP` picks the address itself.
+//! - `shmat` at an address the caller chooses (`shmaddr` non-NULL) maps it
+//!   there through lane A's `SYS_SHM_MAP_AT` -- refusing an occupied range
+//!   with `EINVAL` unless `SHM_REMAP`, as Linux's `do_shmat` does -- but only
+//!   inside the kernel's general mapping window (`0x60_0000_0000` to
+//!   `0x6f_0000_0000`), where Linux takes any user address; anywhere else is
+//!   `EINVAL`. On a kernel without the call, which picks the address itself,
+//!   every non-NULL `shmaddr` is `EINVAL`.
 //! - `SHM_EXEC` is refused with `EACCES`: the kernel never maps shared memory
 //!   executable.
 //! - `SHM_HUGETLB` is `ENOMEM`, as on a Linux system with no huge pages set
@@ -213,16 +218,37 @@ mod backing {
         Ok(r as u64)
     }
 
-    /// A new mapping of `handle`'s region: its address.
+    /// A new mapping of `handle`'s region: its address -- `at`, when that is
+    /// not 0, replacing what is mapped there if `replace` (`SHM_REMAP`), or
+    /// else an address the kernel picks.
     #[cfg(target_os = "none")]
-    pub(super) fn map(handle: u64, write: bool) -> Result<usize, i32> {
+    pub(super) fn map(handle: u64, write: bool, at: usize, replace: bool) -> Result<usize, i32> {
         let flags = crate::syscall::SHM_MAP_READ
             | if write {
                 crate::syscall::SHM_MAP_WRITE
             } else {
                 0
             };
-        let r = crate::syscall::syscall2(crate::syscall::SYS_SHM_MAP, handle, flags);
+        let r = if at == 0 {
+            crate::syscall::syscall2(crate::syscall::SYS_SHM_MAP, handle, flags)
+        } else {
+            let fixed = if replace {
+                crate::syscall::SHM_MAP_FIXED
+            } else {
+                0
+            };
+            let r = crate::syscall::syscall3(
+                crate::syscall::SYS_SHM_MAP_AT,
+                handle,
+                flags | fixed,
+                at as u64,
+            );
+            if r == crate::errno::native::NO_SUCH_SYSCALL {
+                // A kernel that only picks the address itself.
+                return Err(crate::errno::EINVAL);
+            }
+            r
+        };
         if r <= 0 {
             return Err(if r == 0 {
                 crate::errno::ENOMEM
@@ -262,8 +288,13 @@ mod backing {
         Ok(p.expose_provenance() as u64)
     }
 
+    /// The host has no address space of its own to place a region in: an
+    /// address is refused, as a kernel without `SYS_SHM_MAP_AT` refuses it.
     #[cfg(not(target_os = "none"))]
-    pub(super) fn map(handle: u64, _write: bool) -> Result<usize, i32> {
+    pub(super) fn map(handle: u64, _write: bool, at: usize, _replace: bool) -> Result<usize, i32> {
+        if at != 0 {
+            return Err(crate::errno::EINVAL);
+        }
         Ok(handle as usize)
     }
 
@@ -576,8 +607,11 @@ pub extern "C" fn shmget(key: i32, size: usize, shmflg: i32) -> i32 {
 /// flags ask for; `ENOMEM`. A segment removed while attached still attaches
 /// by its id, as on Linux.
 ///
-/// Not Linux's (see the module docs): a non-NULL `shmaddr` that passes those
-/// checks is `EINVAL`, and `SHM_EXEC` is `EACCES`.
+/// A non-NULL `shmaddr` is where the segment is mapped -- `EINVAL` for an
+/// occupied range without `SHM_REMAP`, which replaces what is there, as
+/// Linux's `do_shmat` answers. Not Linux's (see the module docs): such an
+/// address must lie in the kernel's general mapping window, and `SHM_EXEC` is
+/// `EACCES`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> *mut u8 {
     match attach(shmid, shmaddr.addr(), shmflg) {
@@ -624,11 +658,8 @@ fn attach(shmid: i32, shmaddr: usize, shmflg: i32) -> Result<usize, i32> {
     if shmflg & SHM_EXEC != 0 {
         return Err(errno::EACCES);
     }
-    if addr != 0 {
-        return Err(errno::EINVAL);
-    }
     let (handle, len) = (seg.handle, pages_of(seg.size).unwrap_or(0) * SHMLBA);
-    let mapped = backing::map(handle, write)?;
+    let mapped = backing::map(handle, write, addr, shmflg & SHM_REMAP != 0)?;
     let Some(a) = t.tables().attaches.claim(usize::MAX, || Attach::EMPTY) else {
         backing::unmap(mapped, len);
         return Err(errno::ENOMEM);

@@ -1,7 +1,6 @@
 # D → A: `SYS_SHM_MAP` at an address the caller chooses
 
-**Status:** OPEN · **Filed:** 2026-09-26 by lane D · **Priority:** low --
-nothing is blocked; one call's variant is refused.
+**Status:** ANSWERED on `lane-a` (`SYS_SHM_MAP_AT`, 235), and `shmat` uses it (2026-10-07) -- reply at the end. Closes when lane A's kernel is on `main`. · **Filed:** 2026-09-26 by lane D · **Priority:** low.
 
 ## In short
 
@@ -27,3 +26,17 @@ when it exists; until then the libc keeps refusing, which is honest.
 `SHM_EXEC` (the kernel never maps shared memory executable, which is a
 policy, not a gap) and sharing segments between processes (D-Q3, the
 operator's).
+
+---
+
+## Lane D — 2026-10-07: `shmat` maps at the address
+
+`posix/src/sysv_shm.rs` maps a segment at a non-NULL `shmaddr` through
+`SYS_SHM_MAP_AT`, with `SHM_REMAP` as `MAP_FIXED`, after the checks it already
+made in `do_shmat`'s order (`SHM_RND`'s rounding, `SHM_REMAP` without an
+address). An occupied range is `EINVAL`, as Linux answers. The one thing not
+Linux's, now in the module's notes: the address must lie in your general
+mapping window, where Linux takes any user address. On a kernel without the
+call an address stays `EINVAL`.
+
+— lane D

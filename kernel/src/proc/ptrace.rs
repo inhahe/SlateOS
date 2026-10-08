@@ -2188,9 +2188,9 @@ pub fn on_thread_exit(tid: TaskId) {
 /// Send tracer `tracer` the `SIGCHLD` for its tracee, thread `tid` of process
 /// `pid`: `code_status` the `si_code` and `si_status` -- `CLD_TRAPPED` and the
 /// stop's signal for a `stop`, as Linux's `do_notify_parent_cldstop` sends it
-/// (not to a tracer whose `SIGCHLD` has `SA_NOCLDSTOP`), or how a traced
-/// thread ended, as its `do_notify_parent` does. `si_pid` is the thread's id.
-/// A debugger's event loop -- GDB's -- is woken by it.
+/// (not to a tracer whose `SIGCHLD` is ignored or has `SA_NOCLDSTOP`), or how
+/// a traced thread ended, as its `do_notify_parent` does. `si_pid` is the
+/// thread's id. A debugger's event loop -- GDB's -- is woken by it.
 fn notify_tracer(
     tracer: ProcessId,
     tid: TaskId,
@@ -2200,12 +2200,7 @@ fn notify_tracer(
 ) {
     const SIGCHLD: u32 = 17;
     let linux = pcb::get_abi_mode(tracer) == Some(pcb::AbiMode::Linux);
-    if stop
-        && linux
-        && crate::syscall::linux::linux_sigaction_get(tracer, SIGCHLD).sa_flags
-            & crate::syscall::linux::sa_flags::SA_NOCLDSTOP
-            != 0
-    {
+    if stop && linux && !crate::syscall::linux::linux_wants_cldstop(tracer) {
         return;
     }
     let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);

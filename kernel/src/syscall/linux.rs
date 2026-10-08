@@ -378,6 +378,18 @@ pub use linux_sigaction_table::{
     set as linux_sigaction_set,
 };
 
+/// Whether Linux-ABI process `parent` is sent the `SIGCHLD` of a stop or a
+/// continue -- a child's job-control change, a tracee's ptrace stop: not when
+/// its `SIGCHLD` is ignored or has `SA_NOCLDSTOP`, the test of Linux's
+/// `do_notify_parent_cldstop`. A child's end is told either way
+/// (`crate::proc::thread::on_thread_exit`).
+#[must_use]
+pub fn linux_wants_cldstop(parent: pcb::ProcessId) -> bool {
+    const SIGCHLD: u32 = 17;
+    let act = linux_sigaction_get(parent, SIGCHLD);
+    act.sa_handler != SIG_IGN && act.sa_flags & sa_flags::SA_NOCLDSTOP == 0
+}
+
 // ---------------------------------------------------------------------------
 // Linux x86_64 syscall numbers (subset).
 //

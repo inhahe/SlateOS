@@ -9913,6 +9913,18 @@ fn terminate_current_process_for_signal(
     sched::task_exit();
 }
 
+/// One job-control change at a time: a stop's suspending of the threads and
+/// its record, against a continue's resuming and its record. Without it a
+/// `SIGSTOP` and a `SIGCONT` from two senders could interleave -- the stop
+/// suspends, the continue resumes and finds nothing stopped to record, the
+/// stop records -- and leave a running process marked stopped, its parent
+/// told of a stop that is not; with it the process ends in the state of
+/// whichever came second, as Linux's `siglock` orders them. Held only across
+/// work that never blocks or yields (a self-stop parks after releasing it);
+/// taken before the process table, the scheduler and the signal state, never
+/// while holding any of them.
+static JOB_CONTROL: crate::sync::Mutex<()> = crate::sync::Mutex::named((), b"jobctl");
+
 /// Wake the parent-side observers of a job-control transition.
 ///
 /// Mirrors the zombie-transition wake in `thread::on_thread_exit`: `.0` is a
@@ -9975,6 +9987,8 @@ fn stop_process_for_signal(
 ) {
     use crate::proc::pcb;
 
+    let jc = JOB_CONTROL.lock();
+
     // Suspend every thread except the current one (if this is a self-stop).
     let mut self_thread: Option<crate::sched::task::TaskId> = None;
     if let Some(threads) = pcb::get_threads(pid) {
@@ -10020,13 +10034,25 @@ fn stop_process_for_signal(
         sched::suspend_pending(t);
     }
 
-    // Mark stopped and wake parent observers. If the process vanished
-    // between the signal check and here, there is nothing to record.
-    if let Ok(waiters) = pcb::record_jc_stopped(pid, sig) {
-        wake_jc_waiters(waiters);
-    }
+    // Mark stopped, wake parent observers and send the parent its
+    // `SIGCHLD` -- unless the process was stopped already, when this is no
+    // stop: no second report and no second `SIGCHLD` (Linux leaves such a
+    // stop signal pending, and the `SIGCONT` discards it). A self-stop's
+    // thread parks all the same. If the process vanished between the signal
+    // check and here, there is nothing to record.
+    let stopped_now = match pcb::record_jc_stopped(pid, sig) {
+        Ok(Some(waiters)) => {
+            wake_jc_waiters(waiters);
+            notify_parent_of_job_control(pid, pcb::JobControlEvent::Stopped(sig));
+            true
+        }
+        Ok(None) | Err(_) => false,
+    };
+    drop(jc);
 
-    serial_println!("[signal] Process {} stopped by signal {}", pid, sig);
+    if stopped_now {
+        serial_println!("[signal] Process {} stopped by signal {}", pid, sig);
+    }
 
     // Phase 2: actually park, unless a SIGCONT already resumed us in the
     // window above — in which case this returns immediately and the thread
@@ -10047,14 +10073,20 @@ fn stop_process_for_signal(
     }
 }
 
-/// Continue a stopped process: resume all its suspended threads and record
-/// the continue so the parent's `wait4`/`waitid` can observe it (WCONTINUED).
+/// Continue a stopped process: resume all its suspended threads, record the
+/// continue so the parent's `wait4`/`waitid` can observe it (WCONTINUED), and
+/// send the parent its `SIGCHLD`.
 ///
 /// `sched::resume` is a no-op for threads that are not Suspended, so calling
-/// this on a process that is not actually stopped is harmless.
+/// this on a process that is not actually stopped is harmless -- and is no
+/// continue: nothing is recorded and the parent is told nothing, as Linux's
+/// `prepare_signal` reports a continue only for a process that was stopped.
+/// Until 2026-10-08 every `SIGCONT` left one, so a shell's `waitpid(-1,
+/// WCONTINUED)` reported a job continued that had never stopped.
 fn continue_process(pid: crate::proc::pcb::ProcessId) {
     use crate::proc::pcb;
 
+    let jc = JOB_CONTROL.lock();
     if let Some(threads) = pcb::get_threads(pid) {
         for t in threads {
             // A thread in a ptrace-stop is its tracer's to resume, not
@@ -10065,11 +10097,57 @@ fn continue_process(pid: crate::proc::pcb::ProcessId) {
         }
     }
 
-    if let Ok(waiters) = pcb::record_jc_continued(pid) {
-        wake_jc_waiters(waiters);
-    }
+    let continued = match pcb::record_jc_continued(pid) {
+        Ok(Some(waiters)) => {
+            wake_jc_waiters(waiters);
+            notify_parent_of_job_control(pid, pcb::JobControlEvent::Continued);
+            true
+        }
+        Ok(None) | Err(_) => false,
+    };
+    drop(jc);
 
-    serial_println!("[signal] Process {} continued", pid);
+    if continued {
+        serial_println!("[signal] Process {} continued", pid);
+    }
+}
+
+/// Send process `pid`'s parent the `SIGCHLD` of its job-control change `ev`,
+/// as Linux's `do_notify_parent_cldstop` sends it: `CLD_STOPPED` and the stop
+/// signal, or `CLD_CONTINUED` and `SIGCONT`, from the child -- unless the
+/// parent's `SIGCHLD` is ignored or has `SA_NOCLDSTOP`. Until 2026-10-08 a
+/// parent was told only of exits, so one that learns of its children from its
+/// `SIGCHLD` handler -- a shell's job control -- did not see a job stop with
+/// `^Z` until it next waited.
+///
+/// For a Linux-ABI parent, whose `SIGCHLD` flags the kernel keeps. A native
+/// parent's `SA_NOCLDSTOP` lives in its C library, which can keep the signal
+/// back only once it reads `si_code` from the signal frame; whether the kernel
+/// should post to it and leave that to the library is lane D's to answer
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`, item 3),
+/// and until then a native parent is not sent it
+/// (`known-issues/A-SIGCHLD-IS-NOT-POSTED-WHEN-A-CHILD-STOPS-OR-CONTINUES.md`).
+fn notify_parent_of_job_control(
+    pid: crate::proc::pcb::ProcessId,
+    ev: crate::proc::pcb::JobControlEvent,
+) {
+    use crate::proc::pcb;
+    const SIGCHLD: u32 = 17;
+    let Some(parent) = pcb::parent(pid).filter(|&p| p != 0 && p != pid) else {
+        return;
+    };
+    if pcb::get_abi_mode(parent) != Some(pcb::AbiMode::Linux)
+        || !super::linux::linux_wants_cldstop(parent)
+    {
+        return;
+    }
+    let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+    let info = crate::proc::signal::SigInfo::child(
+        u32::try_from(pid).unwrap_or(u32::MAX),
+        uid,
+        ev.sigchld_code_and_status(),
+    );
+    crate::proc::signal::set_pending_info(parent, SIGCHLD, info);
 }
 
 /// Post a signal the kernel raises -- a terminal's `^C`/`^Z`/`SIGWINCH`, the

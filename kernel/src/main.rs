@@ -3595,6 +3595,14 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_exec_threads(),
     );
+    // A parent is sent SIGCHLD when its child stops or continues, unless it
+    // asked not to (SA_NOCLDSTOP); a SIGCONT to a running child is no continue
+    // (crate::syscall::handlers::notify_parent_of_job_control).
+    selftest::dispatch_debug(
+        "Linux SIGCHLD on stop and continue (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_sigchld_stop(),
+    );
 
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares

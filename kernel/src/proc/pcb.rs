@@ -4714,40 +4714,56 @@ pub fn take_trace_waiters(tracee: ProcessId, tracer: ProcessId) -> JcWaiters {
     (wake, any)
 }
 
-/// Record that `pid` has been stopped by job-control signal `sig`.
+/// Record that `pid` has been stopped by job-control signal `sig` -- if it
+/// was not stopped already.
 ///
-/// Sets the stopped flag and records a `Stopped(sig)` report for the
-/// parent's `wait()` to observe.  Because stop and continue are mutually
-/// exclusive transitions, this supersedes any not-yet-reported `Continued`
-/// (overwriting `jc_report`).  Returns the parent-side waiters to wake (see
-/// [`JcWaiters`]).
+/// For a running process: sets the stopped flag and records a
+/// `Stopped(sig)` report for the parent's `wait()` to observe, superseding
+/// any not-yet-reported `Continued` (stop and continue are mutually
+/// exclusive transitions), and returns the parent-side waiters to wake (see
+/// [`JcWaiters`]). For one already stopped, `None` and nothing recorded: a
+/// second stop signal is no second stop, and the parent, told once, is not
+/// told again (Linux leaves the signal pending until a `SIGCONT` discards
+/// it). The counterpart of [`record_jc_continued`].
 ///
 /// This only updates job-control bookkeeping — actually suspending the
 /// process's threads is the caller's responsibility (the signal-delivery
 /// path), keeping this module free of scheduler coupling.
 ///
 /// Returns `NoSuchProcess` if `pid` is unknown.
-pub fn record_jc_stopped(pid: ProcessId, sig: u32) -> KernelResult<JcWaiters> {
+pub fn record_jc_stopped(pid: ProcessId, sig: u32) -> KernelResult<Option<JcWaiters>> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    if proc.stopped {
+        return Ok(None);
+    }
     proc.stopped = true;
     proc.jc_report = Some(JobControlEvent::Stopped(sig));
-    Ok(take_jc_waiters(&mut table, pid))
+    Ok(Some(take_jc_waiters(&mut table, pid)))
 }
 
-/// Record that `pid` has been continued by `SIGCONT`.
+/// Record that `pid` has been continued by `SIGCONT` -- if it was stopped.
 ///
-/// Clears the stopped flag and records a `Continued` report, superseding any
-/// not-yet-reported `Stopped`.  Returns the parent-side waiters to wake (see
-/// [`JcWaiters`]).  Actually resuming the threads is the caller's job.
+/// For a stopped process: clears the stopped flag and records a `Continued`
+/// report, superseding any not-yet-reported `Stopped`, and returns the
+/// parent-side waiters to wake (see [`JcWaiters`]). For one that was not
+/// stopped, `None` and nothing recorded: a `SIGCONT` to a running process is
+/// no continue, and `waitpid(WCONTINUED)` reports none (Linux's
+/// `prepare_signal` marks a continue only when the process was stopped). The
+/// test and the record are one step under the table's lock, so of two racing
+/// `SIGCONT`s only one continues. Actually resuming the threads is the
+/// caller's job.
 ///
 /// Returns `NoSuchProcess` if `pid` is unknown.
-pub fn record_jc_continued(pid: ProcessId) -> KernelResult<JcWaiters> {
+pub fn record_jc_continued(pid: ProcessId) -> KernelResult<Option<JcWaiters>> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    if !proc.stopped {
+        return Ok(None);
+    }
     proc.stopped = false;
     proc.jc_report = Some(JobControlEvent::Continued);
-    Ok(take_jc_waiters(&mut table, pid))
+    Ok(Some(take_jc_waiters(&mut table, pid)))
 }
 
 /// Whether `pid` is currently stopped (threads suspended for job control).
@@ -10192,15 +10208,30 @@ fn test_job_control_state() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // A continue of a process that is not stopped is none: nothing recorded.
+    if record_jc_continued(pid)?.is_some() || peek_jc_report(pid).is_some() {
+        serial_println!("[proc]   FAIL: continuing a running process recorded a continue");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
     // Stop by SIGTSTP (20). No parent waiters registered → both None.
     let waiters = record_jc_stopped(pid, 20)?;
-    if waiters != (None, None) {
+    if waiters != Some((None, None)) {
         serial_println!("[proc]   FAIL: unexpected waiters on stop");
         destroy(pid);
         return Err(KernelError::InternalError);
     }
     if !is_stopped(pid) || peek_jc_report(pid) != Some(JobControlEvent::Stopped(20)) {
         serial_println!("[proc]   FAIL: stop did not record Stopped(20)");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    // A second stop of the stopped process is none: the first report stands.
+    if record_jc_stopped(pid, 19)?.is_some()
+        || peek_jc_report(pid) != Some(JobControlEvent::Stopped(20))
+    {
+        serial_println!("[proc]   FAIL: stopping a stopped process recorded a second stop");
         destroy(pid);
         return Err(KernelError::InternalError);
     }
@@ -10212,7 +10243,11 @@ fn test_job_control_state() -> KernelResult<()> {
     }
 
     // Continue supersedes the stop report and clears the stopped flag.
-    let _ = record_jc_continued(pid)?;
+    if record_jc_continued(pid)?.is_none() {
+        serial_println!("[proc]   FAIL: continuing a stopped process recorded nothing");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
     if is_stopped(pid) || peek_jc_report(pid) != Some(JobControlEvent::Continued) {
         serial_println!("[proc]   FAIL: continue did not supersede with Continued");
         destroy(pid);

@@ -23981,6 +23981,103 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of the `SIGCHLD` a parent is sent when its child stops or
+/// continues, through the Linux ABI: [`elf::build_linux_sigchld_stop_test_elf`]
+/// (`build/sigchldstoptest.c`). The parent's handler is called with
+/// `CLD_STOPPED` for a child's own `SIGSTOP` and `CLD_CONTINUED` for the
+/// parent's `SIGCONT`; a `SIGSTOP` to the stopped child is no stop and a
+/// `SIGCONT` to the running child no continue (no call, nothing for
+/// `waitpid`); under `SA_NOCLDSTOP` a stop and
+/// a continue call nothing though `waitpid` sees both; the exit is told
+/// (`handlers::notify_parent_of_job_control`, `pcb::record_jc_continued`).
+pub fn self_test_linux_sigchld_stop() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux SIGCHLD on stop and continue (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_sigchld_stop_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-sigchld-stop"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sigchld-stop",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SIGCHLD stop spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SIGCHLD on stop and continue (ring 3) — the program did not finish \
+             in 90 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "mmap of the handler's mailbox failed",
+            Some(0x31) => "rt_sigaction(SIGCHLD) failed",
+            Some(0x32 | 0x33) => "pipe or fork failed",
+            Some(0x40) => "the child's own SIGSTOP called no SIGCHLD handler (10 s)",
+            Some(0x41) => "the stop's SIGCHLD was not CLD_STOPPED, 19, from the child",
+            Some(0x42) => "waitpid(WUNTRACED) did not report the stop",
+            Some(0x43 | 0x47 | 0x4a | 0x4c | 0x53) => "a kill of the child failed",
+            Some(0x44) => "the parent's SIGCONT called no SIGCHLD handler (10 s)",
+            Some(0x45) => "the continue's SIGCHLD was not CLD_CONTINUED, 18, from the child",
+            Some(0x46) => "waitpid(WCONTINUED) did not report the continue",
+            Some(0x48) => "a SIGCONT to the running child sent SIGCHLD",
+            Some(0x49) => "a SIGCONT to the running child left a continue for waitpid",
+            Some(0x4b | 0x4d) => "under SA_NOCLDSTOP, waitpid did not see the stop or continue",
+            Some(0x4e) => "SA_NOCLDSTOP did not keep back the SIGCHLD of a stop or continue",
+            Some(0x4f) => "the write that releases the child failed",
+            Some(0x50) => "the child's exit called no SIGCHLD handler (10 s)",
+            Some(0x51) => "the exit's SIGCHLD was not CLD_EXITED, 7, from the child",
+            Some(0x52) => "the child's status was not exit 7",
+            Some(0x54) => "a SIGSTOP to the stopped child sent a second SIGCHLD",
+            Some(0x55) => "a SIGSTOP to the stopped child left a second stop for waitpid",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: SIGCHLD on stop and continue (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux SIGCHLD on stop and continue (ring 3: CLD_STOPPED for a child's own \
+         SIGSTOP, none for a SIGSTOP to the stopped child, CLD_CONTINUED for a SIGCONT, none for \
+         a SIGCONT to a running child, none under SA_NOCLDSTOP, CLD_EXITED): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

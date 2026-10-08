@@ -114,6 +114,11 @@ pub struct WaitClasses {
     pub stopped: bool,
     /// Report a child resumed by `SIGCONT` (`WCONTINUED`).
     pub continued: bool,
+    /// Report a tracee's ptrace stop to its tracer, asked for or not -- as
+    /// Linux reports them to `wait4` and `waitid` whatever the options
+    /// (`crate::proc::ptrace`). Only the native calls that can say nothing
+    /// but an exit code leave it out.
+    pub traced: bool,
 }
 
 impl WaitClasses {
@@ -146,6 +151,9 @@ pub enum ChildEvent {
     Exited(ExitInfo),
     /// The child stopped or continued and is still alive.
     JobControl(JobControlEvent),
+    /// A thread the caller traces stopped for it (`crate::proc::ptrace`):
+    /// the stop's code -- the signal, or `SIGTRAP | event << 8`.
+    Traced(u32),
 }
 
 /// A child state change, in the neutral form both ABIs encode from.
@@ -178,6 +186,13 @@ impl FoundEvent {
         match &self.event {
             ChildEvent::Exited(info) => info.to_wstatus(),
             ChildEvent::JobControl(ev) => ev.to_wstatus(),
+            // Linux's `wait_task_stopped`: `(exit_code << 8) | 0x7f`, the
+            // event in the bits above the signal.
+            ChildEvent::Traced(code) => {
+                #[allow(clippy::cast_possible_wrap)]
+                let w = (((code & 0xffff) << 8) | 0x7f) as i32;
+                w
+            }
         }
     }
 }
@@ -201,6 +216,25 @@ impl FoundEvent {
 /// Linux, whose `wait_consider_task` tests `EXIT_ZOMBIE` first.
 pub fn scan_once(parent_pid: ProcessId, req: WaitRequest) -> KernelResult<Option<FoundEvent>> {
     let want_jc = req.classes.wants_job_control();
+
+    // A tracee's stop is its tracer's, `WUNTRACED` or not.
+    if req.classes.traced {
+        let (which, pgid) = match req.target {
+            WaitTarget::Pid(child) => (Some(child), None),
+            WaitTarget::Pgid(g) => (None, Some(g)),
+            WaitTarget::Any => (None, None),
+        };
+        if let Some((id, code)) =
+            crate::proc::ptrace::take_stop_report(parent_pid, which, pgid, !req.nowait)
+        {
+            return Ok(Some(FoundEvent {
+                pid: id,
+                uid: pcb::process_uid(id).unwrap_or(0),
+                usage: crate::proc::thread::process_usage_both(id),
+                event: ChildEvent::Traced(code),
+            }));
+        }
+    }
 
     if let WaitTarget::Pid(child) = req.target {
         if req.classes.exited {

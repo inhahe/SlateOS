@@ -974,6 +974,10 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
             if is_zombie {
                 serial_println!("[thread] Process {} has no threads left — now zombie", pid);
 
+                // The threads it traced are let go -- or ended, under
+                // PTRACE_O_EXITKILL (Linux's `exit_ptrace`).
+                crate::proc::ptrace::on_process_exit(pid);
+
                 // Close all fd-bearing kernel resources NOW, at process
                 // exit — matching Linux's `exit_files()` in `do_exit`.
                 // This must happen before the reaper's `wait4()` (which

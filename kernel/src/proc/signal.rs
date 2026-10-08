@@ -419,6 +419,30 @@ impl SigInfo {
         }
     }
 
+    /// The record a Linux `siginfo_t` carries: `si_code`, and the sender's
+    /// pid, uid and value where `kill`, `sigqueue` and `tgkill` put them (a
+    /// tracer's `PTRACE_SETSIGINFO`, kept for a signal it injects).
+    #[must_use]
+    pub fn from_linux(info: &crate::proc::linux_sigframe::LinuxSiginfo) -> Self {
+        let word = |at: usize| -> u32 {
+            let mut b = [0u8; 4];
+            if let Some(src) = info.sifields.get(at..at.saturating_add(4)) {
+                b.copy_from_slice(src);
+            }
+            u32::from_ne_bytes(b)
+        };
+        let mut value = [0u8; 8];
+        if let Some(src) = info.sifields.get(8..16) {
+            value.copy_from_slice(src);
+        }
+        Self {
+            code: info.si_code,
+            sender_pid: word(0),
+            sender_uid: word(4),
+            value: u64::from_ne_bytes(value),
+        }
+    }
+
     /// A thread-directed signal (`tkill`/`tgkill`, i.e. `raise`/`pthread_kill`):
     /// `SI_TKILL` with the sender identity.
     #[must_use]
@@ -2192,6 +2216,14 @@ fn blocked_for_post(pid: ProcessId, target: Option<TaskId>, bit: u64) -> bool {
     })
 }
 
+/// Whether thread `tid` of process `pid` blocks signal `sig` -- for a
+/// signal a tracer injects, which waits, queued, until the thread can take
+/// it (`crate::proc::ptrace`).
+#[must_use]
+pub fn thread_blocks(pid: ProcessId, tid: TaskId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| blocked_for_post(pid, Some(tid), bit))
+}
+
 /// Make `sig` pending on `target`'s queue -- a thread's, or `None` the
 /// process's.
 fn post_to(pid: ProcessId, target: Option<TaskId>, sig: u32, info: SigInfo) {
@@ -2210,6 +2242,24 @@ fn classify(pid: ProcessId, target: Option<TaskId>, sig: u32, info: SigInfo) -> 
     // SIGKILL is unconditionally fatal and never delivered to a handler.
     if sig == SIGKILL {
         return PostDecision::Terminate(sig);
+    }
+
+    // A traced process's signals are its tracer's to decide on: each is
+    // queued, and stops the thread that takes it on its way back to user mode
+    // (`crate::proc::ptrace`'s signal-delivery-stop) -- none acts when it is
+    // sent, an ignored one included (Linux's `sig_ignored` is false for a
+    // traced task). `SIGCONT` still continues a stopped process now, as
+    // Linux's `prepare_signal` does for any target.
+    if crate::proc::ptrace::process_is_traced(pid) {
+        post_to(pid, target, sig, info);
+        if sig == SIGCONT {
+            clear_pending(pid, stop_signals_mask());
+            return PostDecision::Continue;
+        }
+        if sig == SIGSTOP || default_action(sig) == DefaultAction::Stop {
+            clear_pending(pid, sigcont_bit());
+        }
+        return PostDecision::Deliver;
     }
 
     let blocked_now = blocked_for_post(pid, target, signal_bit(sig).unwrap_or(0));
@@ -2342,6 +2392,10 @@ pub fn take_deliverable_info(pid: ProcessId) -> Option<(u32, SigInfo)> {
 
 /// [`take_deliverable_info`] for thread `me` (the self-tests name one).
 pub(crate) fn take_deliverable_info_as(pid: ProcessId, me: TaskId) -> Option<(u32, SigInfo)> {
+    // A traced thread stops for an ignored signal too, before its disposition
+    // drops it (Linux's `get_signal` calls `ptrace_signal` first): nothing is
+    // discarded here for it.
+    let keep_ignored = crate::proc::ptrace::is_traced(me);
     loop {
         let step = with_states(|states| {
             let state = states.get_mut(&pid)?;
@@ -2353,7 +2407,7 @@ pub(crate) fn take_deliverable_info_as(pid: ProcessId, me: TaskId) -> Option<(u3
                 ignored,
                 ..
             } = state;
-            let ignored = *ignored;
+            let ignored = if keep_ignored { 0 } else { *ignored };
             let mut mine = threads.get_mut(&me);
             let blocked = mine.as_ref().map_or(template.blocked, |t| t.blocked);
             // Ignored and deliverable: discarded, with their records (see

@@ -3559,6 +3559,16 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_rseq(),
     );
+    // ptrace: the register image and its checks, the call's refusals
+    // (crate::proc::ptrace), then a debugger's start end to end in ring 3.
+    selftest::dispatch_debug("ptrace", selftest::Severity::Integrity, || {
+        proc::ptrace::self_test()
+    });
+    selftest::dispatch_debug(
+        "Linux ptrace (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_ptrace(),
+    );
 
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares

@@ -6783,6 +6783,18 @@ pub const SYS_MEMBARRIER: u64 = 1147;
 /// ABI could register an area; the exit-path work was always ABI-blind.
 pub const SYS_RSEQ: u64 = 1148;
 
+/// `SYS_PTRACE(request, pid, addr, data)` -- Linux's `ptrace(2)`, its
+/// requests, arguments and errnos (as `-errno`), for native programs: the
+/// Linux ABI's call is the same body (`crate::proc::ptrace::ptrace`), so a C
+/// library's `ptrace()` passes straight through -- `PTRACE_PEEK*` stores the
+/// word at `data`, as the raw Linux call does. A debugger starts its program
+/// with `PTRACE_TRACEME` in the child (which gives the parent `DEBUG` over
+/// it) and an exec; stops come back through `SYS_PROCESS_WAIT_STATUS` as
+/// `WIFSTOPPED`, with or without `WUNTRACED`. Attaching to a process the
+/// caller did not start is `EPERM` (design-decisions 1547; lane D's
+/// `requests/d-a-a-debugger-needs-ptrace-for-native-programs.md`).
+pub const SYS_PTRACE: u64 = 1149;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

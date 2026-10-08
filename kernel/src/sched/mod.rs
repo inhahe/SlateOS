@@ -2625,6 +2625,17 @@ pub fn set_task_gs_base(task_id: TaskId, gs_base: u64) {
     }
 }
 
+/// Task `task_id`'s TLS bases, `(fs_base, gs_base)` -- what its next switch
+/// in loads (`Task::fs_base`, `Task::gs_base`). `None` if it is gone.
+#[must_use]
+pub fn task_tls_bases(task_id: TaskId) -> Option<(u64, u64)> {
+    let state = SCHED.lock();
+    state
+        .tasks
+        .get(&task_id)
+        .map(|task| (task.fs_base, task.gs_base))
+}
+
 /// Read the current task's saved userspace `%gs` base (the authoritative
 /// [`Task::gs_base`] field, `0` if unset).  Used by `fork`/`clone` to
 /// propagate the creator's `%gs` base to the new task.

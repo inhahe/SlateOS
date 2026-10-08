@@ -354,6 +354,9 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
     // in this address space's task list); we match that.
     RSEQ.lock().remove(&task_id);
 
+    // A traced thread's trace ends with it.
+    crate::proc::ptrace::on_thread_exit(task_id);
+
     let ctid_ptr = match CLEAR_CHILD_TID.lock().remove(&task_id) {
         Some(p) => p,
         None => return,

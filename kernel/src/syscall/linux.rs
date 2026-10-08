@@ -2278,7 +2278,7 @@ pub fn linux_disposition(pid: pcb::ProcessId, sig: u32) -> LinuxDisposition {
 /// [`SyscallFrame`](crate::syscall::entry::SyscallFrame) (asynchronous signal
 /// delivered at syscall return) or a hardware-exception ISR frame
 /// (synchronous fault) — so both paths share one emitter.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxTrapRegs {
     pub rax: u64,
     pub rbx: u64,
@@ -2587,6 +2587,7 @@ pub fn build_linux_rt_frame(
     sig: u32,
     act: &LinuxSigaction,
     info: crate::proc::signal::SigInfo,
+    siginfo_override: Option<crate::proc::linux_sigframe::LinuxSiginfo>,
 ) -> bool {
     // SA_RESTART: a handler is about to run, so resolve any restart sentinel
     // the interrupted syscall returned.  Either we rewind so the syscall
@@ -2629,7 +2630,10 @@ pub fn build_linux_rt_frame(
     // handler read si_status 0 and a timer's si_value was lost.
     #[allow(clippy::cast_possible_wrap)]
     let signo_i = sig as i32;
-    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::from_record(signo_i, &info);
+    // A tracer's `PTRACE_SETSIGINFO`, or the one it made for a signal it put
+    // in place of another (`crate::proc::ptrace`), goes in as it is.
+    let siginfo = siginfo_override
+        .unwrap_or_else(|| crate::proc::linux_sigframe::LinuxSiginfo::from_record(signo_i, &info));
 
     // An rseq critical section the thread is in is aborted first, so the frame
     // records -- and the handler returns to -- its abort address (Linux's
@@ -3303,7 +3307,14 @@ fn linux_exec_common_inner(
             frame.r15 = 0;
             // RFLAGS: keep IF=1 (interrupts enabled), reserved bit 1.
             frame.user_rflags = 0x202;
-            0
+            // The call reads as execve, whichever exec it was -- Linux's
+            // `set_personality_64bit` sets `orig_ax` to `__NR_execve` for
+            // every 64-bit exec, and a tracer reads it.
+            const NR_EXECVE: u64 = 59;
+            frame.syscall_nr = NR_EXECVE;
+            // A traced thread stops before the new program's first
+            // instruction; what the call returns is its tracer's to change.
+            crate::syscall::handlers::exec_stop(frame, NR_EXECVE)
         }
         Err(e) => -i64::from(linux_errno_for(e)),
     }
@@ -36169,60 +36180,18 @@ fn sys_seccomp(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
-/// `ptrace(request, pid, addr, data)`.
-///
-/// Linux's `kernel/ptrace.c::SYSCALL_DEFINE4(ptrace)` gates:
-///
-///   1. `if (request == PTRACE_TRACEME) ptrace_traceme(); goto out;`
-///      The TRACEME request never consults `pid` — it sets PT_PTRACED
-///      on the caller and returns success (or `EPERM` if the caller
-///      is already being traced).
-///   2. `child = find_get_task_by_vpid(pid)`; on failure `-ESRCH`.
-///   3. `if (request == PTRACE_ATTACH || PTRACE_SEIZE) ptrace_attach(...)`.
-///   4. `ptrace_check_attach(child, ...)`.
-///   5. `arch_ptrace(child, request, addr, data)` — unknown requests
-///      surface as `-EIO` from `ptrace_request`'s switch default.
-///
-/// Pre-batch we rejected `request > 0x10_000` with `EINVAL` ahead of
-/// the pid lookup, so a probe with `(req=garbage, pid=non-existent)`
-/// saw `EINVAL` where Linux returns `ESRCH` (the pid lookup fires
-/// first).  We also ignored the PTRACE_TRACEME special case and
-/// returned `ESRCH` for `(req=0, pid=negative)` where Linux ignores
-/// `pid` entirely and either succeeds or returns `EPERM`.
-///
-/// This kernel has no ptrace subsystem, so the terminal answer for
-/// a real tracing request is `EPERM` (the caller is not allowed to
-/// attach) — but the gates above must fire ahead of `EPERM` so probes
-/// see Linux-shaped errnos for malformed inputs.
+/// `ptrace(request, pid, addr, data)`: [`crate::proc::ptrace::ptrace`], which
+/// the native `SYS_PTRACE` shares -- its requests, refusals and errnos are
+/// Linux's (design-decisions 1547).
 fn sys_ptrace(args: &SyscallArgs) -> SyscallResult {
-    // 1. PTRACE_TRACEME (request==0) ignores pid.  Linux returns
-    //    success for the first call and EPERM if the caller is
-    //    already being traced.  We return EPERM unconditionally:
-    //    self-tracing is meaningful only if a tracer can later
-    //    attach, which we never allow.
-    if args.arg0 == 0 {
-        return linux_err(errno::EPERM);
+    let task_id = crate::sched::current_task_id();
+    let caller = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    match crate::proc::ptrace::ptrace(caller, task_id, args.arg0, args.arg1, args.arg2, args.arg3) {
+        // A request's answer is 0, or a small count: it fits.
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(v) => SyscallResult::ok(v as i64),
+        Err(e) => linux_err(e.linux_errno()),
     }
-    // 2. Pid lookup.  Linux's find_get_task_by_vpid(pid) treats
-    //    non-positive pids as "not found" and returns ESRCH.  We
-    //    also probe pcb::name for the positive case so a probe
-    //    discovers ESRCH for a stale pid before reaching EPERM.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let pid = args.arg1 as i32;
-    if pid <= 0 {
-        return linux_err(errno::ESRCH);
-    }
-    #[allow(clippy::cast_sign_loss)]
-    let target: crate::proc::pcb::ProcessId = pid as u64;
-    if crate::proc::pcb::name(target).is_none() {
-        return linux_err(errno::ESRCH);
-    }
-    // 3-5. Pid resolved.  This kernel does not allow a tracer to
-    //      attach, so the terminal answer is EPERM regardless of
-    //      request.  A real implementation should also dispatch the
-    //      request switch and return EIO for unknown ops; for now
-    //      the EPERM denies the operation before the request matters.
-    linux_err(errno::EPERM)
 }
 
 /// `clone3(cl_args*, size)` — frameless dispatch path.
@@ -46476,6 +46445,7 @@ fn waitid_scan(
             exited: want_exited,
             stopped: want_stopped,
             continued: want_continued,
+            traced: true,
         },
         nohang: true,
         nowait,
@@ -46488,6 +46458,9 @@ fn waitid_found_from(found: &wait::FoundEvent) -> WaitidFound {
     let (si_code, si_status) = match &found.event {
         wait::ChildEvent::Exited(info) => waitid_si_from_exit(info),
         wait::ChildEvent::JobControl(ev) => waitid_si_from_jc(ev),
+        // Linux's `wait_task_stopped` for a tracee: `CLD_TRAPPED`, and the
+        // stop's whole code as the status.
+        wait::ChildEvent::Traced(code) => (4, i32::try_from(*code).unwrap_or(0)),
     };
     WaitidFound {
         si_code,
@@ -47079,6 +47052,7 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
             exited: want_exited,
             stopped: want_stopped,
             continued: want_continued,
+            traced: true,
         },
         nohang,
         nowait,
@@ -49921,6 +49895,7 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: (options & WUNTRACED) != 0,
             continued: (options & WCONTINUED) != 0,
+            traced: true,
         },
         nohang,
         nowait: false,

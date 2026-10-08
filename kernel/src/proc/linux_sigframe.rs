@@ -233,6 +233,30 @@ impl LinuxSiginfo {
         out
     }
 
+    /// The structure from the 128 bytes user memory holds -- a tracer's
+    /// `PTRACE_SETSIGINFO`.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; 128]) -> Self {
+        let int = |at: usize| -> i32 {
+            let mut b = [0u8; 4];
+            if let Some(src) = bytes.get(at..at.saturating_add(4)) {
+                b.copy_from_slice(src);
+            }
+            i32::from_ne_bytes(b)
+        };
+        let mut sifields = [0u8; 112];
+        if let Some(src) = bytes.get(16..128) {
+            sifields.copy_from_slice(src);
+        }
+        Self {
+            si_signo: int(0),
+            si_errno: int(4),
+            si_code: int(8),
+            _pad0: int(12),
+            sifields,
+        }
+    }
+
     /// The structure's 128 bytes, as user memory holds them.
     #[must_use]
     pub fn to_bytes(self) -> [u8; 128] {
@@ -286,6 +310,8 @@ pub mod si_fault_code {
     pub const ILL_ILLOPN: i32 = 2;
     /// `BUS_ADRALN` — invalid address alignment (#AC).
     pub const BUS_ADRALN: i32 = 1;
+    /// `TRAP_TRACE` — a single step (#DB with the trap flag).
+    pub const TRAP_TRACE: i32 = 2;
 }
 
 /// Size of `struct rt_sigframe` *excluding* any trailing fpstate, i.e. the

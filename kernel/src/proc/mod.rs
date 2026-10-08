@@ -44,6 +44,7 @@ pub mod linux_stack;
 pub mod pcb;
 pub mod posix_timer;
 pub mod priority;
+pub mod ptrace;
 pub mod signal;
 pub mod spawn;
 pub mod thread;

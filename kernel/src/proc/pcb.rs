@@ -4650,6 +4650,21 @@ fn take_jc_waiters(table: &mut BTreeMap<ProcessId, Process>, pid: ProcessId) -> 
     (wake, any)
 }
 
+/// The waiters to wake when a thread of `tracee` stops for its tracer
+/// `tracer` (`crate::proc::ptrace`): a task blocked waiting for `tracee`
+/// itself, and one of the tracer's blocked waiting for any child -- taken, as
+/// [`take_jc_waiters`] takes a parent's.
+pub fn take_trace_waiters(tracee: ProcessId, tracer: ProcessId) -> JcWaiters {
+    let mut table = PROCESS_TABLE.lock();
+    let wake = table.get_mut(&tracee).and_then(|p| p.wait_task.take());
+    let any = if tracer == tracee {
+        None
+    } else {
+        table.get_mut(&tracer).and_then(|p| p.wait_any_task.take())
+    };
+    (wake, any)
+}
+
 /// Record that `pid` has been stopped by job-control signal `sig`.
 ///
 /// Sets the stopped flag and records a `Stopped(sig)` report for the

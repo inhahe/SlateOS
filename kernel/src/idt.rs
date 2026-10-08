@@ -2033,7 +2033,159 @@ fn linux_fault_mapping(code: crate::proc::exception::ExceptionCode) -> Option<(u
 /// alternate stack) is answered with `SIGSEGV`, as Linux's `force_sigsegv`
 /// does: delivered here if it has a handler that can run, its default action
 /// -- the end -- otherwise.
+///
+/// A traced thread stops first (`crate::proc::ptrace::fault_stop`), and its
+/// tracer decides what the fault comes to: nothing -- this answers `true` and
+/// the instruction runs again, or the program runs on where the tracer put
+/// it -- or this signal, delivered as it would be untraced.
 fn try_deliver_linux_fault_signal(
+    frame: &InterruptStackFrame,
+    sig: u32,
+    si_code: i32,
+    addr: u64,
+) -> bool {
+    if traced_fault_stop(frame, sig, si_code, addr) == Some(true) {
+        return true;
+    }
+    deliver_linux_fault_signal(frame, sig, si_code, addr)
+}
+
+/// The interrupted user registers of the exception whose stub frame is at
+/// `frame_ptr`: the frame, and the fifteen the stub saved below it.
+///
+/// # Safety
+///
+/// `frame_ptr` is an exception stub's frame on this kernel stack, the
+/// exception taken from user mode, and nothing else refers to it or to the
+/// saved registers while this reads them.
+unsafe fn trap_regs(frame_ptr: *const InterruptStackFrame) -> crate::syscall::linux::LinuxTrapRegs {
+    use core::ptr::read_volatile;
+    // SAFETY: the caller's contract; the saved registers sit 128 bytes below
+    // the frame (the stub layout, `saved_registers_from_frame`).
+    unsafe {
+        let saved = saved_registers_from_frame(frame_ptr);
+        crate::syscall::linux::LinuxTrapRegs {
+            rax: read_volatile(addr_of!((*saved).rax)),
+            rbx: read_volatile(addr_of!((*saved).rbx)),
+            rcx: read_volatile(addr_of!((*saved).rcx)),
+            rdx: read_volatile(addr_of!((*saved).rdx)),
+            rsi: read_volatile(addr_of!((*saved).rsi)),
+            rdi: read_volatile(addr_of!((*saved).rdi)),
+            rbp: read_volatile(addr_of!((*saved).rbp)),
+            r8: read_volatile(addr_of!((*saved).r8)),
+            r9: read_volatile(addr_of!((*saved).r9)),
+            r10: read_volatile(addr_of!((*saved).r10)),
+            r11: read_volatile(addr_of!((*saved).r11)),
+            r12: read_volatile(addr_of!((*saved).r12)),
+            r13: read_volatile(addr_of!((*saved).r13)),
+            r14: read_volatile(addr_of!((*saved).r14)),
+            r15: read_volatile(addr_of!((*saved).r15)),
+            rip: read_volatile(addr_of!((*frame_ptr).rip)),
+            rsp: read_volatile(addr_of!((*frame_ptr).rsp)),
+            rflags: read_volatile(addr_of!((*frame_ptr).rflags)),
+        }
+    }
+}
+
+/// Put `regs` back where [`trap_regs`] read them, for the stub's `iretq`.
+///
+/// # Safety
+///
+/// As for [`trap_regs`], and nothing else writes them meanwhile.
+unsafe fn set_trap_regs(
+    frame_ptr: *mut InterruptStackFrame,
+    regs: &crate::syscall::linux::LinuxTrapRegs,
+) {
+    use core::ptr::write_volatile;
+    // SAFETY: the caller's contract, as in `trap_regs`.
+    unsafe {
+        let saved = saved_registers_from_frame(frame_ptr);
+        write_volatile(addr_of_mut!((*saved).rax), regs.rax);
+        write_volatile(addr_of_mut!((*saved).rbx), regs.rbx);
+        write_volatile(addr_of_mut!((*saved).rcx), regs.rcx);
+        write_volatile(addr_of_mut!((*saved).rdx), regs.rdx);
+        write_volatile(addr_of_mut!((*saved).rsi), regs.rsi);
+        write_volatile(addr_of_mut!((*saved).rdi), regs.rdi);
+        write_volatile(addr_of_mut!((*saved).rbp), regs.rbp);
+        write_volatile(addr_of_mut!((*saved).r8), regs.r8);
+        write_volatile(addr_of_mut!((*saved).r9), regs.r9);
+        write_volatile(addr_of_mut!((*saved).r10), regs.r10);
+        write_volatile(addr_of_mut!((*saved).r11), regs.r11);
+        write_volatile(addr_of_mut!((*saved).r12), regs.r12);
+        write_volatile(addr_of_mut!((*saved).r13), regs.r13);
+        write_volatile(addr_of_mut!((*saved).r14), regs.r14);
+        write_volatile(addr_of_mut!((*saved).r15), regs.r15);
+        write_volatile(addr_of_mut!((*frame_ptr).rip), regs.rip);
+        write_volatile(addr_of_mut!((*frame_ptr).rsp), regs.rsp);
+        write_volatile(addr_of_mut!((*frame_ptr).rflags), regs.rflags);
+    }
+}
+
+/// A traced thread's stop for an exception it took from user mode that
+/// raises `sig` (`si_code`, at `addr`), from the exception handler
+/// ([`crate::proc::ptrace::fault_stop`]). `None`: not traced -- deliver as
+/// untraced. `Some(true)`: decided, nothing more to do here -- the tracer
+/// gave no signal, or put another in this one's place, queued for the
+/// thread. `Some(false)`: the tracer let this signal go on -- deliver it as
+/// untraced.
+///
+/// The stop parks the thread, so interrupts go on first, as a page fault's
+/// resolution turns them on: the exception came from user mode, so nothing
+/// it interrupted holds a kernel lock (the exit turns them off again).
+fn traced_fault_stop(
+    frame: &InterruptStackFrame,
+    sig: u32,
+    si_code: i32,
+    addr: u64,
+) -> Option<bool> {
+    let task_id = sched::current_task_id();
+    if !is_userspace_exception(frame) || !crate::proc::ptrace::is_traced(task_id) {
+        return None;
+    }
+    let pid = crate::proc::thread::owner_process(task_id).filter(|&p| p != 0)?;
+    let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
+    // SAFETY: an exception stub's frame from user mode, on this kernel stack;
+    // the handler holds no other reference to it while this runs.
+    let mut regs = unsafe { trap_regs(frame_ptr) };
+    // SAFETY: from user mode, as above: no kernel lock is held by what the
+    // exception interrupted.
+    unsafe {
+        cpu::sti();
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::fault(sig as i32, si_code, addr);
+    let out = crate::proc::ptrace::fault_stop(pid, task_id, sig, siginfo, &mut regs)?;
+    if out.regs_changed {
+        // SAFETY: as for `trap_regs` above.
+        unsafe { set_trap_regs(frame_ptr, &regs) };
+    }
+    Some(out.sig == 0)
+}
+
+/// A trap a user program took -- `int3`, or a single step -- that raises
+/// `sig` (`si_code`, at `addr`): its tracer's to stop for first; then a Linux
+/// program's, delivered to its handler, or -- with none that can take it --
+/// its end, as Linux's `do_int3_user` and `send_sigtrap` (`force_sig`) end
+/// it. A native program has no such signal and runs on, as it always has.
+fn user_trap(frame: &InterruptStackFrame, sig: u32, si_code: i32, addr: u64) {
+    if traced_fault_stop(frame, sig, si_code, addr) == Some(true) {
+        return;
+    }
+    let task_id = sched::current_task_id();
+    let Some(pid) = crate::proc::thread::owner_process(task_id).filter(|&p| p != 0) else {
+        return;
+    };
+    if crate::proc::pcb::get_abi_mode(pid) != Some(crate::proc::pcb::AbiMode::Linux) {
+        return;
+    }
+    if deliver_linux_fault_signal(frame, sig, si_code, addr) {
+        return;
+    }
+    crate::syscall::handlers::kill_current_for_signal(pid, task_id, sig);
+}
+
+/// [`try_deliver_linux_fault_signal`] without the tracer's stop.
+fn deliver_linux_fault_signal(
     frame: &InterruptStackFrame,
     sig: u32,
     si_code: i32,
@@ -2199,8 +2351,35 @@ extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
     count_vector(1);
+    if is_userspace_exception(frame) {
+        // DR6 says why; the CPU never clears it, so it is cleared here, as
+        // Linux's `exc_debug` does.
+        let dr6: u64;
+        // SAFETY: reading and writing DR6 at CPL 0 is always permitted.
+        unsafe {
+            core::arch::asm!("mov {}, dr6", out(reg) dr6, options(nomem, nostack, preserves_flags));
+            core::arch::asm!("mov dr6, {}", in(reg) DR6_RESERVED, options(nomem, nostack, preserves_flags));
+        }
+        if dr6 & DR6_BS != 0 {
+            // One instruction run with the trap flag: SIGTRAP, `TRAP_TRACE`,
+            // at the next instruction (Linux's `send_sigtrap`).
+            const SIGTRAP: u32 = 5;
+            user_trap(
+                frame,
+                SIGTRAP,
+                crate::proc::linux_sigframe::si_fault_code::TRAP_TRACE,
+                frame.rip,
+            );
+            return;
+        }
+    }
     serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
 }
+
+/// DR6's single-step bit (`BS`).
+const DR6_BS: u64 = 1 << 14;
+/// DR6 with nothing recorded: its reserved bits, which read as 1.
+const DR6_RESERVED: u64 = 0xFFFF_0FF0;
 
 /// Handle NMI (Non-Maskable Interrupt, vector 2).
 ///
@@ -2707,6 +2886,20 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     let rflags = cpu::read_rflags();
     BP_ENTRY_DF.store(rflags & RFLAGS_DF != 0, Ordering::Relaxed);
     BP_ENTRY_AC.store(rflags & RFLAGS_AC != 0, Ordering::Relaxed);
+    // A user program's `int3`: SIGTRAP from the kernel, `rip` already past
+    // the instruction, as Linux's `do_int3_user` sends it -- a debugger's
+    // breakpoint (`user_trap`). A native program's is logged below and runs
+    // on, as before.
+    if is_userspace_exception(frame)
+        && (crate::proc::ptrace::is_traced(sched::current_task_id())
+            || crate::proc::thread::owner_process(sched::current_task_id())
+                .and_then(crate::proc::pcb::get_abi_mode)
+                == Some(crate::proc::pcb::AbiMode::Linux))
+    {
+        const SIGTRAP: u32 = 5;
+        user_trap(frame, SIGTRAP, crate::proc::signal::si_code::SI_KERNEL, 0);
+        return;
+    }
     // Say whether this breakpoint was asked for. The serial log is the only
     // artefact a failed boot leaves behind, and the host-side triage tools
     // (`scripts/boot-history.py`) decide "did the kernel die?" by reading the

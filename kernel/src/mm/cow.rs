@@ -81,9 +81,116 @@ const HW_PAGES_PER_FRAME: usize = FRAME_SIZE / HW_PAGE_SIZE;
 /// - [`KernelError::OutOfMemory`] — no physical frame available for the copy.
 /// - [`KernelError::NotSupported`] — subsystem not initialized.
 pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
-    let prepared = prepare_cow(pml4_phys, fault_addr)?;
+    let prepared = prepare_cow(pml4_phys, fault_addr, Break::Write)?;
     let _held = super::as_lock::lock(pml4_phys);
-    install_cow(pml4_phys, prepared)
+    install_cow(pml4_phys, prepared, Break::Write)
+}
+
+/// What a break copies, and what the copy's entries then allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Break {
+    /// A write fault's copy-on-write break ([`resolve_cow_fault`]): the parts
+    /// that are COW entries on the frame, made writable.
+    Write,
+    /// [`write_private`]'s: every part on the frame that is not shared by
+    /// design, its protection kept -- the address space gets its own copy of
+    /// a page it still may not write.
+    Keep,
+}
+
+impl Break {
+    /// Whether a part's entry `pte` is one this break moves off a shared
+    /// frame.
+    fn moves(self, pte: PageTableEntry) -> bool {
+        pte.is_present()
+            && match self {
+                Self::Write => pte.is_cow(),
+                Self::Keep => !pte.is_shared(),
+            }
+    }
+
+    /// The flags a moved part's entry gets.
+    fn flags(self, pte: PageTableEntry) -> PageFlags {
+        match self {
+            Self::Write => PageFlags::from_bits(
+                (pte.flags() | PageFlags::WRITABLE).bits() & !PageFlags::COW.bits(),
+            ),
+            Self::Keep => pte.flags(),
+        }
+    }
+}
+
+/// Write `bytes` -- inside one 4 KiB page -- into the page at `va` of the
+/// address space `pml4_phys`, whatever the page's own protection says: a
+/// debugger's write into code (ptrace's `POKETEXT`, `/proc/<pid>/mem`;
+/// Linux's `FOLL_FORCE`). The page is the address space's own first: a frame
+/// it shares -- with another process, or with the page cache, which holds a
+/// file's pages for every mapper -- is copied, as a copy-on-write break
+/// copies, but its entries keep their protection, so the program still may
+/// not write the page, and the file and the other mappers keep theirs
+/// unchanged. A page shared by design ([`PageFlags::SHARED`]: shared memory,
+/// device memory) is refused: writing it would be writing every party's.
+///
+/// The page must be present (the caller faults it in).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] -- `bytes` crosses the page's end.
+/// - [`KernelError::InvalidAddress`] -- the page is not present.
+/// - [`KernelError::PermissionDenied`] -- the page is shared by design.
+/// - [`KernelError::OutOfMemory`] -- no frame for the copy.
+/// - [`KernelError::ResourceExhausted`] -- the page kept being shared again
+///   faster than it could be copied.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn write_private(pml4_phys: u64, va: u64, bytes: &[u8]) -> KernelResult<()> {
+    /// How many copies are tried before the page is given up on.
+    const ATTEMPTS: usize = 8;
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let offset = (va % HW_PAGE_SIZE as u64) as usize;
+    if offset
+        .checked_add(bytes.len())
+        .is_none_or(|end| end > HW_PAGE_SIZE)
+    {
+        return Err(KernelError::InvalidArgument);
+    }
+    let virt = VirtAddr::new(va - offset as u64);
+    for _ in 0..ATTEMPTS {
+        {
+            let _held = super::as_lock::lock(pml4_phys);
+            // SAFETY: pml4_phys is a valid PML4 (caller guarantee).
+            let pte = unsafe { read_pte(pml4_phys, virt, hhdm)? };
+            if !pte.is_present() {
+                return Err(KernelError::InvalidAddress);
+            }
+            if pte.is_shared() {
+                return Err(KernelError::PermissionDenied);
+            }
+            let phys = pte.phys_addr();
+            let frame = PhysFrame::from_addr(phys & !(FRAME_SIZE as u64 - 1))
+                .ok_or(KernelError::InvalidAddress)?;
+            if frame::refcount(frame) == 1 {
+                // This address space's alone: the bytes land in place, and
+                // the entry is left as it is.
+                // SAFETY: through the HHDM into the 4 KiB page at `phys`,
+                // `offset + bytes.len()` within it (checked above); the frame
+                // is this address space's only, and the page-table lock held
+                // here keeps it mapped and unshared while it is written.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        (hhdm + phys + offset as u64) as *mut u8,
+                        bytes.len(),
+                    );
+                }
+                return Ok(());
+            }
+        }
+        // Shared: made this address space's own, then looked at again.
+        let prepared = prepare_cow(pml4_phys, va, Break::Keep)?;
+        let _held = super::as_lock::lock(pml4_phys);
+        install_cow(pml4_phys, prepared, Break::Keep)?;
+    }
+    Err(KernelError::ResourceExhausted)
 }
 
 /// What the slow half of a copy-on-write break found and made
@@ -110,7 +217,7 @@ struct CowPrep {
 /// until it is the last ([`install_cow`]'s sole-owner case), and this
 /// address space's own reference keeps it shared until the install drops it.
 #[allow(clippy::arithmetic_side_effects)]
-fn prepare_cow(pml4_phys: u64, fault_addr: u64) -> KernelResult<CowPrep> {
+fn prepare_cow(pml4_phys: u64, fault_addr: u64, mode: Break) -> KernelResult<CowPrep> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
     // Align down to the 4 KiB hardware page boundary.
@@ -121,8 +228,8 @@ fn prepare_cow(pml4_phys: u64, fault_addr: u64) -> KernelResult<CowPrep> {
     // SAFETY: pml4_phys is a valid PML4 (caller guarantee).
     let pte = unsafe { read_pte(pml4_phys, virt, hhdm)? };
 
-    // Verify this is actually a CoW page.
-    if !pte.is_present() || !pte.is_cow() {
+    // Verify this is a page the break moves: a CoW page, for a write fault.
+    if !mode.moves(pte) {
         return Err(KernelError::PageFault);
     }
 
@@ -163,8 +270,8 @@ fn prepare_cow(pml4_phys: u64, fault_addr: u64) -> KernelResult<CowPrep> {
         let Ok(sibling_pte) = (unsafe { read_pte(pml4_phys, sibling_virt, hhdm) }) else {
             continue; // Unmapped intermediate -- skip.
         };
-        if !sibling_pte.is_present() || !sibling_pte.is_cow() {
-            continue; // Not a CoW page -- leave it alone.
+        if !mode.moves(sibling_pte) {
+            continue; // Not a page this break moves -- leave it alone.
         }
         let sib_phys = sibling_pte.phys_addr();
         if sib_phys & !(FRAME_SIZE as u64 - 1) != frame_base {
@@ -201,7 +308,7 @@ fn prepare_cow(pml4_phys: u64, fault_addr: u64) -> KernelResult<CowPrep> {
 /// Another CPU that broke the same page first left nothing to change: the
 /// copy is freed, and the write runs again on what that CPU installed.
 #[allow(clippy::arithmetic_side_effects)]
-fn install_cow(pml4_phys: u64, prep: CowPrep) -> KernelResult<()> {
+fn install_cow(pml4_phys: u64, prep: CowPrep, mode: Break) -> KernelResult<()> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let CowPrep {
         frame_base,
@@ -211,20 +318,23 @@ fn install_cow(pml4_phys: u64, prep: CowPrep) -> KernelResult<()> {
     } = prep;
     let frame = PhysFrame::from_addr(frame_base).ok_or(KernelError::InternalError)?;
     let sibling = |i: usize| VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
-    // Whether part `i` is still a COW entry on the shared frame, and its entry.
+    // Whether part `i` is still an entry this break moves (a COW one, for a
+    // write fault) on the shared frame, and its entry.
     let still_cow = |i: usize| -> Option<PageTableEntry> {
         // SAFETY: pml4_phys is valid (same address space).
         let pte = unsafe { read_pte(pml4_phys, sibling(i), hhdm) }.ok()?;
-        (pte.is_present()
-            && pte.is_cow()
-            && pte.phys_addr() & !(FRAME_SIZE as u64 - 1) == frame_base)
-            .then_some(pte)
+        (mode.moves(pte) && pte.phys_addr() & !(FRAME_SIZE as u64 - 1) == frame_base).then_some(pte)
     };
 
     let Some(new_frame) = copy else {
         // Prepared as the sole owner. Not if the frame has gained an owner
         // since: the write then runs again, faults, and copies.
         if frame::refcount(frame) > 1 {
+            return Ok(());
+        }
+        // Already the address space's own: nothing for `write_private`'s
+        // break to change.
+        if mode == Break::Keep {
             return Ok(());
         }
         // Make every part still COW on the frame writable, in place.
@@ -262,9 +372,7 @@ fn install_cow(pml4_phys: u64, prep: CowPrep) -> KernelResult<()> {
             continue;
         };
         let offset = pte.phys_addr() - frame_base;
-        let flags = PageFlags::from_bits(
-            (pte.flags() | PageFlags::WRITABLE).bits() & !PageFlags::COW.bits(),
-        );
+        let flags = mode.flags(pte);
         // SAFETY: pml4_phys is valid; part `i` of the same group; the copy
         // at `offset` holds this part's data.
         unsafe {
@@ -323,7 +431,9 @@ fn install_cow(pml4_phys: u64, prep: CowPrep) -> KernelResult<()> {
         let _ = unsafe { frame::ref_dec(frame) };
     }
 
-    super::fault::record_cow();
+    if mode == Break::Write {
+        super::fault::record_cow();
+    }
     Ok(())
 }
 
@@ -1517,17 +1627,17 @@ fn test_cow_break_twice() -> KernelResult<()> {
         unsafe { mark_cow(pml4, VirtAddr::new(base + (i * HW_PAGE_SIZE) as u64))? };
     }
 
-    let first = prepare_cow(pml4, base)?;
-    let second = prepare_cow(pml4, base + 5000)?;
+    let first = prepare_cow(pml4, base, Break::Write)?;
+    let second = prepare_cow(pml4, base + 5000, Break::Write)?;
     let first_copy = first.copy.map(|f| f.addr());
     let second_copy = second.copy.map(|f| f.addr());
     {
         let _held = super::as_lock::lock(pml4);
-        install_cow(pml4, first)?;
+        install_cow(pml4, first, Break::Write)?;
     }
     {
         let _held = super::as_lock::lock(pml4);
-        install_cow(pml4, second)?;
+        install_cow(pml4, second, Break::Write)?;
     }
 
     // SAFETY: this test's address space.

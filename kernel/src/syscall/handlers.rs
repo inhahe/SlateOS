@@ -4575,12 +4575,24 @@ mod wait_opt {
     /// asked and here is where to put it", because only the option word is
     /// something every existing caller demonstrably does set.
     pub const WINFO: u64 = 0x0002_0000;
+    /// Linux's thread-selection options, with Linux's values: `__WNOTHREAD`
+    /// (wait for the caller's own children only), `__WALL` (any kind of
+    /// child) and `__WCLONE` (clone children only). A debugger waits with
+    /// them (LLDB's `waitpid(-1, __WALL | __WNOTHREAD | WNOHANG)`); this
+    /// kernel's children are all of one kind, and accepts them as `wait4`
+    /// does.
+    pub const WNOTHREAD: u64 = 0x2000_0000;
+    /// See [`WNOTHREAD`].
+    pub const WALL: u64 = 0x4000_0000;
+    /// See [`WNOTHREAD`].
+    pub const WCLONE: u64 = 0x8000_0000;
 
     /// Every bit this syscall understands. Anything else is `EINVAL` — an
     /// unknown bit is a caller compiled against a *newer* kernel than this
     /// one, and silently ignoring it would grant it the old semantics under
     /// a name that promises different ones.
-    pub const KNOWN: u64 = WNOHANG | WUNTRACED | WCONTINUED | WPGID | WNOWAIT | WINFO;
+    pub const KNOWN: u64 =
+        WNOHANG | WUNTRACED | WCONTINUED | WPGID | WNOWAIT | WINFO | WNOTHREAD | WALL | WCLONE;
 }
 
 /// Size in bytes of the `WaitInfo` structure `sys_process_wait_status` can
@@ -4799,6 +4811,7 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: options & wait_opt::WUNTRACED != 0,
             continued: options & wait_opt::WCONTINUED != 0,
+            traced: true,
         },
         nohang: options & wait_opt::WNOHANG != 0,
         nowait: options & wait_opt::WNOWAIT != 0,
@@ -5057,6 +5070,7 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: false,
             continued: false,
+            traced: false,
         },
         nohang: false,
         nowait: false,
@@ -5082,7 +5096,9 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
                 // `unreachable!()` because a panic here would be a kernel
                 // panic reachable from an unprivileged syscall if that
                 // invariant ever broke.
-                wait::ChildEvent::JobControl(_) => SyscallResult::err(KernelError::InvalidArgument),
+                wait::ChildEvent::JobControl(_) | wait::ChildEvent::Traced(_) => {
+                    SyscallResult::err(KernelError::InvalidArgument)
+                }
             }
         }
         // `nohang: false`, so the primitive cannot report a miss.
@@ -5114,6 +5130,7 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: false,
             continued: false,
+            traced: false,
         },
         // The scan itself is the whole syscall — there is nothing to block on.
         nohang: true,
@@ -5134,7 +5151,9 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
                 }
                 // Unreachable — no job-control class was requested; see
                 // `sys_process_wait` for why this is handled, not panicked on.
-                wait::ChildEvent::JobControl(_) => SyscallResult::err(KernelError::InvalidArgument),
+                wait::ChildEvent::JobControl(_) | wait::ChildEvent::Traced(_) => {
+                    SyscallResult::err(KernelError::InvalidArgument)
+                }
             }
         }
         Ok(None) => SyscallResult::err(KernelError::WouldBlock),
@@ -9779,6 +9798,17 @@ pub fn sys_signal_return_with_frame(frame: &mut super::entry::SyscallFrame) -> i
     }
 }
 
+/// End the current process -- thread `current_task` of `pid` -- as killed by
+/// `sig`: a trap's signal no handler can take (`idt`'s `int3` and single
+/// step, as Linux's `force_sig` ends the program). Never returns.
+pub(crate) fn kill_current_for_signal(
+    pid: crate::proc::pcb::ProcessId,
+    current_task: crate::sched::task::TaskId,
+    sig: u32,
+) {
+    terminate_current_process_for_signal(pid, current_task, sig);
+}
+
 /// Terminate the current process because a fatal signal was posted and no
 /// userspace handler trampoline is registered.
 ///
@@ -9979,7 +10009,11 @@ fn continue_process(pid: crate::proc::pcb::ProcessId) {
 
     if let Some(threads) = pcb::get_threads(pid) {
         for t in threads {
-            sched::resume(t);
+            // A thread in a ptrace-stop is its tracer's to resume, not
+            // SIGCONT's (Linux's TASK_TRACED).
+            if !crate::proc::ptrace::is_trace_stopped(t) {
+                sched::resume(t);
+            }
         }
     }
 
@@ -10147,6 +10181,29 @@ fn regs_from_syscall_frame(
     }
 }
 
+/// After a successful exec by the current thread -- its frame already the
+/// new program's first state -- its exec stop, if it is traced
+/// (`crate::proc::ptrace::after_exec`), at the exit of call `nr`. Returns
+/// what the call returns: 0, or the `rax` of a tracer that changed the new
+/// program's first registers, which are then in the frame, restored whole.
+pub(crate) fn exec_stop(frame: &mut super::entry::SyscallFrame, nr: u64) -> i64 {
+    let task_id = sched::current_task_id();
+    let Some(pid) = crate::proc::thread::owner_process(task_id).filter(|&p| p != 0) else {
+        return 0;
+    };
+    let mut regs = regs_from_syscall_frame(frame, 0);
+    if !crate::proc::ptrace::after_exec(pid, task_id, &mut regs, nr) {
+        return 0;
+    }
+    regs_into_syscall_frame(frame, &regs);
+    frame.exit_full = 1;
+    // The register's bits, as the call's return value.
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        regs.rax as i64
+    }
+}
+
 /// Make `regs` -- a signal handler's entry state -- what the system call
 /// returns to. (`rax` is the call's return value, which the caller sets.)
 fn regs_into_syscall_frame(
@@ -10185,17 +10242,21 @@ fn regs_into_syscall_frame(
 /// while ignore/stop/continue defaults are consumed.
 ///
 /// `ret_val` is the value the interrupted syscall was about to return in RAX;
-/// it is saved into the frame and restored by the signal return.
+/// it is saved into the frame and restored by the signal return. A tracer
+/// that stopped the thread (`crate::proc::ptrace`) may change it, and every
+/// other register: they are back in `ret_val` and the frame -- restored whole
+/// on the way out, `rcx` and `r11` too (`exit_full`) -- whatever is
+/// delivered.
 ///
 /// Returns `true` if a signal was delivered to a handler (the frame was
-/// rewritten), `false` otherwise (the normal return value should be used).
+/// rewritten), `false` otherwise (`*ret_val` should be returned).
 /// Note that a fatal no-handler signal does not return at all.
 ///
 /// If the user stack cannot hold the frame (e.g. it would cross into an
 /// unmapped guard page), delivery is skipped and the signal stays pending —
 /// it will be retried on the next return to userspace. This avoids
 /// corrupting memory.
-pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
+pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: &mut i64) -> bool {
     // Fast path: nothing pending anywhere.
     if !crate::proc::signal::any_pending() {
         return false;
@@ -10205,17 +10266,28 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
         Some(pid) if pid != 0 => pid,
         _ => return false,
     };
-    let mut regs = regs_from_syscall_frame(frame, ret_val);
+    let mut regs = regs_from_syscall_frame(frame, *ret_val);
+    let before = regs;
     let exit = SyscallExit {
         nr: frame.syscall_nr,
-        ret: ret_val,
+        ret: *ret_val,
     };
     if deliver_signal_to_regs(pid, task_id, &mut regs, Some(exit)) {
         regs_into_syscall_frame(frame, &regs);
-        true
-    } else {
-        false
+        return true;
     }
+    if regs != before {
+        // A tracer changed them at a stop, and no handler runs: the call
+        // returns to them, every one.
+        regs_into_syscall_frame(frame, &regs);
+        frame.exit_full = 1;
+        // The register's bits, as the call's return value.
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            *ret_val = regs.rax as i64;
+        }
+    }
+    false
 }
 
 /// Deliver a pending signal to the current thread on an interrupt's or an
@@ -10276,6 +10348,7 @@ pub fn deliver_pending_signal_on_interrupt_exit(
     unsafe {
         crate::cpu::sti();
     }
+    let before = regs;
     let delivered = deliver_signal_to_regs(pid, task_id, &mut regs, None);
     // SAFETY: disabling interrupts is always sound; the stub restores the
     // registers and `iretq`s with the interrupted RFLAGS.
@@ -10283,7 +10356,8 @@ pub fn deliver_pending_signal_on_interrupt_exit(
         crate::cpu::cli();
     }
     crate::cpu::irqoff_tracker::record_disable();
-    if delivered {
+    // A handler's entry state -- or registers a tracer changed at a stop.
+    if delivered || regs != before {
         gprs.rax = regs.rax;
         gprs.rbx = regs.rbx;
         gprs.rcx = regs.rcx;
@@ -10326,6 +10400,58 @@ fn deliver_signal_to_regs(
     deliver_native_signal(regs, exit, pid, task_id)
 }
 
+/// A signal taken for delivery to the current thread `task_id` of `pid`,
+/// after its tracer -- if it is traced -- has had its say
+/// ([`crate::proc::ptrace::signal_stop`]): the signal to deliver now, its
+/// record, and a `siginfo_t` of the tracer's to deliver it with; `None` when
+/// nothing is to be delivered for it (look for the next).
+///
+/// The tracer's word on an interrupted call goes into `exit`: an `orig_rax`
+/// of -1 means it is not restarted, and `rax` is what it returns.
+fn traced_signal(
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+    sig: u32,
+    info: crate::proc::signal::SigInfo,
+    regs: &mut super::linux::LinuxTrapRegs,
+    exit: &mut Option<SyscallExit>,
+) -> Option<(
+    u32,
+    crate::proc::signal::SigInfo,
+    Option<crate::proc::linux_sigframe::LinuxSiginfo>,
+)> {
+    use crate::proc::linux_sigframe::LinuxSiginfo;
+    let orig_rax = exit.map_or(u64::MAX, |e| e.nr);
+    let siginfo = LinuxSiginfo::from_record(i32::try_from(sig).unwrap_or(0), &info);
+    let Some(out) = crate::proc::ptrace::signal_stop(pid, task_id, sig, siginfo, regs, orig_rax)
+    else {
+        return Some((sig, info, None));
+    };
+    if exit.is_some() && out.orig_rax == u64::MAX {
+        // Not to be restarted: a restart value still in `rax` is the raw
+        // `-ERESTART*` Linux leaves there, not this kernel's sentinel.
+        regs.rax = crate::proc::ptrace::raw_rax(regs.rax);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let ret = regs.rax as i64;
+    *exit = exit
+        .filter(|_| out.orig_rax != u64::MAX)
+        .map(|_| SyscallExit {
+            nr: out.orig_rax,
+            ret,
+        });
+    // Ignored after all: dropped now, as Linux's `get_signal` drops it after
+    // `ptrace_signal`.
+    if out.sig == 0 || crate::proc::signal::is_ignored(pid, out.sig) {
+        return None;
+    }
+    Some((
+        out.sig,
+        crate::proc::signal::SigInfo::from_linux(&out.siginfo),
+        Some(out.siginfo),
+    ))
+}
+
 /// The native half of [`deliver_signal_to_regs`].
 ///
 /// If the process has a handler trampoline registered, this mirrors the
@@ -10342,7 +10468,7 @@ fn deliver_signal_to_regs(
 /// state.
 fn deliver_native_signal(
     regs: &mut super::linux::LinuxTrapRegs,
-    exit: Option<SyscallExit>,
+    mut exit: Option<SyscallExit>,
     pid: crate::proc::pcb::ProcessId,
     task_id: crate::sched::task::TaskId,
 ) -> bool {
@@ -10361,7 +10487,12 @@ fn deliver_native_signal(
             // defaults are consumed and dropped. This closes the gap where an
             // async-posted fatal signal (e.g. ITIMER_REAL's SIGALRM) to a
             // process with no handler would sit pending forever.
-            while let Some(sig) = signal::take_deliverable(pid) {
+            while let Some((sig, info)) = signal::take_deliverable_info(pid) {
+                // A traced thread's tracer decides first.
+                let Some((sig, _, _)) = traced_signal(pid, task_id, sig, info, regs, &mut exit)
+                else {
+                    continue;
+                };
                 match signal::default_action(sig) {
                     signal::DefaultAction::Terminate => {
                         terminate_current_process_for_signal(pid, task_id, sig);
@@ -10397,19 +10528,26 @@ fn deliver_native_signal(
     // timer interrupt, can only queue it (`posix_timer`). Here is where that
     // queued one takes effect, as Linux's `get_signal` does for both.
     let (sig, info) = loop {
-        match signal::take_deliverable_info(pid) {
+        let (sig, info) = match signal::take_deliverable_info(pid) {
             Some((signal::SIGKILL, _)) => {
                 terminate_current_process_for_signal(pid, task_id, signal::SIGKILL);
                 // Unreachable: task_exit never returns.
+                return false;
             }
-            Some((signal::SIGSTOP, _)) => {
-                signal::discard_pending_cont(pid);
-                stop_process_for_signal(pid, signal::SIGSTOP, Some(task_id));
-                // Continued: look for the next one.
-            }
-            Some(taken) => break taken,
+            Some(taken) => taken,
             None => return false,
+        };
+        // A traced thread's tracer decides first -- SIGSTOP's fate too.
+        let Some((sig, info, _)) = traced_signal(pid, task_id, sig, info, regs, &mut exit) else {
+            continue;
+        };
+        if sig == signal::SIGSTOP {
+            signal::discard_pending_cont(pid);
+            stop_process_for_signal(pid, signal::SIGSTOP, Some(task_id));
+            // Continued: look for the next one.
+            continue;
         }
+        break (sig, info);
     };
 
     // An rseq critical section the thread is in is aborted first, so the frame
@@ -10626,12 +10764,18 @@ fn deliver_linux_signal(
                 return false;
             }
         };
+        // A traced thread's tracer decides first.
+        let Some((sig, info, siginfo)) = traced_signal(pid, task_id, sig, info, regs, &mut exit)
+        else {
+            continue;
+        };
 
         match linux::linux_disposition(pid, sig) {
             LinuxDisposition::Handler(act) => {
                 // Build a Linux rt_sigframe and enter the handler, passing the
-                // recorded source metadata so the siginfo_t is sender-faithful.
-                if linux::build_linux_rt_frame(regs, exit, pid, sig, &act, info) {
+                // recorded source metadata so the siginfo_t is sender-faithful
+                // -- or the tracer's, when it gave one.
+                if linux::build_linux_rt_frame(regs, exit, pid, sig, &act, info, siginfo) {
                     return true;
                 }
                 // The interrupted call's restart has been resolved into
@@ -10968,7 +11112,9 @@ fn sys_process_exec_with_frame_inner(frame: &mut super::entry::SyscallFrame) -> 
                 pid,
                 result.entry_rip
             );
-            0 // Success (returned in RAX).
+            // A traced thread stops before the new program's first
+            // instruction; what the call returns is its tracer's to change.
+            exec_stop(frame, super::number::SYS_PROCESS_EXEC)
         }
         Err(e) => {
             serial_println!(
@@ -20031,6 +20177,20 @@ pub fn sys_thread_scheduler(args: &SyscallArgs) -> SyscallResult {
 /// See [`SYS_MEMBARRIER`](super::number::SYS_MEMBARRIER).
 pub fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
     crate::membarrier::membarrier(args.arg0, args.arg1, args.arg2)
+}
+
+/// `SYS_PTRACE` (1149) -- Linux's `ptrace`, its requests, arguments and
+/// errnos (as `-errno`): `crate::proc::ptrace::ptrace` is both ABIs' call.
+/// See [`SYS_PTRACE`](super::number::SYS_PTRACE).
+pub fn sys_ptrace(args: &SyscallArgs) -> SyscallResult {
+    let task_id = sched::current_task_id();
+    let caller = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    match crate::proc::ptrace::ptrace(caller, task_id, args.arg0, args.arg1, args.arg2, args.arg3) {
+        // A request's answer is 0, or a small count: it fits.
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(v) => SyscallResult::ok(v as i64),
+        Err(e) => super::linux::linux_err(e.linux_errno()),
+    }
 }
 
 /// `SYS_RSEQ` (1148) -- Linux's `rseq`, its arguments and errnos. See

@@ -23568,6 +23568,110 @@ pub fn self_test_linux_rseq() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of ptrace through the Linux ABI: [`elf::build_linux_ptrace_test_elf`]
+/// (`build/ptracetest.c`) forks a child that consents with `PTRACE_TRACEME`
+/// and execs a small program from a memfd; it stops at the exec's `SIGTRAP`,
+/// has an `int3` written into its read-only text through `/proc/<pid>/mem`,
+/// stops at it, is single-stepped twice, stops for a `SIGUSR1` the tracer
+/// suppresses, and exits 7. A second child stops at `PTRACE_EVENT_EXEC` and
+/// is ended by `PTRACE_KILL` (`crate::proc::ptrace`, design-decisions 1547).
+pub fn self_test_linux_ptrace() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux ptrace (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_ptrace_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-ptrace"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-ptrace",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ptrace spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ptrace (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "the program could not be put in a memfd",
+            Some(0x32) => "a request for a process the caller does not trace was not ESRCH",
+            Some(0x33 | 0x34) => "fork, or the wait for the child, failed",
+            Some(0x35) => "the child's exec did not stop it with SIGTRAP",
+            Some(0x36 | 0x37) => {
+                "at the exec stop, GETREGS failed or rip/orig_rax/rax were not the entry/59/0"
+            }
+            Some(0x38) => "GETREGS's cs/ss were not Linux's 0x33/0x2b",
+            Some(0x39 | 0x3a) => "PEEKTEXT did not read the program's code",
+            Some(0x3b) => "/proc/<pid>/mem could not be opened for writing",
+            Some(0x3c | 0x3d) => {
+                "an int3 could not be written into the text through /proc/<pid>/mem"
+            }
+            Some(0x3e) => "the write through /proc/<pid>/mem reached the memfd",
+            Some(0x3f | 0x40) => "PEEKTEXT did not see the int3",
+            Some(0x41..=0x46) => {
+                "the breakpoint did not stop the program with SIGTRAP, SI_KERNEL, rip past it"
+            }
+            Some(0x47 | 0x48) => "POKETEXT or SETREGS failed",
+            Some(0x49..=0x4d) => "a single step did not stop one instruction on with TRAP_TRACE",
+            Some(0x4e) => "GETREGS showed the tracer's trap flag",
+            Some(0x4f..=0x52) => "the second single step did not stop after mov eax, 60",
+            Some(0x53..=0x56) => "a signal sent to the tracee did not stop it",
+            Some(0x57..=0x59) => "a suppressed signal ended the program, or it did not exit 7",
+            Some(0x60 | 0x61) => "PTRACE_TRACEME failed, or a second one was not EPERM",
+            Some(0x62) => "the child's execveat failed",
+            Some(0x70..=0x72) => "the second child's SIGSTOP did not stop it for its tracer",
+            Some(0x73 | 0x74) => "SETOPTIONS refused TRACEEXEC|EXITKILL, or took an unknown bit",
+            Some(0x75..=0x79) => {
+                "the exec was not a PTRACE_EVENT_EXEC stop with the pid as its message"
+            }
+            Some(0x7a..=0x7c) => "PTRACE_KILL did not end the tracee with SIGKILL",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ptrace (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux ptrace (ring 3: TRACEME and the exec stop, Linux's registers, an int3 \
+         through /proc/<pid>/mem into read-only text, a breakpoint, single steps, a suppressed \
+         signal, PTRACE_EVENT_EXEC, PTRACE_KILL): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

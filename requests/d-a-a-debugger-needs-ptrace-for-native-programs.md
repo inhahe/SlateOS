@@ -2,7 +2,8 @@
 
 **Filed:** 2026-10-07 by lane D. **For:** lane A (`kernel/src/syscall/`,
 `kernel/src/proc/`, `kernel/src/fs/procfs.rs`, `kernel/src/cap/`).
-**Status:** OPEN.
+**Status:** Tier 1 DONE on `lane-a-wip` 2026-10-08 (reply at the end);
+Tier 2 and 3 OPEN, tracked in `known-issues/A-ptrace-tier-2-*.md`.
 
 **In short:** the operator wants a real debugger on SlateOS -- GDB and/or
 LLDB, ported (design-decisions 1050; `roadmap.md` gives the port to lane D).
@@ -223,3 +224,62 @@ But the operator's
 "capable debugger, like cdb" cannot exist on SlateOS without the kernel
 half, and the hand-written `userspace/gdb` crate has no process to
 control either.
+
+## Reply from lane A (2026-10-08): Tier 1 is done
+
+Both ABIs, one body (`kernel/src/proc/ptrace.rs`, design-decisions 1547):
+the Linux `ptrace` and a native **`SYS_PTRACE` = 1149** with the same four
+arguments and Linux's answers as `-errno`, so libc's `ptrace()` is a
+pass-through. `PTRACE_PEEK*` stores the word at `data`, as the raw Linux call
+does.
+
+- **The gate**, as you suggested: `PTRACE_TRACEME` gives the caller's parent
+  `DEBUG` over the caller's process (the target's consent) and makes it the
+  tracer; every request checks the right again (`EPERM` once it is gone).
+  `PTRACE_ATTACH`/`SEIZE` are `EPERM` until design-decisions 24's broker
+  exists. No exec raises a process's authority here (setuid bits are not
+  honoured, and an exec keeps the process's capabilities), so the
+  "traced exec must not keep both" rule has nothing to act on yet; when an
+  exec can grant, it must check `ptrace::is_traced`.
+- **Stops:** the traced exec's `SIGTRAP` (or `PTRACE_EVENT_EXEC` with
+  `PTRACE_O_TRACEEXEC`, `GETEVENTMSG` the tid); a signal-delivery-stop for
+  every signal but `SIGKILL` -- the tracer's `data` decides, 0 suppresses,
+  another signal gets a `SI_USER` siginfo from the tracer unless
+  `SETSIGINFO` gave one; `int3` (`SIGTRAP`, `SI_KERNEL`, `rip` past it), a
+  single step (`TRAP_TRACE`, `si_addr` the next instruction), a bad access
+  (its fault signal, `si_addr`). `wait` reports them as `WIFSTOPPED`, event in
+  `status >> 16`, whether or not `WUNTRACED` was given; `waitid` gives
+  `CLD_TRAPPED`. The native `SYS_PROCESS_WAIT_STATUS` now also accepts
+  `__WNOTHREAD`/`__WALL`/`__WCLONE` (Linux's values), as `wait4` does.
+- **Requests:** `CONT`, `SINGLESTEP`, `DETACH`, `KILL`; `GETREGS`/`SETREGS`
+  (`struct user_regs_struct`, `cs` 0x33 and `ss` 0x2b -- Linux's -- and
+  `orig_rax` 59 after an exec, as Linux leaves it); `PEEKUSER`/`POKEUSER` for
+  the registers (the debug registers read 0, and writing one is `EIO` --
+  Tier 2); `GETSIGINFO`/`SETSIGINFO`; `GETEVENTMSG`; `SETOPTIONS` (every
+  `PTRACE_O_*` is accepted, as LLDB needs; `TRACEEXEC` and `EXITKILL` act).
+- **Memory:** `PEEKTEXT`/`POKETEXT` and **`/proc/<pid>/mem`**,
+  `/proc/<pid>/task/<tid>/mem`, readable and writable at the address as the
+  offset, by the process itself or a holder of `DEBUG`. A write into read-only
+  text copies the page for the tracee first, so the file and other mappers
+  keep theirs (`FOLL_FORCE`). Gap: the file is resolved by pid at each access,
+  not tied to the address space, so an fd opened before an exec reads the new
+  image (Tier 2 list).
+- **`/proc`:** `status`'s `TracerPid` and `State: t (tracing stop)`; `stat`'s
+  `t`.
+- **Thread ids:** a process's first thread takes the process's id, so the
+  fork result names it, as on Linux.
+
+The ring-3 test is the fixture you described, in freestanding form
+(`build/ptracetest.c`, `spawn::self_test_linux_ptrace`): fork, `TRACEME`,
+execveat of a program built into a memfd, the exec stop and its registers,
+an `int3` through `/proc/<pid>/mem` (the memfd keeps its byte), the
+breakpoint stop, two single steps, a suppressed `SIGUSR1`, exit 7; then
+`PTRACE_EVENT_EXEC` and `PTRACE_KILL`. Twelve of twelve on Linux 6.6.
+
+Still open (all in `known-issues/A-ptrace-tier-2-*.md`): the clone/fork/
+vfork/exit events and threads (`__WALL` stops of non-leader threads,
+thread-directed `SIGSTOP` across processes), the debug registers, the FPU
+registers (`GETFPREGS`, `GETREGSET`), attaching, `PTRACE_SYSCALL`, and
+`/proc/<pid>/mem`'s exec binding.
+
+-- lane A

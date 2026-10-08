@@ -381,7 +381,7 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
         unsafe {
             cpu::sti();
         }
-        if super::handlers::deliver_pending_signal(f, rax) {
+        if super::handlers::deliver_pending_signal(f, &mut rax) {
             // The frame now enters the handler, as in `handle_syscall`; the
             // value the call returned is saved in the signal frame.
             rax = 0;
@@ -410,8 +410,8 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
         // sigreturn restores the interrupted frame. After restoring, a
         // *different* pending signal may still need delivery, so fall
         // through to the delivery check below using the restored frame.
-        let restored_rax = super::handlers::sys_signal_return_with_frame(f);
-        if super::handlers::deliver_pending_signal(f, restored_rax) {
+        let mut restored_rax = super::handlers::sys_signal_return_with_frame(f);
+        if super::handlers::deliver_pending_signal(f, &mut restored_rax) {
             // Frame now points at the trampoline; the return value is
             // unused (trampoline gets args via the frame's registers).
             return 0;
@@ -446,11 +446,11 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
         .unwrap_or(crate::proc::pcb::AbiMode::Native);
 
     if abi_mode == crate::proc::pcb::AbiMode::Linux {
-        if let Some(rax) = super::linux::dispatch_linux_with_frame(f) {
+        if let Some(mut rax) = super::linux::dispatch_linux_with_frame(f) {
             // Same signal-delivery hook as the regular return path —
             // ensures pending signals can interrupt around an execve
             // boundary, exactly as in native sys_process_exec_with_frame.
-            if super::handlers::deliver_pending_signal(f, rax) {
+            if super::handlers::deliver_pending_signal(f, &mut rax) {
                 return 0;
             }
             return rax;
@@ -470,7 +470,8 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
     // restart sentinel (if any) is already resolved inside the delivery
     // path (rewind-to-restart or convert-to-EINTR baked into the saved
     // context), so we just return.
-    if super::handlers::deliver_pending_signal(f, result.value) {
+    let mut ret = result.value;
+    if super::handlers::deliver_pending_signal(f, &mut ret) {
         return 0;
     }
 
@@ -481,7 +482,7 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
     // RAX with the original syscall number — the SYSRET path below reloads the
     // original argument registers from the frame).  Any sentinel that is not
     // restarted is converted to -EINTR so it can never leak to ring 3.
-    let rax = super::linux::resolve_syscall_restart(f, result.value);
+    let rax = super::linux::resolve_syscall_restart(f, ret);
 
     // Deliver a second return value in RDX for two-value syscalls
     // (e.g. SYS_PIPE_CREATE / SYS_CHANNEL_CREATE, which return a pair of

@@ -584,6 +584,7 @@ const PID_FILES: &[&str] = &[
     "sessionid",
     "io",
     "wchan",
+    "mem",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2491,11 +2492,16 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
     // mapping used by /proc/<pid>/stat (see build_pid_stat) so the two files
     // never disagree about a task's state.
-    let state = match task.state {
-        TaskState::Running | TaskState::Ready => "R (running)", // Ready == runnable
-        TaskState::Blocked => "S (sleeping)",
-        TaskState::Suspended => "T (stopped)",
-        TaskState::Dead => "Z (zombie)",
+    let state = if crate::proc::ptrace::is_trace_stopped(task.id) {
+        // In a ptrace-stop, its tracer's to let go (Linux's `t`).
+        "t (tracing stop)"
+    } else {
+        match task.state {
+            TaskState::Running | TaskState::Ready => "R (running)", // Ready == runnable
+            TaskState::Blocked => "S (sleeping)",
+            TaskState::Suspended => "T (stopped)",
+            TaskState::Dead => "Z (zombie)",
+        }
     };
 
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
@@ -2529,7 +2535,8 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "Ngid:\t0");
     let _ = writeln!(s, "Pid:\t{}", task.id);
     let _ = writeln!(s, "PPid:\t{ppid}");
-    let _ = writeln!(s, "TracerPid:\t0"); // no ptrace tracer tracking yet
+    let tracer = crate::proc::ptrace::tracer_of(task.id).unwrap_or(0);
+    let _ = writeln!(s, "TracerPid:\t{tracer}");
     // Linux prints four credential columns (real, effective, saved-set,
     // filesystem).  Our credential model holds a single uid/gid, so all four
     // columns carry the same value — consistent with getuid/geteuid/
@@ -2976,12 +2983,16 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     let full_name = task.name.get(..task.name_len).unwrap_or(&[]);
     let name = comm_truncate(full_name);
 
-    let state_char = match task.state {
-        TaskState::Running => 'R',
-        TaskState::Ready => 'R',     // runnable = R in Linux
-        TaskState::Blocked => 'S',   // sleeping
-        TaskState::Suspended => 'T', // stopped
-        TaskState::Dead => 'Z',      // zombie
+    let state_char = if crate::proc::ptrace::is_trace_stopped(task.id) {
+        't' // in a ptrace-stop
+    } else {
+        match task.state {
+            TaskState::Running => 'R',
+            TaskState::Ready => 'R',     // runnable = R in Linux
+            TaskState::Blocked => 'S',   // sleeping
+            TaskState::Suspended => 'T', // stopped
+            TaskState::Dead => 'Z',      // zombie
+        }
     };
 
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
@@ -14073,6 +14084,84 @@ fn gen_properties() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// The task whose memory `rel` names, if it is `<pid>/mem` or
+/// `<pid>/task/<tid>/mem` of a live one.
+fn mem_file_task(rel: &str) -> Option<u64> {
+    match classify_path(rel) {
+        ProcPath::PidFile(pid, "mem") => pid_dir_exists(pid).then_some(pid),
+        ProcPath::PidTaskFile(pid, tid, "mem") => thread_belongs(pid, tid).then_some(tid),
+        _ => None,
+    }
+}
+
+/// The process whose memory `/proc/<task>/mem` is -- for a reader that is
+/// that process, or holds `DEBUG` over it, as its tracer does (Linux's
+/// `PTRACE_MODE_ATTACH` check, design-decisions 24's right). `EACCES` for
+/// anyone else.
+fn mem_target(task: u64) -> KernelResult<u64> {
+    let target = proc_target(task).ok_or(KernelError::NotFound)?;
+    let reader = proc_reader();
+    let allowed = reader == Some(target)
+        || reader.is_some_and(|r| {
+            crate::proc::pcb::has_capability_for(
+                r,
+                crate::cap::ResourceType::Process,
+                target,
+                crate::cap::Rights::DEBUG,
+            )
+        });
+    if allowed {
+        Ok(target)
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// How much of `/proc/<pid>/mem` one step reads or writes: a page, so a range
+/// that runs into an unmapped page stops there.
+const MEM_STEP: u64 = 4096;
+
+/// `/proc/<task>/mem`'s read: `len` bytes of the process's memory at address
+/// `offset`, a page at a time, up to the first address it does not map -- a
+/// short read, or `EIO` when not even the first byte is mapped (Linux's
+/// `mem_rw`).
+fn mem_read(task: u64, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    let target = mem_target(task)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    let mut addr = offset;
+    while out.len() < len {
+        // 1..=MEM_STEP: what is left of `addr`'s page.
+        let room = MEM_STEP.saturating_sub(addr % MEM_STEP);
+        let want = usize::try_from(room)
+            .unwrap_or(usize::MAX)
+            .min(len.saturating_sub(out.len()));
+        let mut chunk = alloc::vec![0u8; want];
+        if crate::proc::ptrace::read_memory(target, addr, &mut chunk).is_err() {
+            break;
+        }
+        out.extend_from_slice(&chunk);
+        match addr.checked_add(room) {
+            Some(next) => addr = next,
+            None => break,
+        }
+    }
+    if out.is_empty() && len > 0 {
+        return Err(KernelError::IoError);
+    }
+    Ok(out)
+}
+
+/// `/proc/<task>/mem`'s write: `data` into the process's memory at address
+/// `offset`, read-only pages of private mappings included -- a breakpoint
+/// into code -- as a tracer's `PTRACE_POKETEXT` writes them
+/// (`crate::proc::ptrace::write_memory`). `EIO` if any of it cannot be.
+fn mem_write(task: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+    let target = mem_target(task)?;
+    crate::proc::ptrace::write_memory(target, offset, data).map_err(|_| KernelError::IoError)
+}
+
 /// Whether `/proc/<id>` exists: a live task has that id -- a process's first
 /// thread, any other thread (resolvable, though not listed), a kernel task
 /// -- or a process does, whatever has become of its threads.
@@ -15186,6 +15275,45 @@ impl FileSystem for ProcFs {
         }
     }
 
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let rel = strip_root(path)?;
+        if let Some(task) = mem_file_task(rel) {
+            return mem_read(task, offset, len);
+        }
+        // Every other file: generated whole and sliced (the trait's default).
+        let data = self.read_file(path)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(data.len());
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec))
+    }
+
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path)?;
+        if let Some(task) = mem_file_task(rel) {
+            return mem_write(task, offset, data);
+        }
+        // Every other file is written whole, as the trait's default writes it:
+        // the bytes in place of the range, then the file.
+        let mut contents = match self.read_file(path) {
+            Ok(c) => c,
+            Err(KernelError::NotFound) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        let start = usize::try_from(offset).map_err(|_| KernelError::InvalidArgument)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(KernelError::InvalidArgument)?;
+        if end > contents.len() {
+            contents.resize(end, 0);
+        }
+        if let Some(dest) = contents.get_mut(start..end) {
+            dest.copy_from_slice(data);
+        }
+        self.write_file(path, &contents)
+    }
+
     fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
         let rel = strip_root(path)?;
 
@@ -15336,6 +15464,10 @@ impl FileSystem for ProcFs {
 
         let perms = if entry.entry_type == EntryType::Directory {
             0o555
+        } else if strip_root(path).is_ok_and(|rel| mem_file_task(rel).is_some()) {
+            // `/proc/<pid>/mem` is read and written, by the process and its
+            // debugger (`mem_target` checks which), as Linux's 0600 says.
+            0o600
         } else {
             0o444
         };

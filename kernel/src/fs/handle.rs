@@ -2729,7 +2729,10 @@ fn test_held_files(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     // until then.
     if Vfs::stat("/tmp").is_ok() {
         crate::fs::memfs::mount(MNT)?;
-        let inodes = || Vfs::statvfs(MNT).map(|i| i.total_inodes);
+        // Inodes in use -- total less free. The total alone moved with free
+        // memory once memfs counted its inodes as tmpfs does (2026-10-07), and
+        // read three fewer while the file was held in the first release boot.
+        let inodes = || Vfs::statvfs(MNT).map(|i| i.total_inodes.saturating_sub(i.free_inodes));
         let before = inodes();
         let h = open_tmpfile(MNT, rw, 0o640)?;
         let wrote = write(h, b"unnamed");

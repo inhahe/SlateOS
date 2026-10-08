@@ -400,9 +400,18 @@ pub fn self_test() -> Result<(), &'static str> {
     if regs.set(7, 0x1 | (0b0010 << 16)) != Err(DebugRegError::Invalid) {
         return Err("an I/O breakpoint was taken");
     }
-    // An 8-byte one must be 8-aligned and end in user space.
+    // An 8-byte one must be 8-aligned: DR0 moved to an address 4-aligned but
+    // not 8-aligned (the 4-byte watchpoint allows it), then widened. (DR0's
+    // 0x40_1000 is 8-aligned: until 2026-10-08 this asked for a refusal there,
+    // and the first boot to run it died on the check's own mistake.)
+    if regs.set(0, 0x40_1004) != Ok(()) {
+        return Err("a 4-aligned address for the 4-byte watchpoint was refused");
+    }
     if regs.set(7, 0x1 | (0b1001 << 16)) != Err(DebugRegError::Invalid) {
         return Err("an 8-byte watchpoint at a 4-aligned address was taken");
+    }
+    if regs.set(0, 0x40_1008) != Ok(()) || regs.set(7, 0x1 | (0b1001 << 16)) != Ok(()) {
+        return Err("an 8-byte watchpoint at an 8-aligned address was refused");
     }
     // Disabled: anything goes, and the CPU gets nothing.
     if regs.set(7, 0x400) != Ok(()) || regs.armed() || regs.get(7) != 0x400 {

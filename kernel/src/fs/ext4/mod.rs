@@ -1173,7 +1173,10 @@ fn sparse_file_test(root: &crate::fs::path::Path) -> KernelResult<()> {
         return fail("fallocate did not reserve the 15 missing blocks");
     }
     Vfs::write_at(&p, 4 * bs + 10, b"xyz")?;
-    let mut want = [0u8; 16];
+    // The preallocation kept the length, so the write makes the file end at
+    // `4 * bs + 13`: a read of 16 bytes there answers the 13 before the end,
+    // as Linux's does. (It asked for 16 and failed the first release boot.)
+    let mut want = [0u8; 13];
     want[10..13].copy_from_slice(b"xyz");
     if Vfs::read_at(&p, 4 * bs, 16)? != want {
         return fail("a write into a preallocated block did not read back");

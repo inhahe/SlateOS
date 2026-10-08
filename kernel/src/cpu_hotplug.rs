@@ -306,11 +306,21 @@ pub fn online_count() -> usize {
 /// `smp::MAX_CPUS` is at most 64 (asserted below), so one word holds every
 /// CPU.
 ///
-/// Empty until [`init`] has run: callers treat an empty mask as "not known
-/// yet", never as "no CPU".
+/// Before [`init`] has run, the CPUs `smp` has brought up so far, which it
+/// numbers from 0 in order, the BSP first. Until 2026-10-08 this was empty
+/// then, which `sched::set_affinity` read as "not known yet" and so let any
+/// mask through: a ring-3 test, which runs before hotplug's `init`, pinned
+/// itself to a CPU 1 that a one-CPU machine does not have and was told it had
+/// moved (the first release boot of the rseq work, exit 0x36).
 #[must_use]
 pub fn online_mask() -> u64 {
     const _: () = assert!(smp::MAX_CPUS <= 64, "an affinity mask is one u64");
+    if !INITIALIZED.load(Ordering::Acquire) {
+        let started = smp::cpu_count().clamp(1, smp::MAX_CPUS);
+        return u64::MAX
+            .checked_shr(u32::try_from(64usize.saturating_sub(started)).unwrap_or(63))
+            .unwrap_or(1);
+    }
     let mut mask = 0u64;
     for cpu in 0..smp::MAX_CPUS {
         if is_online(cpu) {

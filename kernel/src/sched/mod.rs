@@ -5861,13 +5861,12 @@ pub fn set_cpu_affinity(task_id: TaskId, mask: u64) -> Option<u64> {
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] if `mask` names no online CPU (once CPU
-///   hotplug has started; before that, if it is zero).
+/// - [`KernelError::InvalidArgument`] if `mask` names no CPU online now --
+///   before CPU hotplug starts, none of the CPUs brought up so far
+///   ([`crate::cpu_hotplug::online_mask`]).
 /// - [`KernelError::NotFound`] if there is no such task.
 pub fn set_affinity(task_id: TaskId, mask: u64) -> KernelResult<u64> {
-    let online = crate::cpu_hotplug::online_mask();
-    let usable = if online == 0 { mask } else { mask & online };
-    if usable == 0 {
+    if mask & crate::cpu_hotplug::online_mask() == 0 {
         return Err(KernelError::InvalidArgument);
     }
 
@@ -5932,12 +5931,12 @@ pub fn get_cpu_affinity(task_id: TaskId) -> Option<u64> {
 
 /// The CPUs a task may run on now: its mask, less the CPUs that are not
 /// online -- what `sched_getaffinity(2)` reports. `None` if there is no such
-/// task. Before CPU hotplug has started, the mask as stored.
+/// task. Before CPU hotplug has started, the CPUs brought up so far count as
+/// the online ones ([`crate::cpu_hotplug::online_mask`]).
 #[must_use]
 pub fn affinity_of(task_id: TaskId) -> Option<u64> {
     let mask = get_cpu_affinity(task_id)?;
-    let online = crate::cpu_hotplug::online_mask();
-    Some(if online == 0 { mask } else { mask & online })
+    Some(mask & crate::cpu_hotplug::online_mask())
 }
 
 /// Ask `cpu` to reschedule at its next interrupt exit, and interrupt it now.

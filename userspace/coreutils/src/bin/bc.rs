@@ -84,7 +84,7 @@ fn read_stdin_line() -> String {
     loop {
         match stdfd::RawStdin.read(&mut byte) {
             Ok(0) => break,
-            Ok(_) if byte == [b'\n'] => break,
+            Ok(_) if byte == *b"\n" => break,
             Ok(_) => line.extend_from_slice(&byte),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {

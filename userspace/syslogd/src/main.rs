@@ -42,11 +42,13 @@ mod record;
 #[cfg(target_os = "linux")]
 mod sys;
 
-use quoting::{quoteaf_os, quotef_os};
+use journalrec::Value;
+use quoting::{os_bytes, quoteaf_os, quotef_os};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,10 +66,6 @@ const DEV_LOG: &str = "/dev/log";
 const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
 /// Maximum number of rotated log files to keep.
 const MAX_ROTATED_FILES: u32 = 10;
-/// Severity levels (RFC 5424 compatible).
-const LEVELS: &[&str] = &[
-    "emerg", "alert", "crit", "error", "warn", "notice", "info", "debug",
-];
 
 // ============================================================================
 // Time helpers
@@ -131,10 +129,10 @@ fn is_leap_year(y: i64) -> bool {
 }
 
 // ============================================================================
-// JSON helpers (minimal, no dependency)
+// Records: one written by `log`, and one read by the other commands
 // ============================================================================
 
-/// A structured log entry.
+/// A structured log entry, as `syslogd log` writes one.
 #[derive(Debug, Clone)]
 struct LogEntry {
     /// Unix timestamp.
@@ -174,137 +172,69 @@ impl LogEntry {
 
         format!("{{{}}}", parts.join(","))
     }
-
-    /// Parse from a JSON-lines entry (minimal parser).
-    fn from_json(line: &str) -> Option<Self> {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-            return None;
-        }
-
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let mut entry = LogEntry {
-            timestamp: 0,
-            level: String::new(),
-            service: String::new(),
-            message: String::new(),
-            extra: Vec::new(),
-        };
-
-        // Simple key-value extraction (handles escaped quotes minimally).
-        let mut pos = 0;
-        let bytes = inner.as_bytes();
-
-        while pos < bytes.len() {
-            // Skip whitespace and commas.
-            while pos < bytes.len()
-                && (bytes[pos] == b' ' || bytes[pos] == b',' || bytes[pos] == b'\t')
-            {
-                pos += 1;
-            }
-            if pos >= bytes.len() {
-                break;
-            }
-
-            // Parse key.
-            let key = parse_json_string(inner, &mut pos)?;
-
-            // Skip colon.
-            while pos < bytes.len() && bytes[pos] != b':' {
-                pos += 1;
-            }
-            pos += 1; // skip ':'
-
-            // Skip whitespace.
-            while pos < bytes.len() && bytes[pos] == b' ' {
-                pos += 1;
-            }
-            if pos >= bytes.len() {
-                break;
-            }
-
-            // Parse value.
-            let value = if bytes[pos] == b'"' {
-                parse_json_string(inner, &mut pos)?
-            } else {
-                // Numeric value.
-                let start = pos;
-                while pos < bytes.len() && bytes[pos] != b',' && bytes[pos] != b'}' {
-                    pos += 1;
-                }
-                inner[start..pos].trim().to_string()
-            };
-
-            match key.as_str() {
-                "ts" => entry.timestamp = value.parse().unwrap_or(0),
-                "level" => entry.level = value,
-                "service" => entry.service = value,
-                "msg" => entry.message = value,
-                "time" => {} // Derived from ts, skip.
-                _ => entry.extra.push((key, value)),
-            }
-        }
-
-        Some(entry)
-    }
-
-    fn display_short(&self) -> String {
-        let time_str = format_timestamp(self.timestamp);
-        let level_padded = format!("{:<6}", self.level);
-        format!(
-            "{} {} [{}] {}",
-            time_str, level_padded, self.service, self.message
-        )
-    }
 }
 
-/// Parse a JSON string starting with `"` at `pos`.
-fn parse_json_string(s: &str, pos: &mut usize) -> Option<String> {
-    let bytes = s.as_bytes();
-    if *pos >= bytes.len() || bytes[*pos] != b'"' {
-        return None;
-    }
-    *pos += 1; // skip opening "
+/// A journal record as `tail`, `query`, `follow` and `stats` show it.
+///
+/// Read through `journalrec`'s parser, the one `journalctl` reads with. This
+/// program had a parser of its own until 2026-10-07, which `journalctl`'s had
+/// been fixed away from on 2026-09-26 and this one never was: it pushed each
+/// byte of a string `as char`, so `café` came out as `cafÃ©`; it decoded no
+/// `\uXXXX`; and a field that is not text -- an array of its bytes, which is
+/// how this program's own daemon files a message that is not text
+/// (design-decisions §1063) -- failed the whole parse, so the record was
+/// never shown at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Shown {
+    /// Seconds since the epoch; 0 when the record has none.
+    timestamp: u64,
+    /// The level, by its canonical name (`journalrec::PRIORITY_NAMES`)
+    /// whichever spelling the record used -- `syslogd log` wrote `error` and
+    /// `warn` where every other writer writes `err` and `warning` -- or as
+    /// written when it is none of them.
+    level: String,
+    /// The service and the message, as the bytes they are.
+    service: Vec<u8>,
+    message: Vec<u8>,
+}
 
-    let mut result = String::new();
-    while *pos < bytes.len() {
-        if bytes[*pos] == b'\\' && *pos + 1 < bytes.len() {
-            match bytes[*pos + 1] {
-                b'"' => {
-                    result.push('"');
-                    *pos += 2;
-                }
-                b'\\' => {
-                    result.push('\\');
-                    *pos += 2;
-                }
-                b'n' => {
-                    result.push('\n');
-                    *pos += 2;
-                }
-                b'r' => {
-                    result.push('\r');
-                    *pos += 2;
-                }
-                b't' => {
-                    result.push('\t');
-                    *pos += 2;
-                }
-                _ => {
-                    result.push(bytes[*pos] as char);
-                    *pos += 1;
-                }
-            }
-        } else if bytes[*pos] == b'"' {
-            *pos += 1; // skip closing "
-            return Some(result);
-        } else {
-            result.push(bytes[*pos] as char);
-            *pos += 1;
-        }
+impl Shown {
+    /// The record on `line`, if it is one: a line that is not UTF-8, or not
+    /// a JSON object, is not.
+    fn of(line: &[u8]) -> Option<Self> {
+        let fields = journalrec::parse_object(std::str::from_utf8(line).ok()?)?;
+        let text = |key: &str| fields.get(key).and_then(Value::text);
+        let bytes = |key: &str| {
+            fields
+                .get(key)
+                .map(|v| v.bytes().to_vec())
+                .unwrap_or_default()
+        };
+        let level = text("level").map_or_else(String::new, |level| {
+            journalrec::priority_name(level).map_or_else(|| level.to_string(), str::to_string)
+        });
+        Some(Shown {
+            timestamp: text("ts").and_then(|t| t.parse().ok()).unwrap_or(0),
+            level,
+            service: bytes("service"),
+            message: bytes("msg"),
+        })
     }
 
-    Some(result)
+    /// `TIME LEVEL [SERVICE] MESSAGE` and a newline, the level padded to the
+    /// longest canonical name so the columns line up.
+    fn write_short(&self, out: &mut dyn Write) -> io::Result<()> {
+        write!(
+            out,
+            "{} {:<7} [",
+            format_timestamp(self.timestamp),
+            self.level
+        )?;
+        out.write_all(&self.service)?;
+        out.write_all(b"] ")?;
+        out.write_all(&self.message)?;
+        out.write_all(b"\n")
+    }
 }
 
 // ============================================================================
@@ -327,24 +257,21 @@ fn rotated_path_of(journal: &Path, n: u32) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn write_log_entry(entry: &LogEntry) -> io::Result<()> {
-    let _ = fs::create_dir_all(LOG_DIR);
+/// Append `entry` to the journal at `path`. Rotating it when it has grown too
+/// big is the caller's: the entry is written either way.
+fn write_log_entry(path: &Path, entry: &LogEntry) -> io::Result<()> {
+    // A directory that cannot be made is reported by the append, which then
+    // cannot make the file.
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
 
-    let path = log_file_path();
     let mut line = entry.to_json().into_bytes();
     line.push(b'\n');
     // Under the journal's lock (design-decisions §1037): a vacuum or a
     // rotation holding the file finishes first, and the entry lands in
     // whichever file the path names then.
-    journalio::append(&path, &line)?;
-
-    // Check if rotation is needed.
-    let meta = fs::metadata(&path)?;
-    if meta.len() > MAX_LOG_SIZE {
-        rotate_logs();
-    }
-
-    Ok(())
+    journalio::append(path, &line)
 }
 
 /// Shift the rotated logs up one and the live log to `.1`, each step under
@@ -353,61 +280,65 @@ fn write_log_entry(entry: &LogEntry) -> io::Result<()> {
 /// whatever this had just moved there, and a writer waiting on the live
 /// log lands in the next one rather than in `.1`.
 ///
-/// A step that fails is left undone -- the files keep their names and the
-/// log keeps growing until the next rotation tries again -- which is why
-/// each result is not looked at.
-fn rotate_logs() {
-    rotate_journal(&log_file_path());
+/// Returns each step that failed, and why. A failed step is left undone --
+/// the files keep their names, and the log keeps growing until the next
+/// rotation tries again -- and the steps after it are still tried. Until
+/// 2026-10-07 every result was dropped here, and `syslogd rotate` said
+/// "done" whatever had happened.
+fn rotate_logs() -> Vec<(PathBuf, io::Error)> {
+    rotate_journal(&log_file_path())
 }
 
 /// [`rotate_logs`] for the journal at `journal`, whichever file that is:
 /// the daemon's `--journal` rotates where it writes.
-fn rotate_journal(journal: &Path) {
+fn rotate_journal(journal: &Path) -> Vec<(PathBuf, io::Error)> {
+    let mut failed = Vec::new();
+    let mut step = |path: PathBuf, act: &dyn Fn(journalio::Locked) -> io::Result<()>| {
+        match journalio::Locked::open(&path) {
+            Ok(Some(held)) => {
+                if let Err(e) = act(held) {
+                    failed.push((path, e));
+                }
+            }
+            // Nothing there to move.
+            Ok(None) => {}
+            Err(e) => failed.push((path, e)),
+        }
+    };
+
     // Delete the oldest file.
-    if let Ok(Some(oldest)) = journalio::Locked::open(&rotated_path_of(journal, MAX_ROTATED_FILES))
-    {
-        let _ = oldest.remove();
-    }
+    step(rotated_path_of(journal, MAX_ROTATED_FILES), &|held| {
+        held.remove()
+    });
 
     // Shift N-1 → N, N-2 → N-1, etc.
     for i in (1..MAX_ROTATED_FILES).rev() {
-        if let Ok(Some(held)) = journalio::Locked::open(&rotated_path_of(journal, i)) {
-            let _ = held.rename_to(&rotated_path_of(journal, i + 1));
-        }
+        let to = rotated_path_of(journal, i + 1);
+        step(rotated_path_of(journal, i), &|held| held.rename_to(&to));
     }
 
     // Move current → .1
-    if let Ok(Some(held)) = journalio::Locked::open(journal) {
-        let _ = held.rename_to(&rotated_path_of(journal, 1));
+    let first = rotated_path_of(journal, 1);
+    step(journal.to_path_buf(), &|held| held.rename_to(&first));
+    failed
+}
+
+/// The journal's bytes, or `None` when there is no journal -- the one
+/// absence. Every other failure is an error: "No log file found." once stood
+/// in for all of them, and so did one byte anywhere in the file that was not
+/// UTF-8, since the file was read as a `String`. A line that is not UTF-8 is
+/// now a line that is not a record, and costs only itself.
+fn read_log(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
-fn read_log_entries(max_entries: usize) -> Vec<LogEntry> {
-    let path = log_file_path();
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let all_lines: Vec<&str> = content.lines().collect();
-    let start = all_lines.len().saturating_sub(max_entries);
-
-    all_lines[start..]
-        .iter()
-        .filter_map(|line| LogEntry::from_json(line))
-        .collect()
-}
-
-fn count_all_entries() -> (usize, u64) {
-    let path = log_file_path();
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return (0, 0),
-    };
-
-    let count = content.lines().count();
-    let size = content.len() as u64;
-    (count, size)
+/// The records among the lines of `bytes`, in order.
+fn records(bytes: &[u8]) -> impl Iterator<Item = Shown> + '_ {
+    journalio::lines(bytes).filter_map(Shown::of)
 }
 
 // ============================================================================
@@ -478,167 +409,317 @@ fn cmd_daemon(_args: &[OsString]) -> process::ExitCode {
 /// A line on standard error that does not panic when it cannot be written,
 /// as `eprintln!` does.
 fn eprintln_safe(line: &str) {
-    use std::io::Write;
     // Nowhere left to report a failure to report.
     let _ = writeln!(io::stderr().lock(), "{line}");
 }
 
-fn cmd_log(level: &str, service: &str, message: &str, extra: &[(String, String)]) {
-    // Validate level.
-    let level_lower = level.to_lowercase();
-    if !LEVELS.contains(&level_lower.as_str()) {
-        eprintln!("warning: unknown level {}, using 'info'", quoteaf_os(level));
+/// `syslogd: cannot WHAT PATH: REASON`, the reason in `strerror`'s words.
+fn cannot(what: &str, path: &Path, e: &io::Error) {
+    eprintln_safe(&format!(
+        "syslogd: cannot {what} {}: {}",
+        quotef_os(path),
+        errmsg::strerror(e)
+    ));
+}
+
+/// `syslogd: write error: REASON`, for output that could not be written.
+fn write_error(e: &io::Error) {
+    eprintln_safe(&format!("syslogd: write error: {}", errmsg::strerror(e)));
+}
+
+/// Write to standard output through `body`, buffered, and flush, stopping at
+/// the first write that fails. `Ok(true)` when it was all written. A reader
+/// that has gone (`EPIPE`) is an ordinary end to a pipeline such as
+/// `syslogd tail | head`, and is `Ok(false)`, said nothing about.
+///
+/// Every line the commands print goes through here: `println!`, which they
+/// all used until 2026-10-07, panics when the write fails -- a full disk, or
+/// that reader gone -- so `syslogd help >/dev/full` ended in a panic and
+/// status 101.
+///
+/// # Errors
+///
+/// A failed write other than `EPIPE`, for the caller to report.
+fn to_stdout(body: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> io::Result<bool> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    match body(&mut out).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(e),
     }
+}
+
+/// The status of a command whose output went through [`to_stdout`]: its own
+/// `status` when the output was written, or its reader went away; 1, after
+/// `syslogd: write error: REASON`, when it could not be written.
+fn settle(written: io::Result<bool>, status: u8) -> u8 {
+    match written {
+        Ok(_) => status,
+        Err(e) => {
+            write_error(&e);
+            1
+        }
+    }
+}
+
+/// `log LEVEL SERVICE MESSAGE...`: one record, written under the journal's
+/// lock. The level is filed by its canonical name, as every other writer
+/// files it: `error` and `warn`, which this used to write as given, are `err`
+/// and `warning` in the journal.
+fn cmd_log(level: &str, service: &str, message: &str, extra: &[(String, String)]) -> u8 {
+    let level = journalrec::priority_name(level).unwrap_or_else(|| {
+        eprintln_safe(&format!(
+            "syslogd: warning: unknown level {}, using 'info'",
+            quoteaf_os(level)
+        ));
+        "info"
+    });
 
     let entry = LogEntry {
         timestamp: now_secs(),
-        level: level_lower,
+        level: level.to_string(),
         service: service.to_string(),
         message: message.to_string(),
         extra: extra.to_vec(),
     };
 
-    if let Err(e) = write_log_entry(&entry) {
-        eprintln!("error writing log: {e}");
-        process::exit(1);
-    }
-}
-
-fn cmd_tail(count: usize) {
-    let entries = read_log_entries(count);
-    if entries.is_empty() {
-        println!("No log entries.");
-        return;
-    }
-
-    for entry in &entries {
-        println!("{}", entry.display_short());
-    }
-}
-
-fn cmd_query(filters: &QueryFilters) {
     let path = log_file_path();
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => {
-            println!("No log file found.");
-            return;
+    if let Err(e) = write_log_entry(&path, &entry) {
+        cannot("write", &path, &e);
+        return 1;
+    }
+    // The record is written; a rotation that could not be done is said, and
+    // tried again by the next writer to find the log too big.
+    if fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_SIZE) {
+        for (file, e) in rotate_logs() {
+            cannot("rotate", &file, &e);
+        }
+    }
+    0
+}
+
+/// `tail [N]`: the last `count` records. Records, not lines: a line that is
+/// not one used to take a record's place.
+fn cmd_tail(count: usize) -> u8 {
+    let path = log_file_path();
+    let bytes = match read_log(&path) {
+        Ok(bytes) => bytes.unwrap_or_default(),
+        Err(e) => {
+            cannot("read", &path, &e);
+            return 1;
         }
     };
+    let all: Vec<Shown> = records(&bytes).collect();
+    let shown = all
+        .get(all.len().saturating_sub(count)..)
+        .unwrap_or_default();
+    let written = to_stdout(|out| {
+        if shown.is_empty() {
+            return out.write_all(b"No log entries.\n");
+        }
+        shown.iter().try_for_each(|record| record.write_short(out))
+    });
+    settle(written, 0)
+}
 
-    let mut matches = 0usize;
-    for line in content.lines() {
-        if let Some(entry) = LogEntry::from_json(line)
-            && filters.matches(&entry)
-        {
-            println!("{}", entry.display_short());
-            matches += 1;
-            if matches >= filters.limit {
-                break;
-            }
+/// `query [FILTERS]`: the records `filters` picks out, up to its limit.
+fn cmd_query(filters: &QueryFilters) -> u8 {
+    let path = log_file_path();
+    let bytes = match read_log(&path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return settle(to_stdout(|out| out.write_all(b"No log file found.\n")), 0),
+        Err(e) => {
+            cannot("read", &path, &e);
+            return 1;
+        }
+    };
+    let matched: Vec<Shown> = records(&bytes)
+        .filter(|record| filters.matches(record))
+        .take(filters.limit)
+        .collect();
+    let written = to_stdout(|out| {
+        if matched.is_empty() {
+            return out.write_all(b"No matching entries.\n");
+        }
+        for record in &matched {
+            record.write_short(out)?;
+        }
+        writeln!(out, "\n{} entries matched.", matched.len())
+    });
+    settle(written, 0)
+}
+
+/// `follow`: each record as it is appended, until the output cannot take
+/// more -- its reader gone (status 0) or a write failing (status 1).
+///
+/// The live log and its first rotated copy are both followed, each by its
+/// identity (journalio's `Follow`): a rotation renames the live log to `.1`,
+/// and what was appended to it just before is read there. This used to
+/// re-read the whole live log twice a second and slice the `String` at the
+/// old length -- which panicked whenever that length fell inside a
+/// multi-byte character, skipped a log that was not all UTF-8 while moving
+/// on past it, and lost a record caught half-appended.
+fn cmd_follow() -> u8 {
+    let live = log_file_path();
+    let first = rotated_path(1);
+    match to_stdout(|out| {
+        writeln!(
+            out,
+            "syslogd: following {} (Ctrl+C to stop)",
+            live.display()
+        )
+    }) {
+        Ok(true) => {}
+        Ok(false) => return 0,
+        Err(e) => {
+            write_error(&e);
+            return 1;
         }
     }
 
-    if matches == 0 {
-        println!("No matching entries.");
-    } else {
-        println!("\n{matches} entries matched.");
+    let mut follow = journalio::Follow::new();
+    for path in [&first, &live] {
+        if let Err(e) = follow.skip_to_end(path) {
+            cannot("read", path, &e);
+        }
     }
-}
-
-fn cmd_follow() {
-    println!(
-        "syslogd: following {} (Ctrl+C to stop)",
-        log_file_path().display()
-    );
-
-    let mut last_size = fs::metadata(log_file_path()).map(|m| m.len()).unwrap_or(0);
-
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let current_size = match fs::metadata(log_file_path()) {
-            Ok(m) => m.len(),
-            Err(_) => continue,
-        };
-
-        if current_size > last_size {
-            // Read new content.
-            if let Ok(content) = fs::read_to_string(log_file_path()) {
-                let bytes = content.as_bytes();
-                if (last_size as usize) < bytes.len() {
-                    let new_data = &content[last_size as usize..];
-                    for line in new_data.lines() {
-                        if let Some(entry) = LogEntry::from_json(line) {
-                            println!("{}", entry.display_short());
-                        }
-                    }
+        // The rotated copy first: what is new in it was written before
+        // anything in the live log.
+        for path in [&first, &live] {
+            let bytes = match follow.read(path, true) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(e) => {
+                    cannot("read", path, &e);
+                    continue;
+                }
+            };
+            let fresh: Vec<Shown> = records(&bytes).collect();
+            match to_stdout(|out| fresh.iter().try_for_each(|record| record.write_short(out))) {
+                Ok(true) => {}
+                Ok(false) => return 0,
+                Err(e) => {
+                    write_error(&e);
+                    return 1;
                 }
             }
-            last_size = current_size;
-        } else if current_size < last_size {
-            // File was rotated/truncated.
-            last_size = 0;
         }
+        follow.end_round();
     }
 }
 
-fn cmd_stats() {
-    println!("=== Syslog Statistics ===");
-
-    let (total_entries, total_size) = count_all_entries();
-    println!("  Main log:    {}", log_file_path().display());
-    println!("  Entries:     {total_entries}");
-    println!("  Size:        {}", format_size(total_size));
+/// `stats`: the journal's size, its rotated copies, and its records by level
+/// and by service. A file that cannot be read or examined is said, and the
+/// status is 1, but what could be counted is still shown.
+fn cmd_stats() -> u8 {
+    let path = log_file_path();
+    let mut failed = false;
+    let (bytes, size) = match read_log(&path) {
+        Ok(bytes) => {
+            let bytes = bytes.unwrap_or_default();
+            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            (bytes, size)
+        }
+        Err(e) => {
+            cannot("read", &path, &e);
+            failed = true;
+            (Vec::new(), 0)
+        }
+    };
+    let all: Vec<Shown> = records(&bytes).collect();
 
     // Count rotated files.
     let mut rotated = 0u32;
     let mut rotated_size = 0u64;
     for i in 1..=MAX_ROTATED_FILES {
         let p = rotated_path(i);
-        if let Ok(meta) = fs::metadata(&p) {
-            rotated += 1;
-            rotated_size += meta.len();
-        }
-    }
-    println!(
-        "  Rotated:     {rotated} files ({} total)",
-        format_size(rotated_size)
-    );
-    println!("  Max size:    {} per file", format_size(MAX_LOG_SIZE));
-    println!("  Max files:   {MAX_ROTATED_FILES}");
-
-    // Level breakdown.
-    if total_entries > 0 {
-        let entries = read_log_entries(total_entries);
-        let mut level_counts = std::collections::BTreeMap::new();
-        let mut service_counts = std::collections::BTreeMap::new();
-
-        for entry in &entries {
-            *level_counts.entry(entry.level.clone()).or_insert(0u64) += 1;
-            *service_counts.entry(entry.service.clone()).or_insert(0u64) += 1;
-        }
-
-        println!("\n  By level:");
-        for level in LEVELS {
-            if let Some(count) = level_counts.get(*level) {
-                println!("    {:<8} {count}", level);
+        match fs::metadata(&p) {
+            Ok(meta) => {
+                rotated += 1;
+                rotated_size = rotated_size.saturating_add(meta.len());
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                cannot("examine", &p, &e);
+                failed = true;
             }
         }
-
-        println!("\n  Top services:");
-        let mut sorted: Vec<_> = service_counts.iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(a.1));
-        for (svc, count) in sorted.iter().take(10) {
-            println!("    {:<20} {count}", svc);
-        }
     }
+
+    // Records by level -- the canonical names in order of severity, then any
+    // other spelling as written -- and by service, most first.
+    let mut level_counts: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut service_counts: BTreeMap<&[u8], u64> = BTreeMap::new();
+    for record in &all {
+        *level_counts.entry(record.level.as_str()).or_insert(0) += 1;
+        *service_counts.entry(record.service.as_slice()).or_insert(0) += 1;
+    }
+    let mut by_level: Vec<(&str, u64)> = journalrec::PRIORITY_NAMES
+        .iter()
+        .filter_map(|name| level_counts.remove(name).map(|n| (*name, n)))
+        .collect();
+    by_level.extend(level_counts);
+    let mut by_service: Vec<(&[u8], u64)> = service_counts.into_iter().collect();
+    by_service.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+
+    let written = to_stdout(|out| {
+        writeln!(out, "=== Syslog Statistics ===")?;
+        writeln!(out, "  Main log:    {}", path.display())?;
+        writeln!(out, "  Entries:     {}", all.len())?;
+        writeln!(out, "  Size:        {}", format_size(size))?;
+        writeln!(
+            out,
+            "  Rotated:     {rotated} files ({} total)",
+            format_size(rotated_size)
+        )?;
+        writeln!(out, "  Max size:    {} per file", format_size(MAX_LOG_SIZE))?;
+        writeln!(out, "  Max files:   {MAX_ROTATED_FILES}")?;
+        if all.is_empty() {
+            return Ok(());
+        }
+        writeln!(out, "\n  By level:")?;
+        for (level, count) in &by_level {
+            let level = if level.is_empty() { "(none)" } else { level };
+            writeln!(out, "    {level:<8} {count}")?;
+        }
+        writeln!(out, "\n  Top services:")?;
+        for (service, count) in by_service.iter().take(10) {
+            out.write_all(b"    ")?;
+            write_padded(out, service, 20)?;
+            writeln!(out, " {count}")?;
+        }
+        Ok(())
+    });
+    settle(written, u8::from(failed))
 }
 
-fn cmd_rotate() {
-    println!("syslogd: forcing log rotation");
-    rotate_logs();
-    println!("  done");
+/// `bytes` and then spaces to fill `width` columns -- a character to a
+/// column when the bytes are text, a byte to one when they are not.
+fn write_padded(out: &mut dyn Write, bytes: &[u8], width: usize) -> io::Result<()> {
+    out.write_all(bytes)?;
+    let used = std::str::from_utf8(bytes).map_or(bytes.len(), |s| s.chars().count());
+    write!(out, "{:pad$}", "", pad = width.saturating_sub(used))
+}
+
+/// `rotate`: the rotation the daemon does when the log grows past its limit,
+/// now. Each step that fails is said, and the status is 1.
+fn cmd_rotate() -> u8 {
+    let header = to_stdout(|out| writeln!(out, "syslogd: forcing log rotation"));
+    let failed = rotate_logs();
+    for (path, e) in &failed {
+        cannot("rotate", path, e);
+    }
+    let written = header.and_then(|_| {
+        if failed.is_empty() {
+            to_stdout(|out| writeln!(out, "  done"))
+        } else {
+            Ok(true)
+        }
+    });
+    settle(written, u8::from(!failed.is_empty()))
 }
 
 /// What [`clean_file`] did, or that there was nothing to do.
@@ -671,7 +752,7 @@ enum Cleaned {
 /// daemon cannot parse, and kept like any other, where the whole file used
 /// to be refused for it.
 fn clean_file(path: &Path, cutoff: u64) -> Result<Cleaned, String> {
-    let failed = |e: io::Error| format!("{}: {e}", quotef_os(path));
+    let failed = |e: io::Error| format!("{}: {}", quotef_os(path), errmsg::strerror(&e));
     let Some(mut held) = journalio::Locked::open(path).map_err(failed)? else {
         return Ok(Cleaned::NoFile);
     };
@@ -679,18 +760,11 @@ fn clean_file(path: &Path, cutoff: u64) -> Result<Cleaned, String> {
 
     let mut kept: Vec<&[u8]> = Vec::new();
     let mut removed = 0usize;
-    // Split on newlines, a final newline ending the last line rather than
-    // starting an empty one.
-    let body = content.strip_suffix(b"\n").unwrap_or(&content);
-    for line in body.split(|&b| b == b'\n').filter(|_| !content.is_empty()) {
+    for line in journalio::lines(&content) {
         // A line this daemon cannot parse is KEPT, not dropped: it is somebody
         // else's record, and a cleaner that deletes what it does not recognise
         // is a cleaner that loses data on a format change.
-        let old = std::str::from_utf8(line)
-            .ok()
-            .and_then(LogEntry::from_json)
-            .is_some_and(|entry| entry.timestamp < cutoff);
-        if old {
+        if Shown::of(line).is_some_and(|record| record.timestamp < cutoff) {
             removed += 1;
         } else {
             kept.push(line);
@@ -711,17 +785,21 @@ fn clean_file(path: &Path, cutoff: u64) -> Result<Cleaned, String> {
     })
 }
 
-fn cmd_clean(days: u64) {
-    let cutoff = now_secs().saturating_sub(days * 86400);
+/// `clean [DAYS]`: every record older than `days` days dropped.
+fn cmd_clean(days: u64) -> u8 {
+    let cutoff = now_secs().saturating_sub(days.saturating_mul(86400));
     match clean_file(&log_file_path(), cutoff) {
-        Ok(Cleaned::NoFile) => println!("No log file."),
+        Ok(Cleaned::NoFile) => settle(to_stdout(|out| out.write_all(b"No log file.\n")), 0),
         Ok(Cleaned::Trimmed { removed, kept }) => {
-            println!("  removed {removed} entries older than {days} days");
-            println!("  kept {kept} entries");
+            let written = to_stdout(|out| {
+                writeln!(out, "  removed {removed} entries older than {days} days")?;
+                writeln!(out, "  kept {kept} entries")
+            });
+            settle(written, 0)
         }
         Err(e) => {
-            eprintln!("syslogd: {e}");
-            process::exit(1);
+            eprintln_safe(&format!("syslogd: {e}"));
+            1
         }
     }
 }
@@ -730,99 +808,101 @@ fn cmd_clean(days: u64) {
 // Query filters
 // ============================================================================
 
+#[derive(Debug, Default)]
 struct QueryFilters {
-    level: Option<String>,
-    service: Option<String>,
-    message_contains: Option<String>,
+    /// A canonical level name, from `journalrec::priority_name`.
+    level: Option<&'static str>,
+    /// Bytes the service must contain.
+    service: Option<Vec<u8>>,
+    /// Bytes the message must contain, letters in either case.
+    message_contains: Option<Vec<u8>>,
+    /// The oldest timestamp shown.
     since: Option<u64>,
-    until: Option<u64>,
     limit: usize,
 }
 
 impl QueryFilters {
-    fn new() -> Self {
-        QueryFilters {
-            level: None,
-            service: None,
-            message_contains: None,
-            since: None,
-            until: None,
+    fn matches(&self, record: &Shown) -> bool {
+        self.level.is_none_or(|level| record.level == level)
+            && self
+                .service
+                .as_ref()
+                .is_none_or(|service| contains(&record.service, service))
+            && self
+                .message_contains
+                .as_ref()
+                .is_none_or(|text| contains_folded(&record.message, text))
+            && self.since.is_none_or(|since| record.timestamp >= since)
+    }
+
+    /// `query`'s arguments, or the message refusing them.
+    ///
+    /// Every option needs its value, and a value that does not parse is
+    /// refused. Until 2026-10-07 an option this did not know was skipped --
+    /// so a misspelt `--servce net` showed every record -- as was an option
+    /// at the end without its value, and a `--since` or `--limit` that did not
+    /// parse; and `--level` matched only this program's own spellings, so
+    /// `--level error` missed every record the daemon files as `err`.
+    fn parse(args: &[OsString]) -> Result<Self, String> {
+        let mut filters = Self {
             limit: 100,
-        }
-    }
-
-    fn matches(&self, entry: &LogEntry) -> bool {
-        if let Some(ref level) = self.level
-            && entry.level != *level
-        {
-            return false;
-        }
-
-        if let Some(ref svc) = self.service
-            && !entry.service.contains(svc.as_str())
-        {
-            return false;
-        }
-
-        if let Some(ref substr) = self.message_contains {
-            let msg_lower = entry.message.to_lowercase();
-            let sub_lower = substr.to_lowercase();
-            if !msg_lower.contains(&sub_lower) {
-                return false;
+            ..Self::default()
+        };
+        let mut words = args.iter();
+        while let Some(option) = words.next() {
+            let mut value = || {
+                words
+                    .next()
+                    .ok_or_else(|| format!("option {} needs a value", quoteaf_os(option)))
+            };
+            match option.as_encoded_bytes() {
+                b"--level" | b"-l" => {
+                    let level = value()?;
+                    filters.level = Some(
+                        level
+                            .to_str()
+                            .and_then(journalrec::priority_name)
+                            .ok_or_else(|| format!("unknown level {}", quoteaf_os(level)))?,
+                    );
+                }
+                b"--service" | b"-s" => filters.service = Some(os_bytes(value()?).into_owned()),
+                b"--msg" | b"-m" => {
+                    filters.message_contains = Some(os_bytes(value()?).into_owned());
+                }
+                b"--since" => {
+                    let hours = value()?;
+                    let n: u64 = hours
+                        .to_str()
+                        .and_then(|h| h.parse().ok())
+                        .ok_or_else(|| format!("invalid number of hours {}", quoteaf_os(hours)))?;
+                    filters.since = Some(now_secs().saturating_sub(n.saturating_mul(3600)));
+                }
+                b"--limit" | b"-n" => {
+                    let limit = value()?;
+                    filters.limit = limit
+                        .to_str()
+                        .and_then(|n| n.parse().ok())
+                        .ok_or_else(|| format!("invalid limit {}", quoteaf_os(limit)))?;
+                }
+                _ => return Err(format!("unknown query option {}", quoteaf_os(option))),
             }
         }
-
-        if let Some(since) = self.since
-            && entry.timestamp < since
-        {
-            return false;
-        }
-
-        if let Some(until) = self.until
-            && entry.timestamp > until
-        {
-            return false;
-        }
-
-        true
+        Ok(filters)
     }
+}
 
-    fn parse_args(args: &[String]) -> Self {
-        let mut filters = Self::new();
-        let mut i = 0;
+/// Whether `needle` occurs in `haystack`, byte for byte.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+}
 
-        while i < args.len() {
-            match args[i].as_str() {
-                "--level" | "-l" if i + 1 < args.len() => {
-                    filters.level = Some(args[i + 1].to_lowercase());
-                    i += 2;
-                }
-                "--service" | "-s" if i + 1 < args.len() => {
-                    filters.service = Some(args[i + 1].clone());
-                    i += 2;
-                }
-                "--msg" | "-m" if i + 1 < args.len() => {
-                    filters.message_contains = Some(args[i + 1].clone());
-                    i += 2;
-                }
-                "--since" if i + 1 < args.len() => {
-                    // Parse as hours ago.
-                    if let Ok(hours) = args[i + 1].parse::<u64>() {
-                        filters.since = Some(now_secs().saturating_sub(hours * 3600));
-                    }
-                    i += 2;
-                }
-                "--limit" | "-n" if i + 1 < args.len() => {
-                    filters.limit = args[i + 1].parse().unwrap_or(100);
-                    i += 2;
-                }
-                _ => {
-                    i += 1;
-                }
-            }
-        }
-
-        filters
+/// Whether `needle` occurs in `haystack`, letters matched in either case:
+/// every letter when both are text, as `query --msg` always matched, and
+/// ASCII letters when either is not.
+fn contains_folded(haystack: &[u8], needle: &[u8]) -> bool {
+    match (std::str::from_utf8(haystack), std::str::from_utf8(needle)) {
+        (Ok(h), Ok(n)) => h.to_lowercase().contains(&n.to_lowercase()),
+        _ => contains(&haystack.to_ascii_lowercase(), &needle.to_ascii_lowercase()),
     }
 }
 
@@ -844,116 +924,134 @@ fn format_size(bytes: u64) -> String {
 // Usage and main
 // ============================================================================
 
-fn print_usage() {
-    println!("Slate OS System Log Daemon v0.1.0");
-    println!();
-    println!("JSON-lines structured log aggregation and query service.");
-    println!("Logs are stored at {LOG_DIR}/{MAIN_LOG}.");
-    println!();
-    println!("USAGE:");
-    println!("  syslogd <command> [arguments]");
-    println!();
-    println!("COMMANDS:");
-    println!("  daemon [--socket PATH] [--journal FILE]");
-    println!("                                 Receive /dev/log's messages into the journal");
-    println!("  log <level> <service> <msg>    Write a log entry");
-    println!("  tail [n]                       Show last N entries (default: 20)");
-    println!("  follow                         Live-tail the log file");
-    println!("  query [filters]                Search log entries");
-    println!("  stats                          Show log statistics");
-    println!("  rotate                         Force log rotation");
-    println!("  clean [days]                   Remove entries older than N days (default: 30)");
-    println!();
-    println!("QUERY FILTERS:");
-    println!("  --level <level>     Filter by severity (emerg..debug)");
-    println!("  --service <name>    Filter by service name (substring)");
-    println!("  --msg <text>        Filter by message content (case-insensitive)");
-    println!("  --since <hours>     Only entries from last N hours");
-    println!("  --limit <n>         Maximum results (default: 100)");
-    println!();
-    println!("LOG LEVELS:");
-    println!("  emerg, alert, crit, error, warn, notice, info, debug");
-    println!();
-    println!("EXAMPLES:");
-    println!("  syslogd log info net.dhcp 'lease renewed for 10.0.2.15'");
-    println!("  syslogd log error fs.ext4 'journal replay failed'");
-    println!("  syslogd tail 50");
-    println!("  syslogd query --level error --since 24");
-    println!("  syslogd query --service net --msg timeout");
-    println!("  syslogd follow");
+/// `help`'s text, a literal to a line: `scripts/check-help-vs-parser.py`
+/// reads each option line on its own.
+const USAGE: &[&str] = &[
+    "Slate OS System Log Daemon v0.1.0",
+    "",
+    "JSON-lines structured log aggregation and query service.",
+    "Logs are stored at /var/log/syslog.jsonl.",
+    "",
+    "USAGE:",
+    "  syslogd <command> [arguments]",
+    "",
+    "COMMANDS:",
+    "  daemon [--socket PATH] [--journal FILE]",
+    "                                 Receive /dev/log's messages into the journal",
+    "  log <level> <service> <msg>    Write a log entry",
+    "  tail [n]                       Show last N entries (default: 20)",
+    "  follow                         Live-tail the log file",
+    "  query [filters]                Search log entries",
+    "  stats                          Show log statistics",
+    "  rotate                         Force log rotation",
+    "  clean [days]                   Remove entries older than N days (default: 30)",
+    "",
+    "QUERY FILTERS:",
+    "  --level <level>     Filter by severity (emerg..debug)",
+    "  --service <name>    Filter by service name (substring)",
+    "  --msg <text>        Filter by message content (case-insensitive)",
+    "  --since <hours>     Only entries from last N hours",
+    "  --limit <n>         Maximum results (default: 100)",
+    "",
+    "LOG LEVELS:",
+    "  emerg, alert, crit, err, warning, notice, info, debug",
+    "  (or 0-7; error, warn, emergency and critical are accepted too)",
+    "",
+    "EXAMPLES:",
+    "  syslogd log info net.dhcp 'lease renewed for 10.0.2.15'",
+    "  syslogd log err fs.ext4 'journal replay failed'",
+    "  syslogd tail 50",
+    "  syslogd query --level err --since 24",
+    "  syslogd query --service net --msg timeout",
+    "  syslogd follow",
+];
+
+fn print_usage(out: &mut dyn Write) -> io::Result<()> {
+    for line in USAGE {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+/// The words of `words` as text, or the message refusing the first that is
+/// not: `log`'s level, service and message are filed as text.
+fn texts(words: &[OsString]) -> Result<Vec<&str>, String> {
+    words
+        .iter()
+        .map(|word| {
+            word.to_str()
+                .ok_or_else(|| format!("argument {} is not text", quoteaf_os(word)))
+        })
+        .collect()
+}
+
+/// The one optional number a command takes -- `tail`'s count, `clean`'s
+/// days -- `default` when it is not given, or the message refusing it:
+/// `what` names it. A word that is not a number used to stand for the
+/// default.
+fn optional_number<T: std::str::FromStr>(
+    words: &[OsString],
+    default: T,
+    what: &str,
+) -> Result<T, String> {
+    match words {
+        [] => Ok(default),
+        [word] => word
+            .to_str()
+            .and_then(|w| w.parse().ok())
+            .ok_or_else(|| format!("invalid {what} {}", quoteaf_os(word))),
+        [_, extra, ..] => Err(unexpected(extra)),
+    }
+}
+
+/// The message refusing a word a command does not take.
+fn unexpected(word: &OsString) -> String {
+    format!("unexpected argument {}", quoteaf_os(word))
+}
+
+/// No words at all, or the message refusing the first.
+fn no_words(words: &[OsString]) -> Result<(), String> {
+    words.first().map_or(Ok(()), |word| Err(unexpected(word)))
 }
 
 fn main() -> process::ExitCode {
     // `args_os`: `env::args` panics on an argument that is not UTF-8. The
-    // daemon takes its paths as they are; the other commands still want
-    // text, and refuse an argument that is not, rather than panicking.
-    let raw: Vec<OsString> = env::args_os().collect();
-    if raw.get(1).is_some_and(|w| w.as_os_str() == "daemon") {
-        return cmd_daemon(raw.get(2..).unwrap_or_default());
+    // daemon takes its paths as they are, and `query` its patterns; a word
+    // that must be text and is not is refused with the rest.
+    let args: Vec<OsString> = env::args_os().collect();
+    let rest = args.get(2..).unwrap_or_default();
+    let command = args.get(1).map(|word| word.as_encoded_bytes());
+    if matches!(command, Some(b"daemon")) {
+        return cmd_daemon(rest);
     }
-    let mut args: Vec<String> = Vec::with_capacity(raw.len());
-    for word in raw {
-        match word.into_string() {
-            Ok(text) => args.push(text),
-            Err(word) => {
-                eprintln_safe(&format!(
-                    "syslogd: argument {} is not text",
-                    quoteaf_os(&word)
-                ));
-                return process::ExitCode::FAILURE;
+    let status = match command {
+        None | Some(b"help" | b"--help" | b"-h") => Ok(settle(to_stdout(print_usage), 0)),
+        Some(b"log") => texts(rest).and_then(|words| match words.as_slice() {
+            [level, service, message @ ..] if !message.is_empty() => {
+                Ok(cmd_log(level, service, &message.join(" "), &[]))
             }
+            _ => Err("usage: syslogd log <level> <service> <message>".to_string()),
+        }),
+        Some(b"tail") => optional_number(rest, 20, "count").map(cmd_tail),
+        Some(b"follow" | b"f") => no_words(rest).map(|()| cmd_follow()),
+        Some(b"query" | b"search") => QueryFilters::parse(rest).map(|filters| cmd_query(&filters)),
+        Some(b"stats") => no_words(rest).map(|()| cmd_stats()),
+        Some(b"rotate") => no_words(rest).map(|()| cmd_rotate()),
+        Some(b"clean" | b"prune") => optional_number(rest, 30, "number of days").map(cmd_clean),
+        Some(_) => {
+            let other = args.get(1).map(OsString::as_os_str).unwrap_or_default();
+            eprintln_safe(&format!("syslogd: unknown command {}", quoteaf_os(other)));
+            eprintln_safe("Run 'syslogd help' for usage.");
+            Ok(1)
+        }
+    };
+    match status {
+        Ok(status) => process::ExitCode::from(status),
+        Err(message) => {
+            eprintln_safe(&format!("syslogd: {message}"));
+            process::ExitCode::FAILURE
         }
     }
-
-    if args.len() < 2 {
-        print_usage();
-        process::exit(0);
-    }
-
-    match args[1].as_str() {
-        "log" => {
-            if args.len() < 5 {
-                eprintln!("usage: syslogd log <level> <service> <message>");
-                process::exit(1);
-            }
-            let level = &args[2];
-            let service = &args[3];
-            let message = args[4..].join(" ");
-
-            // Parse extra key=value pairs from environment (future).
-            cmd_log(level, service, &message, &[]);
-        }
-        "tail" => {
-            let count = if args.len() >= 3 {
-                args[2].parse().unwrap_or(20)
-            } else {
-                20
-            };
-            cmd_tail(count);
-        }
-        "follow" | "f" => cmd_follow(),
-        "query" | "search" => {
-            let filters = QueryFilters::parse_args(&args[2..]);
-            cmd_query(&filters);
-        }
-        "stats" => cmd_stats(),
-        "rotate" => cmd_rotate(),
-        "clean" | "prune" => {
-            let days = if args.len() >= 3 {
-                args[2].parse().unwrap_or(30)
-            } else {
-                30
-            };
-            cmd_clean(days);
-        }
-        "help" | "--help" | "-h" => print_usage(),
-        other => {
-            eprintln!("unknown command: {other}");
-            eprintln!("Run 'syslogd help' for usage.");
-            process::exit(1);
-        }
-    }
-    process::ExitCode::SUCCESS
 }
 
 #[cfg(test)]
@@ -1080,5 +1178,238 @@ mod tests {
         );
         let after = fs::read_to_string(&path).expect("read back");
         assert!(after.contains("not json at all"));
+    }
+
+    /// A record the daemon filed with a message that is not text -- an array
+    /// of its bytes -- is cleaned like any other. The old parser could not
+    /// read one, so it was kept for ever.
+    #[test]
+    fn a_record_whose_message_is_bytes_is_cleaned_too() {
+        let dir = ScratchDir::new("syslogd_clean");
+        let old = r#"{"ts":50,"level":"info","service":"t","msg":[98,255]}"#;
+        let path = log_with(&dir, &[old, &entry(250)]);
+        assert_eq!(
+            clean_file(&path, 100),
+            Ok(Cleaned::Trimmed {
+                removed: 1,
+                kept: 1
+            })
+        );
+    }
+
+    // --- Reading a record (the shared parser) ---
+
+    fn shown(line: &str) -> Shown {
+        Shown::of(line.as_bytes()).expect("a record")
+    }
+
+    fn short(record: &Shown) -> Vec<u8> {
+        let mut out = Vec::new();
+        record.write_short(&mut out).unwrap();
+        out
+    }
+
+    /// `café` used to come out as `cafÃ©`: each byte pushed `as char`.
+    #[test]
+    fn a_record_keeps_its_characters() {
+        let record = shown(
+            "{\"ts\":0,\"level\":\"info\",\"service\":\"d\u{e9}\",\"msg\":\"caf\u{e9} \\u00e9\"}",
+        );
+        assert_eq!(record.message, "caf\u{e9} \u{e9}".as_bytes());
+        assert_eq!(record.service, "d\u{e9}".as_bytes());
+        assert_eq!(
+            short(&record),
+            "unknown info    [d\u{e9}] caf\u{e9} \u{e9}\n".as_bytes()
+        );
+    }
+
+    /// A message that is not text is an array of its bytes (design-decisions
+    /// §1063) -- how this program's own daemon files one. The old parser
+    /// failed on the array, and the record was never shown.
+    #[test]
+    fn a_message_that_is_not_text_is_shown_as_its_bytes() {
+        let record = shown(r#"{"ts":0,"level":"err","service":"t","msg":[98,97,100,32,255]}"#);
+        assert_eq!(record.message, b"bad \xff");
+        assert_eq!(short(&record), b"unknown err     [t] bad \xff\n");
+    }
+
+    /// Every spelling of a level is its canonical name: `syslogd log` wrote
+    /// `error` and `warn` where the daemon, `logger` and `systemd-cat` write
+    /// `err` and `warning`.
+    #[test]
+    fn levels_are_read_by_their_canonical_names() {
+        for (written, read) in [
+            ("error", "err"),
+            ("warn", "warning"),
+            ("3", "err"),
+            ("err", "err"),
+        ] {
+            let record = shown(&format!(r#"{{"ts":1,"level":"{written}","msg":"m"}}"#));
+            assert_eq!(record.level, read, "{written}");
+        }
+        assert_eq!(shown(r#"{"ts":1,"level":"loud","msg":"m"}"#).level, "loud");
+        assert_eq!(shown(r#"{"ts":1,"msg":"m"}"#).level, "");
+    }
+
+    #[test]
+    fn a_line_that_is_not_a_record_is_none() {
+        assert_eq!(Shown::of(b"not json"), None);
+        assert_eq!(Shown::of(b"{\"msg\":\"\xff\"}"), None);
+        assert_eq!(Shown::of(b""), None);
+    }
+
+    // --- Query filters ---
+
+    fn words(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    fn query(list: &[&str]) -> Result<QueryFilters, String> {
+        QueryFilters::parse(&words(list))
+    }
+
+    /// What used to be skipped -- an unknown option, an option missing its
+    /// value, a value that does not parse -- is refused.
+    #[test]
+    fn a_query_refuses_what_it_used_to_skip() {
+        let err = |list: &[&str]| query(list).err().unwrap();
+        assert_eq!(err(&["--servce", "net"]), "unknown query option '--servce'");
+        assert_eq!(err(&["--level"]), "option '--level' needs a value");
+        assert_eq!(err(&["--level", "loud"]), "unknown level 'loud'");
+        assert_eq!(
+            err(&["--since", "yesterday"]),
+            "invalid number of hours 'yesterday'"
+        );
+        assert_eq!(err(&["--limit", "-1"]), "invalid limit '-1'");
+    }
+
+    #[test]
+    fn a_query_reads_its_filters() {
+        let f = query(&["-l", "error", "-s", "net", "-m", "Lease", "-n", "5"]).unwrap();
+        assert_eq!(f.level, Some("err"));
+        assert_eq!(f.service.as_deref(), Some(&b"net"[..]));
+        assert_eq!(f.message_contains.as_deref(), Some(&b"Lease"[..]));
+        assert_eq!(f.limit, 5);
+        let f = query(&["--since", "24"]).unwrap();
+        assert!(f.since.is_some_and(|since| since <= now_secs()));
+        assert_eq!(query(&[]).unwrap().limit, 100);
+        // Hours enough to overflow a multiplication saturate instead.
+        let most = u64::MAX.to_string();
+        assert_eq!(query(&["--since", most.as_str()]).unwrap().since, Some(0));
+    }
+
+    #[test]
+    fn a_query_matches_by_level_service_and_message() {
+        let record =
+            shown(r#"{"ts":10,"level":"error","service":"net.dhcp","msg":"Lease RENEWED"}"#);
+        let matches = |list: &[&str]| query(list).unwrap().matches(&record);
+        assert!(matches(&["--level", "err"]));
+        assert!(matches(&["--level", "3"]));
+        assert!(!matches(&["--level", "info"]));
+        assert!(matches(&["--service", "dhcp"]));
+        assert!(!matches(&["--service", "DHCP"]));
+        assert!(matches(&["--msg", "lease renewed"]));
+        assert!(!matches(&["--msg", "expired"]));
+    }
+
+    #[test]
+    fn messages_are_matched_in_either_case() {
+        assert!(contains_folded(
+            "CAF\u{c9}".as_bytes(),
+            "caf\u{e9}".as_bytes()
+        ));
+        assert!(contains_folded(b"BAD \xff", b"bad"));
+        assert!(contains_folded(b"bad \xff", b"\xff"));
+        assert!(!contains_folded(b"abc", b"abcd"));
+        assert!(contains_folded(b"", b""));
+    }
+
+    // --- Arguments ---
+
+    #[test]
+    fn a_count_is_a_number_or_refused() {
+        assert_eq!(optional_number::<usize>(&words(&[]), 20, "count"), Ok(20));
+        assert_eq!(optional_number::<usize>(&words(&["5"]), 20, "count"), Ok(5));
+        assert_eq!(
+            optional_number::<usize>(&words(&["banana"]), 20, "count"),
+            Err("invalid count 'banana'".to_string())
+        );
+        assert_eq!(
+            optional_number::<u64>(&words(&["1", "2"]), 30, "number of days"),
+            Err("unexpected argument '2'".to_string())
+        );
+        assert_eq!(
+            no_words(&words(&["x"])),
+            Err("unexpected argument 'x'".to_string())
+        );
+        assert_eq!(no_words(&words(&[])), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_word_that_is_not_text_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let word = std::ffi::OsStr::from_bytes(b"a\xffb").to_os_string();
+        let args = [OsString::from("info"), word];
+        assert_eq!(
+            texts(&args),
+            Err("argument 'a'$'\\377''b' is not text".to_string())
+        );
+    }
+
+    // --- Output ---
+
+    #[test]
+    fn a_failed_write_is_status_one() {
+        assert_eq!(settle(Ok(true), 0), 0);
+        assert_eq!(settle(Ok(false), 1), 1);
+        assert_eq!(settle(Err(io::Error::other("no space")), 0), 1);
+    }
+
+    #[test]
+    fn the_usage_is_written_a_line_at_a_time() {
+        let mut out = Vec::new();
+        print_usage(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), USAGE.len());
+        assert!(text.contains("  tail [n]"));
+    }
+
+    #[test]
+    fn padding_counts_characters_when_it_can() {
+        let mut out = Vec::new();
+        write_padded(&mut out, "d\u{e9}".as_bytes(), 4).unwrap();
+        assert_eq!(out, "d\u{e9}  ".as_bytes());
+        let mut out = Vec::new();
+        write_padded(&mut out, b"\xff", 3).unwrap();
+        assert_eq!(out, b"\xff  ");
+        let mut out = Vec::new();
+        write_padded(&mut out, b"toolong", 3).unwrap();
+        assert_eq!(out, b"toolong");
+    }
+
+    // --- Rotation ---
+
+    /// Each file moves up one; nothing is reported when nothing failed.
+    #[test]
+    fn a_rotation_moves_each_file_up_one() {
+        let dir = ScratchDir::new("syslogd_rotate");
+        let live = dir.path("syslog.jsonl");
+        fs::write(&live, "live\n").unwrap();
+        fs::write(rotated_path_of(&live, 1), "one\n").unwrap();
+        fs::write(rotated_path_of(&live, MAX_ROTATED_FILES), "oldest\n").unwrap();
+        let failed = rotate_journal(&live);
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(!live.exists());
+        assert_eq!(
+            fs::read_to_string(rotated_path_of(&live, 1)).unwrap(),
+            "live\n"
+        );
+        assert_eq!(
+            fs::read_to_string(rotated_path_of(&live, 2)).unwrap(),
+            "one\n"
+        );
+        assert!(!rotated_path_of(&live, MAX_ROTATED_FILES + 1).exists());
+        assert!(!rotated_path_of(&live, MAX_ROTATED_FILES).exists());
     }
 }

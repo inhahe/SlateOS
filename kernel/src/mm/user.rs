@@ -119,24 +119,30 @@ pub fn validate_user_write(ptr: u64, len: usize) -> KernelResult<()> {
 /// Check that `[ptr, ptr+len)` could be a user buffer, without touching it.
 ///
 /// The arithmetic half of [`validate_user_read`]: an empty span is always
-/// fine; otherwise the pointer is not null, the end does not wrap, and the
-/// whole span lies below `USER_SPACE_END`.  No page is examined, so the cost
-/// is the same however long the span -- which is the point.  A handler that
-/// will touch only the first part of a buffer (one pipe call moves at most one
-/// pipe buffer) checks the caller's whole claim with this, as Linux's
-/// `access_ok` does, and validates only the part it touches, through the copy.
+/// fine; otherwise the end does not wrap, and the whole span lies below
+/// `USER_SPACE_END`.  No page is examined, so the cost is the same however
+/// long the span -- which is the point.  A handler that will touch only the
+/// first part of a buffer (one pipe call moves at most one pipe buffer)
+/// checks the caller's whole claim with this, as Linux's `access_ok` does,
+/// and validates only the part it touches, through the copy.
+///
+/// A null pointer passes, as `access_ok` passes it: it is a user address no
+/// page is mapped at, so the copy faults -- and only where bytes would have
+/// moved, which is what lets a read of a NULL buffer at the end of a file be
+/// 0, and one on an empty non-blocking pipe `EAGAIN`, as on Linux. This
+/// refused it until 2026-10-08, which put `EFAULT` in front of every one of
+/// those answers.
 ///
 /// **Kernel context bypass**: as [`validate_user_read`].
 ///
 /// # Errors
 ///
-/// [`KernelError::InvalidAddress`] if the span is null, wraps, or reaches
-/// kernel space.
+/// [`KernelError::InvalidAddress`] if the span wraps or reaches kernel space.
 pub fn check_user_span(ptr: u64, len: usize) -> KernelResult<()> {
     if is_kernel_context() || len == 0 {
         return Ok(());
     }
-    user_span_end(ptr, len).map(|_| ())
+    access_ok_end(ptr, len).map(|_| ())
 }
 
 /// Validate that a single user-space pointer refers to a valid, mapped
@@ -173,15 +179,11 @@ fn is_kernel_context() -> bool {
 /// etc.) calls `is_kernel_context()` first and skips this function
 /// for bare kernel tasks.
 ///
-/// The end of `[ptr, ptr+len)` if it is a well-formed user span: `ptr` not
-/// null, `ptr + len` not wrapping, and no byte at or above `USER_SPACE_END`.
-/// The arithmetic shared by [`check_user_span`] and [`validate_user_range`];
-/// both handle `len == 0` first, since an empty span is valid anywhere.
-fn user_span_end(ptr: u64, len: usize) -> KernelResult<u64> {
-    // Null pointer is never valid.
-    if ptr == 0 {
-        return Err(KernelError::InvalidAddress);
-    }
+/// The end of `[ptr, ptr+len)` if it lies in user space -- `ptr + len` not
+/// wrapping, and no byte at or above `USER_SPACE_END` -- whatever `ptr` is,
+/// null included: Linux's `access_ok`, [`check_user_span`]'s arithmetic.
+/// The callers handle `len == 0` first, since an empty span is valid anywhere.
+fn access_ok_end(ptr: u64, len: usize) -> KernelResult<u64> {
     // Overflow is the failure condition here, not a bug: a wrapping span.
     let end = ptr
         .checked_add(len as u64)
@@ -191,6 +193,16 @@ fn user_span_end(ptr: u64, len: usize) -> KernelResult<u64> {
         return Err(KernelError::InvalidAddress);
     }
     Ok(end)
+}
+
+/// [`access_ok_end`] for a span about to be walked page by page
+/// ([`validate_user_range`]): a null pointer is refused too, as no page is
+/// ever mapped there.
+fn user_span_end(ptr: u64, len: usize) -> KernelResult<u64> {
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    access_ok_end(ptr, len)
 }
 
 /// Arithmetic here is for address-range boundary checking.  Overflow
@@ -1456,6 +1468,17 @@ pub fn self_test() -> KernelResult<()> {
                 ptr,
                 len,
                 if ok { "a span" } else { "refused" }
+            );
+            return Err(KernelError::InternalError);
+        }
+        // `access_ok`'s half differs in one place: a null pointer passes, the
+        // copy faulting at it.
+        if access_ok_end(ptr, len).is_ok() != (ok || ptr == 0) {
+            crate::serial_println!(
+                "[user]   FAIL: access_ok_end({:#x}, {:#x}) should be {}",
+                ptr,
+                len,
+                if ok || ptr == 0 { "a span" } else { "refused" }
             );
             return Err(KernelError::InternalError);
         }

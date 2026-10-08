@@ -10212,7 +10212,6 @@ fn notify_parent_of_job_control(
     ev: crate::proc::pcb::JobControlEvent,
 ) {
     use crate::proc::pcb;
-    const SIGCHLD: u32 = 17;
     let Some(parent) = pcb::parent(pid).filter(|&p| p != 0 && p != pid) else {
         return;
     };
@@ -10227,7 +10226,9 @@ fn notify_parent_of_job_control(
         uid,
         ev.sigchld_code_and_status(),
     );
-    crate::proc::signal::set_pending_info(parent, SIGCHLD, info);
+    // Dropped as it is sent if SIGCHLD is at its default, which ignores it,
+    // and nothing blocks it -- as Linux sends it.
+    super::linux::post_linux_sigchld(parent, info);
 }
 
 /// Carry out, now, what `SIGCONT` or `SIGKILL` -- just queued on process

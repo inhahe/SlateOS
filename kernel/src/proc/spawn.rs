@@ -24196,6 +24196,90 @@ pub fn self_test_linux_stopped_signals() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of ignored signals dropped as they are sent, through the Linux
+/// ABI: [`elf::build_linux_ignored_at_send_test_elf`] (`build/sigdfltest.c`).
+/// A program with a `SIGUSR1` handler -- so a trampoline is registered -- is
+/// not woken from a sleep by a child's `SIGCHLD`, a `SIGWINCH` or an ignored
+/// `SIGURG`; a blocked `SIGCHLD` is kept, and discarded once unblocked at its
+/// default; a `SIGUSR1` does wake it (`signal::classify`,
+/// `syscall::linux::post_linux_sigchld`).
+pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux ignored signals dropped at the send (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_ignored_at_send_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-ignored-at-send"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-ignored-at-send",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ignored-at-send spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ignored signals at the send (ring 3) — the program did not finish \
+             in 120 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "rt_sigaction or rt_sigpending failed",
+            Some(0x32 | 0x33) => "fork or wait4 failed",
+            Some(0x40) => "a child's exit (SIGCHLD at its default) cut a sleep short",
+            Some(0x41) => "a child's exit left SIGCHLD pending at its default",
+            Some(0x42 | 0x44) => "rt_sigprocmask failed",
+            Some(0x43) => "a blocked SIGCHLD was not kept pending",
+            Some(0x45) => "an unblocked SIGCHLD at its default was not discarded",
+            Some(0x46) => "a SIGWINCH at its default cut a sleep short",
+            Some(0x47) => "a SIGURG set to SIG_IGN cut a sleep short",
+            Some(0x48) => "a SIGUSR1 with a handler did not cut a sleep short with EINTR",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ignored signals at the send (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux ignored signals dropped at the send (ring 3: SIGCHLD, SIGWINCH and an \
+         ignored SIGURG wake nothing, a blocked SIGCHLD is kept, a handled SIGUSR1 wakes): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

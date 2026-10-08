@@ -2210,7 +2210,9 @@ fn notify_tracer(
         code_status,
     );
     if linux {
-        crate::proc::signal::set_pending_info(tracer, SIGCHLD, info);
+        // Dropped as it is sent if the tracer ignores SIGCHLD (its default)
+        // and blocks nothing -- GDB has a handler.
+        crate::syscall::linux::post_linux_sigchld(tracer, info);
     } else {
         // SIGCHLD's default is to be ignored: a native tracer with no handler
         // drops it, one with a handler has it pending.

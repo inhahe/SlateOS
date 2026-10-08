@@ -1076,15 +1076,15 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                             child_uid,
                             ended.sigchld_code_and_status(),
                         );
-                        // Linux-ABI parents deliver SIGCHLD via their
-                        // per-signal rt_sigaction disposition
-                        // (deliver_linux_signal consults linux_disposition),
-                        // so mark it pending directly. Native parents go
+                        // Linux-ABI parents: their per-signal rt_sigaction
+                        // disposition decides -- dropped as it is sent when
+                        // it ignores SIGCHLD and nothing blocks it, else
+                        // pending for deliver_linux_signal. Native parents go
                         // through classify_post so a registered trampoline
                         // handler runs and a no-handler parent correctly
                         // drops it (SIGCHLD default action = ignore).
                         if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
-                            crate::proc::signal::set_pending_info(parent, 17, info);
+                            crate::syscall::linux::post_linux_sigchld(parent, info);
                         } else {
                             // Discarding the PostDecision is intentional:
                             // SIGCHLD's default is ignore, so a no-handler

@@ -2215,6 +2215,26 @@ pub fn classify_post_thread_info(
     classify(pid, Some(tid), sig, info)
 }
 
+/// Whether a signal sent to process `pid` would wait, blocked: every thread
+/// blocks `sig` (a process-directed signal waits only while each does). For a
+/// sender deciding whether an ignored signal is kept or dropped as it is sent
+/// (`syscall::linux::post_linux_sigchld`).
+#[must_use]
+pub fn blocked_by_every_thread(pid: ProcessId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| blocked_for_post(pid, None, bit))
+}
+
+/// Whether Linux-ABI process `pid` leaves `sig` at its default action, by its
+/// `rt_sigaction` entry -- which the native trampoline test cannot see: a
+/// Linux program with a handler for any signal has a trampoline registered.
+fn linux_default_action(pid: ProcessId, sig: u32) -> bool {
+    crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux)
+        && matches!(
+            crate::syscall::linux::linux_disposition(pid, sig),
+            crate::syscall::linux::LinuxDisposition::Default
+        )
+}
+
 /// Whether a signal posted to `target` (a thread of `pid`, or `None` the
 /// process) finds `bit` blocked: the thread's mask, or for the process every
 /// thread's.
@@ -2305,6 +2325,20 @@ fn classify(pid: ProcessId, target: Option<TaskId>, sig: u32, info: SigInfo) -> 
         if blocked_now {
             post_to(pid, target, sig, info);
         }
+        return PostDecision::Drop;
+    }
+
+    // A Linux program's action for each signal is its `rt_sigaction` entry,
+    // which the trampoline test below does not see: one left at the default,
+    // when the default is to ignore it (`SIGCHLD`, `SIGWINCH`, `SIGURG`), is
+    // dropped as it is sent unless it is blocked -- Linux's `sig_ignored`.
+    // Queued for the trampoline, as it was until 2026-10-08, it woke the
+    // program's interruptible sleeps for a signal its delivery then
+    // discarded.
+    if !blocked_now
+        && default_action(sig) == DefaultAction::Ignore
+        && linux_default_action(pid, sig)
+    {
         return PostDecision::Drop;
     }
 

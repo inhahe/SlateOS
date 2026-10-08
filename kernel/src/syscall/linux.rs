@@ -390,6 +390,28 @@ pub fn linux_wants_cldstop(parent: pcb::ProcessId) -> bool {
     act.sa_handler != SIG_IGN && act.sa_flags & sa_flags::SA_NOCLDSTOP == 0
 }
 
+/// Send Linux-ABI process `parent` a `SIGCHLD` with record `info` -- a
+/// child's end, stop or continue, a tracee's -- as Linux's
+/// `__send_signal_locked` sends it: dropped as it is sent when its action
+/// ignores it (`SIG_IGN`, or the default, which for `SIGCHLD` is to ignore)
+/// and no thread blocks it, unless a tracer holds the parent (a tracer sees
+/// even ignored signals); otherwise queued. A blocked one is kept, as the
+/// action may change before it is unblocked. Until 2026-10-08 every one was
+/// queued, and woke the parent's interruptible sleeps for a signal its
+/// delivery then discarded.
+pub fn post_linux_sigchld(parent: pcb::ProcessId, info: crate::proc::signal::SigInfo) {
+    const SIGCHLD: u32 = 17;
+    let act = linux_sigaction_get(parent, SIGCHLD);
+    let ignores = act.sa_handler == SIG_IGN || act.sa_handler == SIG_DFL;
+    if ignores
+        && !crate::proc::signal::blocked_by_every_thread(parent, SIGCHLD)
+        && !crate::proc::ptrace::process_is_traced(parent)
+    {
+        return;
+    }
+    crate::proc::signal::set_pending_info(parent, SIGCHLD, info);
+}
+
 // ---------------------------------------------------------------------------
 // Linux x86_64 syscall numbers (subset).
 //

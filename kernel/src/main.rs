@@ -3620,6 +3620,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_stopped_signals(),
     );
+    // An ignored signal is dropped as it is sent unless blocked, so it wakes
+    // nothing (crate::proc::signal::classify, linux::post_linux_sigchld).
+    selftest::dispatch_debug(
+        "Linux ignored signals dropped at the send (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_ignored_at_send(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

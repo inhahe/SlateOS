@@ -4699,7 +4699,13 @@ pub unsafe fn init() {
         // exhausted or wedged (hardware IST switches the stack before pushing
         // the frame — a stub-level RSP switch cannot).  See gdt::NMI_STACKS.
         idt.entries[2] = IdtEntry::new(isr_nmi as *const () as u64, cs, 2, 0);
-        idt.entries[3] = IdtEntry::new(isr_breakpoint as *const () as u64, cs, 0, 0);
+        // DPL 3, as Linux's `SYSG(X86_TRAP_BP)`: a program's `int3` is an
+        // instruction it may execute, and its #BP is the SIGTRAP a debugger's
+        // breakpoint gives (`handle_breakpoint`). At DPL 0 a ring-3 `int3`
+        // was a #GP instead -- SIGSEGV, never SIGTRAP -- until 2026-10-08:
+        // the ptrace tier-2 test's thread stopped with SIGSEGV at its
+        // breakpoint (debug boot 13 of lane-a).
+        idt.entries[3] = IdtEntry::new(isr_breakpoint as *const () as u64, cs, 0, 3);
         idt.entries[4] = IdtEntry::new(isr_overflow as *const () as u64, cs, 0, 0);
         idt.entries[5] = IdtEntry::new(isr_bound_range as *const () as u64, cs, 0, 0);
         idt.entries[6] = IdtEntry::new(isr_invalid_opcode as *const () as u64, cs, 0, 0);

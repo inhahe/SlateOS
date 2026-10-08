@@ -29456,21 +29456,47 @@ pub fn self_test_callmax_abi() -> KernelResult<()> {
     // loaded host.  Bounded, so a regression that blocks -- `0x55` without
     // the span check reads an empty pipe forever -- fails rather than wedging
     // the boot.
-    let deadline = crate::hrtimer::now_ns().saturating_add(5_000_000_000); // 5 s
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
+    //
+    // What fails is a probe that has *waited* -- blocked, the regression's
+    // shape -- for 5 s, judged by its task's scheduler state rather than by
+    // the clock alone. A probe still running when 5 s are up is only slow:
+    // TCG with another lane compiling beside it, which debug boot 13 of
+    // lane-a (2026-10-08) reported as a failure (state Running) of a probe
+    // that had passed that morning. It gets up to 120 s, and still fails then.
+    const BLOCKED_NS: u64 = 5_000_000_000;
+    const RUNNING_NS: u64 = 120_000_000_000;
+    let start = crate::hrtimer::now_ns();
+    let mut blocked_since: Option<u64> = None;
+    let verdict = loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break None;
+        }
+        let now = crate::hrtimer::now_ns();
+        let task = crate::sched::task_state(result.task_id);
+        if task == Some(crate::sched::task::TaskState::Blocked) {
+            let since = *blocked_since.get_or_insert(now);
+            if now.saturating_sub(since) >= BLOCKED_NS {
+                break Some("blocked for 5 s");
+            }
+        } else {
+            blocked_since = None;
+        }
+        if now.saturating_sub(start) >= RUNNING_NS {
+            break Some("still not done after 120 s");
+        }
         crate::sched::yield_now();
-    }
+    };
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    if state != Some(pcb::ProcessState::Zombie) {
+    if let Some(why) = verdict {
         serial_println!(
-            "[spawn]   FAIL: per-call copy bound (ring 3) — probe did not exit within 5s \
-             (state {:?}); a blocked 0x55 means the span check is gone",
-            state
+            "[spawn]   FAIL: per-call copy bound (ring 3) — probe did not exit: {} \
+             (state {:?}, task {:?}); a blocked 0x55 means the span check is gone",
+            why,
+            state,
+            crate::sched::task_state(result.task_id)
         );
         // Forced down, as the other runners here do, so a blocked probe
         // cannot outlive its test.

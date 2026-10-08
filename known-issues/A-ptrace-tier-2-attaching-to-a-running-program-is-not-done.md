@@ -50,9 +50,12 @@ Tier 2 but attaching
   kept across its exec of a privileged program, from reaching the new
   image (the Mempodipper hole). Checked by `procfs::self_test`.
 - **An untraced native program's `int3` or single step** is logged and the
-  program runs on, as before: the native exception set has no breakpoint or
-  trace code (`proc::exception::ExceptionCode`). A Linux program gets
-  `SIGTRAP`, as on Linux.
+  program runs on: the native exception set has no breakpoint or trace code
+  (`proc::exception::ExceptionCode`). A Linux program, and any traced one,
+  gets `SIGTRAP`, as on Linux. (Until 2026-10-08 the IDT's breakpoint gate
+  had DPL 0, so a ring-3 `int3` was a #GP -- `SIGSEGV`, or a native
+  program killed -- and none of this ran; debug boot 13 of lane-a's ptrace
+  tier-2 test stopped with `SIGSEGV` at its breakpoint.)
 - **Small divergences, recorded so they are not rediscovered:** this
   kernel's vfork does not hold the parent, so `PTRACE_EVENT_VFORK_DONE`
   follows `PTRACE_EVENT_VFORK` at once; a single step over a `syscall`

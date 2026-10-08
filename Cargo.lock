@@ -688,6 +688,7 @@ dependencies = [
  "ulclosestream",
  "ulcolors",
  "ulstrutils",
+ "ultimeutils",
  "userspec",
  "utmpfile",
 ]
@@ -4493,6 +4494,14 @@ version = "0.1.0"
 dependencies = [
  "quoting",
  "scratchdir",
+ "ulstrutils",
+]
+
+[[package]]
+name = "ultimeutils"
+version = "0.1.0"
+dependencies = [
+ "localtime",
  "ulstrutils",
 ]
 

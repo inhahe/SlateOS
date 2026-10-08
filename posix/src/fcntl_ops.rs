@@ -41,6 +41,28 @@ pub const F_SETLK: i32 = 6;
 pub const F_SETLKW: i32 = 7;
 /// Duplicate fd with close-on-exec.
 pub const F_DUPFD_CLOEXEC: i32 = 1030;
+/// Seal the file: forbid, from now on, what the seals in `arg` name.
+pub const F_ADD_SEALS: i32 = 1033;
+/// Read the file's seals.
+pub const F_GET_SEALS: i32 = 1034;
+
+// ---------------------------------------------------------------------------
+// File seals (F_ADD_SEALS / F_GET_SEALS)
+// ---------------------------------------------------------------------------
+
+/// No more seals may be added.
+pub const F_SEAL_SEAL: i32 = 0x01;
+/// The file may not shrink.
+pub const F_SEAL_SHRINK: i32 = 0x02;
+/// The file may not grow.
+pub const F_SEAL_GROW: i32 = 0x04;
+/// The file may not be written (here, not truncated either).
+pub const F_SEAL_WRITE: i32 = 0x08;
+/// Linux's: no write through a mapping made from now on. The kernel here has
+/// no such seal, and refuses it (`EINVAL`).
+pub const F_SEAL_FUTURE_WRITE: i32 = 0x10;
+/// No change to an execute bit.
+pub const F_SEAL_EXEC: i32 = 0x20;
 
 // ---------------------------------------------------------------------------
 // Advisory lock types (l_type in struct flock)
@@ -161,6 +183,8 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
             dup_fd_from(fd, arg as i32, true)
         }
         F_GETLK | F_SETLK | F_SETLKW => record_lock(&entry, cmd, arg as *mut Flock),
+        F_ADD_SEALS => add_seals(&entry, arg),
+        F_GET_SEALS => get_seals(&entry),
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -220,6 +244,79 @@ fn give_kernel_append(handle: u64, append: bool) {
     if ret >= 0 {
         KERNEL_KEEPS_APPEND.store(true, Ordering::Relaxed);
     }
+}
+
+// ---------------------------------------------------------------------------
+// File seals
+// ---------------------------------------------------------------------------
+
+/// `fcntl(fd, F_ADD_SEALS, seals)`: seal the file `entry` is open on, through
+/// lane A's `SYS_FS_ADD_SEALS` (1124). Seals add up and are never removed;
+/// they end with the file, and every route to it -- `write`, `ftruncate`, a
+/// writable mapping, another descriptor, another process -- is refused what
+/// they forbid (`EPERM`). 0, or -1 with errno.
+///
+/// Linux's answers: a descriptor that is no file, or seals it has no bit
+/// for, `EINVAL`; a descriptor not open for writing, or a file already
+/// sealed with `F_SEAL_SEAL`, `EPERM`. Not Linux's: any file may be sealed,
+/// where Linux seals only a `memfd` (and `tmpfs`) file made to allow it and
+/// answers `EINVAL` for the rest; `F_SEAL_WRITE` forbids a truncate too,
+/// where Linux leaves the size to `F_SEAL_SHRINK` and `F_SEAL_GROW` -- the
+/// kernel's seals fix a file's contents outright (lane A's design-decisions
+/// 1526); and `F_SEAL_FUTURE_WRITE`, which the kernel does not have, is
+/// `EINVAL`. A kernel without the call can seal nothing:
+/// `EINVAL`, what Linux says of a file that cannot be sealed, and what this
+/// answered for every file until 2026-10-07.
+fn add_seals(entry: &fdtable::FdEntry, arg: i64) -> i32 {
+    match seals_answer(entry, |handle| {
+        crate::syscall::syscall2(
+            crate::syscall::SYS_FS_ADD_SEALS,
+            handle,
+            u64::try_from(arg).unwrap_or(u64::MAX),
+        )
+    }) {
+        Ok(_) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// `fcntl(fd, F_GET_SEALS)`: the seals of the file `entry` is open on
+/// (`SYS_FS_GET_SEALS`, 1125), in the `F_SEAL_*` bits; 0 for none. `EINVAL`
+/// for a descriptor that is no file, and on a kernel without the call, as
+/// [`add_seals`] says.
+fn get_seals(entry: &fdtable::FdEntry) -> i32 {
+    match seals_answer(entry, |handle| {
+        crate::syscall::syscall1(crate::syscall::SYS_FS_GET_SEALS, handle)
+    }) {
+        Ok(seals) => seals,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// A seals call `call` on the file `entry` holds: its answer, the seals; or
+/// the errno -- `EINVAL` for a descriptor that is no file and for a kernel
+/// without the calls (or, in the host build, none), the rest as the shared
+/// mapping says (`NotPermitted` is `EPERM`).
+fn seals_answer(entry: &fdtable::FdEntry, call: impl FnOnce(u64) -> i64) -> Result<i32, i32> {
+    if entry.kind != fdtable::HandleKind::File {
+        return Err(errno::EINVAL);
+    }
+    let ret = call(entry.handle);
+    if ret == errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    {
+        return Err(errno::EINVAL);
+    }
+    if ret < 0 {
+        return Err(errno::errno_for(ret));
+    }
+    Ok(i32::try_from(ret).unwrap_or(i32::MAX))
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +488,63 @@ mod tests {
     fn test_f_dupfd_cloexec_value() {
         // Linux defines F_DUPFD_CLOEXEC = 1030.
         assert_eq!(F_DUPFD_CLOEXEC, 1030);
+    }
+
+    /// The seal commands and bits are Linux's numbers.
+    #[test]
+    fn test_seal_constants_are_linuxs() {
+        assert_eq!((F_ADD_SEALS, F_GET_SEALS), (1033, 1034));
+        assert_eq!(
+            (
+                F_SEAL_SEAL,
+                F_SEAL_SHRINK,
+                F_SEAL_GROW,
+                F_SEAL_WRITE,
+                F_SEAL_FUTURE_WRITE,
+                F_SEAL_EXEC
+            ),
+            (0x01, 0x02, 0x04, 0x08, 0x10, 0x20)
+        );
+    }
+
+    /// A descriptor that is no file has no seals (`EINVAL`); a file's are the
+    /// kernel's, which the host -- having no kernel -- answers as a kernel
+    /// without the calls does, `EINVAL`. A refusal is the shared mapping's
+    /// (`NotPermitted` is `EPERM`); an answer is the seals themselves.
+    #[test]
+    fn test_seals_answer_as_linux_does() {
+        let console = fdtable::get_fd(0).expect("the console");
+        assert_eq!(seals_answer(&console, |_| 0), Err(errno::EINVAL));
+        let file = fdtable::FdEntry {
+            kind: fdtable::HandleKind::File,
+            handle: 7,
+            flags: 0,
+            status_flags: 0,
+        };
+        assert_eq!(
+            seals_answer(&file, |_| crate::syscall::HOST_ENOSYS),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            seals_answer(&file, |_| errno::native::NO_SUCH_SYSCALL),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            seals_answer(&file, |_| errno::native::NOT_PERMITTED),
+            Err(errno::EPERM)
+        );
+        assert_eq!(
+            seals_answer(&file, |handle| {
+                assert_eq!(handle, 7);
+                0x0a
+            }),
+            Ok(0x0a)
+        );
+        crate::errno::set_errno(0);
+        assert_eq!(fcntl(0, F_GET_SEALS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), errno::EINVAL);
+        assert_eq!(fcntl(0, F_ADD_SEALS, i64::from(F_SEAL_WRITE)), -1);
+        assert_eq!(crate::errno::get_errno(), errno::EINVAL);
     }
 
     // -- Lock type constants --

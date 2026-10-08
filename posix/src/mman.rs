@@ -1286,6 +1286,25 @@ mod tests {
         }
     }
 
+    /// A memfd starts sealed as Linux's `memfd_create` makes it: `F_SEAL_SEAL`
+    /// unless sealing is allowed, `F_SEAL_EXEC` with `MFD_NOEXEC_SEAL`
+    /// (which allows it), nothing with `MFD_ALLOW_SEALING` alone.
+    #[test]
+    fn test_memfd_starts_sealed_as_linux_makes_it() {
+        use crate::fcntl_ops::{F_SEAL_EXEC, F_SEAL_SEAL};
+        use crate::linux_memfd::{MFD_ALLOW_SEALING, MFD_CLOEXEC, MFD_NOEXEC_SEAL};
+        assert_eq!(initial_memfd_seals(0), F_SEAL_SEAL);
+        assert_eq!(initial_memfd_seals(MFD_CLOEXEC), F_SEAL_SEAL);
+        assert_eq!(initial_memfd_seals(MFD_ALLOW_SEALING), 0);
+        assert_eq!(initial_memfd_seals(MFD_NOEXEC_SEAL), F_SEAL_EXEC);
+        assert_eq!(
+            initial_memfd_seals(MFD_NOEXEC_SEAL | MFD_ALLOW_SEALING),
+            F_SEAL_EXEC
+        );
+        assert_eq!(SHM_DIR_C, b"/dev/shm\0");
+        assert_eq!(&SHM_DIR_C[..SHM_DIR.len()], SHM_DIR);
+    }
+
     // -- mremap returns MAP_FAILED --
 
     #[test]
@@ -4229,20 +4248,25 @@ const MEMFD_FLAG_MASK: u32 = crate::linux_memfd::MFD_CLOEXEC
 /// Linux's 249; and the counter alone named the file, so two processes could
 /// collide.
 ///
+/// Where the kernel can make a file with no name (`O_TMPFILE`, lane A's
+/// `SYS_FS_TMPFILE`), the memfd is one from the start, and nothing of it is
+/// ever seen in /dev/shm; the named route above is what a kernel without that
+/// call gets.
+///
 /// Supported flags:
 /// - `MFD_CLOEXEC` — set close-on-exec on the returned fd.
-/// - `MFD_ALLOW_SEALING` — accepted; sealing itself (fcntl
-///   `F_ADD_SEALS` / `F_GET_SEALS`) is not yet implemented, so the
-///   flag is recognised but currently has no observable effect beyond
-///   not erroring out.
-/// - `MFD_NOEXEC_SEAL` — accepted; equivalent in spirit to
-///   `MFD_ALLOW_SEALING` plus an immediate `F_SEAL_EXEC`.  Without
-///   sealing infrastructure or an executable-bit model on memfds, this
-///   currently has no observable effect.
+/// - `MFD_ALLOW_SEALING` — the memfd may be sealed (`fcntl` `F_ADD_SEALS`,
+///   lane A's `SYS_FS_ADD_SEALS`). Without it the memfd starts sealed with
+///   `F_SEAL_SEAL`, so nothing more may be added, as on Linux.
+/// - `MFD_NOEXEC_SEAL` — implies `MFD_ALLOW_SEALING`, and the memfd starts
+///   with `F_SEAL_EXEC`, as on Linux 6.3 and later.
 /// - `MFD_EXEC` — accepted, no-op (we don't have a noexec default to
 ///   override).
 /// - `MFD_HUGETLB` — rejected with `EINVAL`; the kernel has no
 ///   hugepage support yet.
+///
+/// On a kernel without seals no memfd has any, and `F_ADD_SEALS` and
+/// `F_GET_SEALS` answer `EINVAL`, as for a Linux file that cannot be sealed.
 ///
 /// # Errors
 ///
@@ -4308,10 +4332,37 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
         return -1;
     }
 
-    let mut oflag = crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | crate::fcntl::O_RDWR;
-    if flags & crate::linux_memfd::MFD_CLOEXEC != 0 {
-        oflag |= crate::fcntl::O_CLOEXEC;
+    let cloexec = if flags & crate::linux_memfd::MFD_CLOEXEC != 0 {
+        crate::fcntl::O_CLOEXEC
+    } else {
+        0
+    };
+    // A file with no name from the start, where the kernel can make one
+    // (`O_TMPFILE`, lane A's `SYS_FS_TMPFILE`): nothing of it is ever seen in
+    // /dev/shm, and nothing is left behind by a process that dies before the
+    // unlink below. `O_EXCL`: never to be named, as a Linux memfd is never
+    // linked into a filesystem.
+    let nameless = crate::file::open(
+        SHM_DIR_C.as_ptr(),
+        crate::fcntl::O_TMPFILE | crate::fcntl::O_RDWR | crate::fcntl::O_EXCL | cloexec,
+        0o600,
+    );
+    let fd = if nameless >= 0 {
+        nameless
+    } else {
+        named_memfd(cloexec)
+    };
+    if fd >= 0 {
+        seal_new_memfd(fd, flags);
     }
+    fd
+}
+
+/// A memfd made the old way, on a kernel or a /dev/shm that cannot make a
+/// file with no name: a uniquely named file in /dev/shm, created and
+/// unlinked at once, so that only the descriptor keeps it.
+fn named_memfd(cloexec: i32) -> i32 {
+    let oflag = crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | crate::fcntl::O_RDWR | cloexec;
     let pid = u64::try_from(crate::process::getpid()).unwrap_or(0);
     // A file of this name that exists was left by a process whose id this
     // one reused, or is another thread's this instant: take the next name.
@@ -4335,6 +4386,37 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
         }
     }
     -1
+}
+
+/// [`SHM_DIR`], NUL-terminated, for `open`.
+const SHM_DIR_C: &[u8] = b"/dev/shm\0";
+
+/// The seals a new memfd starts with, as Linux's `memfd_create` gives them:
+/// `F_SEAL_SEAL` unless `MFD_ALLOW_SEALING` -- no seal may ever be added --
+/// and `F_SEAL_EXEC` with `MFD_NOEXEC_SEAL`, which allows sealing and seals
+/// the execute bits.
+fn initial_memfd_seals(flags: u32) -> i32 {
+    if flags & crate::linux_memfd::MFD_NOEXEC_SEAL != 0 {
+        crate::fcntl_ops::F_SEAL_EXEC
+    } else if flags & crate::linux_memfd::MFD_ALLOW_SEALING != 0 {
+        0
+    } else {
+        crate::fcntl_ops::F_SEAL_SEAL
+    }
+}
+
+/// Give the new memfd `fd` the seals it starts with
+/// ([`initial_memfd_seals`]). On a kernel without seals there are none to
+/// give, and the memfd is as it was before 2026-10-07: nothing about it can
+/// be sealed, so a program that tries is told `EINVAL`, which it must be
+/// ready for anyway on a Linux file that cannot be sealed.
+fn seal_new_memfd(fd: i32, flags: u32) {
+    let seals = initial_memfd_seals(flags);
+    if seals != 0 {
+        // The descriptor was made just above, open for writing, as sealing
+        // needs: the only failure is a kernel without seals, see above.
+        let _ = crate::fcntl_ops::fcntl(fd, crate::fcntl_ops::F_ADD_SEALS, i64::from(seals));
+    }
 }
 
 /// `/dev/shm/.memfd_<pid>_<counter>`, NUL-terminated, into `out`; the

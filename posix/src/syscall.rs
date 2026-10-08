@@ -284,6 +284,18 @@ pub const SYS_FS_TMPFILE: u64 = 648;
 /// new name as `SYS_FS_LINK` asks it. Lane A's (1096); a kernel without it
 /// answers `NoSuchSyscall`.
 pub const SYS_FS_LINK_HANDLE: u64 = 1096;
+/// Seal the file a handle holds: `fs_add_seals(handle, seals) -> seals after`,
+/// in Linux's `F_SEAL_*` bits (`SEAL` 0x01, `SHRINK` 0x02, `GROW` 0x04,
+/// `WRITE` 0x08 -- which here forbids truncation too -- and `EXEC` 0x20).
+/// Seals add up, are never removed, and every route to the file is refused
+/// what they forbid (`NotPermitted`). The handle must be open for writing,
+/// else `NotPermitted`; another bit, or none, `InvalidArgument`; a file
+/// sealed with `SEAL`, `NotPermitted`. Lane A's (1124); a kernel without it
+/// answers `NoSuchSyscall`.
+pub const SYS_FS_ADD_SEALS: u64 = 1124;
+/// The seals of the file a handle holds: `fs_get_seals(handle) -> seals`, in
+/// [`SYS_FS_ADD_SEALS`]'s bits; 0 for none. Lane A's (1125).
+pub const SYS_FS_GET_SEALS: u64 = 1125;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

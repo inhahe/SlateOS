@@ -215,12 +215,15 @@ impl CpuLimit {
     /// `SIGKILL` at the hard limit (and nothing further), else `SIGXCPU` at
     /// the soft one, which then moves on a second.
     fn check(&mut self, now: u64) -> Option<u32> {
-        if now >= self.hard {
+        // `NO_CPU_EXPIRY` is never -- an infinite limit, or one spent by its
+        // SIGKILL -- not a threshold `now` reaches at `u64::MAX`, which the
+        // self-test's "nothing after SIGKILL" asks and it did not hold.
+        if self.hard != NO_CPU_EXPIRY && now >= self.hard {
             self.soft = NO_CPU_EXPIRY;
             self.hard = NO_CPU_EXPIRY;
             return Some(SIGKILL);
         }
-        if now >= self.soft {
+        if self.soft != NO_CPU_EXPIRY && now >= self.soft {
             self.soft = self.soft.saturating_add(NS_PER_SEC);
             return Some(SIGXCPU);
         }

@@ -3,8 +3,10 @@
 **Status:** PARTLY FIXED 2026-10-08 (lane B): `tee`, the program whose
 difference corrupted data, opens its files as its upstream does now, and so
 do `csplit`, whose pieces kept a diagnostic inside them, the digest
-programs, whose `--check` read its own list as a `-` line's input, and `pr`,
-whose `-m` read a file twice -- once as itself and once as `-`.
+programs, whose `--check` read its own list as a `-` line's input, `pr`,
+whose `-m` read a file twice -- once as itself and once as `-` -- and the
+`freopen` programs (`uniq`, `shuf`, `tsort`, `dircolors`, `du
+--files0-from`, `ptx -G`), one of which aborted.
 **OPEN** for the other programs whose upstream keeps its files off
 descriptors 0-2 (the list at the end): each is converted with the harness
 case that shows the difference, not all at once.
@@ -73,11 +75,9 @@ those has to be ported as upstream does it, which is not `fd_safer` either.
 **Still to do** -- each with a closed-descriptor case in its harness that
 fails before and agrees after:
 
-* `freopen`/`fd_reopen` (onto 0 or 1): `dircolors`, `du --files0-from`,
-  `shuf`, `tsort`, `uniq`, `ptx`'s output, `csplit`'s and `split`'s input,
-  `stty -F`, `touch`, `dd`, `nohup`. (`ptx` has no `fopen` of its own: its
-  input and word files are read by gnulib's `read_file`, which opens
-  plainly, so only its output operand's `freopen` is the safe one.)
+* `fd_reopen` (onto 0 or 1): `csplit`'s and `split`'s input, `stty -F`,
+  `touch`, `dd`. (`nohup`'s was already right, and now shares
+  `stdfd::move_to`.)
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
   `copy.c`), `split`'s output files.
 * `ln`'s target directory (`openat_safer`).
@@ -97,6 +97,43 @@ md5sum -c SUMS <&-       (SUMS lists a, then -)
 Both are `stdfd::open_read_safer` now. `digest-diff.sh` has seven
 closed-standard-input cases for each of the seven programs; three differed
 before.
+
+**The `freopen` programs, 2026-10-08.** `uniq`, `shuf`, `tsort`,
+`dircolors`, `du --files0-from` and `ptx -G` take an operand with
+`freopen (NAME, "r", stdin)` or `freopen (NAME, "w", stdout)`. glibc's
+`freopen` opens the file and moves it onto the stream's own descriptor, and
+when the open fails it closes that descriptor and reports *the close's*
+`errno` -- `Bad file descriptor` if the stream was closed to begin with. Ours
+opened the operand as an ordinary file, wherever a descriptor was free.
+Measured against GNU 9.4, with each standard descriptor closed in turn:
+
+```
+uniq f /nonexistent/x >&-
+  ours: uniq: /nonexistent/x: No such file or directory, then
+        fatal runtime error: IO Safety violation: owned file
+        descriptor already closed (status 134)
+  GNU:  uniq: /nonexistent/x: Bad file descriptor (status 1)
+shuf -o out -i 1-3 >&-
+  ours: shuf: write error: Bad file descriptor, `out` empty
+  GNU:  `out` holds the three lines, status 0
+tsort nosuch <&-          (and dircolors nosuch, du --files0-from=nosuch)
+  ours: ...: No such file or directory
+  GNU:  ...: Bad file descriptor
+```
+
+`uniq` had put `f` on descriptor 1, then closed descriptor 1 while copying
+glibc's error rule, and the standard library aborted over the descriptor it
+had lost. `shuf`'s output file was created *on* descriptor 1, and its
+`dup2 (1, 1)` followed by dropping the original closed the output again.
+Both are now `stdfd::freopen`: open, then `stdfd::move_to` the stream's
+descriptor (which keeps the case of an open that landed there already), with
+glibc's error rule; each program then reads descriptor 0 or writes descriptor
+1, and closes standard input where upstream does. `ptx -G`'s OUTPUT had the
+wording difference (`ptx -G t1 /nonexistent/dir/out >&-` said `No such file
+or directory`), unseen because no case closed a descriptor around it. The
+harnesses of all six hold closed-descriptor cases now; 19 of them differed
+before (`shuf` 7, `uniq` 3, `ptx` 3, `tsort`, `dircolors` and `du` 2 each)
+and none after.
 
 **`pr`, 2026-10-08.** Upstream's `open_file` is `fopen` under `stdio--.h`.
 Ours opened plainly, and `-m` opens every file before it reads any, so with

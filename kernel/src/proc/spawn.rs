@@ -18785,7 +18785,7 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
 /// queue), we read, *while the task still exists*, both (a) `pcb::get_nice(pid)`
 /// and (b) the task's base scheduler priority (`sched::get_base_priority`).  We
 /// assert the tool wrote exactly `"0,-7,-12,-12"` AND `pcb::get_nice == -12`
-/// AND the base priority equals `thread::nice_to_priority(-12)` (== 6).  Then
+/// AND the base priority equals `thread::nice_to_priority(-12)` (== 11).  Then
 /// we kill the (sleeping) process.  The old stub would leave `pcb::get_nice` at
 /// 0 and the scheduler priority at the spawn default (16) — two independent
 /// failures.  nice -12 → priority 6 is distinct from the default 16, ruling out
@@ -18800,7 +18800,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
 
     const OUT_PATH: &str = "/tmp/fastpy-nice.out";
     // Must match the literals baked into services/fastpy-nice/build.py's SRC:
-    // setpriority(-7), then nice(-5) ⇒ -12.  nice_to_priority(-12) == 6.
+    // setpriority(-7), then nice(-5) ⇒ -12.  nice_to_priority(-12) == 11.
     // Negative nice (a priority *raise*) is CAP_SYS_NICE-gated — the tool is
     // spawned as root so it holds the cap — and moves the tool ABOVE the
     // default priority.  The tool then *sleeps* (blocks) rather than spins, so
@@ -23346,6 +23346,111 @@ pub fn self_test_linux_null_buffer() -> KernelResult<()> {
         "[spawn]   Linux NULL-buffer I/O (ring 3: files mid-file and at the end, the wrong \
          direction, directories, /dev/null and /dev/zero, pipes and unix sockets empty, with \
          bytes, with no writer or reader): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of real-time scheduling through the Linux ABI:
+/// [`elf::build_linux_rt_sched_test_elf`] (`build/rtsched.c`) puts a thread
+/// under each policy and reads it back, meets Linux's refusals, forks under
+/// and without `SCHED_RESET_ON_FORK`, and spins as `SCHED_FIFO` beside an
+/// ordinary thread on one CPU, which must not run until the spinner is
+/// ordinary again (design-decisions 1544).
+///
+/// The process is given the right to raise priority -- `IO_REALTIME` on a
+/// `Thread` capability, this kernel's `CAP_SYS_NICE` -- as the fixture was
+/// run as root on Linux; without it the first `SCHED_FIFO` is `EPERM`, which
+/// `syscall::dispatch`'s `test_dispatch_thread_scheduler` checks.
+pub fn self_test_linux_rt_sched() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux real-time scheduling (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_rt_sched_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-rt-sched"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let capabilities = [(ResourceType::Thread, 0u64, Rights::IO_REALTIME)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-rt-sched",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &capabilities,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real-time scheduling spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real-time scheduling (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox could not be mapped",
+            Some(0x31 | 0x32) => "a new thread was not SCHED_OTHER at priority 0",
+            Some(0x33..=0x35) => "a priority that does not suit the policy was not EINVAL",
+            Some(0x36 | 0x37) => "an unknown policy, or SCHED_DEADLINE, was not EINVAL",
+            Some(0x38 | 0x39) => "a thread that does not exist was not ESRCH",
+            Some(0x3A) => "a NULL param was not EINVAL",
+            Some(0x40) => "SCHED_FIFO was refused: IO_REALTIME was not honoured",
+            Some(0x41..=0x44) => "SCHED_FIFO, or sched_setparam under it, did not read back",
+            Some(0x45 | 0x46) => "SCHED_RR did not read back, or its slice is not 100 ms",
+            Some(0x47 | 0x48) => "sched_getattr did not report SCHED_RR 5",
+            Some(0x49..=0x4C) => "SCHED_BATCH, SCHED_IDLE or the way back to SCHED_OTHER",
+            Some(0x50..=0x52) => "SCHED_RESET_ON_FORK was not kept or not reported",
+            Some(0x53) => "a child forked under SCHED_RESET_ON_FORK was not SCHED_OTHER",
+            Some(0x54 | 0x55) => {
+                "a child forked by a SCHED_FIFO thread was not SCHED_FIFO at its priority"
+            }
+            Some(0x56) => "could not return to SCHED_OTHER",
+            Some(0x60..=0x63) => "the CPU pin, or the ordinary spinner thread, failed",
+            Some(0x64 | 0x65) => "the policy was not the thread's own",
+            Some(0x66) => "an ordinary thread ran on the CPU of a spinning SCHED_FIFO thread",
+            Some(0x67..=0x6A) => "a thread made by a SCHED_FIFO thread did not inherit its policy",
+            Some(0x6B | 0x6C) => {
+                "the ordinary thread did not run again once the spinner was ordinary"
+            }
+            Some(0x70..=0x73) => "sched_setattr did not set, or read back, SCHED_RR 7",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: real-time scheduling (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux real-time scheduling (ring 3: every policy read back, Linux's refusals, \
+         RR's 100 ms, SCHED_RESET_ON_FORK across fork, a thread's own policy inherited by its \
+         threads, an ordinary thread kept off a spinning SCHED_FIFO thread's CPU): OK"
     );
     Ok(())
 }

@@ -6723,6 +6723,38 @@ pub const MEMORY_LOCK_ALL: u64 = 2;
 /// [`SYS_MEMORY_LOCK`] operation: unlock every mapping (`munlockall`).
 pub const MEMORY_UNLOCK_ALL: u64 = 3;
 
+/// `SYS_THREAD_SCHEDULER(op, tid, a, b)` -- a thread's scheduling policy,
+/// which is how a thread becomes real-time: Linux's `sched_setscheduler`
+/// family for one thread (`tid` 0 is the calling one), with its policy
+/// numbers -- `SCHED_OTHER` 0, `SCHED_FIFO` 1, `SCHED_RR` 2, `SCHED_BATCH` 3,
+/// `SCHED_IDLE` 5 -- and its errnos as `-errno`. The Linux ABI's calls share
+/// the body.
+///
+/// | `op` | Linux call | `a`, `b` | answer |
+/// |---|---|---|---|
+/// | [`SCHEDULER_GET`] | `sched_getscheduler` and `sched_getparam` | -- | bits 0..32: the policy, with `SCHED_RESET_ON_FORK` (0x4000_0000) or'd in; bits 32..40: the real-time priority |
+/// | [`SCHEDULER_SET`] | `sched_setscheduler` | `policy` (0x4000_0000 or'd in sets `SCHED_RESET_ON_FORK`; -1 keeps the thread's policy, as `sched_setparam`), `priority` (1..=99 real-time, 0 otherwise) | 0 |
+/// | [`SCHEDULER_RR_INTERVAL`] | `sched_rr_get_interval` | -- | the thread's time slice, in nanoseconds: 100 ms under `SCHED_RR`, 0 under `SCHED_FIFO` |
+///
+/// `SCHED_FIFO` and `SCHED_RR` run a thread in the real-time band, levels
+/// 0-7, above every ordinary thread; `SCHED_FIFO` has no time slice
+/// (design-decisions 1544). Who may set (`EPERM` otherwise): the thread's
+/// own process, its parent, or a holder of a `Process` capability with
+/// `DELETE` for it -- and for a real-time policy past the process's
+/// `RLIMIT_RTPRIO`, which is 0 by default, the `IO_REALTIME` right on a
+/// `Thread` capability. `ESRCH` for no such thread; `EINVAL` for an unknown
+/// `op` or policy, or a priority that does not suit the policy. Reading
+/// needs no right. Until 2026-10-07 a native program had no way to be
+/// real-time (requests/d-a-real-time-scheduling-has-no-class-to-run-in.md).
+pub const SYS_THREAD_SCHEDULER: u64 = 1146;
+/// [`SYS_THREAD_SCHEDULER`] operation: read the policy and priority.
+pub const SCHEDULER_GET: u64 = 0;
+/// [`SYS_THREAD_SCHEDULER`] operation: set them (`sched_setscheduler`).
+pub const SCHEDULER_SET: u64 = 1;
+/// [`SYS_THREAD_SCHEDULER`] operation: the time slice
+/// (`sched_rr_get_interval`).
+pub const SCHEDULER_RR_INTERVAL: u64 = 2;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

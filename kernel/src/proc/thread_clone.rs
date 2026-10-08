@@ -484,9 +484,14 @@ pub fn clone_thread(
     let regs = build_register_image(frame, args);
     let image_raw = Box::into_raw(Box::new(regs)) as u64;
 
-    // Inherit the calling thread's effective scheduling priority.
-    let priority = crate::sched::get_effective_priority(crate::sched::current_task_id())
-        .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
+    // The calling thread's scheduling, as Linux's `sched_fork` gives a new
+    // thread: policy, real-time priority and ordinary level, reset to the
+    // ordinary default under SCHED_RESET_ON_FORK (`sched::inheritance_from`).
+    // The thread is spawned at that level and given the rest while still
+    // suspended. Until 2026-10-07 it was spawned at the caller's *effective*
+    // level, an interactive boost or a lent level included.
+    let inheritance = crate::sched::inheritance_from(crate::sched::current_task_id());
+    let priority = inheritance.map_or(crate::sched::task::DEFAULT_PRIORITY, |i| i.level());
 
     // Compute the child's persistent FS (TLS) base *before* spawning so it can
     // be seeded onto the Task while it is still suspended.  IA32_FS_BASE is a
@@ -533,6 +538,10 @@ pub fn clone_thread(
             return Err(e);
         }
     };
+
+    if let Some(inheritance) = inheritance {
+        crate::sched::inherit_scheduling(task_id, inheritance);
+    }
 
     // NOTE: the child's FS/GS bases were seeded by `spawn_with_tls` *before*
     // the task was admitted — deliberately not done here, where the child may

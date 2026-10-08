@@ -1583,6 +1583,29 @@ pub fn pi_owner_of_waiter(waiter: TaskId) -> Option<TaskId> {
     find_pi_owner(sched::get_blocked_on_pi(waiter)?)
 }
 
+/// A thread blocked on a priority-inheritance futex was just given a new
+/// priority (`sched_setscheduler`, a nice change): lend its level on to the
+/// futex's holder and down the chain, as Linux's `rt_mutex_adjust_pi` does,
+/// so a waiter made real-time while it waits does not stay stuck behind an
+/// ordinary holder. A *lowered* waiter takes nothing back here: the holder
+/// keeps the larger loan until it releases, when its inheritance is worked
+/// out afresh -- an over-boost that lasts no longer than the hold.
+///
+/// Takes `SCHED` and `PI_FUTEX_TABLE` one after the other: call with
+/// neither held.
+pub fn pi_waiter_priority_changed(waiter: TaskId) {
+    let Some(owner) = pi_owner_of_waiter(waiter) else {
+        return;
+    };
+    let Some(level) = sched::get_effective_priority(waiter) else {
+        return;
+    };
+    // A holder that has gone since the lookup has nothing to be lent.
+    if sched::boost_priority(owner, level).is_some() {
+        sched::pi_chain_boost(owner, level, find_pi_owner);
+    }
+}
+
 /// Register a task as the PI futex owner of `key`; `uaddr` is the owner's
 /// own virtual address of the word (see [`PiOwner::uaddr`]).
 fn register_pi_owner(key: FutexKey, uaddr: u64, owner_id: TaskId) {

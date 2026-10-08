@@ -16607,7 +16607,11 @@ pub fn sys_udp_mcast_leave(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: entry point address (ring 3 RIP).
 /// `arg1`: stack pointer (ring 3 RSP).
-/// `arg2`: priority (0–31, or `u64::MAX` for default).
+/// `arg2`: priority (0–31), or `u64::MAX` for the creating thread's
+///         scheduling: its policy, real-time priority and level, as a thread
+///         made by `clone` takes them (`sched::inheritance_from`) -- what
+///         `pthread_create`'s default `PTHREAD_INHERIT_SCHED` asks. An
+///         explicit level makes an ordinary (`SCHED_OTHER`) thread there.
 ///
 /// Returns: new thread's task ID.
 pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
@@ -16618,8 +16622,17 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
     let user_rsp = args.arg1;
     let raw_priority = args.arg2;
 
-    // Resolve priority: u64::MAX means default.
-    let priority = if raw_priority == u64::MAX {
+    // Resolve priority: u64::MAX means the creator's. Until 2026-10-07 it
+    // meant the default level, so a thread of a process at nice 10 ran at
+    // nice 0, and one made by a real-time thread was ordinary.
+    let inheritance = if raw_priority == u64::MAX {
+        sched::inheritance_from(sched::current_task_id())
+    } else {
+        None
+    };
+    let priority = if let Some(inheritance) = inheritance {
+        inheritance.level()
+    } else if raw_priority == u64::MAX {
         DEFAULT_PRIORITY
     } else if raw_priority > 31 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -16644,8 +16657,12 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
     };
 
     match thread::spawn_user(pid, b"user-thread", priority, entry_rip, user_rsp) {
-        Ok(new_task_id) =>
-        {
+        Ok(new_task_id) => {
+            // Spawned at the inherited level already; the policy follows at
+            // once, so at most the first dispatch's slice is an ordinary one.
+            if let Some(inheritance) = inheritance {
+                sched::inherit_scheduling(new_task_id, inheritance);
+            }
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(new_task_id as i64)
         }
@@ -19987,6 +20004,13 @@ pub fn sys_mmap_native(args: &SyscallArgs) -> SyscallResult {
 /// [`SYS_MEMORY_LOCK`](super::number::SYS_MEMORY_LOCK).
 pub fn sys_memory_lock(args: &SyscallArgs) -> SyscallResult {
     super::linux::native_memory_lock(args.arg0, args.arg1, args.arg2, args.arg3)
+}
+
+/// `SYS_THREAD_SCHEDULER` (1146) — a thread's scheduling policy: Linux's
+/// `sched_setscheduler` family for one thread, with its errnos. See
+/// [`SYS_THREAD_SCHEDULER`](super::number::SYS_THREAD_SCHEDULER).
+pub fn sys_thread_scheduler(args: &SyscallArgs) -> SyscallResult {
+    super::linux::native_thread_scheduler(args.arg0, args.arg1, args.arg2, args.arg3)
 }
 
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem

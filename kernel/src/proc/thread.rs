@@ -1333,23 +1333,34 @@ pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
 ///
 /// Nice ranges `-20..=19` (lower = more favourable / higher priority);
 /// our scheduler priority ranges `0..=31` (0 = highest, 31 = lowest, see
-/// [`crate::sched::task::NUM_PRIORITIES`]). The mapping is linear and
-/// monotonic (higher nice ⇒ higher priority number ⇒ lower scheduling
-/// priority), pinned so nice `0` lands on the default priority level:
+/// [`crate::sched::task::NUM_PRIORITIES`]), of which `0..8` are the
+/// real-time band ([`crate::sched::task::RT_LEVELS`]) that nice never
+/// reaches. The mapping is monotonic (higher nice ⇒ higher priority number
+/// ⇒ lower scheduling priority) and pinned so nice `0` lands on the default
+/// priority level:
 ///
-/// `priority = round((nice + 20) * 31 / 39)`
+/// - nice `0..=19`: `round((nice + 20) * 31 / 39)`, levels 16..=31;
+/// - nice `-20..=-1`: `8 + round((nice + 20) * 7 / 19)`, levels 8..=15;
 ///
-/// which yields `nice -20 → 0`, `nice 0 → 16` (== [`task::DEFAULT_PRIORITY`]),
-/// and `nice 19 → 31`. Inputs are clamped to the valid nice range first.
+/// which yields `nice -20 → 8`, `nice 0 → 16` (==
+/// [`task::DEFAULT_PRIORITY`]), and `nice 19 → 31`. Inputs are clamped to
+/// the valid nice range first.
 #[must_use]
 pub fn nice_to_priority(nice: i32) -> u8 {
-    // Clamp to the POSIX nice range, then bias to 0..=39 so the scaling is a
-    // non-negative integer computation.
-    let biased = nice.clamp(-20, 19) + 20; // 0..=39
-    // round(biased * 31 / 39): add half the denominator before the floor.
-    // biased*31 <= 39*31 = 1209, +19 = 1228, well within i32 — no overflow.
+    let nice = nice.clamp(-20, 19);
+    // Nice 0..=19: round((nice + 20) * 31 / 39), 16..=31 -- the mapping nice
+    // has always had (biased*31 <= 1209, +19, well within i32).
+    // Nice -20..=-1: the eight levels above that, 8..=15 --
+    // 8 + round((nice + 20) * 7 / 19) -- so that even nice -20 stays below
+    // the real-time band (`sched::task::RT_LEVELS`), which only a real-time
+    // policy reaches. Until 2026-10-07 nice -20 was level 0, above every
+    // real-time level there was to be.
     #[allow(clippy::arithmetic_side_effects)]
-    let prio = (biased * 31 + 19) / 39; // 0..=31
+    let prio = if nice >= 0 {
+        ((nice + 20) * 31 + 19) / 39 // 16..=31
+    } else {
+        8 + ((nice + 20) * 7 + 9) / 19 // 8..=15
+    };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         prio.clamp(0, 31) as u8

@@ -184,6 +184,111 @@ impl Context {
 /// (idle / background).
 pub const NUM_PRIORITIES: usize = 32;
 
+/// Levels `0..RT_LEVELS` are the **real-time band**: where `SCHED_FIFO` and
+/// `SCHED_RR` threads run, above every ordinary thread (nice -20 is level 8,
+/// [`RT_LEVELS`] itself), as `scheduler.txt` asks ("real-time levels at the
+/// top"). Nothing ordinary is lifted into it by the scheduler: the
+/// interactive boost and the anti-starvation boost both stop at its floor.
+/// Priority inheritance does lift a holder into it, which is the point of
+/// inheritance. Kernel tasks may still be placed there (the audio pump).
+///
+/// Eight levels for POSIX's 99 real-time priorities ([`rt_level`]): several
+/// to a level, as Linux's O(1) scheduler had them; a desktop needs few.
+pub const RT_LEVELS: u8 = 8;
+
+/// A `SCHED_RR` thread's time slice: Linux's `RR_TIMESLICE`, 100 ms
+/// (`sched_rr_get_interval` reports it).
+pub const RR_TIMESLICE_TICKS: u32 = 10;
+
+/// How a thread is scheduled: Linux's policies, numbered as Linux numbers
+/// them (`sched_setscheduler`, `sched_getscheduler`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchedPolicy {
+    /// `SCHED_OTHER` (0): ordinary time-sharing at its nice level.
+    #[default]
+    Other,
+    /// `SCHED_FIFO` (1): real-time; runs until it blocks, yields or a
+    /// higher level preempts it -- no time slice.
+    Fifo,
+    /// `SCHED_RR` (2): real-time, sharing its level in
+    /// [`RR_TIMESLICE_TICKS`] slices.
+    Rr,
+    /// `SCHED_BATCH` (3): ordinary, but never given the interactive boost --
+    /// Linux's "assume CPU-bound".
+    Batch,
+    /// `SCHED_IDLE` (5): runs only when nothing else will, at the lowest
+    /// level.
+    Idle,
+}
+
+impl SchedPolicy {
+    /// The policy Linux numbers `policy`, if this kernel has it
+    /// (`SCHED_DEADLINE` (6) it has not).
+    #[must_use]
+    pub const fn from_linux(policy: u32) -> Option<Self> {
+        match policy {
+            0 => Some(Self::Other),
+            1 => Some(Self::Fifo),
+            2 => Some(Self::Rr),
+            3 => Some(Self::Batch),
+            5 => Some(Self::Idle),
+            _ => None,
+        }
+    }
+
+    /// Linux's number for the policy.
+    #[must_use]
+    pub const fn linux(self) -> u32 {
+        match self {
+            Self::Other => 0,
+            Self::Fifo => 1,
+            Self::Rr => 2,
+            Self::Batch => 3,
+            Self::Idle => 5,
+        }
+    }
+
+    /// `SCHED_FIFO` or `SCHED_RR`.
+    #[must_use]
+    pub const fn is_realtime(self) -> bool {
+        matches!(self, Self::Fifo | Self::Rr)
+    }
+}
+
+/// The level a real-time priority runs at: POSIX's 1..=99 (99 most urgent)
+/// spread over the [`RT_LEVELS`] levels of the band, 99 at level 0 and 1 at
+/// level 7. A priority outside 1..=99 is clamped into it.
+#[must_use]
+pub const fn rt_level(rt_priority: u8) -> u8 {
+    let p = if rt_priority == 0 {
+        1
+    } else if rt_priority > 99 {
+        99
+    } else {
+        rt_priority
+    };
+    // (p - 1) * 8 / 99 is 0..=7 for p in 1..=99; no overflow in u16.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    let step = ((p as u16 - 1) * RT_LEVELS as u16 / 99) as u8;
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        RT_LEVELS - 1 - step
+    }
+}
+
+/// A thread's scheduling attributes as `sched_setscheduler` sets them and
+/// `sched_getscheduler`/`sched_getparam` report them (the thread's nice is
+/// its process's, kept by `proc::priority`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SchedAttr {
+    /// The policy.
+    pub policy: SchedPolicy,
+    /// 1..=99 under `SCHED_FIFO`/`SCHED_RR`, 0 under any other policy.
+    pub rt_priority: u8,
+    /// `SCHED_RESET_ON_FORK`.
+    pub reset_on_fork: bool,
+}
+
 /// Priority level for the idle task (lowest possible).
 // Truncation: NUM_PRIORITIES is 32, so 31 fits in u8.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -401,11 +506,31 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, like `pending_wake`.
     pub wait: crate::wchan::Wait,
-    /// Base priority level (0 = highest, 31 = lowest).
+    /// Base priority level (0 = highest, 31 = lowest): the level the task
+    /// is queued at, before boosts.
     ///
-    /// This is the user-assigned priority.  The effective scheduling
-    /// priority may be higher (lower number) due to interactive boost.
+    /// For an ordinary task this is the user-assigned priority (its nice
+    /// level, or what `SYS_THREAD_SET_PRIORITY` set); for a real-time one
+    /// ([`Self::policy`]) the level of its [`Self::rt_priority`]. The
+    /// effective scheduling priority may be higher (lower number) due to
+    /// interactive boost or inheritance.
     pub priority: u8,
+    /// How the task is scheduled ([`SchedPolicy`]): ordinary unless
+    /// `sched_setscheduler` or `SYS_THREAD_SCHEDULER` said otherwise. A new
+    /// thread or forked child takes its creator's (`sched::inherit_scheduling`),
+    /// as on Linux, and `exec` keeps it.
+    pub policy: SchedPolicy,
+    /// The POSIX real-time priority, 1..=99, of a `SCHED_FIFO`/`SCHED_RR`
+    /// task; 0 for every other policy.
+    pub rt_priority: u8,
+    /// The ordinary level the task returns to when it leaves a real-time
+    /// policy: kept while it is real-time, so a nice change made meanwhile
+    /// waits here, as Linux keeps `static_prio` beside `rt_priority`.
+    pub normal_priority: u8,
+    /// Linux's `SCHED_RESET_ON_FORK`: the tasks this one creates start
+    /// ordinary -- a real-time policy becomes `SCHED_OTHER` at nice 0, a
+    /// negative nice becomes 0 -- and without the flag.
+    pub reset_on_fork: bool,
     /// Saved CPU register state.
     pub context: Context,
     /// Physical address of the stack's backing frame(s).
@@ -788,12 +913,23 @@ impl Task {
     /// - Inherited priority from PI futex (if any)
     ///
     /// Lower number = higher priority.
+    ///
+    /// The interactive boost is an ordinary task's alone, and never carries
+    /// it into the real-time band ([`RT_LEVELS`]): a real-time task runs at
+    /// its level, and an ordinary one at level 8 or 9 is boosted no higher
+    /// than 8. (A kernel task placed in the band keeps the boost it always
+    /// had.) Inheritance may lift any task into the band.
     #[must_use]
     pub fn effective_priority(&self) -> u8 {
-        let base = if self.interactive {
-            self.priority.saturating_sub(INTERACTIVE_BOOST)
-        } else {
+        let boosted = self.interactive && !matches!(self.policy, SchedPolicy::Batch);
+        let base = if self.policy.is_realtime() || !boosted {
             self.priority
+        } else if self.priority >= RT_LEVELS {
+            self.priority
+                .saturating_sub(INTERACTIVE_BOOST)
+                .max(RT_LEVELS)
+        } else {
+            self.priority.saturating_sub(INTERACTIVE_BOOST)
         };
         match self.inherited_priority {
             Some(inh) => base.min(inh),
@@ -1069,6 +1205,10 @@ impl Task {
             sleep_timer_id: 0,
             wait: crate::wchan::Wait::NONE,
             priority: IDLE_PRIORITY,
+            policy: SchedPolicy::Other,
+            rt_priority: 0,
+            normal_priority: IDLE_PRIORITY,
+            reset_on_fork: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,
@@ -1157,6 +1297,10 @@ impl Task {
             sleep_timer_id: 0,
             wait: crate::wchan::Wait::NONE,
             priority: IDLE_PRIORITY,
+            policy: SchedPolicy::Other,
+            rt_priority: 0,
+            normal_priority: IDLE_PRIORITY,
+            reset_on_fork: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
@@ -1312,6 +1456,10 @@ impl Task {
             sleep_timer_id: 0,
             wait: crate::wchan::Wait::NONE,
             priority,
+            policy: SchedPolicy::Other,
+            rt_priority: 0,
+            normal_priority: priority,
+            reset_on_fork: false,
             context,
             stack_phys,
             stack_bottom,

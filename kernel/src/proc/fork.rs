@@ -754,10 +754,15 @@ fn fork_process_clone_inner(
     let regs = build_reg_image(frame, rsp_override);
     let image_raw = Box::into_raw(Box::new(ForkChildImage { regs, settid_ptr })) as u64;
 
-    // Inherit the parent thread's effective scheduling priority so the
-    // child runs at a comparable urgency; fall back to the default.
-    let priority = crate::sched::get_effective_priority(crate::sched::current_task_id())
-        .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
+    // The forking thread's scheduling, as Linux's `sched_fork` passes it on:
+    // policy, real-time priority and ordinary level, reset to the ordinary
+    // default under SCHED_RESET_ON_FORK (`sched::inheritance_from`). The child
+    // is spawned at that level and given the rest while still suspended.
+    // Until 2026-10-07 it was spawned at the parent's *effective* level, which
+    // made an interactive boost, or a level lent by a lock waiter, the child's
+    // own.
+    let inheritance = crate::sched::inheritance_from(crate::sched::current_task_id());
+    let priority = inheritance.map_or(crate::sched::task::DEFAULT_PRIORITY, |i| i.level());
 
     // Capture the parent thread's live %fs (TLS) base so the child can
     // inherit it.  fork() duplicates the address space, so the child's
@@ -791,6 +796,23 @@ fn fork_process_clone_inner(
         parent_gs,
     ) {
         Ok(task_id) => {
+            if let Some(inheritance) = inheritance {
+                crate::sched::inherit_scheduling(task_id, inheritance);
+                // SCHED_RESET_ON_FORK resets the child process's nice too:
+                // Linux resets the child's static priority, which is its nice.
+                if inheritance.creator.reset_on_fork
+                    && let Some(nice) = pcb::get_nice(child_pid)
+                {
+                    let reset = crate::proc::priority::nice_after_reset_on_fork(
+                        inheritance.creator.policy,
+                        nice,
+                    );
+                    // The record was read just above, and the child cannot
+                    // have been reaped: it has not run yet.
+                    let _ = pcb::set_nice(child_pid, reset);
+                }
+            }
+
             // CLONE_PARENT_SETTID: write the child's TID into the
             // *parent's* memory at parent_tid_ptr.  We are still running
             // in the parent's syscall context (parent CR3 active), so the

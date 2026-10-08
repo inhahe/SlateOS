@@ -105,10 +105,10 @@ use super::number::{
     SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
     SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
     SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
-    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
-    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
-    SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_THREAD_SCHEDULER, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
+    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
+    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
     SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6, SYS_UDP_RECV, SYS_UDP_RECV6,
     SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_UDP_SEND6, SYS_UDP_SET_OPTION,
     SYS_WAIT_MULTIPLE, SYS_YIELD,
@@ -777,6 +777,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GETGROUPS as usize] = Some(handlers::sys_process_getgroups);
     handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
+    handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -5468,6 +5469,137 @@ fn test_dispatch_getgroups() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_MEMORY_LOCK: OK");
+
+    test_dispatch_thread_scheduler()
+}
+
+/// `SYS_THREAD_SCHEDULER` as a process meets it: on a thread of a scratch
+/// process, called as that process (`thread::self_test_as_process`), so the
+/// rule is the one a program gets -- a real-time policy needs
+/// `RLIMIT_RTPRIO` or the IO_REALTIME right, a stranger and a kernel task are
+/// out of reach, and reading needs nothing. The rule itself, case by case, is
+/// `proc::priority`'s self-test.
+fn test_dispatch_thread_scheduler() -> KernelResult<()> {
+    use super::number::{SCHEDULER_GET, SCHEDULER_RR_INTERVAL, SCHEDULER_SET};
+    use crate::cap::{ResourceType, Rights};
+    use crate::proc::{pcb, thread};
+    use crate::sched::task::{RR_TIMESLICE_TICKS, rt_level};
+
+    extern "C" fn never_runs(_arg: u64) {}
+
+    let call = |op: u64, tid: u64, a: u64, b: u64| {
+        let args = SyscallArgs {
+            arg0: op,
+            arg1: tid,
+            arg2: a,
+            arg3: b,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_THREAD_SCHEDULER, &args).value
+    };
+    let neg = |n: i32| i64::from(n).wrapping_neg();
+    // SCHEDULER_GET's answer: the policy word, and the priority above it.
+    let word = |policy: i64, priority: i64| policy | priority.wrapping_shl(32);
+    let (einval, eperm, esrch) = (
+        neg(super::linux::errno::EINVAL),
+        neg(super::linux::errno::EPERM),
+        neg(super::linux::errno::ESRCH),
+    );
+
+    let owner = pcb::create("rt-door-owner", 0);
+    let stranger = pcb::create("rt-door-stranger", 0);
+    let mine = crate::sched::spawn_suspended(b"rt-door-mine", 16, never_runs, 0, 0)?;
+    let kernel_task = crate::sched::spawn_suspended(b"rt-door-kernel", 16, never_runs, 0, 0)?;
+    let outcome = thread::self_test_with_thread(mine, owner, || -> Result<(), &'static str> {
+        // From the kernel: an unknown op, no such thread, a bad policy.
+        if call(9, mine, 0, 0) != einval
+            || call(SCHEDULER_GET, u64::MAX - 3, 0, 0) != esrch
+            || call(SCHEDULER_SET, mine, 4, 0) != einval
+            || call(SCHEDULER_SET, mine, 1, 0) != einval
+        {
+            return Err("the kernel's refusals");
+        }
+        // As the owning process, with the default RLIMIT_RTPRIO of 0 and no
+        // right: real-time is refused, an ordinary policy is not.
+        let refused = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, mine, 1, 10) == eperm
+                && call(SCHEDULER_SET, mine, 3, 0) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == 3
+        });
+        if !refused {
+            return Err("real-time without RLIMIT_RTPRIO or the right was not EPERM");
+        }
+        // RLIMIT_RTPRIO 20: up to 20 and no further, and lowering is free.
+        if pcb::set_rlimit(owner, 14, 20, 20, pcb::LimitAuthority::MayRaiseHardLimit).is_err() {
+            return Err("could not set RLIMIT_RTPRIO");
+        }
+        let within = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, mine, 1, 20) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == word(1, 20)
+                && crate::sched::get_base_priority(mine) == Some(rt_level(20))
+                && call(SCHEDULER_SET, mine, 1, 30) == eperm
+                && call(SCHEDULER_SET, mine, 2, 5) == 0
+                && call(SCHEDULER_RR_INTERVAL, mine, 0, 0)
+                    == i64::from(RR_TIMESLICE_TICKS).saturating_mul(10_000_000)
+                // -1 keeps the policy, as sched_setparam.
+                && call(SCHEDULER_SET, mine, u64::from(u32::MAX), 3) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == word(2, 3)
+                // SCHED_RESET_ON_FORK may be set, but not cleared without
+                // the right.
+                && call(SCHEDULER_SET, mine, 0x4000_0002, 3) == 0
+                && call(SCHEDULER_SET, mine, 2, 3) == eperm
+                && call(SCHEDULER_GET, mine, 0, 0) == word(0x4000_0002, 3)
+        });
+        if !within {
+            return Err("RLIMIT_RTPRIO was not honoured as Linux's");
+        }
+        // A kernel task is out of reach; reading it is not.
+        let kernel = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, kernel_task, 0, 0) == eperm
+                && call(SCHEDULER_GET, kernel_task, 0, 0) == 0
+        });
+        if !kernel {
+            return Err("a process changed a kernel task's policy");
+        }
+        // A stranger may read, and may not set, even with the right.
+        if pcb::grant_capability(stranger, ResourceType::Thread, 0, Rights::IO_REALTIME).is_err() {
+            return Err("could not grant IO_REALTIME");
+        }
+        let strange = thread::self_test_as_process(stranger, || {
+            call(SCHEDULER_SET, mine, 2, 3) == eperm && call(SCHEDULER_GET, mine, 0, 0) != eperm
+        });
+        if !strange {
+            return Err("a stranger changed another process's thread");
+        }
+        // The right lifts the ceiling and the flag: the owner, granted it,
+        // reaches 99 and clears SCHED_RESET_ON_FORK.
+        if pcb::grant_capability(owner, ResourceType::Thread, 0, Rights::IO_REALTIME).is_err() {
+            return Err("could not grant the owner IO_REALTIME");
+        }
+        let lifted = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, mine, 1, 99) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == word(1, 99)
+                && crate::sched::get_base_priority(mine) == Some(0)
+                && call(SCHEDULER_RR_INTERVAL, mine, 0, 0) == 0
+                && call(SCHEDULER_SET, mine, 0, 0) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == 0
+        });
+        if !lifted {
+            return Err("IO_REALTIME did not lift RLIMIT_RTPRIO and the flag");
+        }
+        Ok(())
+    });
+    crate::sched::kill_task(mine);
+    crate::sched::kill_task(kernel_task);
+    crate::sched::reap_dead_tasks();
+    pcb::destroy(owner);
+    pcb::destroy(stranger);
+    if let Err(why) = outcome {
+        serial_println!("[syscall]   FAIL: SYS_THREAD_SCHEDULER: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_THREAD_SCHEDULER: OK");
     Ok(())
 }
 

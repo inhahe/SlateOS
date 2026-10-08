@@ -1,11 +1,13 @@
 //! Scheduling politeness ("nice"): who may change whose, and the three ways a
-//! call names processes.
+//! call names processes -- and a thread's scheduling policy, which is how a
+//! thread becomes real-time ([`set_scheduler`], at the end).
 //!
 //! Nice runs from -20 (greediest) to 19 (most yielding).
 //! [`thread::set_process_nice`](crate::proc::thread::set_process_nice) turns
-//! it into a scheduler priority, and nice -20 is the top of the 32 levels,
-//! above every service. Who may set it is therefore a security question, and
-//! it is decided here, once, for every door:
+//! it into a scheduler priority, and nice -20 is the top of the ordinary
+//! levels (level 8, below only the real-time band), above every service.
+//! Who may set it is therefore a security question, and it is decided here,
+//! once, for every door:
 //!
 //! - the native `SYS_PROCESS_SET_NICE` (532, the caller's own), and
 //!   `SYS_PROCESS_GET_PRIORITY` / `SYS_PROCESS_SET_PRIORITY` (1088/1089: a
@@ -39,12 +41,25 @@
 //!
 //! Reading a nice needs no authority, as on Linux: `/proc/<pid>/stat` shows
 //! it to anyone.
+//!
+//! # Real-time policies ([`may_set_scheduler`]; design-decisions 1544)
+//!
+//! `SCHED_FIFO` and `SCHED_RR` put a thread in the real-time band, levels
+//! 0-7, above every ordinary thread (`sched::task::RT_LEVELS`). The same
+//! authority is needed as for nice, and the same right lifts the same kind
+//! of ceiling: a real-time policy needs a non-zero `RLIMIT_RTPRIO` (0 by
+//! default) and stays within it, unless the caller holds IO_REALTIME, as
+//! Linux's `CAP_SYS_NICE` lifts `RLIMIT_RTPRIO` there.
 
 use alloc::vec::Vec;
 
 use crate::cap::{ResourceType, Rights};
 use crate::error::KernelError;
 use crate::proc::pcb::{self, ProcessId};
+use crate::sched::{
+    self,
+    task::{SchedAttr, SchedPolicy, TaskId},
+};
 
 /// `RLIMIT_NICE`'s number, as [`pcb::get_rlimit`] takes it.
 const RLIMIT_NICE: u32 = 13;
@@ -276,6 +291,190 @@ pub fn set_own_nice(pid: ProcessId, nice: i32) -> Result<i32, NiceRefusal> {
     crate::proc::thread::set_process_nice(pid, nice).ok_or(NiceRefusal::NoSuchProcess)
 }
 
+/// The nice a forked child's process starts with when the forking thread
+/// had `SCHED_RESET_ON_FORK` (Linux's `sched_fork`): 0 if the thread was
+/// real-time, otherwise its own with a negative one raised to 0.
+#[must_use]
+pub fn nice_after_reset_on_fork(creator_policy: SchedPolicy, nice: i32) -> i32 {
+    if creator_policy.is_realtime() {
+        0
+    } else {
+        nice.max(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling policies: who may make a thread real-time
+// ---------------------------------------------------------------------------
+//
+// A thread's policy (`SCHED_OTHER`, `SCHED_FIFO`, `SCHED_RR`, `SCHED_BATCH`,
+// `SCHED_IDLE`), its real-time priority and its `SCHED_RESET_ON_FORK` flag
+// are its own (`sched::task::SchedAttr`), as on Linux; its nice is its
+// process's. [`set_scheduler`] is the one place they are changed, for the
+// Linux `sched_setscheduler`, `sched_setparam` and `sched_setattr` and the
+// native `SYS_THREAD_SCHEDULER` alike (design-decisions 1544).
+
+/// `RLIMIT_RTPRIO`'s number, as [`pcb::get_rlimit`] takes it.
+const RLIMIT_RTPRIO: u32 = 14;
+const _: () = assert!(RLIMIT_RTPRIO as usize == pcb::RLIMIT_RTPRIO_INDEX);
+
+/// Why a change of a thread's scheduling was refused: Linux's answers for
+/// `sched_setscheduler`, `sched_setparam` and `sched_setattr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedRefusal {
+    /// No such thread. `ESRCH`.
+    NoSuchThread,
+    /// A priority outside the policy's range: 1..=99 under `SCHED_FIFO` and
+    /// `SCHED_RR`, 0 under the others. `EINVAL`.
+    Invalid,
+    /// No authority over the thread, or a change only the right to raise
+    /// priority allows. `EPERM`.
+    NotPermitted,
+}
+
+/// What a call asks of a thread's scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedChange {
+    /// The policy, or `None` to keep the thread's -- and with it its
+    /// `SCHED_RESET_ON_FORK` -- as `sched_setparam` and
+    /// `SCHED_FLAG_KEEP_POLICY` do.
+    pub policy: Option<SchedPolicy>,
+    /// The real-time priority asked for, as the caller passed it.
+    pub rt_priority: i64,
+    /// `SCHED_RESET_ON_FORK`, when `policy` is given.
+    pub reset_on_fork: bool,
+    /// `SCHED_FLAG_KEEP_PARAMS`: everything is checked as asked, but only
+    /// the reset flag is stored, as Linux skips `__setscheduler_params`.
+    pub keep_params: bool,
+}
+
+/// May `caller` move thread `tid`, now under `current`, to `wanted`?
+/// Linux's `user_check_sched_setscheduler`, with this kernel's authority in
+/// place of user ids and the IO_REALTIME right on a Thread capability in
+/// place of `CAP_SYS_NICE`:
+///
+/// 1. **Authority over the thread's process** ([`may_act_on`]). No process
+///    may change a kernel task, which belongs to none.
+/// 2. **A change only the right allows** ([`needs_the_right`]) is refused
+///    without it.
+///
+/// A kernel task (`caller` 0) may do anything.
+pub fn may_set_scheduler(
+    caller: ProcessId,
+    tid: TaskId,
+    current: SchedAttr,
+    wanted: SchedAttr,
+) -> Result<(), SchedRefusal> {
+    if caller == 0 {
+        return Ok(());
+    }
+    let owner = crate::proc::thread::owner_process(tid)
+        .filter(|&p| p != 0)
+        .ok_or(SchedRefusal::NotPermitted)?;
+    match may_act_on(caller, owner) {
+        Ok(()) => {}
+        Err(NiceRefusal::NoSuchProcess) => return Err(SchedRefusal::NoSuchThread),
+        Err(NiceRefusal::NotPermitted | NiceRefusal::RaiseRefused) => {
+            return Err(SchedRefusal::NotPermitted);
+        }
+    }
+    if needs_the_right(owner, current, wanted)
+        && !pcb::has_capability_type(caller, ResourceType::Thread, Rights::IO_REALTIME)
+    {
+        return Err(SchedRefusal::NotPermitted);
+    }
+    Ok(())
+}
+
+/// Whether moving a thread of process `owner` from `current` to `wanted`
+/// takes the right to raise priority -- each of Linux's `req_priv` cases:
+///
+/// - **a real-time policy** the thread is not already under, while
+///   `owner`'s `RLIMIT_RTPRIO` is 0 (the default);
+/// - **a real-time priority raised** past `RLIMIT_RTPRIO`;
+/// - **leaving `SCHED_IDLE`** for a policy whose nice `owner`'s
+///   `RLIMIT_NICE` would not let it raise itself to -- Linux counts
+///   `SCHED_IDLE` as below nice 19, so coming back is a raise;
+/// - **clearing `SCHED_RESET_ON_FORK`.**
+///
+/// Lowering never does: a real-time thread may always lower its priority or
+/// become ordinary.
+#[must_use]
+pub fn needs_the_right(owner: ProcessId, current: SchedAttr, wanted: SchedAttr) -> bool {
+    if wanted.policy.is_realtime() {
+        let limit = pcb::get_rlimit(owner, RLIMIT_RTPRIO).map_or(0, |(soft, _)| soft);
+        if wanted.policy != current.policy && limit == 0 {
+            return true;
+        }
+        if wanted.rt_priority > current.rt_priority && u64::from(wanted.rt_priority) > limit {
+            return true;
+        }
+    }
+    if current.policy == SchedPolicy::Idle && wanted.policy != SchedPolicy::Idle {
+        let soft = pcb::get_rlimit(owner, RLIMIT_NICE).map_or(0, |(soft, _)| soft);
+        if !rlimit_allows_nice(soft, pcb::get_nice(owner).unwrap_or(0)) {
+            return true;
+        }
+    }
+    current.reset_on_fork && !wanted.reset_on_fork
+}
+
+/// The real-time priority `rt_priority` as a thread under `policy` holds it,
+/// or [`SchedRefusal::Invalid`] if it does not suit the policy: Linux's
+/// checks that a priority is at most `MAX_RT_PRIO - 1` (99) and that a
+/// real-time policy has one (1..=99) and no other policy does (0). A
+/// negative one is above 99 as Linux's `u32` field sees it.
+pub fn check_priority(policy: SchedPolicy, rt_priority: i64) -> Result<u8, SchedRefusal> {
+    let p = u8::try_from(rt_priority)
+        .ok()
+        .filter(|&p| p <= 99)
+        .ok_or(SchedRefusal::Invalid)?;
+    if policy.is_realtime() == (p != 0) {
+        Ok(p)
+    } else {
+        Err(SchedRefusal::Invalid)
+    }
+}
+
+/// Change thread `tid`'s scheduling as `caller` asks: Linux's
+/// `__sched_setscheduler` for one thread, in its order -- no such thread
+/// ([`SchedRefusal::NoSuchThread`]), then a priority out of the policy's
+/// range ([`SchedRefusal::Invalid`]), then [`may_set_scheduler`].
+///
+/// A thread blocked on a priority-inheritance futex lends its new level on to
+/// the holder ([`crate::ipc::futex::pi_waiter_priority_changed`]).
+pub fn set_scheduler(
+    caller: ProcessId,
+    tid: TaskId,
+    change: SchedChange,
+) -> Result<(), SchedRefusal> {
+    let current = sched::get_sched_attr(tid).ok_or(SchedRefusal::NoSuchThread)?;
+    let policy = change.policy.unwrap_or(current.policy);
+    let reset_on_fork = if change.policy.is_some() {
+        change.reset_on_fork
+    } else {
+        current.reset_on_fork
+    };
+    let rt_priority = check_priority(policy, change.rt_priority)?;
+    let wanted = SchedAttr {
+        policy,
+        rt_priority,
+        reset_on_fork,
+    };
+    may_set_scheduler(caller, tid, current, wanted)?;
+    let stored = if change.keep_params {
+        SchedAttr {
+            reset_on_fork,
+            ..current
+        }
+    } else {
+        wanted
+    };
+    sched::set_scheduler(tid, stored).ok_or(SchedRefusal::NoSuchThread)?;
+    crate::ipc::futex::pi_waiter_priority_changed(tid);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -445,9 +644,177 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         return fail("a kernel task's own priority", &pids);
     }
 
+    // Real-time policies, on a suspended thread counted as the child's.
+    if let Err(why) = self_test_scheduler(parent, child, stranger) {
+        return fail(why, &pids);
+    }
+
     for p in pids {
         pcb::destroy(p);
     }
     serial_println!("[priority]   nice authority, raises, groups, users: OK");
+    serial_println!("[priority]   real-time policies: authority, RLIMIT_RTPRIO, IO_REALTIME: OK");
     Ok(())
+}
+
+/// The real-time rule ([`may_set_scheduler`], [`needs_the_right`],
+/// [`set_scheduler`]) on a suspended thread counted as `child`'s, which the
+/// nice test above left at nice -5 under an `RLIMIT_NICE` of 25. `parent`
+/// has authority over it; `stranger`, which holds IO_REALTIME by now, has
+/// not.
+fn self_test_scheduler(
+    parent: ProcessId,
+    child: ProcessId,
+    stranger: ProcessId,
+) -> Result<(), &'static str> {
+    use crate::sched::task::rt_level;
+    use SchedRefusal::{Invalid, NoSuchThread, NotPermitted};
+
+    extern "C" fn never_runs(_arg: u64) {}
+
+    let thread = sched::spawn_suspended(b"prio-rt", 16, never_runs, 0, 0)
+        .map_err(|_| "could not spawn the scratch thread")?;
+    let outcome = crate::proc::thread::self_test_with_thread(thread, child, || {
+        let attr = |policy, rt_priority, reset_on_fork| SchedAttr {
+            policy,
+            rt_priority,
+            reset_on_fork,
+        };
+        let other = SchedAttr::default();
+        let idle = attr(SchedPolicy::Idle, 0, false);
+        let fifo = |p| attr(SchedPolicy::Fifo, p, false);
+        let change = |policy, rt_priority, reset_on_fork| SchedChange {
+            policy,
+            rt_priority,
+            reset_on_fork,
+            keep_params: false,
+        };
+        let now = || sched::get_sched_attr(thread);
+
+        // Authority: the parent may, a stranger may not -- not even with
+        // IO_REALTIME -- and the kernel always may. No process may change a
+        // kernel task (the boot task here).
+        let batch = attr(SchedPolicy::Batch, 0, false);
+        if may_set_scheduler(stranger, thread, other, batch) != Err(NotPermitted)
+            || may_set_scheduler(parent, thread, other, batch) != Ok(())
+            || may_set_scheduler(0, thread, other, fifo(99)) != Ok(())
+            || may_set_scheduler(parent, sched::current_task_id(), other, other)
+                != Err(NotPermitted)
+        {
+            return Err("the authority over a thread");
+        }
+        // RLIMIT_RTPRIO 0, the default: no real-time policy without the right.
+        if !needs_the_right(child, other, fifo(1))
+            || may_set_scheduler(parent, thread, other, fifo(1)) != Err(NotPermitted)
+        {
+            return Err("a real-time policy under RLIMIT_RTPRIO 0");
+        }
+        // Lowering never needs it.
+        if needs_the_right(child, fifo(50), fifo(10))
+            || needs_the_right(child, fifo(50), other)
+            || needs_the_right(child, fifo(50), idle)
+        {
+            return Err("lowering a real-time thread needed the right");
+        }
+        // RLIMIT_RTPRIO 30: in, and up to 30; a policy change within the
+        // band; a priority already past it may stay or come down.
+        if pcb::set_rlimit(
+            child,
+            RLIMIT_RTPRIO,
+            30,
+            30,
+            pcb::LimitAuthority::MayRaiseHardLimit,
+        )
+        .is_err()
+        {
+            return Err("could not set the child's RLIMIT_RTPRIO");
+        }
+        if needs_the_right(child, other, fifo(30))
+            || !needs_the_right(child, other, fifo(31))
+            || needs_the_right(child, fifo(30), attr(SchedPolicy::Rr, 30, false))
+            || !needs_the_right(child, fifo(10), fifo(31))
+            || needs_the_right(child, fifo(60), fifo(60))
+            || needs_the_right(child, fifo(60), fifo(50))
+        {
+            return Err("RLIMIT_RTPRIO's ceiling is not Linux's");
+        }
+        // SCHED_RESET_ON_FORK: setting it is free, clearing it is not.
+        let reset = attr(SchedPolicy::Other, 0, true);
+        if needs_the_right(child, other, reset) || !needs_the_right(child, reset, other) {
+            return Err("SCHED_RESET_ON_FORK's rule");
+        }
+        // Leaving SCHED_IDLE is a raise to the process's nice: the child's
+        // RLIMIT_NICE of 25 allows its nice of -5; the parent's 0 allows its
+        // nice of 3 nothing.
+        if needs_the_right(child, idle, other) || !needs_the_right(parent, idle, other) {
+            return Err("leaving SCHED_IDLE is not judged by RLIMIT_NICE");
+        }
+
+        // set_scheduler: no such thread, then a bad priority (before who
+        // may: a stranger's is Invalid too), then who may.
+        if set_scheduler(
+            parent,
+            u64::MAX - 7,
+            change(Some(SchedPolicy::Other), 0, false),
+        ) != Err(NoSuchThread)
+            || set_scheduler(parent, thread, change(Some(SchedPolicy::Fifo), 0, false))
+                != Err(Invalid)
+            || set_scheduler(parent, thread, change(Some(SchedPolicy::Other), 5, false))
+                != Err(Invalid)
+            || set_scheduler(parent, thread, change(Some(SchedPolicy::Fifo), 100, false))
+                != Err(Invalid)
+            || set_scheduler(parent, thread, change(Some(SchedPolicy::Rr), -1, false))
+                != Err(Invalid)
+            || set_scheduler(stranger, thread, change(Some(SchedPolicy::Fifo), 0, false))
+                != Err(Invalid)
+            || set_scheduler(stranger, thread, change(Some(SchedPolicy::Fifo), 5, false))
+                != Err(NotPermitted)
+        {
+            return Err("set_scheduler's refusals or their order");
+        }
+        // What it stores: FIFO 20 with the flag, in the band at 20's level.
+        if set_scheduler(parent, thread, change(Some(SchedPolicy::Fifo), 20, true)) != Ok(())
+            || now() != Some(attr(SchedPolicy::Fifo, 20, true))
+            || sched::get_base_priority(thread) != Some(rt_level(20))
+        {
+            return Err("FIFO 20 was not stored, or not at its level");
+        }
+        // No policy keeps the policy and the flag (sched_setparam).
+        if set_scheduler(parent, thread, change(None, 25, false)) != Ok(())
+            || now() != Some(attr(SchedPolicy::Fifo, 25, true))
+        {
+            return Err("keeping the policy did not keep it, or the flag");
+        }
+        // keep_params checks what it is given, and stores only the flag.
+        let keep = SchedChange {
+            policy: Some(SchedPolicy::Rr),
+            rt_priority: 5,
+            reset_on_fork: true,
+            keep_params: true,
+        };
+        if set_scheduler(parent, thread, keep) != Ok(())
+            || now() != Some(attr(SchedPolicy::Fifo, 25, true))
+        {
+            return Err("keep_params stored more than the flag");
+        }
+        // Clearing the flag takes the right, which the parent has not; an
+        // ordinary policy with the flag kept is free.
+        if set_scheduler(parent, thread, change(Some(SchedPolicy::Other), 0, false))
+            != Err(NotPermitted)
+            || set_scheduler(parent, thread, change(Some(SchedPolicy::Other), 0, true)) != Ok(())
+            || now() != Some(reset)
+            || sched::get_base_priority(thread) != Some(16)
+        {
+            return Err("the flag's clearing, or the return to the thread's level");
+        }
+        if set_scheduler(0, thread, change(Some(SchedPolicy::Other), 0, false)) != Ok(())
+            || now() != Some(other)
+        {
+            return Err("the kernel could not clear the flag");
+        }
+        Ok(())
+    });
+    sched::kill_task(thread);
+    sched::reap_dead_tasks();
+    outcome
 }

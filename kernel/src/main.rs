@@ -3540,6 +3540,15 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_null_buffer(),
     );
 
+    // Real-time scheduling: SCHED_FIFO, SCHED_RR and the rest set and read
+    // back as Linux answers, inherited across fork and clone, and obeyed --
+    // a spinning SCHED_FIFO thread keeps an ordinary one off its CPU.
+    selftest::dispatch_debug(
+        "Linux real-time scheduling (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_rt_sched(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

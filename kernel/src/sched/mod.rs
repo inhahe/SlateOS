@@ -658,6 +658,168 @@ static NEED_RESCHED: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+// ---------------------------------------------------------------------------
+// The real-time band, per CPU
+// ---------------------------------------------------------------------------
+//
+// Real-time (`SCHED_FIFO`/`SCHED_RR`) tasks run in levels 0..RT_LEVELS
+// (`task::RT_LEVELS`). Three things make the band behave as real-time rather
+// than as eight more priority levels, and all three must be decided without
+// the task table, from the timer interrupt:
+//
+// - **Preemption into the band** does not wait for the running task's slice:
+//   a band level queued above what a CPU runs takes the CPU at the next tick
+//   (`rt_outranks_current`), and a wake into the band asks the CPU at once
+//   (`wake`). A `SCHED_FIFO` task has no slice to wait for at all.
+// - **The throttle** (`rt_account_tick`): band work may take
+//   `sched.rt_runtime_pct` of each second (95%, Linux's
+//   `sched_rt_runtime_us` default) of a CPU on which ordinary work is
+//   waiting; past that the CPU runs its ordinary work first until the period
+//   ends, so a spinning real-time thread cannot take the machine with it.
+//   Unlike Linux it never idles a CPU: with no ordinary work waiting, band
+//   work runs on (design-decisions 1544).
+// - **What runs where** (`CURRENT_LEVEL`), recorded at each dispatch
+//   (`note_dispatch`).
+
+/// The effective level each CPU last dispatched (`u8::MAX` before the
+/// first): what the tick and a wake compare a queued band level with.
+static CURRENT_LEVEL: [CachePadded<AtomicU8>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU8> = CachePadded::new(AtomicU8::new(u8::MAX));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Ticks each CPU has spent in the real-time band in this bandwidth period.
+static RT_TICKS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Whether each CPU's band work has used its share of this period.
+static RT_THROTTLED: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicBool> = CachePadded::new(AtomicBool::new(false));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// How many times a CPU's band work has been throttled since boot.
+static RT_THROTTLES: AtomicU64 = AtomicU64::new(0);
+
+/// The share of each second, in percent, band work may take of a CPU on
+/// which ordinary work waits: Linux's 950000 of 1000000 microseconds.
+const RT_RUNTIME_PCT_DEFAULT: u64 = 95;
+
+/// Whether `cpu`'s real-time work has used its share of this period, so the
+/// CPU runs its ordinary work first until the period ends.
+#[must_use]
+pub fn rt_throttled(cpu: usize) -> bool {
+    RT_THROTTLED
+        .get(cpu)
+        .is_some_and(|f| f.load(Ordering::Relaxed))
+}
+
+/// How many times a CPU's real-time work has been throttled since boot.
+#[must_use]
+#[allow(dead_code)] // Public API for diagnostics, as `starvation_boost_count` is.
+pub fn rt_throttle_count() -> u64 {
+    RT_THROTTLES.load(Ordering::Relaxed)
+}
+
+/// The ticks of each period band work may take while ordinary work waits.
+/// `try_get`: the timer interrupt asks (see `check_starvation`).
+fn rt_budget_ticks() -> u64 {
+    let pct = crate::sysctl::try_get(crate::sysctl::PARAM_SCHED_RT_RUNTIME_PCT)
+        .unwrap_or(RT_RUNTIME_PCT_DEFAULT)
+        .clamp(1, 100);
+    BANDWIDTH_PERIOD_TICKS.saturating_mul(pct) / 100
+}
+
+/// Record what `cpu` now runs ([`CURRENT_LEVEL`]) and give a real-time
+/// policy its slice: none for `SCHED_FIFO`, which runs until it blocks,
+/// yields or a higher level preempts it, and Linux's 100 ms for `SCHED_RR`.
+/// Called at every dispatch, after the pick set the level's ordinary slice.
+fn note_dispatch(cpu: usize, task: &Task) {
+    if let Some(level) = CURRENT_LEVEL.get(cpu) {
+        level.store(task.effective_priority(), Ordering::Relaxed);
+    }
+    match task.policy {
+        task::SchedPolicy::Fifo => PER_CPU_SCHED.set_current_remaining(cpu, u32::MAX),
+        task::SchedPolicy::Rr => {
+            PER_CPU_SCHED.set_current_remaining(cpu, task::RR_TIMESLICE_TICKS);
+        }
+        _ => {}
+    }
+}
+
+/// Whether a band level queued on `cpu` outranks what the CPU runs, so the
+/// tick preempts for it now rather than at the end of a slice. Never while
+/// the CPU's band work is throttled. Without waiting for the queue's lock.
+fn rt_outranks_current(cpu: usize) -> bool {
+    if rt_throttled(cpu) {
+        return false;
+    }
+    let current = CURRENT_LEVEL
+        .get(cpu)
+        .map_or(u8::MAX, |l| l.load(Ordering::Relaxed));
+    PER_CPU_SCHED
+        .try_top_level(cpu)
+        .is_some_and(|top| top < task::RT_LEVELS && top < current)
+}
+
+/// One tick of `cpu`'s real-time accounting: a tick in the band counts
+/// against the CPU's share, and when the share is spent while ordinary work
+/// waits, the CPU's band work is throttled for the rest of the period.
+/// Returns whether that just happened -- a reschedule, so the ordinary work
+/// runs now.
+fn rt_account_tick(cpu: usize) -> bool {
+    let level = CURRENT_LEVEL
+        .get(cpu)
+        .map_or(u8::MAX, |l| l.load(Ordering::Relaxed));
+    if level >= task::RT_LEVELS {
+        return false;
+    }
+    let Some(ticks) = RT_TICKS.get(cpu) else {
+        return false;
+    };
+    let used = ticks.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if used < rt_budget_ticks() || rt_throttled(cpu) {
+        return false;
+    }
+    if !PER_CPU_SCHED.try_has_ordinary_work(cpu) {
+        return false;
+    }
+    if let Some(f) = RT_THROTTLED.get(cpu) {
+        f.store(true, Ordering::Relaxed);
+    }
+    RT_THROTTLES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// A new bandwidth period: every CPU's real-time share starts again, and a
+/// CPU that was throttled is asked to reschedule, so its band work runs
+/// again at once. From the BSP's tick, every `BANDWIDTH_PERIOD_TICKS`.
+fn reset_rt_budgets() {
+    for cpu in 0..PER_CPU_SCHED.num_cpus() {
+        if let Some(t) = RT_TICKS.get(cpu) {
+            t.store(0, Ordering::Relaxed);
+        }
+        if RT_THROTTLED
+            .get(cpu)
+            .is_some_and(|f| f.swap(false, Ordering::Relaxed))
+        {
+            request_preempt_on(cpu);
+        }
+    }
+}
+
+/// Whether a task just queued at `level` on `cpu` should take that CPU now:
+/// a band level above what the CPU runs, unless its band work is throttled.
+fn wake_preempts(cpu: usize, level: u8) -> bool {
+    level < task::RT_LEVELS
+        && !rt_throttled(cpu)
+        && CURRENT_LEVEL
+            .get(cpu)
+            .is_some_and(|l| level < l.load(Ordering::Relaxed))
+}
+
 /// Per-CPU preemption-disable count (spinlock hold depth).
 ///
 /// Incremented for the whole duration a CPU holds (or is spinning to acquire)
@@ -2639,6 +2801,7 @@ fn block_current_inner(
 /// Returns `false` if the task was not in the Blocked state.
 pub fn wake(task_id: TaskId) -> bool {
     let target_cpu;
+    let preempt_target;
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&task_id) {
@@ -2651,6 +2814,7 @@ pub fn wake(task_id: TaskId) -> bool {
                 target_cpu = choose_cpu_for_task(task);
                 task.last_cpu = target_cpu;
                 PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+                preempt_target = wake_preempts(target_cpu, prio);
             } else {
                 // Task is not Blocked (still Running or Ready).  Set the
                 // pending-wake flag so block_current() won't actually
@@ -2671,8 +2835,13 @@ pub fn wake(task_id: TaskId) -> bool {
         task_id,
         target_cpu as u64,
     );
-    // Signal the target CPU after releasing the lock.
-    signal_cpu(target_cpu);
+    // Signal the target CPU after releasing the lock -- and, for a wake into
+    // the real-time band above what it runs, have it switch now.
+    if preempt_target {
+        request_preempt_on(target_cpu);
+    } else {
+        signal_cpu(target_cpu);
+    }
     true
 }
 
@@ -2737,7 +2906,11 @@ pub fn try_wake(task_id: TaskId) -> bool {
     task.last_cpu = target_cpu;
     PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
     drop(state);
-    signal_cpu(target_cpu);
+    if wake_preempts(target_cpu, prio) {
+        request_preempt_on(target_cpu);
+    } else {
+        signal_cpu(target_cpu);
+    }
     true
 }
 
@@ -4035,6 +4208,11 @@ pub fn timer_tick(from_user: bool) -> bool {
 
     let time_slice_expired = PER_CPU_SCHED.tick(cpu);
 
+    // The real-time band: a tick spent there counts against the CPU's share
+    // (and may throttle it), and a band level queued above what runs here
+    // takes the CPU now -- a SCHED_FIFO task has no slice to wait out.
+    let rt_preempt = rt_account_tick(cpu) || rt_outranks_current(cpu);
+
     // --- Watchdog heartbeat (no lock needed) ---
     // Each CPU bumps its counter so the BSP can detect stalls.
     if let Some(hb) = WATCHDOG_HEARTBEAT.get(cpu) {
@@ -4127,6 +4305,7 @@ pub fn timer_tick(from_user: bool) -> bool {
         #[allow(clippy::arithmetic_side_effects)]
         if tick > 0 && tick.is_multiple_of(BANDWIDTH_PERIOD_TICKS) {
             unthrottle_expired();
+            reset_rt_budgets();
             update_load_average();
             // Reset cgroup CPU and I/O period counters alongside per-task resets.
             crate::cgroup::cpu_period_reset();
@@ -4147,7 +4326,7 @@ pub fn timer_tick(from_user: bool) -> bool {
         }
     }
 
-    if time_slice_expired || bandwidth_exceeded {
+    if time_slice_expired || bandwidth_exceeded || rt_preempt {
         return true;
     }
 
@@ -4692,13 +4871,18 @@ fn check_starvation() {
         if task.priority >= task::IDLE_PRIORITY {
             continue; // Idle tasks don't need boosting.
         }
+        if task.policy.is_realtime() {
+            // A real-time task waits only for higher real-time levels, by
+            // design; its waiting is not starvation.
+            continue;
+        }
         if task.ready_since_tick == 0 {
             continue; // Not tracking yet.
         }
         let waited = now.saturating_sub(task.ready_since_tick);
         if waited >= threshold {
             let current_prio = task.effective_priority();
-            if current_prio > 0 && boost_count < boost_list.len() {
+            if current_prio > starvation_target(current_prio) && boost_count < boost_list.len() {
                 // Only boost if not already at highest priority.
                 // SAFETY: indexing is bounds-checked by boost_count < len.
                 #[allow(clippy::indexing_slicing)]
@@ -4714,10 +4898,11 @@ fn check_starvation() {
         return;
     }
 
-    // Re-enqueue starved tasks at priority 0.
+    // Re-enqueue starved tasks at their boost level (`starvation_target`:
+    // the top of the ordinary band, or 0 within the real-time band).
     //
     // Two correctness points here, both guarding against duplicate run-queue
-    // entries (the same task ID appearing twice in the priority-0 queue):
+    // entries (the same task ID appearing twice in the boost level's queue):
     //
     // 1. The removal is by id, at every level. A task that was already
     //    boosted on a previous pass physically sits in priority-queue 0, but
@@ -4754,7 +4939,7 @@ fn check_starvation() {
     // starvation loop can be attributed to specific tasks.  Printed
     // incrementally to avoid any heap allocation on this path.
     serial_print!(
-        "[sched] Anti-starvation: cur={} boosted {} task{} to priority 0: [",
+        "[sched] Anti-starvation: cur={} boosted {} task{} (to level 8, or 0 within the band): [",
         load_current_task(),
         boost_count,
         if boost_count == 1 { "" } else { "s" }
@@ -4771,8 +4956,9 @@ fn check_starvation() {
     serial_println!("]");
 }
 
-/// Move one starved task to priority level 0 and restart its starvation
-/// clock -- the step [`check_starvation`] takes for each task it picks.
+/// Move one starved task to its boost level ([`starvation_target`]) and
+/// restart its starvation clock -- the step [`check_starvation`] takes for
+/// each task it picks.
 ///
 /// The task's priority fields are left alone, so it sits at a level its
 /// fields do not compute: every removal must therefore be by id, which
@@ -4782,14 +4968,31 @@ fn check_starvation() {
 /// as the booster does, not by an imitation of it.
 fn starvation_boost_locked(state: &mut SchedState, id: TaskId, cpu: usize, now: u64) {
     // Every existing entry goes, at every level and on every CPU, then one
-    // goes back at level 0.
-    PER_CPU_SCHED.dequeue(id, 0, cpu);
-    PER_CPU_SCHED.enqueue(id, 0, cpu);
+    // goes back at the boost's level.
+    let target = state
+        .tasks
+        .get(&id)
+        .map_or(0, |t| starvation_target(t.effective_priority()));
+    PER_CPU_SCHED.dequeue(id, target, cpu);
+    PER_CPU_SCHED.enqueue(id, target, cpu);
     STARVATION_BOOSTS.fetch_add(1, Ordering::Relaxed);
     // So the task is not re-boosted before it has had a chance to be
     // dispatched from level 0.
     if let Some(task) = state.tasks.get_mut(&id) {
         task.ready_since_tick = now;
+    }
+}
+
+/// The level a starved task at `level` is lifted to: the top of the
+/// ordinary band ([`task::RT_LEVELS`]) for ordinary work, never into the
+/// real-time band -- so a task already at that top (nice -20) is not lifted
+/// at all; level 0 for a task already in the band (a kernel task placed
+/// there), as before the band existed.
+const fn starvation_target(level: u8) -> u8 {
+    if level >= task::RT_LEVELS {
+        task::RT_LEVELS
+    } else {
+        0
     }
 }
 
@@ -5214,17 +5417,63 @@ pub fn resume(task_id: TaskId) -> bool {
     true
 }
 
-/// Change a task's scheduling priority.
+/// Re-level `task_id` after `change` alters its scheduling fields: if it is
+/// queued (`Ready`, not throttled), its entry moves to its new effective
+/// level; a task in any other state takes the new level when it next enters
+/// a queue, and a running one is recorded at it for the real-time checks.
+/// Returns its effective level before and after, or `None` if there is no
+/// such task.
+fn relevel_locked(
+    state: &mut SchedState,
+    task_id: TaskId,
+    change: impl FnOnce(&mut Task),
+) -> Option<(u8, u8)> {
+    let task = state.tasks.get_mut(&task_id)?;
+    let old_effective = task.effective_priority();
+    change(task);
+    let new_effective = task.effective_priority();
+    let cpu = task.last_cpu;
+    match task.state {
+        TaskState::Ready if !task.throttled && new_effective != old_effective => {
+            PER_CPU_SCHED.dequeue(task_id, old_effective, cpu);
+            PER_CPU_SCHED.enqueue(task_id, new_effective, cpu);
+        }
+        TaskState::Running => {
+            if let Some(level) = CURRENT_LEVEL.get(cpu) {
+                level.store(new_effective, Ordering::Relaxed);
+            }
+        }
+        _ => {}
+    }
+    Some((old_effective, new_effective))
+}
+
+/// The base level of a task with policy `policy`: its real-time priority's
+/// for `SCHED_FIFO`/`SCHED_RR`, the idle level for `SCHED_IDLE`, and its
+/// ordinary level otherwise.
+const fn policy_level(policy: task::SchedPolicy, rt_priority: u8, normal: u8) -> u8 {
+    match policy {
+        task::SchedPolicy::Fifo | task::SchedPolicy::Rr => task::rt_level(rt_priority),
+        task::SchedPolicy::Idle => task::IDLE_PRIORITY,
+        task::SchedPolicy::Other | task::SchedPolicy::Batch => normal,
+    }
+}
+
+/// Change a task's scheduling priority: its ordinary level.
 ///
 /// If the task is in the run queue ([`TaskState::Ready`] state), it is dequeued
 /// at the old priority and re-enqueued at the new priority.  For
 /// other states (Running, Blocked, Suspended), the new priority takes
 /// effect when the task next enters the run queue.
 ///
+/// A task under a real-time policy, or `SCHED_IDLE`, keeps running where
+/// its policy puts it: the new ordinary level is kept for when it returns
+/// to an ordinary policy, as Linux keeps `static_prio` beside `rt_priority`.
+///
 /// Priority is clamped to `0..NUM_PRIORITIES` (0 = highest, 31 =
 /// lowest).
 ///
-/// Returns the old priority, or `None` if the task was not found.
+/// Returns the old ordinary level, or `None` if the task was not found.
 pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     let clamped = new_priority.min(
         #[allow(clippy::cast_possible_truncation)]
@@ -5235,45 +5484,189 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
 
     let mut state = SCHED.lock();
     let task = state.tasks.get(&task_id)?;
-    let old_priority = task.priority;
-    let old_effective = task.effective_priority();
-    let task_state = task.state;
+    let old_normal = task.normal_priority;
+    let fixed_by_policy = task.policy.is_realtime() || task.policy == task::SchedPolicy::Idle;
+    let unchanged = task.priority == clamped;
     let is_interactive = task.interactive;
-    let task_cpu = task.last_cpu;
-
-    if old_priority == clamped {
-        return Some(old_priority);
+    if fixed_by_policy || unchanged {
+        if let Some(task) = state.tasks.get_mut(&task_id) {
+            task.normal_priority = clamped;
+        }
+        return Some(old_normal);
     }
-
-    // Compute the new effective priority (with interactive boost).
-    let new_effective = if is_interactive {
-        clamped.saturating_sub(task::INTERACTIVE_BOOST)
-    } else {
-        clamped
-    };
-
-    // If the task is Ready (in the run queue), move it to the new
-    // priority queue.  We do the dequeue/enqueue first with the
-    // scheduler, then update the task's stored priority, to avoid
-    // two mutable borrows of `state`.
-    if task_state == TaskState::Ready {
-        PER_CPU_SCHED.dequeue(task_id, old_effective, task_cpu);
-        PER_CPU_SCHED.enqueue(task_id, new_effective, task_cpu);
-    }
-
-    // Now update the task's stored priority.
-    if let Some(task) = state.tasks.get_mut(&task_id) {
-        task.priority = clamped;
-    }
+    relevel_locked(&mut state, task_id, |t| {
+        t.priority = clamped;
+        t.normal_priority = clamped;
+    })?;
 
     serial_println!(
         "[sched] Task {} priority: {} → {}{}",
         task_id,
-        old_priority,
+        old_normal,
         clamped,
         if is_interactive { " (interactive)" } else { "" }
     );
-    Some(old_priority)
+    Some(old_normal)
+}
+
+/// Put `task_id` under the scheduling attributes `attr` -- its policy, its
+/// real-time priority (1..=99 under `SCHED_FIFO`/`SCHED_RR`, clamped there;
+/// none under the others) and `SCHED_RESET_ON_FORK`: Linux's
+/// `sched_setscheduler` for one thread. Who may, and whether the values are
+/// in range, is the caller's to check (`proc::priority::set_scheduler`).
+///
+/// A real-time task moves into the band at its priority's level
+/// ([`task::rt_level`]) and, queued above what a CPU runs, takes it at once;
+/// leaving a real-time policy returns it to its ordinary level, and
+/// `SCHED_BATCH` drops the interactive boost. A *running* task's CPU is asked
+/// to reschedule when its policy or level changes, so the pick that follows
+/// gives it its new policy's slice (none for `SCHED_FIFO`, 100 ms for
+/// `SCHED_RR`) and lets run whatever it no longer outranks.
+///
+/// Returns the attributes it had, or `None` if there is no such task.
+pub fn set_scheduler(task_id: TaskId, attr: task::SchedAttr) -> Option<task::SchedAttr> {
+    let mut state = SCHED.lock();
+    let mut old = None;
+    let (old_effective, new_effective) = relevel_locked(&mut state, task_id, |t| {
+        old = Some(task::SchedAttr {
+            policy: t.policy,
+            rt_priority: t.rt_priority,
+            reset_on_fork: t.reset_on_fork,
+        });
+        t.policy = attr.policy;
+        t.rt_priority = if attr.policy.is_realtime() {
+            attr.rt_priority.clamp(1, 99)
+        } else {
+            0
+        };
+        t.reset_on_fork = attr.reset_on_fork;
+        t.priority = policy_level(attr.policy, t.rt_priority, t.normal_priority);
+        if attr.policy == task::SchedPolicy::Batch {
+            t.interactive = false;
+        }
+    })?;
+    let old = old?;
+    let kick = state.tasks.get(&task_id).and_then(|t| match t.state {
+        TaskState::Ready if wake_preempts(t.last_cpu, new_effective) => Some(t.last_cpu),
+        TaskState::Running if old.policy != attr.policy || old_effective != new_effective => {
+            Some(t.last_cpu)
+        }
+        _ => None,
+    });
+    drop(state);
+    if let Some(cpu) = kick {
+        request_preempt_on(cpu);
+    }
+    Some(old)
+}
+
+/// The scheduling attributes of `task_id`, or `None` if there is no such
+/// task.
+#[must_use]
+pub fn get_sched_attr(task_id: TaskId) -> Option<task::SchedAttr> {
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map(|t| task::SchedAttr {
+        policy: t.policy,
+        rt_priority: t.rt_priority,
+        reset_on_fork: t.reset_on_fork,
+    })
+}
+
+/// The time slice `task_id` is given each time it is dispatched, in
+/// nanoseconds -- what `sched_rr_get_interval` reports: none (0) under
+/// `SCHED_FIFO`, which runs until it blocks or yields;
+/// [`task::RR_TIMESLICE_TICKS`] under `SCHED_RR`; otherwise its effective
+/// level's ([`get_time_slice`]). `None` if there is no such task.
+#[must_use]
+pub fn time_slice_ns(task_id: TaskId) -> Option<u64> {
+    let (policy, level) = {
+        let state = SCHED.lock();
+        let t = state.tasks.get(&task_id)?;
+        (t.policy, t.effective_priority())
+    };
+    let ticks = match policy {
+        task::SchedPolicy::Fifo => 0,
+        task::SchedPolicy::Rr => task::RR_TIMESLICE_TICKS,
+        _ => get_time_slice(usize::from(level)).unwrap_or(0),
+    };
+    const TICK_NS: u64 = 1_000_000_000 / crate::apic::TICK_RATE_HZ as u64;
+    Some(u64::from(ticks).saturating_mul(TICK_NS))
+}
+
+/// What a new task takes from the task that creates it ([`inheritance_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inheritance {
+    /// The creator's attributes, as they were.
+    pub creator: task::SchedAttr,
+    /// The new task's: the creator's after `SCHED_RESET_ON_FORK`, never
+    /// with the flag itself.
+    pub attr: task::SchedAttr,
+    /// The new task's ordinary level ([`Task::normal_priority`]).
+    pub normal_priority: u8,
+}
+
+impl Inheritance {
+    /// The level the new task is queued at.
+    #[must_use]
+    pub const fn level(&self) -> u8 {
+        policy_level(
+            self.attr.policy,
+            self.attr.rt_priority,
+            self.normal_priority,
+        )
+    }
+}
+
+/// The scheduling a task created by `parent` starts with, as Linux's
+/// `sched_fork` gives it: the parent's policy, real-time priority and
+/// ordinary level -- unless the parent has `SCHED_RESET_ON_FORK`, when a
+/// real-time policy becomes `SCHED_OTHER` at the default level (nice 0) and
+/// a raised ordinary level (a negative nice) goes back to the default. The
+/// flag itself is not inherited. `None` if there is no task `parent`.
+#[must_use]
+pub fn inheritance_from(parent: TaskId) -> Option<Inheritance> {
+    let state = SCHED.lock();
+    let p = state.tasks.get(&parent)?;
+    let creator = task::SchedAttr {
+        policy: p.policy,
+        rt_priority: p.rt_priority,
+        reset_on_fork: p.reset_on_fork,
+    };
+    let mut attr = task::SchedAttr {
+        reset_on_fork: false,
+        ..creator
+    };
+    let mut normal = p.normal_priority;
+    if creator.reset_on_fork {
+        if creator.policy.is_realtime() {
+            attr.policy = task::SchedPolicy::Other;
+            attr.rt_priority = 0;
+            normal = task::DEFAULT_PRIORITY;
+        } else {
+            normal = normal.max(task::DEFAULT_PRIORITY);
+        }
+    }
+    Some(Inheritance {
+        creator,
+        attr,
+        normal_priority: normal,
+    })
+}
+
+/// Give the new task `child` what [`inheritance_from`] said it inherits.
+/// `fork` and `clone` call it while the child is still suspended;
+/// `SYS_THREAD_CREATE` spawns its thread at [`Inheritance::level`] and calls
+/// it straight after, so only the slice of the first dispatch can differ.
+pub fn inherit_scheduling(child: TaskId, inheritance: Inheritance) {
+    let mut state = SCHED.lock();
+    // A child that is already gone has nothing to inherit.
+    let _ = relevel_locked(&mut state, child, |c| {
+        c.policy = inheritance.attr.policy;
+        c.rt_priority = inheritance.attr.rt_priority;
+        c.reset_on_fork = false;
+        c.normal_priority = inheritance.normal_priority;
+        c.priority = inheritance.level();
+    });
 }
 
 /// Set a task's CPU affinity mask: [`set_affinity`], with `None` for every
@@ -5761,44 +6154,32 @@ pub fn get_base_priority(task_id: TaskId) -> Option<u8> {
 /// on a lock held by a lower-priority task.
 pub fn boost_priority(task_id: TaskId, donor_priority: u8) -> Option<u8> {
     let mut state = SCHED.lock();
+    let current_inherited = state.tasks.get(&task_id)?.inherited_priority;
 
-    // Read current state (immutable borrow).
-    let t = state.tasks.get(&task_id)?;
-    let old_effective = t.effective_priority();
-    let task_state = t.state;
-    let current_inherited = t.inherited_priority;
-    let base_prio = t.priority;
-    let is_interactive = t.interactive;
-    let task_cpu = t.last_cpu;
-
-    // Compute new inherited priority (keep the most aggressive boost).
-    let new_inh = match current_inherited {
-        Some(current) => current.min(donor_priority),
-        None => donor_priority,
-    };
-
-    // No change — return early.
+    // Keep the most aggressive boost.
+    let new_inh = current_inherited.map_or(donor_priority, |c| c.min(donor_priority));
     if Some(new_inh) == current_inherited {
-        return Some(old_effective);
+        return state.tasks.get(&task_id).map(|t| t.effective_priority());
     }
 
-    // Compute new effective priority.
-    let base_eff = if is_interactive {
-        base_prio.saturating_sub(task::INTERACTIVE_BOOST)
-    } else {
-        base_prio
-    };
-    let new_effective = base_eff.min(new_inh);
-
-    // Re-queue if Ready and effective priority changed.
-    if task_state == TaskState::Ready && new_effective != old_effective {
-        PER_CPU_SCHED.dequeue(task_id, old_effective, task_cpu);
-        PER_CPU_SCHED.enqueue(task_id, new_effective, task_cpu);
-    }
-
-    // Write the new inherited priority.
-    if let Some(task) = state.tasks.get_mut(&task_id) {
-        task.inherited_priority = Some(new_inh);
+    // `relevel_locked` moves a queued task to its new level, computed as
+    // every other change computes it (`Task::effective_priority`). This used
+    // to work the level out here by the old rule -- base less the
+    // interactive boost -- which, once a real-time or `SCHED_BATCH` task had
+    // no such boost, would have queued it where nothing looked for it.
+    let (old_effective, new_effective) = relevel_locked(&mut state, task_id, |t| {
+        t.inherited_priority = Some(new_inh)
+    })?;
+    // A holder lent a real-time waiter's level takes its CPU at once, as a
+    // wake into the band does: the waiter is stuck until it releases.
+    let kick = state
+        .tasks
+        .get(&task_id)
+        .filter(|t| t.state == TaskState::Ready && wake_preempts(t.last_cpu, new_effective))
+        .map(|t| t.last_cpu);
+    drop(state);
+    if let Some(cpu) = kick {
+        request_preempt_on(cpu);
     }
 
     serial_println!(
@@ -5823,32 +6204,11 @@ pub fn boost_priority(task_id: TaskId, donor_priority: u8) -> Option<u8> {
 /// was not found.
 pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Option<u8> {
     let mut state = SCHED.lock();
-
-    let t = state.tasks.get(&task_id)?;
-    let old_effective = t.effective_priority();
-    let task_state = t.state;
-    let base_prio = t.priority;
-    let is_interactive = t.interactive;
-    let task_cpu = t.last_cpu;
-
-    let base_eff = if is_interactive {
-        base_prio.saturating_sub(task::INTERACTIVE_BOOST)
-    } else {
-        base_prio
-    };
-    let new_effective = match new_inherited {
-        Some(inh) => base_eff.min(inh),
-        None => base_eff,
-    };
-
-    if task_state == TaskState::Ready && new_effective != old_effective {
-        PER_CPU_SCHED.dequeue(task_id, old_effective, task_cpu);
-        PER_CPU_SCHED.enqueue(task_id, new_effective, task_cpu);
-    }
-
-    if let Some(task) = state.tasks.get_mut(&task_id) {
-        task.inherited_priority = new_inherited;
-    }
+    // The level as every change computes it ([`boost_priority`] says why).
+    let (old_effective, new_effective) = relevel_locked(&mut state, task_id, |t| {
+        t.inherited_priority = new_inherited
+    })?;
+    drop(state);
 
     if old_effective != new_effective {
         serial_println!(
@@ -7991,6 +8351,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             task.record_dispatch(crate::apic::tick_count());
                             task.state = TaskState::Running;
                             task.last_cpu = cpu;
+                            note_dispatch(cpu, task);
                         }
                         drop(s);
                         wake_signals.flush();
@@ -8085,6 +8446,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         task.record_dispatch(crate::apic::tick_count());
                         task.state = TaskState::Running;
                         task.last_cpu = cpu;
+                        note_dispatch(cpu, task);
                     }
 
                     if let (
@@ -8250,6 +8612,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     PER_CPU_SCHED.dequeue(current_id, task.effective_priority(), cpu);
                     task.record_dispatch(crate::apic::tick_count());
                     task.state = TaskState::Running;
+                    note_dispatch(cpu, task);
                 }
             }
             return;
@@ -8272,6 +8635,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             // save-then-restore.  Handle it uniformly regardless of `requeue`.
             if let Some(task) = state.tasks.get_mut(&current_id) {
                 task.state = TaskState::Running;
+                note_dispatch(cpu, task);
             }
             return;
         }
@@ -8339,6 +8703,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 next_task.record_dispatch(crate::apic::tick_count());
                 next_task.state = TaskState::Running;
                 next_task.last_cpu = cpu;
+                note_dispatch(cpu, next_task);
             }
             old_ctx_ptr = old;
             new_ctx_ptr = new;
@@ -8801,6 +9166,7 @@ pub fn self_test() -> KernelResult<()> {
     test_suspend_resume()?;
     test_two_phase_self_suspend()?;
     test_set_priority()?;
+    test_realtime_band()?;
     test_interactive_detection()?;
     test_time_slice_config()?;
     test_workload_profiles()?;
@@ -10605,6 +10971,241 @@ fn test_set_priority() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   Set priority: OK");
+    Ok(())
+}
+
+/// The real-time band (design-decisions 1544), a piece at a time: the levels
+/// POSIX priorities map to, the boosts that stop at the band's floor,
+/// `set_scheduler` and `set_priority` on a parked task, what a new task
+/// inherits, and -- on a run queue of the test's own -- the throttle's pick
+/// and `SCHED_FIFO`'s missing slice.
+fn test_realtime_band() -> KernelResult<()> {
+    use task::{IDLE_PRIORITY, RT_LEVELS, SchedAttr, SchedPolicy, rt_level};
+
+    extern "C" fn parked_entry(_arg: u64) {}
+
+    // POSIX 1..=99 over levels 7..=0, 99 the most urgent, never leaving the
+    // band; out-of-range priorities clamped.
+    let mut last = RT_LEVELS;
+    for p in 1..=99u8 {
+        let level = rt_level(p);
+        if level >= RT_LEVELS || level > last {
+            serial_println!("[sched]   FAIL: rt_level({}) = {} after {}", p, level, last);
+            return Err(KernelError::InternalError);
+        }
+        last = level;
+    }
+    if rt_level(99) != 0
+        || rt_level(1) != 7
+        || rt_level(50) != 4
+        || rt_level(0) != 7
+        || rt_level(200) != 0
+    {
+        serial_println!("[sched]   FAIL: rt_level's ends or middle");
+        return Err(KernelError::InternalError);
+    }
+
+    let id = spawn_suspended(b"test-rt-band", 16, parked_entry, 0, 0)?;
+    let outcome = (|| -> Result<(), &'static str> {
+        // The boosts, computed on the parked task's own fields: it is in no
+        // queue, so they may be set directly.
+        {
+            let mut state = SCHED.lock();
+            let t = state.tasks.get_mut(&id).ok_or("no parked task")?;
+            t.interactive = true;
+            let cases = [
+                // The ordinary interactive boost...
+                (SchedPolicy::Other, 16, 14),
+                // ...stops at the band's floor,
+                (SchedPolicy::Other, 9, 8),
+                // is not SCHED_BATCH's,
+                (SchedPolicy::Batch, 16, 16),
+                // nor a real-time task's;
+                (SchedPolicy::Fifo, 3, 3),
+                // a kernel task placed in the band keeps the one it had.
+                (SchedPolicy::Other, 3, 1),
+            ];
+            let mut wrong = false;
+            for (policy, level, want) in cases {
+                t.policy = policy;
+                t.priority = level;
+                wrong |= t.effective_priority() != want;
+            }
+            // Inheritance lifts anything, into the band too.
+            t.policy = SchedPolicy::Other;
+            t.priority = 16;
+            t.inherited_priority = Some(2);
+            wrong |= t.effective_priority() != 2;
+            t.interactive = false;
+            t.inherited_priority = None;
+            if wrong {
+                return Err("a boost was wrong for a policy, or crossed into the band");
+            }
+        }
+
+        // set_scheduler moves the task into the band and back; a level set
+        // meanwhile waits for the real-time policy to end.
+        let fifo50 = SchedAttr {
+            policy: SchedPolicy::Fifo,
+            rt_priority: 50,
+            reset_on_fork: false,
+        };
+        if set_scheduler(id, fifo50) != Some(SchedAttr::default())
+            || get_base_priority(id) != Some(4)
+        {
+            return Err("FIFO 50 did not put the task at level 4");
+        }
+        if set_priority(id, 10) != Some(16) || get_base_priority(id) != Some(4) {
+            return Err("set_priority moved a real-time task");
+        }
+        if set_scheduler(id, SchedAttr::default()) != Some(fifo50)
+            || get_base_priority(id) != Some(10)
+        {
+            return Err("leaving FIFO did not return to the level set meanwhile");
+        }
+        // SCHED_IDLE runs at the idle level; SCHED_BATCH drops the
+        // interactive mark.
+        let as_policy = |policy| SchedAttr {
+            policy,
+            rt_priority: 0,
+            reset_on_fork: false,
+        };
+        if set_scheduler(id, as_policy(SchedPolicy::Idle)).is_none()
+            || get_base_priority(id) != Some(IDLE_PRIORITY)
+        {
+            return Err("SCHED_IDLE is not the idle level");
+        }
+        if let Some(t) = SCHED.lock().tasks.get_mut(&id) {
+            t.interactive = true;
+        }
+        let batch_interactive = set_scheduler(id, as_policy(SchedPolicy::Batch)).and_then(|_| {
+            SCHED
+                .lock()
+                .tasks
+                .get(&id)
+                .map(|t| (t.interactive, t.priority))
+        });
+        if batch_interactive != Some((false, 10)) {
+            return Err("SCHED_BATCH kept the interactive mark, or left its level");
+        }
+        // A real-time priority out of 1..=99 is clamped (the callers refuse
+        // one first).
+        let fifo = |rt_priority| SchedAttr {
+            policy: SchedPolicy::Fifo,
+            rt_priority,
+            reset_on_fork: false,
+        };
+        let clamped_low = set_scheduler(id, fifo(0)).and_then(|_| get_sched_attr(id));
+        let clamped_high = set_scheduler(id, fifo(150)).and_then(|_| get_sched_attr(id));
+        if clamped_low.map(|a| a.rt_priority) != Some(1)
+            || clamped_high.map(|a| a.rt_priority) != Some(99)
+        {
+            return Err("a real-time priority out of range was not clamped");
+        }
+
+        // What a task it creates inherits: an RR creator under
+        // SCHED_RESET_ON_FORK passes on SCHED_OTHER at the default level.
+        let rr_reset = SchedAttr {
+            policy: SchedPolicy::Rr,
+            rt_priority: 30,
+            reset_on_fork: true,
+        };
+        let inherited = set_scheduler(id, rr_reset).and_then(|_| inheritance_from(id));
+        if inherited.map(|i| (i.attr, i.normal_priority, i.level()))
+            != Some((
+                SchedAttr::default(),
+                task::DEFAULT_PRIORITY,
+                task::DEFAULT_PRIORITY,
+            ))
+        {
+            return Err("a reset RR creator passed on more than SCHED_OTHER at nice 0");
+        }
+        let plain = set_scheduler(id, fifo(30)).and_then(|_| inheritance_from(id));
+        if plain.map(|i| (i.attr, i.level())) != Some((fifo(30), rt_level(30))) {
+            return Err("a FIFO creator did not pass FIFO on");
+        }
+        if set_scheduler(id, SchedAttr::default()).is_none() || set_priority(id, 16).is_none() {
+            return Err("could not restore the parked task");
+        }
+        Ok(())
+    })();
+    kill_task(id);
+    reap_dead_tasks();
+    if let Err(why) = outcome {
+        serial_println!("[sched]   FAIL: real-time band: {}", why);
+        return Err(KernelError::InternalError);
+    }
+
+    // The throttle's pick and the band's queries, on a run queue of the
+    // test's own: band work at level 3, ordinary at 16.
+    let mut rq = priority_rr::PriorityRoundRobin::new();
+    rq.enqueue(9001, 3);
+    rq.enqueue(9002, 16);
+    let queries = rq.top_level() == Some(3) && rq.has_ordinary_work();
+    // Throttled, the pick passes over the band to the ordinary work...
+    let masked = rq.pick_next_masked(true);
+    // ...and with only band work left it picks that after all: the throttle
+    // never idles a CPU that has work.
+    let band_left = !rq.has_ordinary_work();
+    let band_only = rq.pick_next_masked(true);
+    let empty = rq.pick_next_masked(true).is_none();
+    // Unthrottled, the band comes first.
+    rq.enqueue(9001, 3);
+    rq.enqueue(9002, 16);
+    let unmasked = rq.pick_next_masked(false);
+    let rest = rq.pick_next();
+    if !queries
+        || masked != Some(9002)
+        || !band_left
+        || band_only != Some(9001)
+        || !empty
+        || unmasked != Some(9001)
+        || rest != Some(9002)
+    {
+        serial_println!(
+            "[sched]   FAIL: the throttle's pick: queries {}, masked {:?}, band left {}, then {:?}, empty {}; unmasked {:?}, then {:?}",
+            queries,
+            masked,
+            band_left,
+            band_only,
+            empty,
+            unmasked,
+            rest
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Only the idle level queued is no ordinary work either.
+    rq.enqueue(9003, IDLE_PRIORITY);
+    let idle_only = !rq.has_ordinary_work();
+    // Drained so the queue is empty again; the id itself is the test's.
+    let _ = rq.pick_next();
+    // SCHED_FIFO's slice is none: its ticks never expire.
+    rq.current_remaining = u32::MAX;
+    let fifo_runs_on = (0..1000).all(|_| !rq.tick());
+    rq.current_remaining = 2;
+    let ordinary_expires = !rq.tick() && rq.tick();
+    if !idle_only || !fifo_runs_on || !ordinary_expires {
+        serial_println!(
+            "[sched]   FAIL: idle-only work {}, a FIFO slice never ending {}, an ordinary one ending {}",
+            idle_only,
+            fifo_runs_on,
+            ordinary_expires
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Starved ordinary work is lifted to the top of the ordinary band and no
+    // further; nice -20's level is not lifted at all.
+    if starvation_target(16) != RT_LEVELS
+        || starvation_target(RT_LEVELS) != RT_LEVELS
+        || starvation_target(3) != 0
+    {
+        serial_println!("[sched]   FAIL: the anti-starvation boost's level");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[sched]   Real-time band: levels, boosts, policies, inheritance, throttle pick: OK"
+    );
     Ok(())
 }
 

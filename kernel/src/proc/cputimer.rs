@@ -491,6 +491,13 @@ fn rttime_expire(pid: ProcessId, account: &ProcCpuAccount, ticks: u64) {
 /// ([`pcb::get_rlimit`]). Every other limit, an infinite one, and one not
 /// raised, is `stored`. Until 2026-10-08 the handler read the old limit (the
 /// CPU-time ring-3 test, 0x7D).
+///
+/// The raised soft limit is not held to the hard one, as Linux's is not
+/// ([`pcb::raise_soft_rlimit`]): `RLIMIT_RTTIME`'s second-long step passes a
+/// hard limit less than a second above it, and reads so (the same test's
+/// 0x86, which read the hard limit until 2026-10-08). `RLIMIT_CPU`'s never
+/// does -- its limits are whole seconds, and at a soft limit equal to the
+/// hard one the `SIGKILL` comes first.
 #[must_use]
 pub fn effective_limit(pid: ProcessId, resource: u32, stored: (u64, u64)) -> (u64, u64) {
     let (soft, hard) = stored;
@@ -512,38 +519,27 @@ pub fn effective_limit(pid: ProcessId, resource: u32, stored: (u64, u64)) -> (u6
         _ => None,
     };
     match raised {
-        Some(next) if next > soft => (next.min(hard), hard),
+        Some(next) if next > soft => (next, hard),
         _ => stored,
     }
 }
 
 /// Work-queue half of an `RLIMIT_RTTIME` `SIGXCPU`: raise process `pid`'s
-/// soft limit to where the account moved it, as Linux raises it.
+/// soft limit to where the account moved it, as Linux raises it -- past the
+/// hard limit if that is where it lands ([`pcb::raise_soft_rlimit`]).
 fn raise_rttime_soft_limit(pid: u64) {
     let Some(account) = pcb::cpu_account(pid) else {
         return;
     };
     let (next, _) = account.rttime();
-    if let Some((soft, hard)) = pcb::get_rlimit_stored(pid, RLIMIT_RTTIME)
-        && soft != RLIM_INFINITY
-        && next != NO_CPU_EXPIRY
-        && soft < next
-    {
-        // Only up to the hard limit, which needs no authority.
-        if pcb::set_rlimit(
-            pid,
-            RLIMIT_RTTIME,
-            next.min(hard),
-            hard,
-            pcb::LimitAuthority::Unprivileged,
-        )
-        .is_err()
-        {
-            serial_println!(
-                "[cputimer] RLIMIT_RTTIME of {} not raised: process gone",
-                pid
-            );
-        }
+    if next == NO_CPU_EXPIRY {
+        return;
+    }
+    if pcb::raise_soft_rlimit(pid, RLIMIT_RTTIME, next).is_err() {
+        serial_println!(
+            "[cputimer] RLIMIT_RTTIME of {} not raised: process gone",
+            pid
+        );
     }
 }
 

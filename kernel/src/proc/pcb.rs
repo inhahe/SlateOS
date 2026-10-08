@@ -3401,6 +3401,38 @@ pub fn set_rlimit(
     Ok(())
 }
 
+/// Raise `pid`'s soft limit for `resource` to `new_cur`, as a `SIGXCPU`
+/// does: Linux's `check_thread_timers` and `check_process_timers` write
+/// `rlim_cur` directly, past none of [`set_rlimit`]'s checks -- so
+/// `RLIMIT_RTTIME`'s, which moves a second at a time in microseconds, passes
+/// a hard limit less than a second above it (100 ms soft and 300 ms hard read
+/// 1.1 s and 300 ms after the first `SIGXCPU`, and the hard limit's `SIGKILL`
+/// still comes at 300 ms). Only upward: a raise that arrives after a later
+/// one, or after the process set the limit itself, changes nothing. The
+/// enforcement already has the new threshold (`crate::proc::cputimer`), so
+/// nothing is re-armed.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a `resource` past the table, `NoSuchProcess` for a
+/// `pid` that is gone.
+pub fn raise_soft_rlimit(pid: ProcessId, resource: u32, new_cur: u64) -> KernelResult<()> {
+    if resource >= NUM_RLIMITS {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let limit = proc
+        .rlimits
+        .get_mut(resource as usize)
+        .ok_or(KernelError::InvalidArgument)?;
+    let (cur, max) = *limit;
+    if cur != RLIM_INFINITY && new_cur > cur {
+        *limit = (new_cur, max);
+    }
+    Ok(())
+}
+
 /// Read the current Linux file-mode creation mask for `pid`.
 ///
 /// Returns `None` if `pid` is unknown.  The returned value is always
@@ -9827,7 +9859,57 @@ fn test_rlimits() -> KernelResult<()> {
         return fail("the RLIMIT_NICE round trip did not read back");
     }
 
-    // (10) An unknown pid is NoSuchProcess, not a panic and not a silent
+    // (10) A SIGXCPU's raise (`raise_soft_rlimit`) is Linux's write of
+    //      `rlim_cur`: past the hard limit when that is where it lands,
+    //      only ever upward, never off an infinite limit -- and a setrlimit
+    //      still may not put the soft limit above the hard one.
+    let rttime = crate::proc::cputimer::RLIMIT_RTTIME;
+    if let Err(e) = set_rlimit(pid, rttime, 100_000, 300_000, LimitAuthority::Unprivileged) {
+        destroy(pid);
+        serial_println!("[proc]   (RLIMIT_RTTIME 100 ms / 300 ms gave {:?})", e);
+        return fail("RLIMIT_RTTIME 100 ms soft, 300 ms hard was refused");
+    }
+    if raise_soft_rlimit(pid, rttime, 1_100_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((1_100_000, 300_000))
+    {
+        destroy(pid);
+        return fail("a SIGXCPU's raise of RLIMIT_RTTIME did not pass the hard limit");
+    }
+    if raise_soft_rlimit(pid, rttime, 500_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((1_100_000, 300_000))
+    {
+        destroy(pid);
+        return fail("a late raise moved RLIMIT_RTTIME's soft limit down");
+    }
+    if set_rlimit(pid, rttime, 400_000, 300_000, LimitAuthority::Unprivileged)
+        != Err(KernelError::InvalidArgument)
+    {
+        destroy(pid);
+        return fail("setrlimit put a soft limit above the hard one");
+    }
+    if let Err(e) = set_rlimit(
+        pid,
+        rttime,
+        RLIM_INFINITY,
+        RLIM_INFINITY,
+        LimitAuthority::MayRaiseHardLimit,
+    ) {
+        destroy(pid);
+        serial_println!("[proc]   (RLIMIT_RTTIME back to infinity gave {:?})", e);
+        return fail("RLIMIT_RTTIME could not be put back to infinity");
+    }
+    if raise_soft_rlimit(pid, rttime, 1_100_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((RLIM_INFINITY, RLIM_INFINITY))
+    {
+        destroy(pid);
+        return fail("a raise replaced an infinite soft limit");
+    }
+    if raise_soft_rlimit(pid, NUM_RLIMITS, 1) != Err(KernelError::InvalidArgument) {
+        destroy(pid);
+        return fail("raise_soft_rlimit accepted a resource >= NUM_RLIMITS");
+    }
+
+    // (11) An unknown pid is NoSuchProcess, not a panic and not a silent
     //      success.  Checked after the argument gates, matching `set_rlimit`'s
     //      documented order.
     destroy(pid);
@@ -9839,8 +9921,14 @@ fn test_rlimits() -> KernelResult<()> {
     if get_rlimit(pid, RLIMIT_NOFILE).is_some() {
         return fail("get_rlimit answered for a destroyed pid");
     }
+    if raise_soft_rlimit(pid, RLIMIT_NOFILE, 1) != Err(KernelError::NoSuchProcess) {
+        return fail("raise_soft_rlimit on a destroyed pid did not report NoSuchProcess");
+    }
 
-    serial_println!("[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute): OK");
+    serial_println!(
+        "[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute, a SIGXCPU's raise \
+         passes the hard limit): OK"
+    );
     Ok(())
 }
 

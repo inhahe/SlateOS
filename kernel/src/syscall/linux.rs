@@ -30604,6 +30604,7 @@ mod mount_flags {
     pub const MS_NOEXEC: u64 = 8;
     pub const MS_REMOUNT: u64 = 32;
     pub const MS_NOATIME: u64 = 1024;
+    pub const MS_NODIRATIME: u64 = 2048;
     pub const MS_BIND: u64 = 4096;
     pub const MS_MOVE: u64 = 8192;
     pub const MS_REC: u64 = 16384;
@@ -30612,12 +30613,16 @@ mod mount_flags {
     pub const MS_PRIVATE: u64 = 1 << 18;
     pub const MS_SLAVE: u64 = 1 << 19;
     pub const MS_SHARED: u64 = 1 << 20;
+    pub const MS_RELATIME: u64 = 1 << 21;
+    pub const MS_STRICTATIME: u64 = 1 << 24;
     pub const MS_NOUSER: u64 = 1 << 31;
     /// The old magic number some callers still put in the top half.
     pub const MS_MGC_MSK: u64 = 0xffff_0000;
     pub const MS_MGC_VAL: u64 = 0xc0ed_0000;
     /// The propagation types: exactly one of them names a change of type.
     pub const PROPAGATION: u64 = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
+    /// The atime flags: a remount naming none keeps the mount's.
+    pub const ATIME: u64 = MS_NOATIME | MS_NODIRATIME | MS_RELATIME | MS_STRICTATIME;
 }
 
 /// Whether the caller may mount and unmount -- Linux's `may_mount`,
@@ -30654,6 +30659,21 @@ fn mount_point(path_ptr: u64, follow: bool) -> Result<crate::fs::path::PathBuf, 
     Ok(host)
 }
 
+/// The `source` a bind or a move names, looked up as `do_loopback` and
+/// `do_move_mount_old` look it up -- through the caller's working directory
+/// and container root, following links: `EINVAL` for none or an empty one,
+/// then the lookup's own answers (`ENOENT`, `ENOTDIR`, `ELOOP`...). A host
+/// path that exists.
+fn mount_source(source: Option<&[u8]>) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let Some(bytes) = source.filter(|b| !b.is_empty()) else {
+        return Err(linux_err(errno::EINVAL));
+    };
+    let guest = resolve_caller_path_bytes(bytes)?;
+    let host = crate::fs::Vfs::resolve_path(&guest).map_err(|e| linux_err(linux_errno_for(e)))?;
+    crate::fs::Vfs::stat_resolved(&host).map_err(|e| linux_err(linux_errno_for(e)))?;
+    Ok(host)
+}
+
 /// `mount(source, target, fstype, flags, data)` -- Linux's `mount(2)`, in
 /// 6.6's order: the strings are copied (`EFAULT`); the mount point is looked
 /// up, following links (`EFAULT`, `ENOENT`, `ENOTDIR`...); `MS_NOUSER` is
@@ -30662,16 +30682,21 @@ fn mount_point(path_ptr: u64, follow: bool) -> Result<crate::fs::path::PathBuf, 
 ///
 /// | flags | what happens |
 /// |---|---|
-/// | `MS_REMOUNT` (with `MS_BIND` or without) | the mount at the target takes `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC`, `MS_NOATIME` as given; `EINVAL` if the target is not a mount's root |
-/// | `MS_BIND`, `MS_MOVE` | `EINVAL`: not built yet (known-issues A-MOUNT-HAS-NO-BIND-OR-MOVE) |
-/// | `MS_PRIVATE`, `MS_SLAVE`, `MS_UNBINDABLE` (with `MS_REC` or not) | nothing to change -- no mount here propagates to another, so each already is what these ask; `EINVAL` if the target is not a mount's root or more than one type is named |
+/// | `MS_REMOUNT \| MS_BIND` | the mount at the target takes `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC`, `MS_NOATIME` as given, and nothing else does -- how a bind mount is made read-only (`fs::Vfs::remount_bind`); `EINVAL` if the target is not a mount's root |
+/// | `MS_REMOUNT` | the same, and the filesystem becomes read-only or writable through every mount of it (`fs::Vfs::remount`) |
+/// | `MS_BIND` (with `MS_REC` or not) | `source`'s subtree mounted at the target too, with the mounts beneath it under `MS_REC` (`fs::Vfs::bind_mount`): `EINVAL` for no source or one on an unbindable mount, `ENOENT` for one that does not exist, `ENOTDIR` for a directory over a non-directory or the reverse |
+/// | `MS_PRIVATE`, `MS_SLAVE`, `MS_UNBINDABLE` (with `MS_REC` or not) | the mount at the target -- and the mounts beneath it under `MS_REC` -- made bindable again, left as it was, or made unbindable (`fs::Vfs::set_propagation`); `EINVAL` if the target is not a mount's root or more than one type is named |
 /// | `MS_SHARED` | `EINVAL`: mounts here never propagate, and saying one does would be false |
+/// | `MS_MOVE` | the mount at `source`, with every mount beneath it, moved to the target (`fs::Vfs::move_mount`): `EINVAL` for no source, one that is not a mount's root, `/`, or a directory and a non-directory; `ELOOP` for a target inside what moves |
 /// | none of these | a new mount of `fstype` (`fs::new_filesystem`) over the device `source`: `EINVAL` with no type, `ENODEV` for a type this kernel has no driver for, `ENOTDIR` for a target that is not a directory, `EBUSY` where something is mounted already |
 ///
 /// `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC` and `MS_NOATIME` are the mount's
-/// options; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken
-/// and change nothing, and the `data` options are not read
-/// (known-issues A-MOUNT-HAS-NO-BIND-OR-MOVE).
+/// options -- a remount naming no atime flag keeps the mount's, as Linux's
+/// does; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken and
+/// change nothing, and the `data` options are not read (known-issues
+/// A-LINUX-MOUNT-GAPS). A target that is a mount point already is
+/// `EBUSY` for a new mount, a bind and a move alike: mounts do not stack
+/// here.
 ///
 /// Until 2026-10-08 this answered `EPERM` to every caller, root included,
 /// and checked the privilege before looking the mount point up, as kernels
@@ -30679,10 +30704,11 @@ fn mount_point(path_ptr: u64, follow: bool) -> Result<crate::fs::path::PathBuf, 
 /// for a missing one first (checked against it, unprivileged).
 fn sys_mount(args: &SyscallArgs) -> SyscallResult {
     use crate::fs::Vfs;
+    use crate::fs::vfs::Propagation;
     use mount_flags::{
-        MS_BIND, MS_MGC_MSK, MS_MGC_VAL, MS_MOVE, MS_NOATIME, MS_NOEXEC, MS_NOSUID, MS_NOUSER,
-        MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, MS_SHARED, MS_SILENT, MS_SLAVE, MS_UNBINDABLE,
-        PROPAGATION,
+        ATIME, MS_BIND, MS_MGC_MSK, MS_MGC_VAL, MS_MOVE, MS_NOATIME, MS_NOEXEC, MS_NOSUID,
+        MS_NOUSER, MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, MS_SILENT, MS_SLAVE, MS_STRICTATIME,
+        MS_UNBINDABLE, PROPAGATION,
     };
     // (1)-(3): copy_mount_string(type), copy_mount_string(dev_name),
     // copy_mount_options(data). The options are not read; a pointer to
@@ -30717,19 +30743,37 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
     if !caller_may_mount() {
         return linux_err(errno::EPERM);
     }
-    let options = crate::fs::vfs::MountOptions {
+    let mut options = crate::fs::vfs::MountOptions {
         read_only: flags & MS_RDONLY != 0,
-        noatime: flags & MS_NOATIME != 0,
+        // MS_STRICTATIME takes MS_NOATIME back, as path_mount clears it.
+        noatime: flags & MS_NOATIME != 0 && flags & MS_STRICTATIME == 0,
         noexec: flags & MS_NOEXEC != 0,
         nosuid: flags & MS_NOSUID != 0,
     };
     let done = if flags & MS_REMOUNT != 0 {
+        // do_reconfigure_mnt (with MS_BIND) and do_remount both ask for a
+        // mount's root.
         if !Vfs::is_mount_point(&target) {
             return linux_err(errno::EINVAL);
         }
-        Vfs::remount(&target, options)
-    } else if flags & (MS_BIND | MS_MOVE) != 0 {
-        return linux_err(errno::EINVAL);
+        // "The default atime for remount is preservation" (path_mount).
+        if flags & ATIME == 0
+            && let Ok(now) = Vfs::mount_options(&target)
+        {
+            options.noatime = now.noatime;
+        }
+        if flags & MS_BIND != 0 {
+            Vfs::remount_bind(&target, options)
+        } else {
+            Vfs::remount(&target, options)
+        }
+    } else if flags & MS_BIND != 0 {
+        // do_loopback: the source looked up, following links.
+        let source = match mount_source(source.as_deref()) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+        Vfs::bind_mount(&source, &target, flags & MS_REC != 0)
     } else if flags & PROPAGATION != 0 {
         let kind = flags & PROPAGATION;
         if kind & kind.wrapping_sub(1) != 0 || flags & !(PROPAGATION | MS_REC | MS_SILENT) != 0 {
@@ -30738,13 +30782,25 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
         if !Vfs::is_mount_point(&target) {
             return linux_err(errno::EINVAL);
         }
-        if kind == MS_SHARED {
+        let kind = match kind {
+            MS_PRIVATE => Propagation::Private,
+            MS_SLAVE => Propagation::Slave,
+            MS_UNBINDABLE => Propagation::Unbindable,
+            // MS_SHARED, the one type left: nothing here propagates.
+            _ => return linux_err(errno::EINVAL),
+        };
+        Vfs::set_propagation(&target, kind, flags & MS_REC != 0)
+    } else if flags & MS_MOVE != 0 {
+        // do_move_mount_old: the source looked up, following links, and it
+        // must be a mount's root.
+        let source = match mount_source(source.as_deref()) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+        if !Vfs::is_mount_point(&source) {
             return linux_err(errno::EINVAL);
         }
-        // MS_PRIVATE, MS_SLAVE (of nothing) and MS_UNBINDABLE: what every
-        // mount here already is.
-        debug_assert!(matches!(kind, MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE));
-        Ok(())
+        Vfs::move_mount(&source, &target)
     } else {
         // do_new_mount.
         let Some(fstype) = fstype else {

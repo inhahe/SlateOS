@@ -6251,9 +6251,10 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
     `/proc/<pid>/ns/{uts,mnt}` (`kernel/src/utsns.rs`, `kernel/src/fs/mntns.rs`,
     `kernel/src/nsfs.rs`), root's `mount(2)`/`umount2(2)` (private mounts
     only), the native `SYS_NAMESPACE_*` calls, and containers' `--hostname` as
-    their own UTS namespace. Remaining: the other five kinds
-    (`known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`), and bind/move
-    mounts and `pivot_root` (`known-issues/A-MOUNT-HAS-NO-BIND-OR-MOVE.md`).
+    their own UTS namespace; bind and move mounts, bind remounts and
+    unbindable mounts the same day (design-decisions 1556). Remaining: the
+    other five kinds (`known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`),
+    and stacked mounts and `pivot_root` (`known-issues/A-LINUX-MOUNT-GAPS.md`).
 
 ### 5.6 Additional software
 - [-] `[E]` Speech input / speech output — **output, step 1 of 4 done

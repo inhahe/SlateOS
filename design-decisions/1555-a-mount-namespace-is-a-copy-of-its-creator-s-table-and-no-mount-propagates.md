@@ -63,6 +63,7 @@ shell's `namespace` command. Two modules with the same name and one of them
 inert would mislead every reader; the command and `/proc/namespaces` now
 report the real namespaces.
 
-**Not yet:** bind and move mounts, `pivot_root(2)` with Linux's argument
-rules, and propagation (known-issues A-MOUNT-HAS-NO-BIND-OR-MOVE); the other
+**Not yet:** `pivot_root(2)` with Linux's argument rules, stacked mounts and
+propagation (known-issues A-LINUX-MOUNT-GAPS; bind and move mounts followed
+the same day, design-decisions 1556); the other
 namespace kinds (known-issues A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET).

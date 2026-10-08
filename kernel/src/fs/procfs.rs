@@ -3361,9 +3361,8 @@ fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
 /// mount_id parent_id major:minor root mount_point options - fstype source super_options
 /// ```
 ///
-/// We have no mount namespaces, so every process sees the same global
-/// mount table — `/proc/<pid>/mountinfo` is identical for all PIDs,
-/// which is accurate rather than fabricated.  Field choices:
+/// A process sees its own mount namespace's table (`fs::mntns`): the
+/// system's, unless it has unshared one or entered another.  Field choices:
 ///
 /// - `mount_id`: a stable small integer per mount (`base + index`).  Linux
 ///   assigns these from a global counter; the exact values are opaque to
@@ -3375,13 +3374,19 @@ fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
 ///   on that mount (`vfs::dev_of`), as Linux numbers its anonymous
 ///   filesystems. It was the mount's index until 2026-10-01, which moved when
 ///   an earlier mount went and matched no `st_dev`.
-/// - `root`: always `/` (we mount whole filesystems, never subtrees).
-/// - optional fields: none, so the separator `-` follows the options
-///   directly (a valid, common case in real `mountinfo`).
+/// - `root`: the directory of its filesystem the mount shows -- `/`, or a
+///   bind mount's subtree (`Vfs::bind_mount`), mangled as the mount point is.
+/// - optional fields: `unbindable` for a mount made so (`MS_UNBINDABLE`),
+///   else none, so the separator `-` follows the options directly (a valid,
+///   common case in real `mountinfo`). Nothing here is shared or a slave of
+///   a shared mount, so `shared:N` and `master:N` never appear.
 /// - `source`: `none` (we do not track backing devices), matching what we
 ///   already emit in `/proc/mounts`.
-/// - per-mount and super options are the same `MountOptions` string.
-fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions, u32)]) -> Vec<u8> {
+/// - the sixth field is the mount's own options (`ro` for a bind mount made
+///   read-only, say), the last the filesystem's: `ro` or `rw`, as the
+///   filesystem itself is (`MountRecord::fs_read_only`). This kernel has no
+///   filesystem-specific options to add there.
+fn render_mountinfo(mounts: &[crate::fs::vfs::MountRecord]) -> Vec<u8> {
     use core::fmt::Write as _;
 
     /// Base for synthetic mount ids.  Linux ids are arbitrary positive
@@ -3391,20 +3396,25 @@ fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions, u3
     let root_id = MOUNT_ID_BASE;
 
     let mut text = String::with_capacity(mounts.len().saturating_mul(96).max(16));
-    for (i, (path, fs_type, options, minor)) in mounts.iter().enumerate() {
+    for (i, m) in mounts.iter().enumerate() {
         let mount_id = MOUNT_ID_BASE.saturating_add(i);
-        let opts = options.to_string();
-        // Linux mangles the mount-point and fstype fields (see
+        let minor = m.dev;
+        let opts = m.options.to_string();
+        let super_opts = if m.fs_read_only { "ro" } else { "rw" };
+        let optional = if m.unbindable { " unbindable" } else { "" };
+        // Linux mangles the root, mount-point and fstype fields (see
         // `mangle_mount_field`); the options string is composed of
         // comma-separated flag tokens with no whitespace, so it is emitted
         // verbatim, matching `show_mnt_opts`.
-        let mount_point = mangle_mount_field(path);
-        let fstype = mangle_mount_field(fs_type);
+        let root = mangle_mount_field(&m.root);
+        let mount_point = mangle_mount_field(&m.path);
+        let fstype = mangle_mount_field(&m.fs_type);
         // 11 fields, optional-field section empty (separator `-` follows
-        // the per-mount options directly).
+        // the per-mount options directly). Writing to a `String` cannot
+        // fail.
         let _ = writeln!(
             text,
-            "{mount_id} {root_id} 0:{minor} / {mount_point} {opts} - {fstype} none {opts}",
+            "{mount_id} {root_id} 0:{minor} {root} {mount_point} {opts}{optional} - {fstype} none {super_opts}",
         );
     }
     text.into_bytes()
@@ -3427,12 +3437,12 @@ fn mount_path_covers(mount_path: &Path, host: &Path) -> bool {
 /// as [`fstype_for_host_path`] chooses, with the device number beside it.
 fn host_mount_for<'a>(
     host: &Path,
-    global: &'a [(PathBuf, String, crate::fs::vfs::MountOptions, u32)],
-) -> Option<&'a (PathBuf, String, crate::fs::vfs::MountOptions, u32)> {
+    global: &'a [crate::fs::vfs::MountRecord],
+) -> Option<&'a crate::fs::vfs::MountRecord> {
     global
         .iter()
-        .filter(|m| mount_path_covers(&m.0, host))
-        .max_by_key(|m| m.0.len())
+        .filter(|m| mount_path_covers(&m.path, host))
+        .max_by_key(|m| m.path.len())
 }
 
 /// Resolve the filesystem type serving host path `host` from the global mount
@@ -3467,7 +3477,7 @@ fn fstype_for_host_path<'a>(
 /// what a write would actually do inside the container.
 fn render_container_mountinfo(
     view: &[crate::ipc::namespace::MountViewEntry],
-    global: &[(PathBuf, String, crate::fs::vfs::MountOptions, u32)],
+    global: &[crate::fs::vfs::MountRecord],
 ) -> Vec<u8> {
     use core::fmt::Write as _;
 
@@ -3480,8 +3490,8 @@ fn render_container_mountinfo(
         // The host mount that serves it: its type, and the device number its
         // files report, which a container sees as it is.
         let host = host_mount_for(&entry.host_target, global);
-        let minor = host.map_or(0, |m| m.3);
-        let fstype = mangle_mount_field(host.map_or("none", |m| m.1.as_str()));
+        let minor = host.map_or(0, |m| m.dev);
+        let fstype = mangle_mount_field(host.map_or("none", |m| m.fs_type.as_str()));
         let mount_point = mangle_mount_field(&entry.guest_path);
         let opts = if entry.read_only { "ro" } else { "rw" };
         let _ = writeln!(
@@ -17592,39 +17602,49 @@ pub fn self_test() -> KernelResult<()> {
     // down the 11-field Linux layout, the id/minor numbering, and that the
     // options string appears in both the per-mount and super-options slots.
     {
-        use crate::fs::vfs::MountOptions;
+        use crate::fs::vfs::{MountOptions, MountRecord};
+        let record =
+            |path: &str, fs_type: &str, options: &str, fs_ro: bool, dev: u32, root: &str| {
+                MountRecord {
+                    path: PathBuf::from(path),
+                    fs_type: String::from(fs_type),
+                    options: MountOptions::parse(options),
+                    fs_read_only: fs_ro,
+                    unbindable: false,
+                    dev,
+                    root: PathBuf::from(root),
+                }
+            };
         // Device numbers out of index order, so a renderer that numbered by
         // position would be caught.
         let mounts = [
-            (
-                PathBuf::from("/"),
-                String::from("ext4"),
-                MountOptions::defaults(),
-                5,
-            ),
-            (
-                PathBuf::from("/tmp"),
-                String::from("tmpfs"),
-                MountOptions::parse("ro,noatime"),
-                2,
-            ),
+            record("/", "ext4", "rw", false, 5, "/"),
+            // Mounted read-only: the mount and the filesystem both are; the
+            // filesystem's options carry no per-mount flag (`noatime`).
+            record("/tmp", "tmpfs", "ro,noatime", true, 2, "/"),
             // A mount point containing a space exercises the Linux
             // `mangle()`-equivalent escaping: the space must become `\040`
             // so the space-separated layout stays parseable.
-            (
-                PathBuf::from("/mnt/my disk"),
-                String::from("ext4"),
-                MountOptions::defaults(),
-                9,
-            ),
+            record("/mnt/my disk", "ext4", "rw", false, 9, "/"),
+            // A bind mount shows its subtree in the root field, mangled as
+            // the mount point is, on its source's device; made read-only by
+            // a bind remount, so the mount is `ro` and the filesystem `rw`.
+            record("/srv", "ext4", "ro", false, 5, "/data/web site"),
+            // Made unbindable: the optional field says so, before the `-`.
+            MountRecord {
+                unbindable: true,
+                ..record("/run/x", "tmpfs", "rw", false, 7, "/")
+            },
         ];
         let rendered = render_mountinfo(&mounts);
         let mi_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = mi_text.lines().collect();
         let expected = [
             "20 20 0:5 / / rw - ext4 none rw",
-            "21 20 0:2 / /tmp ro,noatime - tmpfs none ro,noatime",
+            "21 20 0:2 / /tmp ro,noatime - tmpfs none ro",
             "22 20 0:9 / /mnt/my\\040disk rw - ext4 none rw",
+            "23 20 0:5 /data/web\\040site /srv ro - ext4 none rw",
+            "24 20 0:7 / /run/x rw unbindable - tmpfs none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -17702,29 +17722,23 @@ pub fn self_test() -> KernelResult<()> {
     // container's own view.  This pins that a container sees ITS mounts, not
     // the host's, and never leaks host backing paths.
     {
-        use crate::fs::vfs::MountOptions;
+        use crate::fs::vfs::{MountOptions, MountRecord};
         use crate::ipc::namespace::MountViewEntry;
+        let record = |path: &str, fs_type: &str, dev: u32| MountRecord {
+            path: PathBuf::from(path),
+            fs_type: String::from(fs_type),
+            options: MountOptions::defaults(),
+            fs_read_only: false,
+            unbindable: false,
+            dev,
+            root: PathBuf::from("/"),
+        };
         // Host mount table the container's targets resolve their fstype against:
         // the rootfs overlay, the ext4 host root, and a tmpfs-backing memfs.
         let global = [
-            (
-                PathBuf::from("/"),
-                String::from("ext4"),
-                MountOptions::defaults(),
-                1,
-            ),
-            (
-                PathBuf::from("/containers/c1/rootfs"),
-                String::from("overlay"),
-                MountOptions::defaults(),
-                4,
-            ),
-            (
-                PathBuf::from("/var/lib/slate/tmpfs/1-0"),
-                String::from("tmpfs"),
-                MountOptions::defaults(),
-                6,
-            ),
+            record("/", "ext4", 1),
+            record("/containers/c1/rootfs", "overlay", 4),
+            record("/var/lib/slate/tmpfs/1-0", "tmpfs", 6),
         ];
         // Container view: read-only rootfs, a read-only bind volume served by
         // the ext4 host root, and a writable tmpfs.
@@ -17798,7 +17812,7 @@ pub fn self_test() -> KernelResult<()> {
         // `/proc/mounts` has no device field: the table without it.
         let global3: Vec<(PathBuf, String, MountOptions)> = global
             .iter()
-            .map(|(p, t, o, _)| (p.clone(), t.clone(), *o))
+            .map(|m| (m.path.clone(), m.fs_type.clone(), m.options))
             .collect();
         let mounts_rendered = render_container_mounts(&view, &global3);
         let mounts_text =

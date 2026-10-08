@@ -29,7 +29,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -1472,8 +1472,16 @@ struct MountPoint {
     /// caching costs one `String` per mount and removes the hazard by
     /// construction rather than by asking every caller to be careful.
     fs_type: String,
-    /// Mount options (read-only, noatime, etc.).
+    /// This mount's own options -- Linux's per-mount flags (`MNT_READONLY`,
+    /// `MNT_NOEXEC`...). What applies is [`Self::effective_options`]: a
+    /// filesystem made read-only is read-only through every mount of it.
     options: MountOptions,
+    /// Whether the filesystem itself is read-only -- Linux's `SB_RDONLY` --
+    /// shared by every entry that mounts it: its bind mounts
+    /// ([`Vfs::bind_mount`]) and the mount namespaces' copies. A remount
+    /// ([`Vfs::remount`]) sets it; a bind remount
+    /// ([`Vfs::remount_bind`]) changes one mount's own flags only.
+    fs_read_only: Arc<AtomicBool>,
     /// Stable, never-reused id for this mounted filesystem instance.
     ///
     /// Assigned monotonically at mount time from [`NEXT_FS_ID`] and kept for
@@ -1491,6 +1499,11 @@ struct MountPoint {
     /// Counted under the mount table's lock, which is what keeps an open
     /// racing an unmount from slipping between the check and the removal.
     objects: usize,
+    /// The directory of its filesystem the mount shows: `/` for a mount of
+    /// the whole filesystem, the subtree for a bind mount
+    /// ([`Vfs::bind_mount`]). A path under the mount point is this joined with
+    /// what follows the mount point ([`find_mount`]).
+    root: PathBuf,
     /// This entry's own id, never reused: what a held file records to give
     /// its hold back to ([`FileObject::mnt_id`]). A mount namespace's copy of
     /// a mount is another entry with another id, as Linux gives each
@@ -1501,6 +1514,82 @@ struct MountPoint {
     /// cleared when a file is held through the mount: a second
     /// `MNT_EXPIRE` with it still set unmounts ([`Vfs::unmount_expire`]).
     expire_mark: bool,
+    /// Made unbindable (`MS_UNBINDABLE`, [`Vfs::set_propagation`]): nothing
+    /// under it may be bound elsewhere, and a recursive bind of a tree it is
+    /// in leaves it and what is beneath it out ([`Vfs::bind_mount`]).
+    unbindable: bool,
+}
+
+impl MountPoint {
+    /// Whether a write through this mount is refused: the mount is
+    /// read-only, or the filesystem is (Linux's `__mnt_is_readonly`).
+    fn read_only(&self) -> bool {
+        self.options.read_only || self.fs_read_only.load(Ordering::Relaxed)
+    }
+
+    /// The options that apply through this mount: its own, read-only too if
+    /// the filesystem is.
+    fn effective_options(&self) -> MountOptions {
+        MountOptions {
+            read_only: self.read_only(),
+            ..self.options
+        }
+    }
+
+    /// Another entry for the same filesystem: a bind mount of it, or a mount
+    /// namespace's copy -- the same filesystem, `fs_id` and filesystem-wide
+    /// read-only flag, this mount's own options, and an id of its own.
+    fn another_mount(&self, path: PathBuf, root: PathBuf) -> Self {
+        MountPoint {
+            path,
+            root,
+            fs: Arc::clone(&self.fs),
+            fs_type: self.fs_type.clone(),
+            options: self.options,
+            fs_read_only: Arc::clone(&self.fs_read_only),
+            fs_id: self.fs_id,
+            mnt_id: NEXT_MNT_ID.fetch_add(1, Ordering::Relaxed),
+            objects: 0,
+            expire_mark: false,
+            unbindable: self.unbindable,
+        }
+    }
+}
+
+/// A mount's propagation type as `mount(2)`'s `MS_PRIVATE`, `MS_SLAVE` and
+/// `MS_UNBINDABLE` name it ([`Vfs::set_propagation`]). `MS_SHARED` has none:
+/// no mount here propagates to another (design-decisions 1555).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Propagation {
+    /// Bindable, propagating to nothing: what every mount starts as.
+    Private,
+    /// A slave of nothing -- no mount here is shared -- which is private;
+    /// whether it may be bound is left as it was.
+    Slave,
+    /// Private, and may not be bound.
+    Unbindable,
+}
+
+/// One mount as `/proc/<pid>/mountinfo` shows it ([`Vfs::mounts_with_dev`]).
+#[derive(Debug, Clone)]
+pub struct MountRecord {
+    /// Where it is mounted.
+    pub path: PathBuf,
+    /// Its filesystem's type name.
+    pub fs_type: String,
+    /// Its own options: mountinfo's sixth field.
+    pub options: MountOptions,
+    /// Whether the filesystem is read-only: the `ro`/`rw` of mountinfo's
+    /// last field, the filesystem's options.
+    pub fs_read_only: bool,
+    /// Made unbindable (`MS_UNBINDABLE`): mountinfo's optional field
+    /// `unbindable`.
+    pub unbindable: bool,
+    /// `st_dev`'s minor of the files under it (major 0).
+    pub dev: u32,
+    /// The directory of its filesystem it shows: `/`, or a bind mount's
+    /// subtree -- mountinfo's fourth field.
+    pub root: PathBuf,
 }
 
 /// An open regular file held as its filesystem and inode, not its name
@@ -1640,13 +1729,14 @@ fn held_mount(vfs: &VfsInner, mnt_id: u64) -> Option<&MountPoint> {
 /// unmount's at once when nothing is held on it, else at its last hold; a
 /// mount namespace's when its table goes.
 ///
-/// A filesystem another table still has -- a mount namespace's copy of the
-/// mount -- is not finished: only this entry went, and the filesystem is
-/// still the other table's, files, locks and device number alike.
+/// A filesystem another entry still has -- a bind mount of it, a mount
+/// namespace's copy of the mount -- is not finished: only this entry went,
+/// and the filesystem is still the other's, files, locks and device number
+/// alike.
 fn finish_unmount(mp: MountPoint) {
     if VFS.lock().every().any(|m| m.fs_id == mp.fs_id) {
         crate::serial_println!(
-            "[vfs] Unmounted {} from '{}' in one mount namespace; it stays mounted in another",
+            "[vfs] Unmounted {} from '{}'; it stays mounted elsewhere",
             mp.fs_type,
             mp.path.display()
         );
@@ -1683,7 +1773,7 @@ fn finish_unmount(mp: MountPoint) {
 fn check_writable_mount(mnt_id: u64) -> KernelResult<()> {
     let vfs = VFS.lock();
     let mp = held_mount(&vfs, mnt_id).ok_or(KernelError::NotFound)?;
-    if mp.options.read_only {
+    if mp.read_only() {
         Err(KernelError::ReadOnlyFilesystem)
     } else {
         Ok(())
@@ -2889,6 +2979,9 @@ impl Vfs {
         assign_dev(fs_id);
         table.push(MountPoint {
             path: mount_path.to_path_buf(),
+            root: PathBuf::from("/"),
+            fs_read_only: Arc::new(AtomicBool::new(options.read_only)),
+            unbindable: false,
             fs: Arc::new(Mutex::new(fs)),
             fs_type,
             options,
@@ -2934,16 +3027,7 @@ impl Vfs {
             let copy: Vec<MountPoint> = vfs
                 .table(from)
                 .iter()
-                .map(|mp| MountPoint {
-                    path: mp.path.clone(),
-                    fs: Arc::clone(&mp.fs),
-                    fs_type: mp.fs_type.clone(),
-                    options: mp.options,
-                    fs_id: mp.fs_id,
-                    mnt_id: NEXT_MNT_ID.fetch_add(1, Ordering::Relaxed),
-                    objects: 0,
-                    expire_mark: false,
-                })
+                .map(|mp| mp.another_mount(mp.path.clone(), mp.root.clone()))
                 .collect();
             vfs.others.insert(to, copy);
         }
@@ -3858,7 +3942,7 @@ impl Vfs {
         // to do, and it was the single most expensive thing about listing a
         // directory that has mounts under it.  See `submount_root_ino`.
         let ns = super::mntns::current();
-        let submounts: Vec<(PathBuf, MountedFs)> = {
+        let submounts: Vec<(PathBuf, MountedFs, PathBuf)> = {
             let vfs = VFS.lock();
             Self::submount_children(vfs.table(ns), path)
         };
@@ -3868,9 +3952,9 @@ impl Vfs {
         // The VFS lock is released above, before the loop takes any per-mount
         // lock — the §43 ordering that `submount_root_ino` documents and that
         // the `MountPoint::fs_type` comment explains the cost of getting wrong.
-        for (name, fs) in submounts {
+        for (name, fs, root) in submounts {
             if !entries.iter().any(|e| e.name == name) {
-                let ino = Self::submount_root_ino(&fs);
+                let ino = Self::submount_root_ino(&fs, &root);
                 entries.push(DirEntry {
                     name,
                     entry_type: EntryType::Directory,
@@ -4328,6 +4412,9 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_path_access(&path, PathAccess::Write)?;
         check_writable(&path)?;
+        // A mount point is refused before anything records the removal (the
+        // intercept, the auto-version); checked again where it happens.
+        refuse_mount_point(&path)?;
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_delete(&path)?;
         // Capture file size before deletion for quota release.
@@ -4336,7 +4423,16 @@ impl Vfs {
         // Allows `fhist restore` to recover accidentally deleted files.
         super::history::try_auto_record(&path);
         let (cache_inval, unlinked) = {
-            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let MountAt {
+                fs,
+                fs_id,
+                relative,
+                mount_point,
+                ..
+            } = resolve_mount_at(&path)?;
+            if mount_point {
+                return Err(KernelError::DeviceBusy);
+            }
             let mut guard = fs.lock();
             // Capture identity *before* removal — the inode (and its number)
             // is gone afterward, and that number may be reused by a future
@@ -4513,10 +4609,20 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_path_access(&path, PathAccess::Write)?;
         check_writable(&path)?;
+        refuse_mount_point(&path)?;
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_delete(&path)?;
         let unlinked = {
-            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let MountAt {
+                fs,
+                fs_id,
+                relative,
+                mount_point,
+                ..
+            } = resolve_mount_at(&path)?;
+            if mount_point {
+                return Err(KernelError::DeviceBusy);
+            }
             let mut guard = fs.lock();
             // A directory's state ends with it, as a file's does; see `remove`.
             let unlinked = unlinked_object(&mut guard, fs_id, &relative);
@@ -4931,12 +5037,7 @@ impl Vfs {
             let (mp, relative) = find_mount(vfs.table_mut(ns)?, path)?;
             mp.objects = mp.objects.saturating_add(1);
             mp.expire_mark = false;
-            (
-                Arc::clone(&mp.fs),
-                mp.fs_id,
-                mp.mnt_id,
-                relative.to_path_buf(),
-            )
+            (Arc::clone(&mp.fs), mp.fs_id, mp.mnt_id, relative)
         };
         let pinned = {
             let mut guard = fs.lock();
@@ -4988,12 +5089,7 @@ impl Vfs {
             let (mp, relative) = find_mount(vfs.table_mut(ns)?, path)?;
             mp.objects = mp.objects.saturating_add(1);
             mp.expire_mark = false;
-            (
-                Arc::clone(&mp.fs),
-                mp.fs_id,
-                mp.mnt_id,
-                relative.to_path_buf(),
-            )
+            (Arc::clone(&mp.fs), mp.fs_id, mp.mnt_id, relative)
         };
         let pinned = {
             let mut guard = fs.lock();
@@ -5059,12 +5155,7 @@ impl Vfs {
             let (mp, relative) = find_mount(vfs.table_mut(ns)?, dir)?;
             mp.objects = mp.objects.saturating_add(1);
             mp.expire_mark = false;
-            (
-                Arc::clone(&mp.fs),
-                mp.fs_id,
-                mp.mnt_id,
-                relative.to_path_buf(),
-            )
+            (Arc::clone(&mp.fs), mp.fs_id, mp.mnt_id, relative)
         };
         let creator = creator_ids();
         let umask = creator_umask();
@@ -5593,7 +5684,7 @@ impl Vfs {
         let read_only = {
             let vfs = VFS.lock();
             held_mount(&vfs, obj.mnt_id)
-                .map(|m| m.options.read_only)
+                .map(MountPoint::read_only)
                 .ok_or(KernelError::NotFound)?
         };
         let mut info = obj.fs.lock().statvfs()?;
@@ -5703,12 +5794,15 @@ impl Vfs {
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_rename(&from, &to)?;
 
-        // Check if both paths are on the same mount point.  Two paths share a
-        // mount iff `resolve_mount` hands back the *same* per-mount filesystem
-        // handle (`Arc::ptr_eq`), so we compare the handles directly.
-        let (fs_from, _id_from, _opts_from, rel_from) = resolve_mount(&from)?;
-        let (fs_to, fs_id_to, _opts_to, rel_to) = resolve_mount(&to)?;
-        let same_mount = Arc::ptr_eq(&fs_from, &fs_to);
+        // Check if both paths are on the same mount: the same mount table
+        // entry, not merely the same filesystem -- a bind mount and its source
+        // share one and are two mounts, across which Linux answers `EXDEV`.
+        let from_at = resolve_mount_at(&from)?;
+        let to_at = resolve_mount_at(&to)?;
+        refuse_mount_point_rename(&from, &from_at, &to, &to_at)?;
+        let same_mount = from_at.mnt_id == to_at.mnt_id;
+        let (fs_to, fs_id_to, rel_from, rel_to) =
+            (to_at.fs, to_at.fs_id, from_at.relative, to_at.relative);
 
         if same_mount {
             // Same mount — delegate to the filesystem's native rename.  Both
@@ -5832,14 +5926,17 @@ impl Vfs {
         super::intercept::pre_rename(&a, &b)?;
 
         {
-            let (fs_a, _id_a, _opts_a, rel_a) = resolve_mount(&a)?;
-            let (fs_b, _id_b, _opts_b, rel_b) = resolve_mount(&b)?;
-            if !Arc::ptr_eq(&fs_a, &fs_b) {
+            let a_at = resolve_mount_at(&a)?;
+            let b_at = resolve_mount_at(&b)?;
+            refuse_mount_point_rename(&a, &a_at, &b, &b_at)?;
+            if a_at.mnt_id != b_at.mnt_id {
                 // Cross-mount exchange: no atomic cross-FS swap exists.
                 // Linux returns EXDEV here (not EINVAL); surface it as
-                // CrossDevice so the syscall layer maps it correctly.
+                // CrossDevice so the syscall layer maps it correctly. Two
+                // mounts of one filesystem (a bind mount) are two mounts.
                 return Err(KernelError::CrossDevice);
             }
+            let (fs_b, rel_a, rel_b) = (b_at.fs, a_at.relative, b_at.relative);
             // Same FS — perform the atomic swap under the per-mount lock.
             // Each name leaves its directory for the other's: both are
             // `may_delete`'s, as Linux asks of an exchange.
@@ -5897,7 +5994,7 @@ impl Vfs {
         let vfs = VFS.lock();
         vfs.table(ns)
             .iter()
-            .map(|mp| (mp.path.clone(), mp.fs_type.clone(), mp.options))
+            .map(|mp| (mp.path.clone(), mp.fs_type.clone(), mp.effective_options()))
             .collect()
     }
 
@@ -5906,26 +6003,228 @@ impl Vfs {
     /// the files under it.
     ///
     /// Locks no filesystem, as [`Self::mounts`].
-    pub fn mounts_with_dev() -> Vec<(PathBuf, String, MountOptions, u32)> {
+    pub fn mounts_with_dev() -> Vec<MountRecord> {
         Self::mounts_with_dev_in(super::mntns::current())
     }
 
     /// [`Self::mounts_with_dev`] of mount namespace `ns`: what
     /// `/proc/<pid>/mountinfo` shows of another process's.
     #[must_use]
-    pub fn mounts_with_dev_in(ns: u64) -> Vec<(PathBuf, String, MountOptions, u32)> {
+    pub fn mounts_with_dev_in(ns: u64) -> Vec<MountRecord> {
         let vfs = VFS.lock();
         vfs.table(ns)
             .iter()
-            .map(|mp| {
-                (
-                    mp.path.clone(),
-                    mp.fs_type.clone(),
-                    mp.options,
-                    dev_of(mp.fs_id),
-                )
+            .map(|mp| MountRecord {
+                path: mp.path.clone(),
+                fs_type: mp.fs_type.clone(),
+                options: mp.options,
+                fs_read_only: mp.fs_read_only.load(Ordering::Relaxed),
+                unbindable: mp.unbindable,
+                dev: dev_of(mp.fs_id),
+                root: mp.root.clone(),
             })
             .collect()
+    }
+
+    /// Mount the subtree `source` names -- in whichever filesystem serves it
+    /// -- at `target` too: Linux's bind mount (`mount --bind`, `MS_BIND`), in
+    /// the caller's mount namespace. Both are host paths, resolved. The new
+    /// entry shares the filesystem (its `fs_id`, so a file is the same file
+    /// through either path) and shows the subtree from `source` down, with
+    /// the source mount's options. `recursive` (`MS_REC`) binds the mounts
+    /// beneath `source` too, each at the same place under `target`.
+    ///
+    /// A file may be bound over a file, as `docker run -v /etc/hosts:...`
+    /// does; a directory only over a directory.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` for a path that is not absolute or has `.`/`..`, or
+    /// a `source` on an unbindable mount ([`Self::set_propagation`]);
+    /// `NotFound` if either does not exist; `NotADirectory` for a directory
+    /// over a non-directory or the reverse, as Linux's `graft_tree` answers;
+    /// `AlreadyExists` where a path the bind would take is a mount point
+    /// already (mounts do not stack here).
+    pub fn bind_mount(
+        source: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+        recursive: bool,
+    ) -> KernelResult<()> {
+        let (source, target) = (source.as_ref(), target.as_ref());
+        for p in [source, target] {
+            if !p.is_absolute() || !p.has_no_dot_components() {
+                return Err(KernelError::InvalidArgument);
+            }
+        }
+        let source = normalize_mount_path(source);
+        let target = normalize_mount_path(target);
+        // Before the table's lock, which no filesystem's may be taken under.
+        let is_dir =
+            |p: &Path| Self::stat_resolved(p).map(|e| e.entry_type == super::EntryType::Directory);
+        if is_dir(&source)? != is_dir(&target)? {
+            return Err(KernelError::NotADirectory);
+        }
+        let ns = super::mntns::current();
+        {
+            let mut vfs = VFS.lock();
+            let table = vfs.table_mut(ns)?;
+            let first = {
+                let (mp, root) = find_mount(table, &source)?;
+                if mp.unbindable {
+                    return Err(KernelError::InvalidArgument);
+                }
+                mp.another_mount(target.clone(), root)
+            };
+            let mut binds = alloc::vec![first];
+            if recursive {
+                // An unbindable mount beneath is left out, and so is
+                // everything beneath it, as Linux's `copy_tree` skips it.
+                let skipped: Vec<PathBuf> = table
+                    .iter()
+                    .filter(|mp| {
+                        mp.unbindable && crate::fs::pathutil::path_strictly_under(&mp.path, &source)
+                    })
+                    .map(|mp| mp.path.clone())
+                    .collect();
+                for mp in table.iter() {
+                    if !crate::fs::pathutil::path_strictly_under(&mp.path, &source)
+                        || skipped
+                            .iter()
+                            .any(|u| crate::fs::pathutil::path_in_subtree(&mp.path, u))
+                    {
+                        continue;
+                    }
+                    let path = rebase_under(&mp.path, &source, &target)
+                        .ok_or(KernelError::InvalidArgument)?;
+                    binds.push(mp.another_mount(path, mp.root.clone()));
+                }
+            }
+            if binds.iter().any(|b| table.iter().any(|m| m.path == b.path)) {
+                return Err(KernelError::AlreadyExists);
+            }
+            table.extend(binds);
+        }
+        crate::serial_println!(
+            "[vfs] Bound '{}' at '{}'{}",
+            source.display(),
+            target.display(),
+            if recursive {
+                " (with what is mounted beneath it)"
+            } else {
+                ""
+            }
+        );
+        VFS_DCACHE.lock().invalidate_all();
+        Ok(())
+    }
+
+    /// Move the mount at `from`, with every mount beneath it, to `to` --
+    /// Linux's `MS_MOVE` (`mount --move`), in the caller's mount namespace.
+    /// Host paths, resolved. A mount keeps its identity: files held on it stay
+    /// held.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` if nothing is mounted at `from` exactly, or one of
+    /// the two is a directory and the other not (Linux's `do_move_mount`
+    /// answers `EINVAL` there, where a bind answers `ENOTDIR`); `NotFound` if
+    /// `to` does not exist; `TooManyLinks` (Linux's `ELOOP`) for a `to` inside
+    /// `from`'s own tree -- which every path is when `from` is `/`, as Linux
+    /// answers for its root; `AlreadyExists` where a path the move would take
+    /// is a mount point already.
+    pub fn move_mount(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
+        let (from, to) = (from.as_ref(), to.as_ref());
+        for p in [from, to] {
+            if !p.is_absolute() || !p.has_no_dot_components() {
+                return Err(KernelError::InvalidArgument);
+            }
+        }
+        let from = normalize_mount_path(from);
+        let to = normalize_mount_path(to);
+        // Before the table's lock, which no filesystem's may be taken under.
+        let is_dir =
+            |p: &Path| Self::stat_resolved(p).map(|e| e.entry_type == super::EntryType::Directory);
+        if is_dir(&from)? != is_dir(&to)? {
+            return Err(KernelError::InvalidArgument);
+        }
+        if crate::fs::pathutil::path_in_subtree(&to, &from) {
+            return Err(KernelError::TooManyLinks);
+        }
+        let ns = super::mntns::current();
+        {
+            let mut vfs = VFS.lock();
+            let table = vfs.table_mut(ns)?;
+            if !table.iter().any(|m| m.path == from) {
+                return Err(KernelError::InvalidArgument);
+            }
+            let mut plan: Vec<(usize, PathBuf)> = Vec::new();
+            for (i, m) in table.iter().enumerate() {
+                if crate::fs::pathutil::path_in_subtree(&m.path, &from) {
+                    let moved =
+                        rebase_under(&m.path, &from, &to).ok_or(KernelError::InvalidArgument)?;
+                    plan.push((i, moved));
+                }
+            }
+            let planned = |j: usize| plan.iter().any(|&(i, _)| i == j);
+            for (_, moved) in &plan {
+                if table
+                    .iter()
+                    .enumerate()
+                    .any(|(j, m)| !planned(j) && m.path == *moved)
+                {
+                    return Err(KernelError::AlreadyExists);
+                }
+            }
+            for (i, moved) in plan {
+                if let Some(m) = table.get_mut(i) {
+                    m.path = moved;
+                }
+            }
+        }
+        crate::serial_println!(
+            "[vfs] Moved the mount at '{}' to '{}'",
+            from.display(),
+            to.display()
+        );
+        VFS_DCACHE.lock().invalidate_all();
+        Ok(())
+    }
+
+    /// Change the propagation type of the mount at `mount_path` -- with
+    /// `recursive` (`MS_REC`), of every mount beneath it too: Linux's
+    /// `MS_PRIVATE`, `MS_SLAVE` and `MS_UNBINDABLE` (`mount --make-private`
+    /// and the rest), in the caller's mount namespace. No mount here
+    /// propagates to another (design-decisions 1555), so what can change is
+    /// whether a mount may be bound ([`Self::bind_mount`]): unbindable makes
+    /// it not, private makes it bindable again, and a slave -- of nothing --
+    /// keeps what it was, as Linux's `change_mnt_propagation` does.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if nothing is mounted at `mount_path` exactly.
+    pub fn set_propagation(
+        mount_path: impl AsRef<Path>,
+        kind: Propagation,
+        recursive: bool,
+    ) -> KernelResult<()> {
+        let mount_path = normalize_mount_path(mount_path.as_ref());
+        let ns = super::mntns::current();
+        let mut vfs = VFS.lock();
+        let table = vfs.table_mut(ns)?;
+        if !table.iter().any(|mp| mp.path == mount_path) {
+            return Err(KernelError::NotFound);
+        }
+        for mp in table.iter_mut().filter(|mp| {
+            mp.path == mount_path
+                || (recursive && crate::fs::pathutil::path_strictly_under(&mp.path, &mount_path))
+        }) {
+            match kind {
+                Propagation::Private => mp.unbindable = false,
+                Propagation::Unbindable => mp.unbindable = true,
+                Propagation::Slave => {}
+            }
+        }
+        Ok(())
     }
 
     /// Get mount options for the filesystem containing `path`.
@@ -5934,7 +6233,7 @@ impl Vfs {
         let ns = super::mntns::current();
         let mut vfs = VFS.lock();
         let (mp, _) = find_mount(vfs.table_mut(ns)?, path)?;
-        Ok(mp.options)
+        Ok(mp.effective_options())
     }
 
     /// The mounted filesystem an already-resolved host `path` is on: where it
@@ -5970,7 +6269,7 @@ impl Vfs {
                     mount: mp.path.clone(),
                     fs_type: mp.fs_type.clone(),
                     fs_id: mp.fs_id,
-                    read_only: mp.options.read_only,
+                    read_only: mp.read_only(),
                     uuid: None,
                 },
             )
@@ -6012,8 +6311,14 @@ impl Vfs {
         let host = Self::resolve_no_follow(path.as_ref())?;
         check_path_access(&host, PathAccess::Metadata)?;
         let volume = Self::volume_of(&host)?;
-        let (fs, fs_id, _opts, relative) = resolve_mount(&host)?;
-        if relative.as_bytes() == b"/" {
+        let MountAt {
+            fs,
+            fs_id,
+            relative,
+            mount_point,
+            ..
+        } = resolve_mount_at(&host)?;
+        if mount_point {
             return Err(KernelError::DeviceBusy);
         }
         let (meta, parent_attributes) = {
@@ -6060,18 +6365,49 @@ impl Vfs {
     pub fn deferral_destination(path: impl AsRef<Path>) -> KernelResult<(PathBuf, u64)> {
         let host = Self::resolve_no_follow(path.as_ref())?;
         check_path_access(&host, PathAccess::Metadata)?;
-        let (_fs, fs_id, _opts, relative) = resolve_mount(&host)?;
-        if relative.as_bytes() == b"/" {
+        let MountAt {
+            fs_id, mount_point, ..
+        } = resolve_mount_at(&host)?;
+        if mount_point {
             return Err(KernelError::DeviceBusy);
         }
         Ok((host, fs_id))
     }
 
-    /// Re-mount a filesystem with new options (e.g., `remount,ro`).
+    /// Re-mount a filesystem with new options (e.g., `remount,ro`): the
+    /// mount at `mount_path` takes `options`, and the filesystem itself
+    /// becomes read-only or writable as they say -- through every mount of
+    /// it, bind mounts and other namespaces' copies too, as Linux's
+    /// `mount -o remount` changes the superblock.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if nothing is mounted at `mount_path`.
     pub fn remount(mount_path: impl AsRef<Path>, options: MountOptions) -> KernelResult<()> {
+        Self::remount_as(mount_path.as_ref(), options, true)
+    }
+
+    /// Change the options of the one mount at `mount_path` -- Linux's bind
+    /// remount (`mount -o remount,bind,ro`, `MS_REMOUNT | MS_BIND`), how a
+    /// bind mount is made read-only while its source stays writable. The
+    /// filesystem's own read-only flag is not changed.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if nothing is mounted at `mount_path`.
+    pub fn remount_bind(mount_path: impl AsRef<Path>, options: MountOptions) -> KernelResult<()> {
+        Self::remount_as(mount_path.as_ref(), options, false)
+    }
+
+    /// [`Self::remount`] (`filesystem_too`) or [`Self::remount_bind`].
+    fn remount_as(
+        mount_path: &Path,
+        options: MountOptions,
+        filesystem_too: bool,
+    ) -> KernelResult<()> {
         // Same normalisation as `mount`/`unmount`: identify the mount by its
         // canonical spelling, not by the caller's.
-        let mount_path = &normalize_mount_path(mount_path.as_ref());
+        let mount_path = &normalize_mount_path(mount_path);
         let ns = super::mntns::current();
         let became_writable = {
             let mut vfs = VFS.lock();
@@ -6083,13 +6419,21 @@ impl Vfs {
                 return Err(KernelError::NotFound);
             };
             crate::serial_println!(
-                "[vfs] Remounted '{}' with options: {}",
+                "[vfs] Remounted '{}'{} with options: {}",
                 mount_path.display(),
+                if filesystem_too {
+                    ""
+                } else {
+                    " (this mount only)"
+                },
                 options.to_string(),
             );
-            let became_writable = mp.options.read_only && !options.read_only;
+            let was_read_only = mp.read_only();
             mp.options = options;
-            became_writable
+            if filesystem_too {
+                mp.fs_read_only.store(options.read_only, Ordering::Relaxed);
+            }
+            was_read_only && !mp.read_only()
         };
         // A volume that was read-only is the commonest reason an operation
         // was deferred, and what clears it is this, not a mount: replay its
@@ -6115,7 +6459,10 @@ impl Vfs {
     /// are equivalent.  Doing it here turns a per-submount longest-prefix
     /// scan of the whole mount table into an `Arc` clone — see the
     /// `vfs_readdir_mp_*` benchmarks for what that was costing.
-    fn submount_children(table: &[MountPoint], dir_path: &Path) -> Vec<(PathBuf, MountedFs)> {
+    fn submount_children(
+        table: &[MountPoint],
+        dir_path: &Path,
+    ) -> Vec<(PathBuf, MountedFs, PathBuf)> {
         let mut names = Vec::new();
 
         for mp in table {
@@ -6126,7 +6473,7 @@ impl Vfs {
             // mount that some intermediate directory owns, not this one.
             if let Some(tail) = mp.path.strip_prefix(dir_path) {
                 if tail.components().count() == 1 {
-                    names.push((tail.to_path_buf(), Arc::clone(&mp.fs)));
+                    names.push((tail.to_path_buf(), Arc::clone(&mp.fs), mp.root.clone()));
                 }
             }
         }
@@ -6161,8 +6508,8 @@ impl Vfs {
     /// lock would invert it.  (The concrete deadlock this avoids is spelled
     /// out on [`MountPoint::fs_type`]: `readdir("/proc")` holds the procfs
     /// mutex while `gen_mounts` asks the VFS for the mount table.)
-    fn submount_root_ino(fs: &MountedFs) -> u64 {
-        fs.lock().metadata(Path::new("/")).map_or(0, |m| m.ino)
+    fn submount_root_ino(fs: &MountedFs, root: &Path) -> u64 {
+        fs.lock().metadata(root).map_or(0, |m| m.ino)
     }
 
     // --- Extended metadata VFS methods ---
@@ -6319,6 +6666,8 @@ impl Vfs {
         crate::ipc::namespace::check_writable(&child)?;
         check_path_access(&child, PathAccess::Write)?;
         check_writable(&child)?;
+        // As `remove` and `rmdir`: a mount point's name stays while it is one.
+        refuse_mount_point(&child)?;
         super::intercept::pre_delete(&child)?;
 
         let file_size = if remove_dir {
@@ -6892,9 +7241,22 @@ impl Vfs {
             // taken, so no ordering between the VFS lock and a filesystem lock
             // can arise.
             let (fs_old, old_fs_id, _opts, old_dir_rel) = resolve_mount(&old_dir.path)?;
-            let (fs_src, _src_id, _opts, src_rel) = resolve_mount(&source)?;
-            let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
-            if !Arc::ptr_eq(&fs_src, &fs_new) {
+            let MountAt {
+                relative: src_rel,
+                mnt_id: src_mnt,
+                ..
+            } = resolve_mount_at(&source)?;
+            let MountAt {
+                fs: fs_new,
+                fs_id: new_fs_id,
+                relative: new_dir_rel,
+                mnt_id: new_mnt,
+                ..
+            } = resolve_mount_at(&new_dir.path)?;
+            // The same mount, not merely the same filesystem: a bind mount
+            // and its source are two mounts, and Linux's `link` answers
+            // `EXDEV` across them.
+            if src_mnt != new_mnt {
                 // POSIX names this exact case: `link()` gives `[EXDEV]` for
                 // "the link named by path2 and the file named by path1 are on
                 // different file systems and the implementation does not
@@ -7045,17 +7407,35 @@ impl Vfs {
             // Every mount-table lookup happens before any filesystem guard is
             // taken, so no ordering between the VFS lock and a filesystem lock
             // can arise.
-            let (fs_old, old_fs_id, _opts, old_dir_rel) = resolve_mount(&old_dir.path)?;
-            let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
-            if !Arc::ptr_eq(&fs_old, &fs_new) {
+            let MountAt {
+                fs_id: old_fs_id,
+                relative: old_dir_rel,
+                mnt_id: old_mnt,
+                ..
+            } = resolve_mount_at(&old_dir.path)?;
+            let MountAt {
+                fs: fs_new,
+                fs_id: new_fs_id,
+                relative: new_dir_rel,
+                mnt_id: new_mnt,
+                ..
+            } = resolve_mount_at(&new_dir.path)?;
+            // One mount, as `rename_inner` asks: a bind mount and its source
+            // are two.
+            if old_mnt != new_mnt {
                 return Err(KernelError::CrossDevice);
+            }
+            // Then a mount point, under either name, is refused, as Linux's
+            // `vfs_rename` does after the mounts are compared.
+            if Self::is_mount_point(&old_child) || Self::is_mount_point(&new_child) {
+                return Err(KernelError::DeviceBusy);
             }
             let old_rel = old_dir_rel.join(old_name);
             let new_rel = new_dir_rel.join(new_name);
 
             let mut guard = fs_new.lock();
             // Pass 2, on both handles, under the guard that performs the
-            // rename. `Arc::ptr_eq` above established that one guard reaches
+            // rename. One mount above established that one guard reaches
             // both directories, so unlike `link_at_pinned` there is no case
             // where only one of the two can be re-verified here.
             verify_pinned(&mut guard, new_fs_id, &new_dir_rel, new_dir)?;
@@ -8155,11 +8535,22 @@ impl Vfs {
             // `resolve_mount` hands back the same per-mount handle.  Resolving
             // each also yields the mount-relative paths, replacing the manual
             // longest-prefix scan the global-lock version performed inline.
-            let (fs_existing, _id_e, _opts_e, rel_existing) = resolve_mount(&existing)?;
-            let (fs_new, _id_n, _opts_n, rel_new) = resolve_mount(&new_path)?;
-            if !Arc::ptr_eq(&fs_existing, &fs_new) {
+            let MountAt {
+                fs: fs_existing,
+                relative: rel_existing,
+                mnt_id: existing_mnt,
+                ..
+            } = resolve_mount_at(&existing)?;
+            let MountAt {
+                relative: rel_new,
+                mnt_id: new_mnt,
+                ..
+            } = resolve_mount_at(&new_path)?;
+            if existing_mnt != new_mnt {
                 // `EXDEV`, per `link()`'s own POSIX text — see the identical
                 // check in `link_at_pinned` for why this is not `EINVAL`.
+                // The same mount, not merely the same filesystem: Linux
+                // answers `EXDEV` between a bind mount and its source too.
                 return Err(KernelError::CrossDevice);
             }
             // The Vfs layer already resolved `existing` per `follow`, but the
@@ -8348,7 +8739,7 @@ impl Vfs {
         let candidates: Vec<(MountedFs, bool)> = {
             let vfs = VFS.lock();
             vfs.every()
-                .map(|mp| (Arc::clone(&mp.fs), mp.options.read_only))
+                .map(|mp| (Arc::clone(&mp.fs), mp.read_only()))
                 .collect()
         };
         let found = candidates
@@ -9968,11 +10359,13 @@ fn verify_pinned(
 }
 
 /// The mount in `table` -- one mount namespace's -- whose path is the
-/// longest prefix of `path`, and `path` relative to it.
-fn find_mount<'a, 'p>(
+/// longest prefix of `path`, and `path` as a path in that mount's
+/// filesystem: what follows the mount point, under the subtree the mount
+/// shows ([`under_root`]).
+fn find_mount<'a>(
     table: &'a mut [MountPoint],
-    path: &'p Path,
-) -> KernelResult<(&'a mut MountPoint, &'p Path)> {
+    path: &Path,
+) -> KernelResult<(&'a mut MountPoint, PathBuf)> {
     if table.is_empty() {
         return Err(KernelError::NotFound);
     }
@@ -10003,7 +10396,22 @@ fn find_mount<'a, 'p>(
     };
 
     let mp = table.get_mut(idx).ok_or(KernelError::NotFound)?;
+    let relative = under_root(&mp.root, relative);
     Ok((mp, relative))
+}
+
+/// `relative` -- a path below a mount point, `/`-rooted -- as a path in the
+/// mount's filesystem: the same path for a mount of the whole filesystem,
+/// joined under `root` for a bind mount's subtree.
+fn under_root(root: &Path, relative: &Path) -> PathBuf {
+    if root.components().next().is_none() {
+        return relative.to_path_buf();
+    }
+    let mut out = root.to_path_buf();
+    for c in relative.components() {
+        out.push(c);
+    }
+    out
 }
 
 /// Resolve `path` to its owning mount, returning a cloned *per-mount*
@@ -10026,9 +10434,79 @@ fn resolve_mount(path: &Path) -> KernelResult<(MountedFs, u64, MountOptions, Pat
     Ok((
         Arc::clone(&mp.fs),
         mp.fs_id,
-        mp.options,
-        relative.to_path_buf(),
+        mp.effective_options(),
+        relative,
     ))
+}
+
+/// What [`resolve_mount_at`] finds: [`resolve_mount`]'s answer, with the
+/// mount table entry's own identity.
+struct MountAt {
+    fs: MountedFs,
+    fs_id: u64,
+    relative: PathBuf,
+    /// The entry's id ([`MountPoint::mnt_id`]). Two paths are on one mount
+    /// when these match: a bind mount and its source share the filesystem
+    /// (`fs`, `fs_id`) and are still two mounts, across which Linux's
+    /// `rename` and `link` answer `EXDEV`.
+    mnt_id: u64,
+    /// The path is the mount point itself -- the root of what is mounted
+    /// there -- which no removal or rename may take while it is one (Linux's
+    /// `is_local_mountpoint`, `EBUSY`). Through the mount, that name is the
+    /// mounted filesystem's root, or for a bind mount a directory or file of
+    /// its source, which a removal would otherwise take from the source.
+    mount_point: bool,
+}
+
+/// [`resolve_mount`], with what [`MountAt`] adds: for the operations that
+/// compare two paths' mounts or act on a name rather than an object.
+fn resolve_mount_at(path: &Path) -> KernelResult<MountAt> {
+    let ns = super::mntns::current();
+    let mut vfs = VFS.lock();
+    let (mp, relative) = find_mount(vfs.table_mut(ns)?, path)?;
+    Ok(MountAt {
+        fs: Arc::clone(&mp.fs),
+        fs_id: mp.fs_id,
+        mnt_id: mp.mnt_id,
+        mount_point: mp.path.as_path() == path,
+        relative,
+    })
+}
+
+/// `DeviceBusy` (Linux's `EBUSY`) where the resolved host path `path` is a
+/// mount point in the caller's namespace: a removal must not take the name
+/// while something is mounted on it ([`MountAt::mount_point`]).
+fn refuse_mount_point(path: &Path) -> KernelResult<()> {
+    if Vfs::is_mount_point(path) {
+        Err(KernelError::DeviceBusy)
+    } else {
+        Ok(())
+    }
+}
+
+/// A rename's (or an exchange's) refusal of a mount point under either name,
+/// in Linux's order: the two directories' mounts are compared first
+/// (`EXDEV`), then a mount point is refused (`EBUSY`).
+fn refuse_mount_point_rename(
+    from: &Path,
+    from_at: &MountAt,
+    to: &Path,
+    to_at: &MountAt,
+) -> KernelResult<()> {
+    if !from_at.mount_point && !to_at.mount_point {
+        return Ok(());
+    }
+    if parent_mount_id(from)? != parent_mount_id(to)? {
+        return Err(KernelError::CrossDevice);
+    }
+    Err(KernelError::DeviceBusy)
+}
+
+/// The id of the mount the directory holding the name `path` is on: what
+/// Linux compares, for a `rename` or `link`, to answer `EXDEV` -- before it
+/// asks whether a name is a mount point.
+fn parent_mount_id(path: &Path) -> KernelResult<u64> {
+    Ok(resolve_mount_at(path.parent().unwrap_or(Path::new("/")))?.mnt_id)
 }
 
 /// Check that the mount for `path` allows writes.
@@ -10044,7 +10522,7 @@ fn check_writable(path: &Path) -> KernelResult<()> {
     for mp in vfs.table(ns) {
         if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
             best_len = mp.path.len();
-            best_ro = mp.options.read_only;
+            best_ro = mp.read_only();
         }
     }
     if best_len == 0 {

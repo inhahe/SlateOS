@@ -3698,6 +3698,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_mount_namespaces(),
     );
+    // Bind and move mounts: MS_BIND (with MS_REC), bind remounts,
+    // unbindable mounts, MS_MOVE (fs::Vfs::bind_mount and the rest).
+    selftest::dispatch_debug(
+        "Linux bind and move mounts (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_bind_mounts(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

@@ -24562,6 +24562,155 @@ pub fn self_test_linux_mount_namespaces() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of bind and move mounts through the Linux ABI:
+/// [`elf::build_linux_bind_mounts_test_elf`] (`build/bindtest.c`), run as
+/// root, in a mount namespace of its own. A directory and a file bound
+/// elsewhere, the same files through both paths and mountinfo's root field;
+/// `EBUSY` for the mount point and `EXDEV` between the two mounts; a bind
+/// remount read-only with the source writable, and a remount of the
+/// filesystem through every mount of it; `MS_REC`; unbindable mounts;
+/// `MS_MOVE`; `EPERM` without root (`crate::fs::Vfs::bind_mount`,
+/// `move_mount`, `remount_bind`, `set_propagation`).
+pub fn self_test_linux_bind_mounts() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux bind and move mounts (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_bind_mounts_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-bind"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make a namespace are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-bind",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: bind mounts spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "a process that gave up root could bind a mount",
+            Some(0x40..=0x45) => {
+                "it could not make a namespace of its own, a tmpfs, or the directories and file \
+                 it works in"
+            }
+            Some(0x46..=0x49) => {
+                "a directory bound elsewhere did not show the same files, or a file made through \
+                 the bind was not in its source"
+            }
+            Some(0x4a) => "mountinfo's root field did not name the bound subtree",
+            Some(0x4b | 0x4c) => "the bind's mount point could be removed or renamed (not EBUSY)",
+            Some(0x4d | 0x4e) => {
+                "a rename or link between a bind and its source was taken (not EXDEV)"
+            }
+            Some(0x4f | 0x50) => "a rename inside the bind failed",
+            Some(0x51..=0x55) => {
+                "a bind remount did not make the bind alone read-only and back, or mountinfo did \
+                 not say the mount is ro and the filesystem rw"
+            }
+            Some(0x56..=0x59) => {
+                "a remount of the filesystem through the bind did not make it read-only through \
+                 every mount of it, and back"
+            }
+            Some(0x5a | 0x5b) => "the bind did not come off, or its source went with it",
+            Some(0x80 | 0x81) => {
+                "a file held open through a bind did not keep it (EBUSY), or it did not come off \
+                 once closed"
+            }
+            Some(0x82..=0x84) => {
+                "a bind did not outlive the unmount of its source, or the source would not come \
+                 off while bound elsewhere"
+            }
+            Some(0x5c..=0x5f) => "a file bound over a file did not show its source, or come off",
+            Some(0x60 | 0x61) => {
+                "a directory over a file, or a file over a directory, was not ENOTDIR"
+            }
+            Some(0x62..=0x64) => {
+                "no source, an empty one or a missing one was not EINVAL, EINVAL, ENOENT"
+            }
+            Some(0x65..=0x6c) => {
+                "MS_REC did not bind the mount beneath, or a bind without it did, or the \
+                 umount with one beneath was not EBUSY, or MNT_DETACH did not take both"
+            }
+            Some(0x6d..=0x74) => {
+                "an unbindable mount could be bound, was not left out of a recursive bind, was \
+                 not listed so, or MS_PRIVATE did not take it back"
+            }
+            Some(0x75..=0x7b) => {
+                "MS_MOVE did not move a mount with its files, or a move into itself was not \
+                 ELOOP, or one of a mount's subdirectory was not EINVAL"
+            }
+            Some(0x7c) => "the unprivileged child did not end 0x2B",
+            Some(0x7d | 0x7e) => {
+                "its tmpfs did not come off, or its directory could not be removed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Its namespace went with it, and the system's table is as it was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- {} namespaces and {} system mounts before, \
+             {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux bind and move mounts (ring 3: a directory and a file bound, the same \
+         files, mountinfo's root, EBUSY and EXDEV, read-only binds and filesystems, MS_REC, \
+         unbindable, MS_MOVE, EPERM without root): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of named pipes through the Linux ABI:
 /// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
 /// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a

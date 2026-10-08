@@ -259,6 +259,24 @@ pub fn name(handle: MemFdHandle) -> KernelResult<Vec<u8>> {
     Ok(mf.name.clone())
 }
 
+/// A copy of all the memfd's data, whatever its offset: the image an exec
+/// of it loads (`execveat(fd, "", ..., AT_EMPTY_PATH)`, glibc's `fexecve`),
+/// as runc and systemd exec a binary they wrote into one.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a closed handle; `OutOfMemory` when the copy cannot
+/// be allocated.
+pub fn contents(handle: MemFdHandle) -> KernelResult<Vec<u8>> {
+    let table = MEMFD_TABLE.lock();
+    let mf = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(mf.data.len())
+        .map_err(|_| KernelError::OutOfMemory)?;
+    out.extend_from_slice(&mf.data);
+    Ok(out)
+}
+
 /// Read up to `buf.len()` bytes starting at the current offset.  Returns
 /// the number of bytes copied (0 at EOF).  Advances the offset by the
 /// number of bytes read.

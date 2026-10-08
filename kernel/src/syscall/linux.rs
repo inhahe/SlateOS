@@ -3303,7 +3303,7 @@ fn linux_exec_common(
     argv_user: u64,
     envp_user: u64,
 ) -> i64 {
-    let rc = linux_exec_common_inner(frame, filename, argv_user, envp_user);
+    let rc = linux_exec_common_inner(frame, ExecSource::Path(filename), argv_user, envp_user);
     if rc < 0 {
         crate::serial_println!(
             "[exec] execve({:?}) FAILED -> errno {} -- see known-issues \
@@ -3315,9 +3315,39 @@ fn linux_exec_common(
     rc
 }
 
+/// What an exec loads: a file, by the name the caller gave (`execve`,
+/// `execveat`), or an image already read with the name `/proc/<pid>/exe`
+/// gives it (a memfd's, by `fexecve`).
+enum ExecSource<'a> {
+    /// A file, read from the VFS before the old image goes.
+    Path(&'a Path),
+    /// The bytes, and the exe link's text.
+    Image {
+        data: alloc::vec::Vec<u8>,
+        exe: alloc::vec::Vec<u8>,
+    },
+}
+
+/// [`linux_exec_common`] for an image already read: `fexecve` of a memfd,
+/// whose bytes are the program and which has no name to load by.
+fn linux_exec_image(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    data: alloc::vec::Vec<u8>,
+    exe: alloc::vec::Vec<u8>,
+    argv_user: u64,
+    envp_user: u64,
+) -> i64 {
+    let shown = Path::new(exe.as_slice()).to_path_buf();
+    let rc = linux_exec_common_inner(frame, ExecSource::Image { data, exe }, argv_user, envp_user);
+    if rc < 0 {
+        crate::serial_println!("[exec] fexecve({:?}) FAILED -> errno {}", shown, -rc);
+    }
+    rc
+}
+
 fn linux_exec_common_inner(
     frame: &mut crate::syscall::entry::SyscallFrame,
-    filename: &Path,
+    source: ExecSource<'_>,
     argv_user: u64,
     envp_user: u64,
 ) -> i64 {
@@ -3355,6 +3385,13 @@ fn linux_exec_common_inner(
         }
         argv_bufs.push(s);
     }
+    // No arguments at all -- a NULL argv, or an empty one -- gets an empty
+    // `argv[0]`, as Linux has given one since 5.18 (`do_execveat_common`):
+    // a program may take argv[0] as there.
+    if argv_bufs.is_empty() {
+        total_bytes = total_bytes.saturating_add(1);
+        argv_bufs.push(alloc::vec::Vec::new());
+    }
     let mut envp_bufs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
         alloc::vec::Vec::with_capacity(envp_ptrs.len());
     for p in envp_ptrs {
@@ -3370,9 +3407,21 @@ fn linux_exec_common_inner(
     }
 
     // ---- 5. Read file from VFS BEFORE tearing down old AS. ----
-    let elf_data = match crate::fs::vfs::Vfs::read_file(filename) {
-        Ok(d) => d,
-        Err(e) => return -i64::from(linux_errno_for(e)),
+    let (elf_data, exe_path) = match source {
+        ExecSource::Path(filename) => {
+            let data = match crate::fs::vfs::Vfs::read_file(filename) {
+                Ok(d) => d,
+                Err(e) => return -i64::from(linux_errno_for(e)),
+            };
+            // Resolve the executable's absolute path for /proc/<pid>/exe.
+            // We canonicalise the caller's filename against the process cwd
+            // so a relative execve still yields an absolute exe link.
+            // Best-effort: on failure we pass None and the link reports
+            // NotFound.
+            let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+            (data, canonicalize_path(&cwd, filename.as_bytes()).ok())
+        }
+        ExecSource::Image { data, exe } => (data, Some(exe)),
     };
 
     // ---- 6. Build &[&[u8]] views for exec_process. ----
@@ -3380,15 +3429,6 @@ fn linux_exec_common_inner(
         argv_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
     let envp_slices: alloc::vec::Vec<&[u8]> =
         envp_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
-
-    // Resolve the executable's absolute path for /proc/<pid>/exe.  We
-    // canonicalise the caller's filename against the process cwd so a
-    // relative execve still yields an absolute exe link.  Best-effort:
-    // on failure we pass None and the link reports NotFound.
-    let exe_path: Option<alloc::vec::Vec<u8>> = {
-        let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
-        canonicalize_path(&cwd, filename.as_bytes()).ok()
-    };
 
     // ---- 7. Exec.  After this point the old AS is gone on success. ----
     match exec_process(
@@ -3494,6 +3534,23 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
             Ok(e) => e,
             Err(sr) => return sr.value,
         };
+        if entry.kind == HandleKind::MemFd {
+            // A memfd: its bytes are the program, and it has no name to load
+            // by. `/proc/<pid>/exe` names it as Linux's does. It was
+            // `EACCES` until 2026-10-08, which no Linux program expects of
+            // a memfd created executable (runc and systemd exec from one).
+            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+            let data = match crate::ipc::memfd::contents(h) {
+                Ok(d) => d,
+                Err(e) => return -i64::from(linux_errno_for(e)),
+            };
+            let mut exe = b"/memfd:".to_vec();
+            // The name is only the link's text: a memfd closed by another
+            // thread since its bytes were read leaves `/memfd: (deleted)`.
+            exe.extend_from_slice(&crate::ipc::memfd::name(h).unwrap_or_default());
+            exe.extend_from_slice(b" (deleted)");
+            return linux_exec_image(frame, data, exe, argv_user, envp_user);
+        }
         if entry.kind != HandleKind::File {
             return -i64::from(errno::EACCES);
         }

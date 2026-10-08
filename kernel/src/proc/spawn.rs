@@ -25148,10 +25148,14 @@ pub fn self_test_linux_stopped_signals() -> KernelResult<()> {
 /// Ring-3 test of ignored signals dropped as they are sent, through the Linux
 /// ABI: [`elf::build_linux_ignored_at_send_test_elf`] (`build/sigdfltest.c`).
 /// A program with a `SIGUSR1` handler -- so a trampoline is registered -- is
-/// not woken from a sleep by a child's `SIGCHLD`, a `SIGWINCH` or an ignored
-/// `SIGURG`; a blocked `SIGCHLD` is kept, and discarded once unblocked at its
-/// default; a `SIGUSR1` does wake it (`signal::classify`,
-/// `syscall::linux::post_linux_sigchld`).
+/// not woken from a sleep by a child's `SIGCHLD`; a blocked `SIGCHLD` is
+/// kept, and discarded once unblocked at its default; a child that inherited
+/// the handler sleeps on through a `SIGWINCH` or an ignored `SIGURG` from its
+/// parent, and a `SIGUSR1` does wake it (`signal::classify`,
+/// `syscall::linux::post_linux_sigchld`). The parent signals the child --
+/// every 100 ms, so a child scheduled late still has some arrive during its
+/// sleep -- because a process may signal only what it started
+/// (design-decisions 1503).
 pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 120_000_000_000;
@@ -25204,14 +25208,20 @@ pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
         let what = match exit_code {
             Some(0x30 | 0x31) => "rt_sigaction or rt_sigpending failed",
             Some(0x32 | 0x33) => "fork or wait4 failed",
+            Some(0x34 | 0x35) => "pipe2, or reading the child's ready byte, failed",
+            Some(0x36) => "the parent's kill of its sleeping child failed",
+            Some(0x37) => "a child sent a signal every 100 ms was still asleep after 10 s",
             Some(0x40) => "a child's exit (SIGCHLD at its default) cut a sleep short",
             Some(0x41) => "a child's exit left SIGCHLD pending at its default",
             Some(0x42 | 0x44) => "rt_sigprocmask failed",
             Some(0x43) => "a blocked SIGCHLD was not kept pending",
             Some(0x45) => "an unblocked SIGCHLD at its default was not discarded",
-            Some(0x46) => "a SIGWINCH at its default cut a sleep short",
-            Some(0x47) => "a SIGURG set to SIG_IGN cut a sleep short",
-            Some(0x48) => "a SIGUSR1 with a handler did not cut a sleep short with EINTR",
+            Some(0x46) => "a SIGWINCH at its default cut the child's sleep short",
+            Some(0x47) => "a SIGURG set to SIG_IGN cut the child's sleep short",
+            Some(0x48) => {
+                "a SIGUSR1 with an inherited handler did not cut the child's sleep short with \
+                 EINTR"
+            }
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };

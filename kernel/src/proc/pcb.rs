@@ -24,6 +24,7 @@ use crate::mm::vma::{Vma, VmaKind};
 use crate::sched::task::TaskId;
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -1667,8 +1668,19 @@ pub const LINUX_PR_TSC_SIGSEGV: u32 = 2;
 /// name it if the exit/reap path wedges on it — this lock is on the suspected
 /// spawn/kill/reap hang path (`on_task_exit` → `get_crash_info`,
 /// `remove_thread`).
-static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
-    Mutex::named(BTreeMap::new(), b"PROCTBL");
+///
+/// **Boxed.** A `Process` is about 1.3 KiB, and a `BTreeMap` holding values
+/// inline passes the value by value through every level of an insert or a
+/// removal (`insert_recursing`, `split`, `slice_insert`; `remove_kv_tracking`,
+/// `bulk_steal_*`), each frame with its own copy in a debug build -- some
+/// 19 KiB of kernel stack for one process created, forked or reaped, and a
+/// 14 KiB node allocation per eleven processes. Boxed, the map moves pointers.
+/// The same pattern overran the stack in `proc::signal` on 2026-10-08
+/// (known-issues A-LARGE-KERNEL-STACK-FRAMES-REMAIN-IN-SELF-TESTS-AND-KSHELL).
+static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::named(BTreeMap::new(), b"PROCTBL");
+
+/// [`PROCESS_TABLE`]'s map: every process, boxed, by pid.
+type ProcessTable = BTreeMap<ProcessId, Box<Process>>;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1685,7 +1697,7 @@ static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
 ///
 /// Returns the new process's PID.
 pub fn create(name: &str, parent: ProcessId) -> ProcessId {
-    let mut proc = Process::new(String::from(name), parent);
+    let mut proc = Box::new(Process::new(String::from(name), parent));
 
     // Allocate a per-process PML4 with kernel entries cloned.
     // If allocation fails, the process falls back to the kernel
@@ -1942,7 +1954,7 @@ pub fn fork_create(
         .collect();
 
     let pid = alloc_pid();
-    let child = Process {
+    let child = Box::new(Process {
         pid,
         name,
         state: ProcessState::Creating,
@@ -2165,7 +2177,7 @@ pub fn fork_create(
         // child runs the same image, so it honours the same commit policy
         // until it execs.
         mmap_commit_policy,
-    };
+    });
 
     table.insert(pid, child);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
@@ -3656,11 +3668,7 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
 /// Until 2026-10-01 a 0 was refused up front with `InvalidArgument`, before
 /// the terminal checks, and a group that did not exist read the same as one
 /// in another session (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
-fn judge_fg_group(
-    table: &BTreeMap<ProcessId, Process>,
-    pgid: ProcessId,
-    sid: ProcessId,
-) -> KernelResult<()> {
+fn judge_fg_group(table: &ProcessTable, pgid: ProcessId, sid: ProcessId) -> KernelResult<()> {
     let mut exists = false;
     for p in table.values() {
         if p.pgid == pgid && pgid != 0 && p.state != ProcessState::Zombie {
@@ -4982,7 +4990,7 @@ pub type JcWaiters = (Option<TaskId>, Option<TaskId>);
 /// pid (captured before the second mutable borrow).  Factored out so
 /// [`record_jc_stopped`] and [`record_jc_continued`] share identical wake
 /// semantics.
-fn take_jc_waiters(table: &mut BTreeMap<ProcessId, Process>, pid: ProcessId) -> JcWaiters {
+fn take_jc_waiters(table: &mut ProcessTable, pid: ProcessId) -> JcWaiters {
     let (wake, parent) = match table.get_mut(&pid) {
         Some(proc) => (proc.wait_task.take(), proc.parent),
         None => return (None, None),
@@ -5390,7 +5398,7 @@ pub fn group_exit_wstatus(pid: ProcessId) -> Option<i32> {
 /// process is still in the table, such as the parent's `SIGCHLD`.
 #[must_use]
 pub fn exit_info(pid: ProcessId) -> Option<ExitInfo> {
-    PROCESS_TABLE.lock().get(&pid).map(Process::exit_info)
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exit_info())
 }
 
 /// Try to reap (wait for) a zombie child process.
@@ -5516,7 +5524,7 @@ pub fn release_autoreaped(pid: ProcessId) -> bool {
 ///
 /// Must be called with no `PROCESS_TABLE` lock held: every step takes it or a
 /// lock ordered after it.
-fn finish_process(pid: ProcessId, mut proc: Process) {
+fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     // The open-file lock is ordered after the process table, which is why
     // this waits until the record is out of it.
     for vma in &proc.vmas {
@@ -7025,9 +7033,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
 /// The process table, for [`resolve_fault`]: at once when it is free; with
 /// `wait`, after waiting for it, unless the calling task holds it already.
 /// `None` is "busy".
-fn lock_table_for_fault(
-    wait: bool,
-) -> Option<crate::sync::MutexGuard<'static, BTreeMap<ProcessId, Process>>> {
+fn lock_table_for_fault(wait: bool) -> Option<crate::sync::MutexGuard<'static, ProcessTable>> {
     table_or_busy(
         wait,
         || PROCESS_TABLE.try_lock(),

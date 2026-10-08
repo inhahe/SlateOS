@@ -6772,6 +6772,17 @@ pub const SCHEDULER_RR_INTERVAL: u64 = 2;
 /// (requests/d-a-membarrier-needs-the-kernel-to-interrupt-the-other-cpus.md).
 pub const SYS_MEMBARRIER: u64 = 1147;
 
+/// `SYS_RSEQ(rseq, len, flags, sig)` -- Linux's `rseq(2)`, its arguments and
+/// errnos (as `-errno`), for native programs: the Linux ABI's call is the
+/// same body (`crate::rseq::rseq`). Registers the calling thread's 32-byte,
+/// 32-byte-aligned `struct rseq` with the abort signature `sig` (`flags` 0),
+/// or unregisters it (`flags` 1, the same three values). While registered,
+/// the kernel keeps the area's `cpu_id` the CPU the thread runs on, and sends
+/// a critical section the thread is switched out, moved or signalled in to
+/// its abort address (design-decisions 1546). Until 2026-10-08 only the Linux
+/// ABI could register an area; the exit-path work was always ABI-blind.
+pub const SYS_RSEQ: u64 = 1148;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

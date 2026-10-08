@@ -10412,6 +10412,18 @@ fn deliver_native_signal(
         }
     };
 
+    // An rseq critical section the thread is in is aborted first, so the frame
+    // records -- and the handler returns to -- its abort address, as the Linux
+    // frame's builder does (`crate::rseq::on_signal_delivery`; a native
+    // program registers its area with `SYS_RSEQ`). A malformed rseq area ends
+    // the program with SIGSEGV, where Linux's `force_sigsegv` leads.
+    if !crate::rseq::on_signal_delivery(&mut regs.rip) {
+        const SIGSEGV: u32 = 11;
+        terminate_current_process_for_signal(pid, task_id, SIGSEGV);
+        // Unreachable: task_exit never returns.
+        return false;
+    }
+
     // The thread's FPU state, for the frame.
     let fpu_image = crate::sched::fpu::capture_signal_image();
 
@@ -20018,7 +20030,13 @@ pub fn sys_thread_scheduler(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_MEMBARRIER` (1147) — Linux's `membarrier`, its commands and errnos.
 /// See [`SYS_MEMBARRIER`](super::number::SYS_MEMBARRIER).
 pub fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
-    super::linux::native_membarrier(args.arg0, args.arg1, args.arg2)
+    crate::membarrier::membarrier(args.arg0, args.arg1, args.arg2)
+}
+
+/// `SYS_RSEQ` (1148) -- Linux's `rseq`, its arguments and errnos. See
+/// [`SYS_RSEQ`](super::number::SYS_RSEQ).
+pub fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
+    crate::rseq::rseq(args.arg0, args.arg1, args.arg2, args.arg3)
 }
 
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem

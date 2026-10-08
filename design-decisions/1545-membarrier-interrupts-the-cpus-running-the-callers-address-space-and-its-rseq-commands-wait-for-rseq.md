@@ -13,7 +13,8 @@ as Linux does. Two variants that also restart special "restartable
 sequences" are refused for now, honestly, until the kernel can do that part
 (lane D's `requests/d-a-membarrier-needs-the-kernel-to-interrupt-the-other-cpus.md`).
 
-**The mechanism** (`kernel/src/cpusync.rs`): an IPI on a new vector (250) to
+**The mechanism** (`kernel/src/cpusync.rs`; the command logic both ABIs
+call is `kernel/src/membarrier.rs`): an IPI on a new vector (250) to
 a mask of CPUs, answered from the handler with a locked increment -- the
 barrier -- and an `iretq` back to user mode -- the serializing instruction
 `SYNC_CORE` asks for. The protocol is the TLB shootdown's (one request at a

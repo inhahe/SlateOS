@@ -143,6 +143,7 @@ mod layout_pad;
 mod limine;
 mod lockdep;
 mod logpersist;
+mod membarrier;
 mod mm;
 mod mouse;
 mod msi;

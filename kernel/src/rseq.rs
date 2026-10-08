@@ -6,8 +6,9 @@
 //!
 //! ## What a thread registers
 //!
-//! `rseq(2)` (`syscall::linux::sys_rseq`) registers a 32-byte `struct rseq`
-//! per thread, kept by `proc::thread_clone` with its abort signature:
+//! `rseq(2)` ([`rseq`]: the Linux call and the native `SYS_RSEQ` are this
+//! one function) registers a 32-byte `struct rseq` per thread, kept by
+//! `proc::thread_clone` with its abort signature:
 //!
 //! | offset | field | written by |
 //! |---|---|---|
@@ -60,7 +61,10 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::error::KernelError;
 use crate::mm::page_table::USER_SPACE_END;
+use crate::syscall::dispatch::SyscallResult;
+use crate::syscall::linux::{errno, linux_err, linux_errno_for};
 
 /// Per CPU: a thread with an rseq area was switched in here and has not yet
 /// returned to user mode since -- or a registration or a `membarrier` RSEQ
@@ -297,4 +301,185 @@ pub fn reset_area(area: u64) -> Option<()> {
     write(area.checked_add(NODE_ID)?, &0u32.to_ne_bytes())?;
     write(area.checked_add(MM_CID)?, &0u32.to_ne_bytes())?;
     Some(())
+}
+
+/// `rseq(rseq*, len, flags, sig)` — restartable-sequence registration.
+///
+/// glibc 2.35+ calls this from every thread's startup; before batch
+/// 121 we returned -ENOSYS, forcing glibc into a degraded mode where
+/// its per-CPU malloc cache slot is computed via a `sched_getcpu`
+/// fallback on every alloc, and per-thread tcache stays disabled.
+///
+/// Register and unregister here; the rest of rseq -- `cpu_id` kept current,
+/// a critical section aborted when its thread is switched out, migrated or
+/// signalled inside it -- is `crate::rseq`, on every return to user mode:
+///   * Register: validate ptr/len/flags/sig, refuse double-register with
+///     -EBUSY, store (ptr, len, sig) per task, write the CPU into the kernel's
+///     fields of `struct rseq` (cpu_id_start, cpu_id, node_id, mm_cid), and
+///     return 0 -- with the thread marked, so the fields are current when the
+///     call returns.
+///   * Unregister: validate the (ptr, len, sig) triple matches the stored
+///     registration (-EINVAL, or -EPERM for the signature), write cpu_id back
+///     to RSEQ_CPU_ID_UNINITIALIZED (-EFAULT, the registration kept, if it
+///     cannot be), drop the entry, return 0.
+///
+/// Until 2026-10-08 the fields were written as 0 at registration and never
+/// again, and no critical section was ever aborted (design-decisions 1546).
+///
+/// Linux ABI:
+///   arg0 = rseq*    (32-byte aligned, 32 bytes valid in user space)
+///   arg1 = len      (must equal sizeof(struct rseq) = 32)
+///   arg2 = flags    (0 = register, RSEQ_FLAG_UNREGISTER = 1)
+///   arg3 = sig      (32-bit signature, must match abort handler's
+///                    preceding word; we store but never check
+///                    because we never invoke an abort handler)
+///
+/// Gate order (matches Linux's `kernel/rseq.c::SYSCALL_DEFINE4(rseq)`):
+///   1. If `flags & RSEQ_FLAG_UNREGISTER`:
+///      a. Any other flag bit -> EINVAL.
+///      b. No prior registration -> EINVAL.
+///      c. Stored ptr != rseq -> EINVAL.
+///      d. Stored len != rseq_len -> EINVAL.
+///      e. Stored sig != sig -> **EPERM** (not EINVAL — discriminates
+///      "tried to unregister someone else's rseq" from "wrong
+///      syscall args").
+///      f. Reset, return 0.
+///   2. Register path (UNREGISTER bit clear):
+///      a. Any flag bit -> EINVAL.
+///      b. If already registered:
+///         - ptr/len mismatch -> EINVAL.
+///         - sig mismatch    -> EPERM.
+///         - else            -> EBUSY.
+///           c. Validate len/ptr/alignment/access_ok.
+///           d. Store registration, initialise kernel-owned runtime fields.
+///
+/// Pre-batch we both returned EINVAL on sig mismatch for unregister
+/// (Linux: EPERM) and returned EBUSY unconditionally on any second
+/// register (Linux: EINVAL for ptr/len mismatch, EPERM for sig
+/// mismatch, EBUSY only when everything matches).  We also did the
+/// alignment/access_ok validation BEFORE branching on UNREGISTER,
+/// so an unregister with an unmapped (but previously-valid) pointer
+/// would return EFAULT where Linux returns EINVAL.
+pub fn rseq(rseq_ptr: u64, len_raw: u64, flags_raw: u64, sig_raw: u64) -> SyscallResult {
+    const RSEQ_STRUCT_SIZE: u64 = 32;
+    const RSEQ_FLAG_UNREGISTER: u64 = 1;
+    const RSEQ_STRUCT_ALIGN: u64 = 32;
+
+    // Linux signature: `SYSCALL_DEFINE4(rseq, struct rseq __user *, rseq,
+    //   u32, rseq_len, int, flags, u32, sig)`.  `rseq_len` is C `u32` in
+    // rsi and `flags` is C `int` in rdx; the AMD64 syscall ABI delivers
+    // both in 64-bit registers and does NOT zero/sign-extend them, so
+    // only the low 32 bits are defined.  Pre-batch we held `len` and
+    // `flags` as raw u64, so a probe like rseq_len=0x1_0000_0020
+    // (high|32) fired the `len != 32` EINVAL gate where Linux's
+    // truncated len=32 advances to the register path, and flags
+    // =0x1_0000_0000 fired the `flags != 0` EINVAL gate where Linux's
+    // truncated flags=0 advances likewise.  Truncate both to their
+    // declared C-type width before any compare.
+    #[allow(clippy::cast_possible_truncation)]
+    let len_u32 = len_raw as u32;
+    let len: u64 = u64::from(len_u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_u32 = flags_raw as u32;
+    let flags: u64 = u64::from(flags_u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let sig = sig_raw as u32;
+
+    let task_id = crate::sched::current_task_id();
+
+    if flags & RSEQ_FLAG_UNREGISTER != 0 {
+        // Reject any other flag bit alongside UNREGISTER.
+        if flags & !RSEQ_FLAG_UNREGISTER != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        // Linux does NOT validate alignment / access_ok on the
+        // unregister path — the pointer is implicitly known to be
+        // valid because it had to be validated at register time.
+        // We match that order so a probe unregistering with the same
+        // args it registered with sees the same errno Linux does.
+        match crate::proc::thread_clone::lookup_rseq(task_id) {
+            Some((stored_ptr, stored_len, stored_sig)) => {
+                if stored_ptr != rseq_ptr {
+                    return linux_err(errno::EINVAL);
+                }
+                if u64::from(stored_len) != len {
+                    return linux_err(errno::EINVAL);
+                }
+                if stored_sig != sig {
+                    // Sig mismatch on unregister: Linux returns EPERM.
+                    return linux_err(errno::EPERM);
+                }
+                // Linux's rseq_reset_rseq_cpu_node_id: cpu_id back to
+                // RSEQ_CPU_ID_UNINITIALIZED (-1), the rest 0 -- EFAULT, with
+                // the registration kept, if the area cannot be written.
+                if crate::rseq::reset_area(stored_ptr).is_none() {
+                    return linux_err(errno::EFAULT);
+                }
+                // The record was found just above; a second unregistration
+                // cannot have run between (the thread is this one).
+                let _ = crate::proc::thread_clone::unregister_rseq(task_id);
+                return SyscallResult::ok(0);
+            }
+            None => return linux_err(errno::EINVAL),
+        }
+    }
+
+    // Register path: no flag bits should be set (UNREGISTER already
+    // handled above; any remaining bit is rejected).
+    if flags != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Already registered: discriminate ptr/len (EINVAL) from sig
+    // (EPERM) from "everything matches" (EBUSY).
+    if let Some((stored_ptr, stored_len, stored_sig)) =
+        crate::proc::thread_clone::lookup_rseq(task_id)
+    {
+        if stored_ptr != rseq_ptr || u64::from(stored_len) != len {
+            return linux_err(errno::EINVAL);
+        }
+        if stored_sig != sig {
+            return linux_err(errno::EPERM);
+        }
+        return linux_err(errno::EBUSY);
+    }
+
+    // First-time registration: validate len/ptr/alignment/access_ok.
+    if len != RSEQ_STRUCT_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    if rseq_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if rseq_ptr & (RSEQ_STRUCT_ALIGN - 1) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Store before writing user space so a copy_to_user fault leaves
+    // the task in a clean unregistered state on rollback.
+    #[allow(clippy::cast_possible_truncation)]
+    crate::proc::thread_clone::register_rseq(task_id, rseq_ptr, len as u32, sig);
+
+    // The fields the kernel owns -- cpu_id_start, cpu_id, node_id, mm_cid --
+    // get the CPU the thread runs on, now and again on its way out (Linux
+    // marks the thread with `rseq_set_notify_resume`, so the call returns with
+    // them current). rseq_cs (8), flags (16) and the padding (28) are the
+    // thread's and stay as they are.
+    crate::rseq::notify_this_cpu();
+    let write_init = || -> Result<(), KernelError> {
+        crate::rseq::write_current_cpu(rseq_ptr).ok_or(KernelError::PageFault)
+    };
+    if let Err(e) = write_init() {
+        // Roll back the registration so the task is in the state it
+        // was before this syscall.
+        crate::proc::thread_clone::unregister_rseq(task_id);
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }

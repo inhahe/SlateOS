@@ -97,5 +97,9 @@ checks in `syscall::linux`'s self-test.
 `idt::exit_to_user_mode` (with `exception_exit` and the stub macros'
 `exit_to_user`) and `proc::fork::fork_child_trampoline`; the two signal-frame
 builders, `syscall::linux::build_linux_rt_frame` and
-`idt::try_deliver_linux_fault_signal`; `sys_rseq`;
+`idt::try_deliver_linux_fault_signal`, and the native frame's
+`syscall::handlers::deliver_native_signal`; `rseq::rseq`, which both ABIs'
+calls are -- the Linux `rseq` and the native `SYS_RSEQ` (1148), added the same
+day so a native program can register an area too (the boot test's gate on
+capabilities only the Linux ABI reaches asked the question);
 `proc::thread_clone::release_for_exec`; `cpusync`'s `SYNC_RSEQ`.

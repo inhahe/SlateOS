@@ -85,17 +85,17 @@ use super::number::{
     SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES,
     SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID,
     SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET,
-    SYS_RLIMIT_SET, SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
-    SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE,
-    SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT,
-    SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER,
-    SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE,
-    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP,
-    SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_EXIT_SELF, SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK,
-    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
-    SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP,
-    SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_RLIMIT_SET, SYS_RSEQ, SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE,
+    SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_EXIT_SELF,
+    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
+    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
+    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
     SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
     SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
     SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
@@ -779,6 +779,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
+    handlers[SYS_RSEQ as usize] = Some(handlers::sys_rseq);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -5642,6 +5643,48 @@ fn test_dispatch_membarrier() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_MEMBARRIER: OK");
+    test_dispatch_rseq()
+}
+
+/// `SYS_RSEQ` is the Linux call's body: its argument gates answer as Linux's
+/// do, before any user memory is looked at. (Registration itself, and what it
+/// does, the ring-3 test `spawn::self_test_linux_rseq` covers.)
+fn test_dispatch_rseq() -> KernelResult<()> {
+    const SIG: u64 = 0x5305_3053;
+    let rseq = |ptr: u64, len: u64, flags: u64| {
+        let args = SyscallArgs {
+            arg0: ptr,
+            arg1: len,
+            arg2: flags,
+            arg3: SIG,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_RSEQ, &args).value
+    };
+    let errno = |e: i32| i64::from(e).wrapping_neg();
+    let einval = errno(super::linux::errno::EINVAL);
+    let checks = [
+        // A length that is not `struct rseq`'s 32.
+        (rseq(0x1000, 16, 0), einval),
+        // An area that is not 32-byte aligned.
+        (rseq(0x1001, 32, 0), einval),
+        // No area at all.
+        (rseq(0, 32, 0), errno(super::linux::errno::EFAULT)),
+        // A flag that is not RSEQ_FLAG_UNREGISTER.
+        (rseq(0x1000, 32, 2), einval),
+        // Unregistering what was never registered.
+        (rseq(0x1000, 32, 1), einval),
+    ];
+    if let Some((got, want)) = checks.iter().find(|(got, want)| got != want) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_RSEQ answered {} where {} was due",
+            got,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_RSEQ: OK");
     Ok(())
 }
 

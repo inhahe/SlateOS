@@ -8199,6 +8199,30 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
     }
 }
 
+/// Take one `(resource_type, handle_raw)` record out of `pid`'s list, saying
+/// whether there was one: a close that must give back exactly the hold the
+/// record stands for, and none when there is no record -- two threads closing
+/// one handle at once give it back once. (`deregister_ipc_handle` answers
+/// nothing, so a caller cannot tell.)
+#[must_use]
+pub fn take_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    match proc
+        .ipc_handles
+        .iter()
+        .position(|&(rt, h)| rt == resource_type && h == handle_raw)
+    {
+        Some(pos) => {
+            proc.ipc_handles.swap_remove(pos);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Does `pid` hold this exact `(resource_type, handle_raw)`?
 ///
 /// Most IPC handle values in this kernel are treated as self-authorising — the

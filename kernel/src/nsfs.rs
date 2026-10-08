@@ -13,6 +13,7 @@
 //! it ([`encode`], [`decode`]). One kind exists so far, [`NsKind::Uts`]
 //! (`crate::utsns`); the others follow as they are built.
 
+use crate::error::{KernelError, KernelResult};
 use crate::sync::Mutex;
 use alloc::string::String;
 
@@ -68,6 +69,13 @@ impl NsKind {
 /// The kinds `/proc/<pid>/ns/` lists, in Linux's order.
 pub const KINDS: &[NsKind] = &[NsKind::Uts];
 
+/// The `CLONE_NEW*` bits of every kind this kernel has: what `unshare`,
+/// `clone` and a pidfd's `setns` may ask for.
+#[must_use]
+pub fn known_clone_flags() -> u64 {
+    KINDS.iter().fold(0, |bits, kind| bits | kind.clone_flag())
+}
+
 /// Bits of a raw handle below the kind's byte: the namespace's id.
 const ID_MASK: u64 = (1 << 56) - 1;
 
@@ -92,6 +100,39 @@ pub const fn decode(raw: u64) -> Option<(NsKind, u64)> {
 pub fn of_process(kind: NsKind, pid: crate::proc::pcb::ProcessId) -> Option<u64> {
     match kind {
         NsKind::Uts => crate::proc::pcb::uts_ns(pid),
+    }
+}
+
+/// Put process `pid` in a new namespace of `kind`, a copy of the one it
+/// leaves -- `unshare`. The caller has checked that it may.
+///
+/// # Errors
+///
+/// `NoSuchProcess`; `ResourceExhausted` past the kind's limit.
+pub fn unshare(pid: crate::proc::pcb::ProcessId, kind: NsKind) -> KernelResult<()> {
+    match kind {
+        NsKind::Uts => {
+            let from = crate::proc::pcb::uts_ns(pid).ok_or(KernelError::NoSuchProcess)?;
+            let id = crate::utsns::create_from(from)?;
+            crate::proc::pcb::set_uts_ns(pid, id)
+        }
+    }
+}
+
+/// Put process `pid` in namespace `id` of `kind`, holding it -- `setns`. The
+/// caller has checked that it may.
+///
+/// # Errors
+///
+/// `NotFound` if the namespace went with its last holder meanwhile (a handle
+/// closed by another thread, the process a pidfd names leaving it);
+/// `NoSuchProcess`.
+pub fn enter(pid: crate::proc::pcb::ProcessId, kind: NsKind, id: u64) -> KernelResult<()> {
+    if !retain(encode(kind, id)) {
+        return Err(KernelError::NotFound);
+    }
+    match kind {
+        NsKind::Uts => crate::proc::pcb::set_uts_ns(pid, id),
     }
 }
 
@@ -156,7 +197,7 @@ pub fn link_text(kind: NsKind, id: u64) -> String {
 /// # Errors
 ///
 /// `InternalError` on the first check that fails.
-pub fn self_test() -> crate::error::KernelResult<()> {
+pub fn self_test() -> KernelResult<()> {
     let ok = decode(encode(NsKind::Uts, 42)) == Some((NsKind::Uts, 42))
         && decode(0).is_none()
         && decode(0xFF << 56).is_none()
@@ -166,7 +207,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         && NsKind::from_name(b"net").is_none();
     if !ok {
         crate::serial_println!("[nsfs]   FAIL: a handle's encoding or a link's text is wrong");
-        return Err(crate::error::KernelError::InternalError);
+        return Err(KernelError::InternalError);
     }
     crate::serial_println!("[nsfs]   handle encoding and link text: OK");
     Ok(())

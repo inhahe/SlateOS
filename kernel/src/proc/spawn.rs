@@ -25510,6 +25510,143 @@ pub fn self_test_native_cap_broker() -> KernelResult<()> {
     Ok(())
 }
 
+/// Native ring-3 test of the namespace calls, `SYS_NAMESPACE_*` 1161-1166:
+/// [`elf::build_native_namespaces_test_elf`] (`build/nsnative.c`), run twice.
+/// Holding `(Namespace, WRITE)`, `(Process, SET_HOSTNAME)` and `(File,
+/// READ)`, it opens `/proc/self/ns/uts` to a handle, unshares a UTS
+/// namespace and names it, moves between two handles' namespaces, leaves a
+/// fork child to move alone, enters a child's namespace by its pid, and
+/// closes a handle exactly once (exit 0x2A). Holding `(File, READ)` alone, it
+/// may open and describe its namespace but neither unshare nor enter one
+/// (exit 0x2C). Either way, no namespace it made outlives it and the
+/// system's host name is as it was (`crate::nsfs`).
+pub fn self_test_native_namespaces() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+
+    serial_println!("[spawn] Running native namespace calls (ring 3) integration test...");
+    let with = [
+        (ResourceType::Namespace, 0u64, Rights::WRITE),
+        (ResourceType::Process, 0u64, Rights::SET_HOSTNAME),
+        (ResourceType::File, 0u64, Rights::READ),
+    ];
+    let without = [(ResourceType::File, 0u64, Rights::READ)];
+    run_native_namespaces(&with, 0x2A, "with the namespace right")?;
+    run_native_namespaces(&without, 0x2C, "without it")?;
+    serial_println!(
+        "[spawn]   native namespace calls (ring 3: a handle on /proc/self/ns/uts and its info, \
+         unshare and a host name of its own, enter by handle and by pid, a fork child moving \
+         alone, a handle closed once, refused without the Namespace right): OK"
+    );
+    Ok(())
+}
+
+/// One run of [`self_test_native_namespaces`]'s program, holding `caps`,
+/// which must end `pass`.
+fn run_native_namespaces(
+    caps: &[(crate::cap::ResourceType, u64, crate::cap::Rights)],
+    pass: i32,
+    which: &str,
+) -> KernelResult<()> {
+    const DEADLINE_NS: u64 = 60_000_000_000;
+    let exe_elf = elf::build_native_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-native-ns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-native-ns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
+    let before = crate::utsns::count();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: native namespace calls ({}) spawn returned {:?}",
+                which,
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- not a zombie after 60 s, got {:?}",
+            which,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(pass) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "the fork child could not enter the first namespace by its inherited handle"
+            }
+            Some(0x32) => "the pid test's child could not unshare",
+            Some(0x40 | 0x41) => {
+                "/proc/self/ns/uts did not open to a handle SYS_NAMESPACE_INFO describes"
+            }
+            Some(0x42 | 0x43) => {
+                "a path that names no namespace, or a process that is not there, was not refused"
+            }
+            Some(0x44) => "info on a handle not held was not InvalidHandle",
+            Some(0x45..=0x47) => "unshare or enter worked without the Namespace right",
+            Some(0x48) => "the handle did not close",
+            Some(0x49) => "the host name could not be read",
+            Some(0x4a) => "unsharing a kind not built was not NotSupported",
+            Some(0x4b..=0x4d) => "unshare did not give a new namespace with a host name of its own",
+            Some(0x4e | 0x4f) => "enter took a mismatched kind or a handle not held",
+            Some(0x50 | 0x51) => "enter did not move between the two handles' namespaces",
+            Some(0x52 | 0x53) => "the fork child did not end 0x2B, or moved its parent",
+            Some(0x54..=0x57) => "enter by pid did not take the child's namespace",
+            Some(0x58 | 0x59) => "the pid test's child could not be ended",
+            Some(0x5a) => "enter by the pid of a reaped process was not NoSuchProcess",
+            Some(0x5b..=0x5d) => "a handle did not close exactly once",
+            Some(0x5e | 0x5f) => "back in the first namespace, the system's name was not as it was",
+            Some(0x2A) => {
+                "it ran the privileged half, so it held the Namespace right it was not given"
+            }
+            Some(0x2C) => "it ran the unprivileged half, so it did not hold the right it was given",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- exit {:?}: {}",
+            which,
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    if crate::utsns::count() != before || crate::utsns::hostname(crate::utsns::ROOT_UTS) != system {
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- {} namespaces outlived the program, \
+             or the system's host name changed",
+            which,
+            crate::utsns::count().saturating_sub(before)
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 /// Unix-domain sockets by name from a real Linux-ABI process
 /// ([`elf::build_linux_unix_socket_test_elf`]): datagrams by abstract name
 /// and by path, a stream through listen/connect/accept with the kernel's

@@ -36,6 +36,12 @@ of `uname`.
   every process it runs joins; replaced `ipc::namespace`'s per-process
   hostname override, which changed what `uname` said but not what a
   `sethostname` inside the container changed (the system's name).
+- Native programs: `SYS_NAMESPACE_UNSHARE`, `_OPEN` (a `/proc/<pid>/ns`
+  path to a handle), `_ENTER`, `_ENTER_PROCESS`, `_CLOSE` and `_INFO`
+  (1161-1166), for lane D's libc `unshare()`, `setns()` and opens of
+  `/proc/<pid>/ns/*` -- the native process keeps its descriptors in
+  userspace, so it cannot be handed a kernel descriptor as a Linux process
+  is.
 
 **Decision 1 -- membership is per process, not per thread.**
 
@@ -54,11 +60,15 @@ task is" beside the process-level ones the kernel already has. Revisit if a
 ported program is found that relies on threads in different UTS namespaces.
 
 **Decision 2 -- who may.** Root's authority, as Linux asks `CAP_SYS_ADMIN`:
-an effective user id of 0 (`proc::setid`), or a `Namespace` capability with
-`WRITE` -- the native authority to make and attach namespaces that
-`SYS_NS_CREATE` and `SYS_NS_ATTACH` already ask for. Without user namespaces
-there is no unprivileged way in, as on a Linux with
-`kernel.unprivileged_userns_clone=0`.
+for a Linux program, an effective user id of 0 (`proc::setid`) or a
+`Namespace` capability with `WRITE` -- the native authority to make and
+attach namespaces that `SYS_NS_CREATE` and `SYS_NS_ATTACH` already ask for;
+for a native program, that capability alone, as every native call takes its
+authority from capabilities and none from a user id. Without user
+namespaces there is no unprivileged way in, as on a Linux with
+`kernel.unprivileged_userns_clone=0`. The checks run in Linux's order --
+`CLONE_NEWUSER` refused first, then the privilege, then a kind not built --
+so an unprivileged program is told `EPERM` whatever it asked for.
 
 **Decision 3 -- a handle is an ordinary descriptor-backed object.** Opening
 `/proc/<pid>/ns/uts` takes a hold on the namespace, recorded in the

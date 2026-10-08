@@ -3692,6 +3692,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_native_cap_broker(),
     );
+    // The namespace calls for native programs, SYS_NAMESPACE_* (crate::nsfs):
+    // with the Namespace right and without it.
+    selftest::dispatch_debug(
+        "native namespace calls (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_namespaces(),
+    );
 
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares

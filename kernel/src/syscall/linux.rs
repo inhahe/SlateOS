@@ -2077,12 +2077,13 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
         return Err(errno::EINVAL);
     }
 
-    // Namespaces: as clone(2) (`clone_namespaces`). A new mount namespace
-    // is not yet: EINVAL here, as the rest this kernel cannot make.
-    if flags_user & clone_flags::CLONE_NEWNS != 0 {
+    // Namespaces (`namespace_request`): CLONE_NEWNS among the kinds not
+    // built yet, which clone3 answers EINVAL as for the rest; and none for a
+    // thread, as `clone_namespaces` says for clone(2).
+    let kinds = namespace_request(flags_user)?;
+    if kinds != 0 && flags_user & clone_flags::CLONE_THREAD != 0 {
         return Err(errno::EINVAL);
     }
-    clone_namespaces(flags_user)?;
 
     // Translate stack base + size to clone(2)'s "stack top" register.
     // clone(2) wants the value of the new RSP at child entry; on x86_64
@@ -2861,31 +2862,51 @@ fn caller_may_change_namespaces() -> bool {
     })
 }
 
-/// The namespace bits of a `clone` or `clone3` flag word: what this kernel
-/// can make, for whom. `CLONE_NEWUTS` for a new process (`proc::fork`) by a
-/// caller that may ([`caller_may_change_namespaces`]): a thread shares its
-/// process's namespaces here, as it cannot on Linux, so a thread asking is
-/// `EINVAL`. The namespaces not built yet are `EINVAL` too -- until
-/// 2026-10-08 `clone(2)` took them and made nothing, so a program believed
-/// itself isolated and was not. `CLONE_NEWNS` keeps its own answer, `ENOSYS`,
-/// at its call sites. `Err(errno)`; `EPERM` for a caller that may not.
-fn clone_namespaces(flags: u64) -> Result<(), i32> {
-    const NOT_YET: u64 = clone_flags::CLONE_NEWIPC
+/// The namespace bits of a `clone`, `clone3` or `unshare` flag word, judged
+/// as Linux judges them on a kernel built with only the kinds this one has
+/// (`crate::nsfs::KINDS`): `CLONE_NEWUSER` is `EINVAL` before anything, as
+/// without `CONFIG_USER_NS`; any other needs a caller that may change
+/// namespaces ([`caller_may_change_namespaces`], `EPERM`); and then a kind
+/// not built is `EINVAL`, as without its `CONFIG_*_NS` -- the order of
+/// Linux's `copy_namespaces` and `unshare_nsproxy_namespaces`, which ask for
+/// `CAP_SYS_ADMIN` before making anything. `Ok` with the bits of the kinds
+/// to make.
+fn namespace_request(flags: u64) -> Result<u64, i32> {
+    const ALL: u64 = clone_flags::CLONE_NEWNS
+        | clone_flags::CLONE_NEWUTS
+        | clone_flags::CLONE_NEWIPC
         | clone_flags::CLONE_NEWUSER
         | clone_flags::CLONE_NEWPID
         | clone_flags::CLONE_NEWNET
         | clone_flags::CLONE_NEWCGROUP
         | clone_flags::CLONE_NEWTIME;
-    if flags & NOT_YET != 0 {
+    if flags & clone_flags::CLONE_NEWUSER != 0 {
         return Err(errno::EINVAL);
     }
-    if flags & clone_flags::CLONE_NEWUTS != 0 {
-        if flags & clone_flags::CLONE_THREAD != 0 {
-            return Err(errno::EINVAL);
-        }
-        if !caller_may_change_namespaces() {
-            return Err(errno::EPERM);
-        }
+    let asked = flags & ALL;
+    if asked == 0 {
+        return Ok(0);
+    }
+    if !caller_may_change_namespaces() {
+        return Err(errno::EPERM);
+    }
+    if asked & !crate::nsfs::known_clone_flags() != 0 {
+        return Err(errno::EINVAL);
+    }
+    Ok(asked)
+}
+
+/// The namespace bits of a `clone` or `clone3` flag word ([`namespace_request`]):
+/// what this kernel can make, for whom, for a new process (`proc::fork`
+/// makes them). A thread shares its process's namespaces here, where Linux
+/// lets it have its own, so a thread asking for one is `EINVAL`.
+/// `CLONE_NEWNS` keeps its own answer, `ENOSYS`, at its call sites. Until
+/// 2026-10-08 `clone(2)` took every namespace bit and made nothing, so a
+/// program believed itself isolated and was not. `Err(errno)`.
+fn clone_namespaces(flags: u64) -> Result<(), i32> {
+    let kinds = namespace_request(flags & !clone_flags::CLONE_NEWNS)?;
+    if kinds != 0 && flags & clone_flags::CLONE_THREAD != 0 {
+        return Err(errno::EINVAL);
     }
     Ok(())
 }
@@ -30409,27 +30430,31 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
     if flags == 0 {
         return SyscallResult::ok(0);
     }
-    // CLONE_NEWUTS (0x0400_0000): the caller into a new UTS namespace, a
-    // copy of the one it leaves (`crate::utsns`) -- for a caller that may
-    // (`caller_may_change_namespaces`). Every thread of the process goes with
-    // it: here namespaces are the process's, where Linux's are the thread's.
-    // The other namespaces and the sharing flags are not yet: EPERM, as
-    // before.
-    const CLONE_NEWUTS: u64 = 0x0400_0000;
-    if flags & !CLONE_NEWUTS != 0 {
+    // The sharing flags -- a private file table, filesystem context or
+    // System V undo list for one thread -- are not built: EPERM, as before.
+    const SHARING: u64 = 0x400 | 0x200 | 0x40000 | 0x10000 | 0x800 | 0x100;
+    if flags & SHARING != 0 {
         return linux_err(errno::EPERM);
     }
-    if !caller_may_change_namespaces() {
-        return linux_err(errno::EPERM);
-    }
+    // The namespaces (`namespace_request`): the caller into a new one of each
+    // kind asked for, a copy of the one it leaves. Every thread of the
+    // process goes with it: here namespaces are the process's, where Linux's
+    // are the thread's (design-decisions 1554).
+    let kinds = match namespace_request(flags) {
+        Ok(kinds) => kinds,
+        Err(e) => return linux_err(e),
+    };
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let from = pcb::uts_ns(pid).unwrap_or(crate::utsns::ROOT_UTS);
-    match crate::utsns::create_from(from).and_then(|id| pcb::set_uts_ns(pid, id)) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => linux_err(linux_errno_for(e)),
+    for &kind in crate::nsfs::KINDS {
+        if kinds & kind.clone_flag() != 0
+            && let Err(e) = crate::nsfs::unshare(pid, kind)
+        {
+            return linux_err(linux_errno_for(e));
+        }
     }
+    SyscallResult::ok(0)
 }
 
 /// `setns(fd, nstype)`: the caller's process into a namespace.
@@ -30536,11 +30561,8 @@ fn setns_namespace(pid: u64, raw: u64, nstype: u64) -> SyscallResult {
 /// `PTRACE_MODE_READ` check), and the caller must be one that may change
 /// namespaces (`EPERM`).
 fn setns_process(pid: u64, target: u64, nstype: u64) -> SyscallResult {
-    use crate::nsfs::{KINDS, NsKind};
-    let known = KINDS
-        .iter()
-        .fold(0u64, |bits, kind| bits | kind.clone_flag());
-    if nstype == 0 || nstype & !known != 0 {
+    use crate::nsfs::KINDS;
+    if nstype == 0 || nstype & !crate::nsfs::known_clone_flags() != 0 {
         return linux_err(errno::EINVAL);
     }
     if pcb::state(target).is_none_or(|s| s == pcb::ProcessState::Zombie) {
@@ -30552,11 +30574,11 @@ fn setns_process(pid: u64, target: u64, nstype: u64) -> SyscallResult {
     if !caller_may_change_namespaces() {
         return linux_err(errno::EPERM);
     }
-    if nstype & NsKind::Uts.clone_flag() != 0 {
-        let Some(id) = crate::nsfs::of_process(NsKind::Uts, target) else {
+    for &kind in KINDS.iter().filter(|kind| nstype & kind.clone_flag() != 0) {
+        let Some(id) = crate::nsfs::of_process(kind, target) else {
             return linux_err(errno::ESRCH);
         };
-        let r = enter_namespace(pid, NsKind::Uts, id);
+        let r = enter_namespace(pid, kind, id);
         if r.value < 0 {
             return r;
         }
@@ -30568,14 +30590,9 @@ fn setns_process(pid: u64, target: u64, nstype: u64) -> SyscallResult {
 /// namespace went with its last holder meanwhile (a handle closed by another
 /// thread, the process the pidfd names leaving it).
 fn enter_namespace(pid: u64, kind: crate::nsfs::NsKind, id: u64) -> SyscallResult {
-    if !crate::nsfs::retain(crate::nsfs::encode(kind, id)) {
-        return linux_err(errno::ESRCH);
-    }
-    let entered = match kind {
-        crate::nsfs::NsKind::Uts => pcb::set_uts_ns(pid, id),
-    };
-    match entered {
+    match crate::nsfs::enter(pid, kind, id) {
         Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::NotFound) => linux_err(errno::ESRCH),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }

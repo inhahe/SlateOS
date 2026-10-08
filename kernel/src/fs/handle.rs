@@ -184,6 +184,15 @@ struct OpenFile {
     object: Option<Arc<crate::fs::vfs::FileHold>>,
     /// Flags this file was opened with.
     flags: OpenFlags,
+    /// What the file was bound to at the open, for one whose contents can be
+    /// replaced under it -- `/proc/<pid>/mem`, bound to the address space an
+    /// exec replaces -- `None` for the rest (`Vfs::open_binding`). Checked
+    /// before each read and write by name ([`binding_holds`]): once it no
+    /// longer holds, reads see end-of-file and writes fail, as on Linux. So a
+    /// descriptor to a process's memory kept across its exec -- a setuid
+    /// program's, written by itself through a redirected stderr -- cannot
+    /// reach the new image.
+    binding: Option<u64>,
     /// Number of owners sharing this open file description.
     ///
     /// One open file description (this `OpenFile` entry, with its shared
@@ -924,7 +933,7 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
     // Snapshot what the VFS call needs, then drop the table lock before
     // making it. See `advance_offset` for why holding it across the call is
     // a deadlock and not merely a bottleneck.
-    let (object, path, start) = {
+    let (object, path, start, binding) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
@@ -936,8 +945,16 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
             return Err(KernelError::InvalidHandle);
         }
 
-        (file.object.clone(), file.path.clone(), file.offset)
+        (
+            file.object.clone(),
+            file.path.clone(),
+            file.offset,
+            file.binding,
+        )
     };
+    if !binding_holds(binding, &path) {
+        return Ok(0);
+    }
 
     // The end of file is the file's now, not as this handle last saw it:
     // both calls below clamp to the current size.
@@ -992,10 +1009,11 @@ pub fn read_precheck(handle: u64, at: Option<u64>, len: usize) -> KernelResult<b
         (
             file.object.clone(),
             file.path.clone(),
-            at.unwrap_or(file.offset),
+            (at.unwrap_or(file.offset), file.binding),
         )
     };
-    if len == 0 {
+    let (offset, binding) = offset;
+    if len == 0 || !binding_holds(binding, &path) {
         return Ok(false);
     }
     // With the table lock released: see `advance_offset`.
@@ -1164,10 +1182,14 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
         (
             file.object.clone(),
             file.path.clone(),
-            file.offset,
+            (file.offset, file.binding),
             file.flags.contains(OpenFlags::APPEND),
         )
     };
+    let (offset, binding) = offset;
+    if !binding_holds(binding, &path) {
+        return Err(KernelError::IoError);
+    }
 
     // An APPEND write lands at the file's end as it is when it lands: the
     // end is found and written in one hold of the filesystem's lock, so two
@@ -1230,8 +1252,12 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
         if buf.is_empty() {
             return Ok(0);
         }
-        (file.object.clone(), file.path.clone())
+        (file.object.clone(), (file.path.clone(), file.binding))
     };
+    let (path, binding) = path;
+    if !binding_holds(binding, &path) {
+        return Ok(0);
+    }
     // Clamped to the file's size now, by the calls themselves.
     let data = match &object {
         Some(obj) => crate::fs::Vfs::object_read(obj, &path, offset, buf.len())?,
@@ -1271,9 +1297,10 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
         if !file.flags.is_readable() {
             return Err(KernelError::InvalidHandle);
         }
-        (file.object.clone(), file.path.clone())
+        (file.object.clone(), (file.path.clone(), file.binding))
     };
-    if buf.is_empty() {
+    let (path, binding) = path;
+    if buf.is_empty() || !binding_holds(binding, &path) {
         return Ok(0);
     }
     // Past the end, the filesystem itself returns nothing.
@@ -1319,8 +1346,12 @@ pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
         if data.is_empty() {
             return Ok(0);
         }
-        (file.object.clone(), file.path.clone())
+        (file.object.clone(), (file.path.clone(), file.binding))
     };
+    let (path, binding) = path;
+    if !binding_holds(binding, &path) {
+        return Err(KernelError::IoError);
+    }
     match &object {
         Some(obj) => crate::fs::Vfs::object_write(obj, &path, offset, data)?,
         None => crate::fs::Vfs::write_at_resolved(&path, offset, data)?,
@@ -2228,6 +2259,13 @@ pub fn list_handles() -> alloc::vec::Vec<HandleInfo> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Whether a handle's open-time binding (`OpenFile::binding`) still holds for
+/// `path`: always, for a handle that has none. Asked with the table lock let
+/// go: it takes the mount table and the filesystem's.
+fn binding_holds(binding: Option<u64>, path: &Path) -> bool {
+    binding.is_none_or(|b| crate::fs::Vfs::binding_current(path, b))
+}
+
 /// Allocate a handle in the global table.
 fn allocate_handle(path: PathBuf, offset: u64, size: u64, flags: OpenFlags) -> KernelResult<u64> {
     // The file itself, held before the handle exists, so no I/O through the
@@ -2246,6 +2284,9 @@ fn allocate_handle_holding(
     flags: OpenFlags,
     object: Option<Arc<crate::fs::vfs::FileHold>>,
 ) -> KernelResult<u64> {
+    // Asked before the table lock: it takes the mount table and the
+    // filesystem's.
+    let binding = crate::fs::Vfs::open_binding(&path);
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {
@@ -2265,6 +2306,7 @@ fn allocate_handle_holding(
             offset,
             seen_size: size,
             flags,
+            binding,
             refcount: 1,
             is_directory: false,
             dir_pin: None,
@@ -2312,6 +2354,7 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
             offset: 0,
             seen_size: 0,
             flags,
+            binding: None,
             refcount: 1,
             is_directory: true,
             dir_pin,

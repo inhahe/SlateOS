@@ -1247,6 +1247,11 @@ pub struct Process {
     /// (`process_times`), which keeps the next from going back -- Linux's
     /// `signal->prev_cputime`.
     pub prev_cputime: crate::sched::PrevCputime,
+    /// How many times the process has exec'd: the address space a
+    /// `/proc/<pid>/mem` opened before an exec reads is gone with it, and the
+    /// file reads end-of-file, as Linux's (which holds the `mm` it opened)
+    /// does (`fs::procfs`, [`note_exec`]).
+    pub exec_gen: u64,
 
     // --- Per-process page-fault accounting (minflt/majflt) ---
     //
@@ -1531,6 +1536,7 @@ impl Process {
             child_utime_ns: 0,
             child_stime_ns: 0,
             prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
+            exec_gen: 0,
             acct_min_flt: 0,
             acct_maj_flt: 0,
             child_min_flt: 0,
@@ -2068,6 +2074,7 @@ pub fn fork_create(
         child_utime_ns: 0,
         child_stime_ns: 0,
         prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
+        exec_gen: 0,
         // Page-fault accounting also resets on fork.
         acct_min_flt: 0,
         acct_maj_flt: 0,
@@ -2174,6 +2181,22 @@ pub fn activate_cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuA
         crate::sched::activate_cpu_account(&proc.cpu_account, exited, &proc.threads);
     }
     Some(Arc::clone(&proc.cpu_account))
+}
+
+/// Process `pid` is exec'ing: the address space it had is about to go, and
+/// with it anything bound to it (`Process::exec_gen`). A no-op for a process
+/// that is not there.
+pub fn note_exec(pid: ProcessId) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        proc.exec_gen = proc.exec_gen.wrapping_add(1);
+    }
+}
+
+/// How many times process `pid` has exec'd ([`note_exec`]), or `None` if
+/// there is no such process.
+#[must_use]
+pub fn exec_generation(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exec_gen)
 }
 
 /// Process `pid`'s CPU-time account, active or not, or `None` if there is no

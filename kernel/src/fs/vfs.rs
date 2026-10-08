@@ -740,6 +740,26 @@ pub trait FileSystem: Send {
     // cannot take the file from under the handle. The defaults answer
     // `NotSupported`, and such a filesystem's handles go by path.
 
+    /// What the file at `path` is bound to as it is opened, for a file whose
+    /// contents belong to something that can be replaced while it stays open
+    /// -- the address space `/proc/<pid>/mem` reads, which an exec replaces --
+    /// or `None`, as for every ordinary file. A handle keeps it and, before
+    /// each read or write by name, asks
+    /// [`binding_current`](Self::binding_current); one no longer current
+    /// reads end-of-file and writes nothing (`EIO`), as Linux's
+    /// `/proc/<pid>/mem`, which holds the `mm` it was opened on, does.
+    fn open_binding(&mut self, path: &Path) -> Option<u64> {
+        let _ = path;
+        None
+    }
+
+    /// Whether `binding`, which [`open_binding`](Self::open_binding) gave for
+    /// `path`, still holds.
+    fn binding_current(&mut self, path: &Path, binding: u64) -> bool {
+        let _ = (path, binding);
+        true
+    }
+
     /// Hold inode `ino` open. Its last name may then go without the file:
     /// it stays, unnamed, until the matching [`unpin_ino`](Self::unpin_ino).
     /// `NotSupported` for an inode the filesystem does not hold this way.
@@ -4183,6 +4203,26 @@ impl Vfs {
     /// Open file descriptors hold a resolved reference (Unix semantics — an fd
     /// is immune to later chroot/rename/symlink changes), so handle-backed I/O
     /// must use this entry point, never the path-based [`read_at`](Self::read_at).
+    /// [`FileSystem::open_binding`] of the file at `path` (a path already
+    /// resolved): what an open of it is bound to, or `None` -- also for a path
+    /// on no mount.
+    #[must_use]
+    pub fn open_binding(path: &Path) -> Option<u64> {
+        let (fs, _fs_id, _opts, relative) = resolve_mount(path).ok()?;
+        fs.lock().open_binding(&relative)
+    }
+
+    /// [`FileSystem::binding_current`]: whether `binding`, which
+    /// [`open_binding`](Self::open_binding) gave for `path`, still holds. A
+    /// path on no mount any more holds nothing.
+    #[must_use]
+    pub fn binding_current(path: &Path, binding: u64) -> bool {
+        match resolve_mount(path) {
+            Ok((fs, _fs_id, _opts, relative)) => fs.lock().binding_current(&relative, binding),
+            Err(_) => false,
+        }
+    }
+
     pub fn read_at_resolved(
         path: impl AsRef<Path>,
         offset: u64,

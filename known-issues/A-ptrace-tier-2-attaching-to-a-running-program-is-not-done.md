@@ -38,10 +38,14 @@ Tier 2 but attaching
   at once (`ptrace::on_thread_exit`, `pcb::peek_exit*`). Only a child of a
   traced program that its tracer keeps tracing (`TRACEFORK` with the child
   not detached) is affected.
-- **`/proc/<pid>/mem` across an exec.** The file is resolved by pid at each
-  access, so a descriptor opened before the target exec'd reads the new
-  image; Linux ties it to the address space and answers EOF after an exec.
-  The fix: an exec generation on the process, recorded at open.
+- ~~**`/proc/<pid>/mem` across an exec.**~~ Fixed on lane-a-wip
+  2026-10-08, awaiting a boot: an open of it is bound to its process's exec
+  generation (`Process::exec_gen`, the VFS's `open_binding` hook kept by the
+  handle), so after an exec it reads end-of-file and writes fail (`EIO`;
+  Linux writes nothing and answers 0), as Linux's, which holds the `mm` it
+  opened, does. That also keeps a descriptor to a process's own memory,
+  kept across its exec of a privileged program, from reaching the new
+  image (the Mempodipper hole). Checked by `procfs::self_test`.
 - **An untraced native program's `int3` or single step** is logged and the
   program runs on, as before: the native exception set has no breakpoint or
   trace code (`proc::exception::ExceptionCode`). A Linux program gets

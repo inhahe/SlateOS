@@ -2477,6 +2477,10 @@ pub fn exec_process(
     // until it registers itself (`cap::request`, design-decisions 1548).
     crate::cap::request::on_process_exit(pid);
 
+    // The old address space goes next: a `/proc/<pid>/mem` opened on it reads
+    // end-of-file from now on, as Linux's does (`pcb::note_exec`).
+    pcb::note_exec(pid);
+
     // Step 3: Tear down the old user address space.
     //
     // After this point, the process has an empty user address space.

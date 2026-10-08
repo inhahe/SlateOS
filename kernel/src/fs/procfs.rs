@@ -15300,6 +15300,23 @@ impl FileSystem for ProcFs {
         }
     }
 
+    // `/proc/<task>/mem` is bound to the address space its process has as it
+    // is opened: the number of times the process has exec'd. After another
+    // exec the handle reads end-of-file (`FileSystem::open_binding`).
+    fn open_binding(&mut self, path: &Path) -> Option<u64> {
+        let task = mem_file_task(strip_root(path).ok()?)?;
+        crate::proc::pcb::exec_generation(proc_target(task)?)
+    }
+
+    fn binding_current(&mut self, path: &Path, binding: u64) -> bool {
+        strip_root(path)
+            .ok()
+            .and_then(mem_file_task)
+            .and_then(proc_target)
+            .and_then(crate::proc::pcb::exec_generation)
+            == Some(binding)
+    }
+
     fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let rel = strip_root(path)?;
         if let Some(task) = mem_file_task(rel) {
@@ -15853,6 +15870,46 @@ pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = ProcFs::new();
+
+    // `/proc/<pid>/mem` is bound, as it is opened, to the address space its
+    // process has then (its exec generation); after an exec that binding no
+    // longer holds -- a handle reads end-of-file, as Linux's does -- and a new
+    // open binds to the new one. Every other file is bound to nothing.
+    {
+        let pid = crate::proc::pcb::create("procfs-mem-binding", 0);
+        let mem = PathBuf::from(format!("/{pid}/mem"));
+        let first = fs.open_binding(&mem);
+        let unbound = fs.open_binding(&PathBuf::from(format!("/{pid}/status")));
+        let held_before = first.is_some_and(|b| fs.binding_current(&mem, b));
+        crate::proc::pcb::note_exec(pid);
+        let held_after = first.is_some_and(|b| fs.binding_current(&mem, b));
+        let second = fs.open_binding(&mem);
+        crate::proc::pcb::destroy(pid);
+        let gone = first.is_some_and(|b| fs.binding_current(&mem, b));
+        if first.is_none()
+            || unbound.is_some()
+            || !held_before
+            || held_after
+            || second.is_none()
+            || second == first
+            || gone
+        {
+            serial_println!(
+                "[procfs]   FAIL: mem binding: first {:?}, status {:?}, held {} then {}, \
+                 reopened {:?}, after reaping {}",
+                first,
+                unbound,
+                held_before,
+                held_after,
+                second,
+                gone
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   /proc/<pid>/mem bound to its exec generation (ends at an exec): OK"
+        );
+    }
 
     // `entry_type`, which path resolution asks of every component it walks,
     // agrees with `stat` on every kind of entry, present or not. It is `stat`

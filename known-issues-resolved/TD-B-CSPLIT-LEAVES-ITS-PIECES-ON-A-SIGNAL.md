@@ -1,6 +1,12 @@
 ## TD-B-CSPLIT-LEAVES-ITS-PIECES-ON-A-SIGNAL (lane B, 2026-10-08)
 
-**Status:** OPEN.
+**Status:** RESOLVED 2026-10-08 (lane B). `coreutils::cleanup` holds the
+machinery `sort` brought in, and `csplit` registers each piece in the
+critical section that creates it (nothing under `-k`); its error cleanup is
+upstream's `delete_all_files` too -- the pieces last first, a failure to
+remove one that is not `ENOENT` said, where it was ignored. Measured before
+the fix, `seq 1 3000 | csplit -n 4 - 2 '{*}' | true` left 1501 pieces where
+GNU leaves none; `csplit-diff.sh` holds that case and its `-k` twin.
 
 **In short:** interrupt GNU `csplit` -- Ctrl-C, a `kill`, its reader gone --
 and it deletes the pieces it has written so far, as it does when it fails,

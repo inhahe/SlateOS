@@ -512,6 +512,26 @@ REDIR='>&- 2>&-'
 run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
 REDIR=
 
+# --- a signal removes the pieces, unless -k -------------------------------------
+# Upstream catches SIGINT, SIGTERM, SIGPIPE and the rest and removes every
+# piece it made before it dies of the signal, as an error's cleanup does;
+# under -k it keeps them. Here the reader of the sizes is gone before they
+# are written, so the write at the end is SIGPIPE, after 1500 pieces.
+pieces_left() {
+  local side=$1 dir=$2; shift 2
+  rm -rf "$dir"; mkdir "$dir"
+  ( cd "$dir" && seq 1 3000 | env PATH="$bindir/$side" csplit "$@" | true ) 2>/dev/null
+  find "$dir" -mindepth 1 | wc -l
+}
+for keep in '' -k; do
+  o_left=$(pieces_left ours o_sig $keep -n 4 - 2 '{*}')
+  g_left=$(pieces_left gnu g_sig $keep -n 4 - 2 '{*}')
+  if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+    AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+  rm -rf o_sig g_sig
+  report "csplit ${keep:+$keep }-n 4 - 2 {*} | true [pieces left]"
+done
+
 # --- not implemented ----------------------------------------------------------
 
 # The two remaining deliberate divergences. Both are about identifying

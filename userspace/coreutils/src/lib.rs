@@ -521,6 +521,7 @@ pub mod basenc;
 pub use ::cprintf::{bignat, cfmt, extfloat};
 pub mod canon;
 pub mod chowncore;
+pub mod cleanup;
 pub mod cksum;
 pub mod copy;
 pub mod digest;

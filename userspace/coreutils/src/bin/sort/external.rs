@@ -40,13 +40,13 @@
 //! new temporary files until one pass can reach the output, ties to the
 //! earlier file, `-u` keeping the first of each run of equal lines.
 
-use std::cell::UnsafeCell;
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use coreutils::cleanup;
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
@@ -464,98 +464,17 @@ impl Lines {
     }
 }
 
-// ── the temporary files that exist, for the exit and the signals ────────────
+// ── the signals ─────────────────────────────────────────────────────────────
 
-/// The paths of the temporary files that exist, for whatever ends the run to
-/// remove: upstream's `temphead` list.
-///
-/// Changed only with the caught signals blocked ([`registry_change`]), so
-/// the handler -- the only other reader -- never sees a change half made;
-/// and `sort` runs one thread, so nothing else can.
-struct Registry(UnsafeCell<Vec<CString>>);
-
-// SAFETY: see the type's documentation. Every access is either inside
-// `registry_change`, with the signals that run the handler blocked, or the
-// handler's own read, which cannot run while one of those is in progress.
-unsafe impl Sync for Registry {}
-
-static REGISTRY: Registry = Registry(UnsafeCell::new(Vec::new()));
-
-/// The signals upstream catches to remove its temporary files before it
-/// dies of them, those its parent left ignored excepted.
-#[cfg(unix)]
-static CAUGHT: std::sync::OnceLock<libcall::signal::SigSet> = std::sync::OnceLock::new();
-
-/// Run `change` on the registry with the caught signals blocked.
-fn registry_change<T>(change: impl FnOnce(&mut Vec<CString>) -> T) -> T {
-    #[cfg(unix)]
-    let before = CAUGHT
-        .get()
-        .and_then(|set| libcall::signal::block(set).ok());
-    // SAFETY: the caught signals are blocked, so the handler cannot read the
-    // list while it changes, and no other thread exists.
-    let result = change(unsafe { &mut *REGISTRY.0.get() });
-    #[cfg(unix)]
-    if let (Some(set), Some(before)) = (CAUGHT.get(), before) {
-        // Unblock only what this blocked: a signal that was blocked before
-        // stays blocked. Unchecked: an unblock of a valid set cannot fail.
-        let mut newly = libcall::signal::SigSet::empty();
-        for sig in SIGNALS {
-            if set.contains(sig) && !before.contains(sig) {
-                let _ = newly.add(sig);
-            }
-        }
-        let _ = libcall::signal::unblock(&newly);
-    }
-    result
-}
-
-/// The signals upstream's `main` catches, "the usual suspects": `SIGALRM`,
-/// `SIGHUP`, `SIGINT`, `SIGPIPE`, `SIGQUIT`, `SIGTERM`, `SIGPOLL`,
-/// `SIGPROF`, `SIGVTALRM`, `SIGXCPU`, `SIGXFSZ`, in Linux's numbers.
-#[cfg(unix)]
-const SIGNALS: [i32; 11] = [14, 1, 2, 13, 3, 15, 29, 27, 26, 24, 25];
-
-/// Upstream's `sighandler`: remove every temporary file, then die of the
-/// signal as if it had never been caught.
-#[cfg(unix)]
-extern "C" fn sighandler(sig: i32) {
-    unlink_all();
-    let _ = libcall::signal::set_default(sig);
-    let _ = libcall::signal::raise(sig);
-}
-
-/// Remove every registered file -- `cleanup`. Async-signal-safe: `unlink`
-/// and reads of a list nobody is changing.
-#[cfg(unix)]
-fn unlink_all() {
-    // SAFETY: called from the handler, with the list not being changed (see
-    // `Registry`), or from the exit, where nothing else runs.
-    let list = unsafe { &*REGISTRY.0.get() };
-    for path in list {
-        sys::unlink(path);
-    }
-}
-
-/// Catch the signals upstream catches, unless they are ignored, and give
-/// `SIGCHLD` its default action ("Don't inherit CHLD handling from parent"):
-/// upstream's `main`, before it reads its options.
+/// Upstream's `main`: catch the usual suspects, so that no temporary file is
+/// left behind by a signal (`coreutils::cleanup`), and give `SIGCHLD` its
+/// default action -- "Don't inherit CHLD handling from parent", which would
+/// otherwise reap the compress program before it could be waited for.
 pub fn install_signal_handlers() {
+    cleanup::install();
     #[cfg(unix)]
     {
-        let mut caught = libcall::signal::SigSet::empty();
-        for sig in SIGNALS {
-            if !libcall::signal::is_ignored(sig).unwrap_or(true) {
-                let _ = caught.add(sig);
-            }
-        }
-        for sig in SIGNALS {
-            if caught.contains(sig) {
-                // Unchecked, as upstream's `sigaction` calls are.
-                let _ = libcall::signal::set_handler_masked(sig, sighandler, &caught);
-            }
-        }
-        let _ = CAUGHT.set(caught);
+        // Unchecked, as upstream's `signal` call is.
         let _ = libcall::signal::set_default(libcall::signal::SIGCHLD);
     }
 }
@@ -563,48 +482,7 @@ pub fn install_signal_handlers() {
 /// Remove whatever temporary files are left: upstream's `exit_cleanup`,
 /// which every way out of `sort` passes through.
 pub fn remove_all() {
-    registry_change(|list| {
-        for path in list.iter() {
-            sys::unlink(path);
-        }
-        list.clear();
-    });
-}
-
-#[cfg(unix)]
-mod sys {
-    use std::ffi::CString;
-
-    unsafe extern "C" {
-        #[link_name = "unlink"]
-        fn c_unlink(path: *const std::ffi::c_char) -> i32;
-    }
-
-    /// `unlink`, unchecked: the run is ending, and a file already gone is
-    /// what was wanted.
-    pub fn unlink(path: &CString) {
-        // SAFETY: `path` is a NUL-terminated string that outlives the call,
-        // which only reads it.
-        let _ = unsafe { c_unlink(path.as_ptr()) };
-    }
-}
-
-#[cfg(not(unix))]
-mod sys {
-    use std::ffi::CString;
-
-    pub fn unlink(path: &CString) {
-        if let Ok(text) = path.to_str() {
-            // Unchecked: as the unix arm.
-            let _ = std::fs::remove_file(text);
-        }
-    }
-}
-
-/// A path as a C string for the registry; a path with a NUL in it cannot be
-/// made, and so is never registered.
-fn c_path(path: &Path) -> Option<CString> {
-    CString::new(os_bytes(path.as_os_str()).into_owned()).ok()
+    cleanup::remove_all();
 }
 
 // ── temporary files ──────────────────────────────────────────────────────────
@@ -667,7 +545,7 @@ impl<'a> Temps<'a> {
         let Some(program) = self.compress else {
             return (temp, TempWriter::File(io::BufWriter::new(file)));
         };
-        let spawned = without_registry(|| {
+        let spawned = cleanup::without(|| {
             Command::new(program)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::from(file))
@@ -714,7 +592,7 @@ impl<'a> Temps<'a> {
             wait(child, program);
         }
         let file = File::open(&temp.path)?;
-        let spawned = without_registry(|| {
+        let spawned = cleanup::without(|| {
             Command::new(program)
                 .arg("-d")
                 .stdin(Stdio::from(file))
@@ -746,14 +624,7 @@ impl<'a> Temps<'a> {
         if let Some(child) = temp.child.take() {
             wait(child, self.compress.unwrap_or_default());
         }
-        let removed = registry_change(|list| {
-            let result = std::fs::remove_file(&temp.path);
-            if let Some(c) = c_path(&temp.path) {
-                list.retain(|p| *p != c);
-            }
-            result
-        });
-        if let Err(e) = removed {
+        if let Err(e) = cleanup::remove(&temp.path) {
             diag!(
                 "sort: warning: cannot remove: {}: {}",
                 quotef_os(temp.path.as_os_str()),
@@ -791,11 +662,9 @@ fn make_temp_file(dir: &OsStr) -> io::Result<(PathBuf, File)> {
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         // Registered in the same blocked section as it is made, so no signal
         // can arrive between the two and leave it behind.
-        let made: io::Result<File> = registry_change(|list| {
+        let made: io::Result<File> = cleanup::change(|list| {
             let file = options.open(&path)?;
-            if let Some(c) = c_path(&path) {
-                list.push(c);
-            }
+            cleanup::add_to(list, &path);
             Ok(file)
         });
         match made {
@@ -805,20 +674,6 @@ fn make_temp_file(dir: &OsStr) -> io::Result<(PathBuf, File)> {
         }
     }
     Err(io::Error::from(io::ErrorKind::AlreadyExists))
-}
-
-/// Run `spawn` with the registry emptied, as upstream's `pipe_fork` empties
-/// `temphead` around its `fork`: a child the handler runs in before `exec`
-/// must not remove its parent's files.
-fn without_registry<T>(spawn: impl FnOnce() -> T) -> T {
-    let saved = registry_change(std::mem::take);
-    let result = spawn();
-    registry_change(|list| {
-        let mut saved = saved;
-        saved.append(list);
-        *list = saved;
-    });
-    result
 }
 
 /// Whether a failed spawn failed to fork -- no process at all -- rather
@@ -1687,8 +1542,8 @@ mod tests {
         drop(file);
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("sort") && name.len() == 10, "{name}");
-        let registered =
-            registry_change(|list| list.iter().any(|p| Some(p) == c_path(&path).as_ref()));
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        let registered = cleanup::change(|list| list.contains(&c));
         assert!(registered);
         assert!(path.exists());
         remove_all();

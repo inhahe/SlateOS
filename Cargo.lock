@@ -2222,13 +2222,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "look"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "losetup"
 version = "0.1.0"
 dependencies = [

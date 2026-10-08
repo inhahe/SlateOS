@@ -5945,6 +5945,10 @@ _Port ext4 first. Don't write a custom filesystem._
   had answered to through an image alias with a subset of it; `scripts/xxd-diff.sh`: 949
   cases agree and 4 differ on purpose, `-r` included -- into pipes, which it fills with
   zeros or refuses to go back on, and into files, which it seeks and patches);
+  `look` (2026-10-08, util-linux 2.39.3's `look.c`, replacing `userspace/look`,
+  which read its word list as UTF-8 and refused any list with one Latin-1 word
+  in it; `scripts/look-diff.sh`: 1229 cases agree and 2 differ on purpose,
+  over lists sorted as a dictionary and as bytes, unsorted and awkward ones);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).

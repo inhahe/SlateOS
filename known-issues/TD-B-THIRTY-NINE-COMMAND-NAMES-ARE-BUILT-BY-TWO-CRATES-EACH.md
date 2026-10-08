@@ -242,6 +242,27 @@ Two measured examples:
   `-a -b -C -d -e -E -n -o -R -u -v`. **What the loser knew that the winner
   did not:** `--json`, an invention. Nothing to port.
 
+* **`look`** — **RETIRED 2026-10-08, the same way.** `coreutils/src/bin/look.rs`
+  is util-linux 2.39.3's `misc-utils/look.c`; `userspace/look` was written
+  from the manual. `scripts/look-diff.sh` searches word lists sorted as a
+  dictionary and as bytes, unsorted ones and awkward ones, with every
+  option:
+
+      coreutils look       1229 passed,   0 differed,  2 differ on purpose
+      userspace/look        595 passed, 634 differed,  2 differ on purpose
+
+  Most of the 634 are one defect: the standalone read its file as UTF-8 and
+  refused any file holding a byte that was not -- `look: words: stream did
+  not contain valid UTF-8`, status 2 -- so every search of a list with one
+  Latin-1 word in it failed outright. The rest: no `-a` and no `$WORDLIST`;
+  `-t` cut *before* its character, where upstream keeps it, and cut every
+  line the same way, where upstream cuts only the string (read from its
+  source -- the UTF-8 refusal hid every `-t` case); an empty file searched
+  as empty, silently, where upstream's `mmap` says `Invalid argument`; and a
+  directory `Is a directory (os error 21)`, status 2, where upstream's says
+  `No such device`, status 1. **What the loser knew that the winner did
+  not:** nothing. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

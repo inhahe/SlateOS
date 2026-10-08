@@ -21,7 +21,8 @@ measured and retired in one commit -- and for `hexdump`, util-linux's in
 standalone was also the image's `xxd`, through the manifest alias
 `xxd = hexdump` and its own `argv[0]` dispatch; vim's `xxd` reached
 `coreutils` one commit earlier, under a name no other package builds, so
-there was no moment without an `xxd` either.
+there was no moment without an `xxd` either. `look` likewise: util-linux's
+in `coreutils`, `userspace/look` retired in the same commit.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

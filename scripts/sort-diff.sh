@@ -1021,8 +1021,30 @@ run_case -S 2k -T /nonexistent mid.txt
 run_case -S 4k -T /nonexistent mid.txt
 run_case -S 8k -T /nonexistent mid.txt
 run_case -S 1k -z -T /nonexistent nul.txt
-run_case -S 1k --compress-program=gzip -n seq20krev.txt
-run_case -S 1k --compress-program=nosuchprog seq20k.txt
+# By absolute path: each side runs with nothing but its own `sort` on PATH,
+# where a bare `gzip` is a program that cannot be found -- which is the
+# next case, not this one.
+gzip_path=$(command -v gzip)
+run_case -S 1k --compress-program="$gzip_path" -n seq20krev.txt
+run_case -S 1k --compress-program="$gzip_path" -u -n seq20krev.txt seq20k.txt
+# A compress program that cannot be run is a race upstream: its child dies
+# with `couldn't execute compress program: errno 2`, and the parent dies
+# either of SIGPIPE writing into the dead pipe (141) or, having written into
+# the pipe's buffer first, saying `'PROG' [-d] terminated abnormally` (2).
+# Ours is the second, always. Either way nothing reaches the output.
+o_err=$(mktemp); g_err=$(mktemp)
+o_out=$($OURS_RUN -S 1k --compress-program=nosuchprog seq20k.txt 2>"$o_err"); o_rc=$?
+g_out=$($GNU_RUN -S 1k --compress-program=nosuchprog seq20k.txt 2>"$g_err"); g_rc=$?
+if [ "$o_rc" = 2 ] && { [ "$g_rc" = 2 ] || [ "$g_rc" = 141 ]; } \
+   && [ -z "$o_out" ] && [ -z "$g_out" ] \
+   && grep -q "terminated abnormally" "$o_err"; then
+  AGREED=yes
+else
+  AGREED=no
+  REPORT="  ours rc=$o_rc out=${#o_out} bytes, gnu rc=$g_rc out=${#g_out} bytes"
+fi
+rm -f "$o_err" "$g_err"
+report "sort -S 1k --compress-program=nosuchprog seq20k.txt [status 2, or GNU's 141]"
 ENVV=(TMPDIR=/nonexistent)
 run_case -S 1k seq20k.txt
 run_case -S 1k -T . seq20k.txt

@@ -1597,6 +1597,18 @@ pub fn linux_from_native(res: SyscallResult) -> SyscallResult {
     SyscallResult::ok(-i64::from(errno_val))
 }
 
+/// Translate a native PI-lock result (`FUTEX_LOCK_PI`, `FUTEX_LOCK_PI2`)
+/// for the Linux ABI: a signal that ended the wait (`Interrupted`) restarts
+/// the call once its handler has run, as Linux's `futex_lock_pi` answers
+/// `-ERESTARTNOINTR` -- a PI lock is never `EINTR` to its caller, with or
+/// without a timeout (the timeout is absolute, so a restart keeps it).
+fn linux_from_lock_pi(res: SyscallResult) -> SyscallResult {
+    if res.value == KernelError::Interrupted as i64 {
+        return restart::restart_result(restart::ERESTARTNOINTR);
+    }
+    linux_from_native(res)
+}
+
 /// Translate a *native* result from a **slow** I/O object (pipe/FIFO,
 /// socket, tty — anything with no inherent timeout) into the Linux ABI
 /// form, honouring SA_RESTART.
@@ -51583,7 +51595,7 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                     arg4: 0,
                     arg5: 0,
                 };
-                linux_from_native(handlers::sys_futex_lock_pi(&a))
+                linux_from_lock_pi(handlers::sys_futex_lock_pi(&a))
             } else {
                 let ts = match read_timespec(timeout_ptr) {
                     Ok(t) => t,
@@ -51607,7 +51619,7 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                     arg4: 0,
                     arg5: 0,
                 };
-                linux_from_native(handlers::sys_futex_lock_pi_timeout(&a))
+                linux_from_lock_pi(handlers::sys_futex_lock_pi_timeout(&a))
             }
         }
         FUTEX_UNLOCK_PI => {

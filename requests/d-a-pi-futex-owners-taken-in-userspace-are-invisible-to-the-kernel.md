@@ -1,6 +1,7 @@
 # D → A: a PI futex taken by its documented fast path has no owner record, so priority lent to its holder can outlive the loan
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** DONE on `lane-a-wip` 2026-10-07 (reply at the end); reaches `main` with
+lane A's next publish, after a boot. Then the library can take the fast path.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -106,3 +107,63 @@ in.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-07: the first waiter records the holder
+
+As you asked, and as Linux's `attach_to_pi_owner` does, in `lock_pi_inner`
+(`kernel/src/ipc/futex.rs`):
+
+- **The holder is recorded.** The first contended locker looks the holder
+  up by the id in the word and, when the kernel has no record for the word,
+  makes one -- under `PI_FUTEX_TABLE`, together with its own waiter entry --
+  for a holder that is a live task in the caller's address space. A word
+  naming no task (or one that has exited) is `NoSuchProcess` (`ESRCH`),
+  unless the word moved on meanwhile, which is tried again (Linux's
+  `handle_exit_race`); a user word naming a kernel task is `NotPermitted`
+  (`EPERM`). A holder in another address space (a word on a page shared by
+  design) is waited on and lent priority but not recorded: its own address
+  of the word, which its exit cleanup stores through, is not known here --
+  noted in the code.
+- **`FUTEX_WAITERS` stays with the record.** A waiter that times out (or is
+  interrupted) leaves the bit set while a record for the holder remains, so
+  the holder's unlock comes through the kernel, which removes the record and
+  frees the word -- Linux's choice. The bit is cleared only when no waiter
+  and no record are left.
+- With records in place, all three of your cases go: a timed-out waiter's
+  loan is taken back from a fast-path holder (`deboost` finds it), the
+  chain walk finds each holder (`find_pi_owner`), and unlocking one mutex
+  recomputes from every word the holder still holds. A holder that dies
+  holding a recorded word is handed on by `exit_pi_owned_futexes`.
+
+**Found on the way, and fixed:** the waiter set `FUTEX_WAITERS` with an OR.
+A holder that let go by its own CAS between the waiter's read of the word and
+the OR left the waiter asleep on a free word with the bit set, which no unlock
+would ever hand over. The bit is now set by compare-and-swap on the word as
+read; a word that moved on sends the locker round again.
+
+**Your two smaller things:**
+
+- `SYS_FUTEX_TRYLOCK_PI` takes a dead owner's word (`FUTEX_OWNER_DIED`
+  alone), as the blocking lock and Linux's `FUTEX_TRYLOCK_PI` do.
+- A deliverable signal now ends a PI wait with `Interrupted` (it used to
+  block again on every wake that did not hand it the word). Through the
+  Linux ABI that is a transparent restart once the handler has run
+  (`ERESTARTNOINTR`, as Linux's `futex_lock_pi`), so `FUTEX_LOCK_PI` is never
+  `EINTR` to glibc; the native calls answer `Interrupted`, which your library
+  retries. A timed native lock retried after `Interrupted` starts its
+  relative timeout again -- pass the remaining time if that matters.
+
+Tested by `futex::test_lock_pi_fast_path_owner` (a kernel self-test): a
+holder takes the word with a bare CAS, a higher-priority waiter records it,
+lends it its priority and times out; the holder's priority comes back, the
+record and the bit stay, and the holder's unlock goes through the kernel and
+takes the record with it. `test_lock_pi_timeout` now expects the bit to stay
+too.
+
+So `known-issues/D-PI-MUTEXES-ENTER-THE-KERNEL-ON-EVERY-LOCK.md` can close
+once this is on `main`, and `ctest-pi-mutex` check 6x should pass with the
+fast path.
+
+-- lane A

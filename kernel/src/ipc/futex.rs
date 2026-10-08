@@ -57,7 +57,7 @@
 //!
 //! Lock ordering: `FUTEX_TABLE` → `SCHED` (wake calls `sched::wake()`).
 
-use super::waiters::{current_user_pid, deliverable_signal_pending};
+use super::waiters::{current_user_pid, deliverable_signal_pending, park_interruptible};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::user::read_user_value;
 use crate::sched::{self, task::TaskId};
@@ -1764,20 +1764,82 @@ fn try_acquire_ownerless(addr: u64, current_tid: u32) -> KernelResult<bool> {
     )
 }
 
+/// Where the holder a PI word names stands, for the first contended locker
+/// to attach to it -- Linux's `attach_to_pi_owner`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiHolder {
+    /// A live task in the caller's own address space: the kernel records it
+    /// as the owner, with the caller's address of the word as its own.
+    Recordable,
+    /// A live user task in another address space -- a word on a page shared
+    /// by design. Waited on, but not recorded: its own address of the word,
+    /// which its exit cleanup stores through, is not known here.
+    Elsewhere,
+    /// No task has that id: `ESRCH`, unless the word has moved on meanwhile.
+    Gone,
+    /// A kernel task, named by a user caller's word: `EPERM`, as Linux
+    /// refuses a `PF_KTHREAD` owner.
+    Kernel,
+}
+
+/// Where the task `owner_id` stands for the caller ([`PiHolder`]).
+fn pi_holder_standing(owner_id: TaskId) -> PiHolder {
+    // A task that has exited but is not yet reaped is gone too: it will never
+    // let go, and its exit cleanup has already run (Linux's `PF_EXITING`
+    // owner, which `handle_exit_race` answers ESRCH for once it is dead).
+    match sched::task_state(owner_id) {
+        None | Some(sched::task::TaskState::Dead) => return PiHolder::Gone,
+        Some(_) => {}
+    }
+    let ours = current_addr_space();
+    let theirs = crate::proc::thread::owner_process(owner_id)
+        .filter(|&p| p != 0)
+        .map_or(0, |p| crate::proc::pcb::get_pml4(p).unwrap_or(0));
+    if theirs == ours {
+        PiHolder::Recordable
+    } else if theirs == 0 {
+        PiHolder::Kernel
+    } else {
+        PiHolder::Elsewhere
+    }
+}
+
 /// Shared implementation of PI lock acquisition.
 ///
 /// `timeout_ns`:
-/// - `None` — block indefinitely until the lock is transferred to us.
+/// - `None` — block until the lock is transferred to us (or a signal).
 /// - `Some(0)` — non-blocking: acquire only if uncontended.
 /// - `Some(ns)` — block until acquired or until `ns` nanoseconds elapse.
 ///
-/// The only events that wake a blocked PI waiter are (a) `futex_unlock_pi`
-/// transferring ownership to us, or (b) our own timeout timer firing.  We
-/// disambiguate by checking, under the `PI_FUTEX_TABLE` lock, whether an
-/// ownership record now exists for us: holding the lock across both the
-/// ownership check and our waiter removal closes the timeout-vs-transfer
-/// race (either `unlock_pi` won the lock and made us owner, or we won the
-/// lock and removed ourselves so `unlock_pi` can no longer pick us).
+/// **The holder is recorded.** A thread that took the word by its userspace
+/// fast path (one compare-and-swap, no kernel entry) has no ownership record
+/// until somebody waits for it. The first contended locker makes one, as
+/// Linux's `attach_to_pi_owner` does: it looks the holder up by the id in the
+/// word (`NoSuchProcess` -- `ESRCH` -- if no task has it and the word has not
+/// moved on; `NotPermitted` for a kernel task named by a user word) and
+/// records it when it shares the caller's address space. From then on the
+/// holder's unlock comes through the kernel (the waiter set
+/// `FUTEX_WAITERS`), which removes the record. Without it -- until
+/// 2026-10-07 -- a waiter that timed out left its priority with the holder
+/// for good, a chain of lenders stopped at the holder, and unlocking another
+/// mutex took away priority the holder still needed
+/// (requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md).
+///
+/// **`FUTEX_WAITERS` is set by compare-and-swap on the word as read.** An OR,
+/// as before, set it on a word whose holder had meanwhile let go by its own
+/// CAS: the waiter then slept on a free word that no unlock would hand over.
+/// A word that moved on sends the locker round again (Linux's `-EAGAIN`
+/// retry).
+///
+/// **What wakes a waiter**: `futex_unlock_pi` handing it the word, its
+/// timeout, or a deliverable signal. We disambiguate under the
+/// `PI_FUTEX_TABLE` lock, where an ownership record for us says we were
+/// handed it: holding the lock across both the ownership check and our
+/// waiter removal closes the give-up-vs-transfer race (either `unlock_pi`
+/// won the lock and made us owner, or we won it and removed ourselves so
+/// `unlock_pi` can no longer pick us). A signal is `Interrupted`, which the
+/// Linux ABI turns into a transparent restart (`ERESTARTNOINTR`, as Linux's
+/// `futex_lock_pi` does) and a native caller retries.
 fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     if addr == 0 {
         return Err(KernelError::InvalidAddress);
@@ -1798,126 +1860,136 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     // reference to it must not be held across the park. See
     // `D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` in `known-issues.md`.
 
-    // Fast path: claim an ownerless word.  This covers the uncontended
-    // case (word == 0) and the dead-owner case (FUTEX_OWNER_DIED set with
-    // no TID) that robust/PI exit cleanup leaves behind, preserving the
-    // OWNER_DIED bit so userspace robust recovery (EOWNERDEAD) still works.
-    if try_acquire_ownerless(addr, current_tid)? {
-        register_pi_owner(key, addr, current_id);
-        return Ok(());
-    }
-
-    // Slow (contended) path.
-    //
-    // Read the owner from the futex word.  Retry the claim if the lock
-    // appears to have become ownerless between our first attempt and this
-    // read (race window on SMP; harmless retry on single-CPU).
-    let owner_id = {
-        let word = crate::mm::user::user_atomic_load_u32(addr)?;
-        let oid = u64::from(word & FUTEX_TID_MASK);
-
-        if oid == current_id {
-            return Err(KernelError::Deadlock); // Caller already owns it.
-        }
-        if oid == 0 {
-            // Lock became ownerless between attempts — retry the claim.
-            if try_acquire_ownerless(addr, current_tid)? {
-                register_pi_owner(key, addr, current_id);
-                return Ok(());
-            }
-            let w2 = crate::mm::user::user_atomic_load_u32(addr)?;
-            let o2 = u64::from(w2 & FUTEX_TID_MASK);
-            if o2 == current_id {
-                return Err(KernelError::Deadlock);
-            }
-            o2
-        } else {
-            oid
-        }
-    };
-
-    // A zero timeout means "try once": contended, so fail without blocking.
-    if matches!(timeout_ns, Some(0)) {
-        return Err(KernelError::TimedOut);
-    }
-
-    // Get our effective priority for the PI donation.
+    // Our effective priority, lent to the holder while we wait.
     let our_priority =
         sched::get_effective_priority(current_id).unwrap_or(sched::task::IDLE_PRIORITY);
 
-    // Register as a PI waiter under the PI table lock.
-    {
-        let mut table = PI_FUTEX_TABLE.lock();
-        // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
-        #[allow(clippy::indexing_slicing)]
-        table.waiters[key.bucket()].push_back(PiWaiter {
-            key,
-            uaddr: addr,
-            task_id: current_id,
-            priority: our_priority,
-        });
-    }
-
-    // Set the WAITERS bit so the unlocker knows to enter the kernel.
-    //
-    // If the word has become inaccessible since the claim attempts above (a
-    // peer thread unmapped it), back the registration out rather than parking:
-    // without the WAITERS bit no unlocker will ever enter the kernel for this
-    // address, so the wait could never be satisfied.
-    if let Err(e) = crate::mm::user::user_atomic_rmw_u32(
-        addr,
-        crate::mm::user::UserAtomicOp::Or,
-        FUTEX_WAITERS_BIT,
-    ) {
-        let mut table = PI_FUTEX_TABLE.lock();
-        let idx = key.bucket();
-        // SAFETY: idx is masked to NUM_BUCKETS - 1.
-        #[allow(clippy::indexing_slicing)]
-        if let Some(pos) = table.waiters[idx]
-            .iter()
-            .position(|w| w.task_id == current_id && w.key == key)
-        {
-            table.waiters[idx].remove(pos);
+    // Until this task is queued with FUTEX_WAITERS set on the very word it
+    // read, any change to the word sends it round again: a holder that let
+    // go, another that took over, an owner that died. Each pass takes the
+    // word, refuses, or queues; one is repeated only when another thread's
+    // atomic succeeded meanwhile, so the system as a whole moves on.
+    let owner_id = loop {
+        // An ownerless word is taken: free (0), or a dead owner's
+        // (FUTEX_OWNER_DIED with no id), the bit kept so userspace robust
+        // recovery (EOWNERDEAD) still sees the death.
+        if try_acquire_ownerless(addr, current_tid)? {
+            register_pi_owner(key, addr, current_id);
+            return Ok(());
         }
-        return Err(e);
-    }
+        let word = crate::mm::user::user_atomic_load_u32(addr)?;
+        let owner_id = u64::from(word & FUTEX_TID_MASK);
+        if owner_id == current_id {
+            return Err(KernelError::Deadlock); // Caller already owns it.
+        }
+        if owner_id == 0 {
+            continue; // Let go between the claim and the read: claim again.
+        }
+        let standing = pi_holder_standing(owner_id);
+        match standing {
+            PiHolder::Gone => {
+                // Linux's `handle_exit_race`: a word that changed since it was
+                // read is tried again; one still naming no task is ESRCH.
+                if crate::mm::user::user_atomic_load_u32(addr)? != word {
+                    continue;
+                }
+                return Err(KernelError::NoSuchProcess);
+            }
+            PiHolder::Kernel => return Err(KernelError::NotPermitted),
+            PiHolder::Recordable | PiHolder::Elsewhere => {}
+        }
+
+        // A zero timeout means "try once": contended, so fail without blocking.
+        if matches!(timeout_ns, Some(0)) {
+            return Err(KernelError::TimedOut);
+        }
+
+        // Queue, and record the holder if the kernel has none for the word.
+        let recorded = {
+            let mut table = PI_FUTEX_TABLE.lock();
+            let idx = key.bucket();
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            let known = table.owners[idx].iter().any(|o| o.key == key);
+            let record = !known && standing == PiHolder::Recordable;
+            if record {
+                push_pi_owner(&mut table, key, addr, owner_id);
+            }
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            table.waiters[idx].push_back(PiWaiter {
+                key,
+                uaddr: addr,
+                task_id: current_id,
+                priority: our_priority,
+            });
+            record
+        };
+
+        // FUTEX_WAITERS on the word as read, so the holder's unlock enters
+        // the kernel. Set already -- by another waiter in the meantime -- is
+        // as good.
+        let want = word | FUTEX_WAITERS_BIT;
+        let set = crate::mm::user::user_atomic_cas_u32(addr, word, want)
+            .map(|r| r.map_or_else(|now| now == want, |_| true));
+        if matches!(set, Ok(true)) {
+            break owner_id;
+        }
+        // The word moved on, or became unreachable (a peer thread unmapped
+        // it): out of the queue, this pass's record withdrawn, and round
+        // again -- or the error.
+        {
+            let mut table = PI_FUTEX_TABLE.lock();
+            let idx = key.bucket();
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            if let Some(pos) = table.waiters[idx]
+                .iter()
+                .position(|w| w.task_id == current_id && w.key == key)
+            {
+                table.waiters[idx].remove(pos);
+            }
+            if recorded {
+                unregister_pi_owner(&mut table, key, owner_id);
+            }
+        }
+        set?;
+    };
 
     // Boost the lock holder's priority if ours is higher (lower number),
-    // then propagate transitively through the PI chain.
-    if owner_id != 0 {
-        sched::boost_priority(owner_id, our_priority);
-        // Walk the chain: if owner_id is itself blocked on another PI
-        // futex, boost that futex's owner, and so on.
-        sched::pi_chain_boost(owner_id, our_priority, find_pi_owner);
-    }
+    // then propagate transitively through the PI chain: if the holder is
+    // itself blocked on another PI futex, boost that futex's owner, and so on
+    // (`find_pi_owner` reads the records, the one just made included).
+    sched::boost_priority(owner_id, our_priority);
+    sched::pi_chain_boost(owner_id, our_priority, find_pi_owner);
 
     // Record that we're blocked on this PI address (enables transitive
     // PI for tasks that later block on a lock we hold).
     sched::set_blocked_on_pi(current_id, Some(key.to_pi_wait()));
 
-    // Arm a one-shot timeout timer if requested.
-    let timer_handle = match timeout_ns {
-        Some(ns) => {
-            // ns == 0 was handled above, so this is a real deadline.
-            fn pi_timeout_wake(tid: u64) {
-                if !sched::try_wake(tid) {
-                    sched::defer_wake(tid);
-                }
+    // Arm a one-shot timeout timer if requested (`Some(0)` returned above).
+    let deadline = timeout_ns.map(|ns| crate::hrtimer::now_ns().saturating_add(ns));
+    let timer_handle = timeout_ns.map(|ns| {
+        fn pi_timeout_wake(tid: u64) {
+            if !sched::try_wake(tid) {
+                sched::defer_wake(tid);
             }
-            Some(crate::hrtimer::schedule_ns(ns, pi_timeout_wake, current_id))
         }
-        None => None,
-    };
+        crate::hrtimer::schedule_ns(ns, pi_timeout_wake, current_id)
+    });
 
-    // Block until ownership is transferred to us, or the timer fires.
-    // Deboost data is collected under the table lock and applied after
-    // release to respect the PI_FUTEX_TABLE → SCHED lock ordering.
+    // Block until ownership is transferred to us, the timer fires, or a
+    // signal arrives. Deboost data is collected under the table lock and
+    // applied after release to respect the PI_FUTEX_TABLE → SCHED lock
+    // ordering.
+    let pid = current_user_pid();
     let mut deboost: Option<(TaskId, Option<u8>)> = None;
     let outcome: KernelResult<()> = loop {
-        sched::block_current_on(crate::wchan::Wait::new(
-            crate::wchan::WaitChannel::Futex,
-            addr,
-        ));
+        park_interruptible(
+            pid,
+            current_id,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, addr),
+        );
 
         let mut table = PI_FUTEX_TABLE.lock();
         let idx = key.bucket();
@@ -1928,20 +2000,19 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
         let is_owner = table.owners[idx]
             .iter()
             .any(|o| o.key == key && o.owner_id == current_id);
-
         if is_owner {
             break Ok(());
         }
 
-        // Not the owner.  With no timeout, the only legitimate wake is an
-        // ownership transfer, so any wake without ownership is spurious —
-        // block again.  With a timeout, this wake is the timer firing.
-        if timeout_ns.is_none() {
+        // Not handed the word: the deadline, a signal, or a spurious wake,
+        // which waits again.
+        let expired = deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d);
+        if !expired && !deliverable_signal_pending(pid) {
             drop(table);
             continue;
         }
 
-        // Timed out: remove our waiter entry and clean up PI donation.
+        // Giving up: remove our waiter entry and clean up the PI donation.
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         if let Some(pos) = table.waiters[idx]
@@ -1951,17 +2022,25 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
             table.waiters[idx].remove(pos);
         }
 
-        // If no waiters remain on this addr, clear the WAITERS bit.  Doing
-        // this under the table lock serialises against new registrations
-        // (which also take the lock before setting the bit), so we cannot
-        // clear a bit that a freshly-queued waiter still needs.
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         let more = table.waiters[idx].iter().any(|w| w.key == key);
-        if !more {
-            // Best-effort: this is cleanup on the timeout path, and the only
-            // way it can fail is the word having become unmapped — in which
-            // case there is no bit left to clear and nobody to mislead.
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let real_owner = table.owners[idx]
+            .iter()
+            .find(|o| o.key == key)
+            .map(|o| o.owner_id);
+        // With no waiter left and no record to keep in step, clear
+        // FUTEX_WAITERS so the holder's unlock stays in userspace. With a
+        // record, the bit stays: the holder's unlock then comes through the
+        // kernel, which removes the record and frees the word -- Linux leaves
+        // it set too. (Clearing it with a record left, as before, would have
+        // let the holder's unlock be the CAS and the record outlive the
+        // ownership.) Under the table lock, so a freshly queued waiter cannot
+        // lose a bit it set. Best-effort: it can fail only with the word
+        // unmapped, and then there is no bit and nobody to mislead.
+        if !more && real_owner.is_none() {
             let _ = crate::mm::user::user_atomic_rmw_u32(
                 addr,
                 crate::mm::user::UserAtomicOp::AndN,
@@ -1971,15 +2050,13 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
 
         // Deboost the real current owner: with us gone, its inherited
         // priority may drop.
-        // SAFETY: idx is masked to NUM_BUCKETS - 1.
-        #[allow(clippy::indexing_slicing)]
-        let real_owner = table.owners[idx]
-            .iter()
-            .find(|o| o.key == key)
-            .map(|o| o.owner_id);
         deboost = real_owner.map(|oid| (oid, recalculate_inherited_for_owner(&table, oid)));
 
-        break Err(KernelError::TimedOut);
+        break Err(if expired {
+            KernelError::TimedOut
+        } else {
+            KernelError::Interrupted
+        });
     };
 
     // Cancel the timer (no-op if it already fired).
@@ -2031,8 +2108,10 @@ pub fn futex_trylock_pi(addr: u64) -> KernelResult<()> {
     let current_tid = (current_id as u32) & FUTEX_TID_MASK;
 
     // Through `mm::user`: see the note in `lock_pi_inner`.
-    // Fast path: CAS 0 → our tid (uncontended acquisition).
-    if crate::mm::user::user_atomic_cas_u32(addr, 0, current_tid)?.is_ok() {
+    // An ownerless word is taken: free, or a dead owner's (FUTEX_OWNER_DIED
+    // alone), as `lock_pi_inner` and Linux's FUTEX_TRYLOCK_PI take it. Until
+    // 2026-10-07 only a word of exactly 0 was.
+    if try_acquire_ownerless(addr, current_tid)? {
         register_pi_owner(key, addr, current_id);
         return Ok(());
     }
@@ -4400,6 +4479,7 @@ pub fn self_test_timeout() -> KernelResult<()> {
     test_timeout_woken_before_deadline()?;
     test_timeout_zero_nonblocking()?;
     test_lock_pi_timeout()?;
+    test_lock_pi_fast_path_owner()?;
     test_wait_multiple_timeout()?;
     test_wait_multiple_woken()?;
 
@@ -4544,13 +4624,17 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
         }
     }
 
-    // We were the only waiter, so the WAITERS bit must be cleared and the
-    // owner must still hold the lock.
+    // The owner still holds the lock, and FUTEX_WAITERS stays set although we
+    // were the only waiter: the kernel holds a record of the owner, so its
+    // unlock must come through the kernel, which removes the record and
+    // frees the word -- Linux leaves the bit set too. (Until 2026-10-07 the
+    // timeout cleared it, and an owner that unlocked by its userspace CAS
+    // left its record behind.)
     let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
     let w = word.load(Ordering::SeqCst);
-    if w != owner_tid {
+    if w != owner_tid | FUTEX_WAITERS_BIT {
         serial_println!(
-            "[futex]   FAIL: after PI timeout word={:#x} (expected owner tid {:#x})",
+            "[futex]   FAIL: after PI timeout word={:#x} (expected owner tid {:#x} with FUTEX_WAITERS)",
             w,
             owner_tid
         );
@@ -4574,6 +4658,151 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
 
     sched::reap_dead_tasks();
     serial_println!("[futex]   Lock PI timeout (held lock → ETIMEDOUT): OK");
+    Ok(())
+}
+
+/// The fast-path test's holder: 0 before it runs, 1 holding, 2 let go, 9 if
+/// it could not take the word.
+static PI_FP_STAGE: AtomicU32 = AtomicU32::new(0);
+/// The fast-path test's holder waits on this (1) until told to let go (0).
+static PI_FP_CONTROL: AtomicU32 = AtomicU32::new(1);
+/// The fast-path test's waiter: 0 still waiting, 1 `TimedOut`, 2 anything
+/// else.
+static PI_FP_WAITED: AtomicU32 = AtomicU32::new(0);
+
+/// The holder of [`test_lock_pi_fast_path_owner`]: takes the word as a
+/// userspace fast path does -- one compare-and-swap, no kernel entry, so no
+/// kernel record -- waits to be told to let go, then lets go as glibc's
+/// unlock does: a compare-and-swap back to 0, or `FUTEX_UNLOCK_PI` when
+/// `FUTEX_WAITERS` is set.
+extern "C" fn pi_fast_path_owner_task(addr: u64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let me = (sched::current_task_id() as u32) & FUTEX_TID_MASK;
+    let took = crate::mm::user::user_atomic_cas_u32(addr, 0, me).is_ok_and(|r| r.is_ok());
+    PI_FP_STAGE.store(if took { 1 } else { 9 }, Ordering::SeqCst);
+    let _ = futex_wait((&raw const PI_FP_CONTROL) as u64, 1);
+    let let_go = crate::mm::user::user_atomic_cas_u32(addr, me, 0).is_ok_and(|r| r.is_ok());
+    if !let_go {
+        let _ = futex_unlock_pi(addr);
+    }
+    PI_FP_STAGE.store(2, Ordering::SeqCst);
+}
+
+/// The waiter of [`test_lock_pi_fast_path_owner`], at a higher priority than
+/// the holder: gives up after 200 ms.
+extern "C" fn pi_fast_path_waiter_task(addr: u64) {
+    let outcome = match futex_lock_pi_timeout(addr, 200_000_000) {
+        Err(KernelError::TimedOut) => 1,
+        _ => 2,
+    };
+    PI_FP_WAITED.store(outcome, Ordering::SeqCst);
+}
+
+/// A PI holder that took its word by the userspace fast path is recorded by
+/// its first waiter (Linux's `attach_to_pi_owner`), is lent the waiter's
+/// priority, and gives it back when the waiter times out -- the case of
+/// requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md
+/// that left the loan with the holder for good. `FUTEX_WAITERS` stays set,
+/// so the holder's unlock comes through the kernel and removes the record.
+fn test_lock_pi_fast_path_owner() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[futex]   FAIL: PI holder taken in userspace: {}", what);
+        Err(KernelError::InternalError)
+    }
+    PI_FP_STAGE.store(0, Ordering::SeqCst);
+    PI_FP_CONTROL.store(1, Ordering::SeqCst);
+    PI_FP_WAITED.store(0, Ordering::SeqCst);
+
+    let word = AtomicU32::new(0);
+    let addr = (&raw const word) as u64;
+    let wait_key = futex_key(addr).to_pi_wait();
+
+    let owner_id = sched::spawn(b"pi-fp-own", 24, pi_fast_path_owner_task, addr, 0)?;
+    for _ in 0..50 {
+        if PI_FP_STAGE.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        sched::yield_now();
+    }
+    if PI_FP_STAGE.load(Ordering::SeqCst) != 1 {
+        return fail("the holder did not take the word");
+    }
+    if find_pi_owner(wait_key).is_some() {
+        return fail("a take without the kernel made a record");
+    }
+
+    // The waiter records the holder and lends it priority 8 before it parks.
+    sched::spawn(b"pi-fp-wait", 8, pi_fast_path_waiter_task, addr, 0)?;
+    let mut recorded = false;
+    for _ in 0..50 {
+        if find_pi_owner(wait_key) == Some(owner_id) {
+            recorded = true;
+            break;
+        }
+        sched::yield_now();
+    }
+    if !recorded {
+        return fail("the waiter did not record the holder");
+    }
+    let lent = sched::get_effective_priority(owner_id);
+    if lent != Some(8) {
+        serial_println!("[futex]   the holder's priority while lent: {:?}", lent);
+        return fail("the holder was not lent the waiter's priority");
+    }
+
+    // The waiter times out -- and takes its loan back.
+    for _ in 0..400 {
+        if PI_FP_WAITED.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        sched::sleep_ms(10);
+    }
+    if PI_FP_WAITED.load(Ordering::SeqCst) != 1 {
+        return fail("the waiter did not time out");
+    }
+    // Its base, or that less the interactive boost (see the inheritance
+    // test); not the lent 8.
+    let base_min = 24u8.saturating_sub(sched::task::INTERACTIVE_BOOST);
+    match sched::get_effective_priority(owner_id) {
+        Some(p) if (base_min..=24).contains(&p) => {}
+        other => {
+            serial_println!(
+                "[futex]   the holder's priority after the waiter left: {:?}",
+                other
+            );
+            return fail("the timed-out waiter's priority stayed with the holder");
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
+    if word.load(Ordering::SeqCst) != owner_tid | FUTEX_WAITERS_BIT
+        || find_pi_owner(wait_key) != Some(owner_id)
+    {
+        return fail("the record or FUTEX_WAITERS did not stay with the holder");
+    }
+
+    // The holder lets go: its compare-and-swap fails on FUTEX_WAITERS, so the
+    // unlock comes through the kernel and takes the record with it.
+    PI_FP_CONTROL.store(0, Ordering::SeqCst);
+    futex_wake((&raw const PI_FP_CONTROL) as u64, 1);
+    for _ in 0..50 {
+        if PI_FP_STAGE.load(Ordering::SeqCst) == 2 {
+            break;
+        }
+        sched::yield_now();
+    }
+    if PI_FP_STAGE.load(Ordering::SeqCst) != 2 {
+        return fail("the holder did not let go");
+    }
+    if word.load(Ordering::SeqCst) != 0 || find_pi_owner(wait_key).is_some() {
+        return fail("the unlock left the word held or the record behind");
+    }
+
+    sched::reap_dead_tasks();
+    serial_println!(
+        "[futex]   PI holder taken in userspace: recorded by its waiter, lent priority, \
+         given it back on the timeout, unlocked through the kernel: OK"
+    );
     Ok(())
 }
 

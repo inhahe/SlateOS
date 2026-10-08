@@ -19,7 +19,6 @@ device`, status 1), and no harness was there to show it.
 | program | upstream to measure against |
 |---|---|
 | `sleep` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
-| `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
 | `fetch` | none: a SlateOS program, so its tests are its own |
 
@@ -89,3 +88,12 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   PLACES` records. Its first run corrected that record twice -- a claimed
   `--skip-tilde` divergence GNU does not have, and a write-error divergence
   `which.rs` had made without recording it.
+* **`renice`, 2026-10-07** -- `scripts/renice-diff.sh`, against util-linux
+  2.39.3. Each side gets a target of its own, a `sleep` at niceness 2 in a
+  session of its own, and the niceness it is left with is compared beside
+  the words. Its first run found two things, one cause: `renice` closed its
+  standard output by gnulib's rule rather than util-linux's, so `renice 5
+  $$ >&-` reported `write error` where util-linux forgives a closed
+  descriptor, and its success lines went out ahead of a later failure where
+  util-linux's `warn` leaves them in the buffer. It uses `ulclosestream` now.
+  87 agree, 0 differ, 3 differ on purpose (our version string).

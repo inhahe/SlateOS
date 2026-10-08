@@ -385,6 +385,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/reintro-sysinfo.py` | Reintroduction check for the sysinfo scroll fixes. |
 | `scripts/reintro-textview.py` | Reintroduction check for the toolkit/desktop wheel-unit fixes. |
 | `scripts/reintro-toolkit-focus.py` | Prove the toolkit's focus, caret and selection tests are regression tests. |
+| `scripts/renice-diff.sh` | Differential test: our `renice` against util-linux 2.39.3's. |
 | `scripts/resolve-rip.sh` | resolve-rip.sh — map a kernel RIP (or any code address) to the containing |
 | `scripts/rm-diff.sh` | Differential test: our `rm` against GNU coreutils'. |
 | `scripts/rmdir-diff.sh` | Differential test: our `rmdir` against GNU coreutils 9.4's. |
@@ -531,4 +532,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_521 scripts._
+_522 scripts._

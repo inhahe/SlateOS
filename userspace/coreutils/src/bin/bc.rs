@@ -15,10 +15,97 @@ use coreutils::stdfd;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
-#[cfg(not(test))]
-use std::io::Write;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read, Write};
 use std::process::ExitCode;
+
+// Before `main`, so that `stdfd::restore` still sees the descriptors `bc` was
+// given: a closed standard output is a write error and a closed standard
+// input a read error, as they are upstream -- not the `/dev/null` Rust's
+// runtime would put on each.
+coreutils::guard_std_fds!();
+
+// -------------------------------------------------------------------------
+// The standard descriptors, as Debian's bc has them
+// -------------------------------------------------------------------------
+//
+// GNU bc 1.07.1 checks no write and no read of its own. The reference these
+// ports are measured against is Ubuntu's, which carries Debian's
+// `05_notice_read_write_errors.diff`: after each value and string `bc` prints,
+// it flushes standard output and calls `checkferror_output (stdout)`; after
+// each diagnostic, `checkferror_output (stderr)`; and after reading a
+// character for `read()`, `checkferror_input (stdin)`. Each ends the run at
+// the first failure with `perror`, status 1 -- `dc: could not write output
+// file: REASON` or `dc: could not read input file: REASON`, the `dc` being
+// the patch's, which gave both programs the one function. What it never
+// checks is `--help`, `--version` and the usage a bad option prints, which
+// upstream writes with plain `printf`s outside the interpreter.
+
+/// Write `text` to standard output, flush it, and end the run if that
+/// failed: the patch's `fflush (stdout); checkferror_output (stdout)`.
+#[cfg(not(test))]
+fn emit(text: &str) {
+    let mut out = stdfd::Stream::stdout();
+    // Neither can fail: a `Stream` keeps a failure for the question below.
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
+    if let Some(e) = out.error() {
+        diag!("dc: could not write output file: {}", strerror(&e));
+        stdfd::exit_now(1, 1);
+    }
+}
+
+/// Write `text` to standard output and never ask how it went: the help, the
+/// version and the usage, which upstream prints with an unchecked `printf`
+/// and exits after, whatever happened to them -- measured, `bc --version
+/// >/dev/full` is status 0, and says nothing.
+fn emit_unchecked(text: &str) {
+    let mut out = stdfd::Stream::stdout();
+    // Unchecked on purpose (above): the stream keeps its failure and nothing
+    // asks for it.
+    let _ = out.write_all(text.as_bytes());
+}
+
+/// After a diagnostic: end the run if it could not be written, as the
+/// patch's `checkferror_output (stderr)` does. The message saying so has
+/// nowhere to go either, so there is none.
+fn check_diagnostic() {
+    if stdfd::diagnostic_lost() {
+        stdfd::exit_now(1, 1);
+    }
+}
+
+/// One line of standard input for `read()`, without its newline, read a
+/// byte at a time from descriptor 0 so that nothing past the line is taken
+/// from whoever reads next. A read that fails ends the run, as the patch's
+/// `checkferror_input (stdin)` does; the end of input is an empty line.
+fn read_stdin_line() -> String {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stdfd::RawStdin.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) if byte == [b'\n'] => break,
+            Ok(_) => line.extend_from_slice(&byte),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                diag!("dc: could not read input file: {}", strerror(&e));
+                stdfd::exit_now(1, 1);
+            }
+        }
+    }
+    // A number is ASCII, so the text before the first byte that is not
+    // UTF-8 is all of the line that can matter -- where upstream's scan of
+    // digits would have stopped as well.
+    let valid = match std::str::from_utf8(&line) {
+        Ok(text) => return text.to_string(),
+        Err(e) => e.valid_up_to(),
+    };
+    // Valid by the definition of `valid_up_to`, so never the default.
+    line.get(..valid)
+        .and_then(|prefix| std::str::from_utf8(prefix).ok())
+        .unwrap_or_default()
+        .to_string()
+}
 
 // -------------------------------------------------------------------------
 // The numbers live in the `bignum` crate
@@ -1651,7 +1738,7 @@ impl Interpreter {
         }
         #[cfg(not(test))]
         {
-            println!("{}", s);
+            emit(&format!("{s}\n"));
         }
     }
 
@@ -1664,8 +1751,7 @@ impl Interpreter {
         }
         #[cfg(not(test))]
         {
-            print!("{}", s);
-            let _ = io::stdout().flush();
+            emit(s);
         }
     }
 
@@ -1676,6 +1762,7 @@ impl Interpreter {
     /// diagnostics mixed into the numbers.
     fn warn(&self, message: &str) {
         diag!("Runtime warning (func=(main)): {message}");
+        check_diagnostic();
     }
 
     fn get_var(&self, name: &str) -> Decimal {
@@ -1796,7 +1883,10 @@ impl Interpreter {
                 // number that looks meaningful and is not would be worse than
                 // an absent field, because the absence is visible and the
                 // fiction is not. See `design-decisions.md` §1025.
-                Err(why) => diag!("Runtime error (func={}): {why}", self.fault_label()),
+                Err(why) => {
+                    diag!("Runtime error (func={}): {why}", self.fault_label());
+                    check_diagnostic();
+                }
             }
         }
         Session::Continue
@@ -1830,10 +1920,7 @@ impl Interpreter {
                         }
                     }
                 }
-                #[cfg(not(test))]
-                {
-                    let _ = io::stdout().flush();
-                }
+                // Each item was flushed, and checked, as it was written.
                 Ok(StmtResult::Normal)
             }
             Stmt::If(cond, then_body, else_body) => {
@@ -2111,8 +2198,11 @@ impl Interpreter {
             "length" => return Ok(Decimal::from_i64(arg0!().length() as i64)),
             "scale" if !args.is_empty() => return Ok(Decimal::from_i64(arg0!().scale as i64)),
             "read" => {
-                let mut line = String::new();
-                let _ = io::stdin().read_line(&mut line);
+                // From descriptor 0 itself. Through `io::stdin()`, as this
+                // was, it waited forever for the lock the session reading the
+                // program from standard input already held -- and it took a
+                // closed descriptor for the end of the input.
+                let line = read_stdin_line();
                 return Ok(Decimal::parse(line.trim(), self.ibase));
             }
             _ => {}
@@ -2930,6 +3020,7 @@ const STDIN_SOURCE: &str = "(standard_in)";
 fn report_syntax(source: &str, errors: &[SyntaxError]) {
     for e in errors {
         diag!("{} {}: {}", source, e.line, e.message());
+        check_diagnostic();
     }
 }
 
@@ -3130,12 +3221,12 @@ impl Refusal {
                 // stdout, from two different pieces of code. Reproduced
                 // rather than tidied: a script doing `bc -x 2>/dev/null`
                 // still sees the usage, as it does upstream.
-                println!("{USAGE}");
+                emit_unchecked(&format!("{USAGE}\n"));
                 e.status
             }
             Self::Unimplemented(message) => {
                 diag!("bc: {message}");
-                println!("{USAGE}");
+                emit_unchecked(&format!("{USAGE}\n"));
                 1
             }
         };
@@ -3164,8 +3255,9 @@ enum Trouble {
     ExpressionNotUtf8,
     /// The same again, for the session on standard input.
     StdinNotUtf8,
-    /// A read on standard input that failed for a reason other than EOF.
-    StdinRead(String),
+    /// A read on standard input that failed for a reason other than EOF, and
+    /// the line the scanner was in.
+    StdinRead(usize),
 }
 
 impl Trouble {
@@ -3190,7 +3282,12 @@ impl Trouble {
             Self::FileNotUtf8(name) => diag!("bc: {}: not valid UTF-8", quotef_os(name)),
             Self::ExpressionNotUtf8 => diag!("bc: -e expression: not valid UTF-8"),
             Self::StdinNotUtf8 => diag!("bc: standard input: not valid UTF-8"),
-            Self::StdinRead(message) => diag!("bc: standard input: {message}"),
+            // The scanner's own words, through `yyerror`'s `NAME LINE: `
+            // prefix: `bc <&-` is `(standard_in) 1: read() in flex scanner
+            // failed`, status 1. No reason is given -- the scanner gives none.
+            Self::StdinRead(line) => {
+                diag!("{STDIN_SOURCE} {line}: read() in flex scanner failed");
+            }
         }
         ExitCode::FAILURE
     }
@@ -3201,10 +3298,12 @@ impl Trouble {
 // -------------------------------------------------------------------------
 
 /// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
+/// status into `exit_failure`. Most of `bc`'s diagnostics end the run the
+/// moment they are lost (see [`check_diagnostic`]); this catches the ones
+/// that are the last thing the run does anyway. See
 /// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -3216,11 +3315,11 @@ fn run_main() -> ExitCode {
     let settings = match parse_args(&args, getopt::posixly_correct()) {
         Err(refusal) => return refusal.report(),
         Ok(Request::Help) => {
-            println!("{USAGE}");
+            emit_unchecked(&format!("{USAGE}\n"));
             return ExitCode::SUCCESS;
         }
         Ok(Request::Version) => {
-            println!("bc (SlateOS coreutils) 0.1.0");
+            emit_unchecked("bc (SlateOS coreutils) 0.1.0\n");
             return ExitCode::SUCCESS;
         }
         Ok(Request::Run(settings)) => settings,
@@ -3234,17 +3333,17 @@ fn run_main() -> ExitCode {
     // `echo 1+1 | bc` -- and the banner went into the caller's captured
     // output, ahead of the answer. `$(echo 1+1 | bc)` is the single most
     // common way this program is used.
-    let stdin = io::stdin();
-    let interactive = settings.force_interactive || {
-        use std::io::IsTerminal;
-        stdin.is_terminal()
-    };
+    let interactive = settings.force_interactive || stdfd::is_tty(0);
 
     // Before the operands, as GNU's is: the banner introduces the session,
     // and there is no session to introduce when `-e` ends the run.
     if !settings.quiet && interactive && settings.reads_stdin() {
-        println!("bc (SlateOS coreutils) 0.1.0");
-        println!("Type 'quit' to exit.");
+        // Each checked, as `show_bc_version` and `welcome` are.
+        #[cfg(not(test))]
+        {
+            emit("bc (SlateOS coreutils) 0.1.0\n");
+            emit("Type 'quit' to exit.\n");
+        }
     }
 
     for input in &settings.inputs {
@@ -3263,7 +3362,7 @@ fn run_main() -> ExitCode {
     }
 
     if settings.reads_stdin()
-        && let Err(trouble) = eval_stdin(&mut interp, &stdin)
+        && let Err(trouble) = eval_stdin(&mut interp)
     {
         return trouble.report();
     }
@@ -3308,9 +3407,18 @@ fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<Session, Troubl
 
 /// The interactive/pipe session: read until EOF, evaluating each construct as
 /// soon as its braces balance.
-fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Trouble> {
-    let mut handle = stdin.lock();
+///
+/// From descriptor 0 itself (`stdfd::RawStdin`), not through `io::stdin()`.
+/// That one calls a closed descriptor the end of the input, so `bc <&-` ran
+/// an empty program and exited 0, where upstream's scanner says `read() in
+/// flex scanner failed` and exits 1; and its lock, held here for the whole
+/// session, was the lock `read()` then waited on for ever.
+fn eval_stdin(interp: &mut Interpreter) -> Result<Session, Trouble> {
+    let mut handle = io::BufReader::new(stdfd::RawStdin);
     let mut chunker = Chunker::new();
+    // The scanner's line number, which a failed read is reported against:
+    // the line it was reading.
+    let mut line_no: usize = 1;
 
     loop {
         // Bytes, then one explicit UTF-8 check. `BufRead::lines()` yields
@@ -3320,11 +3428,11 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Tr
         let mut raw: Vec<u8> = Vec::new();
         match handle.read_until(b'\n', &mut raw) {
             Ok(0) => break,
-            Ok(_) => {}
+            Ok(_) => line_no = line_no.saturating_add(1),
             // Reported, not swallowed. `break` here -- which is what the old
             // loop did -- turns a failed read into a normal end of input, so
             // a truncated program is evaluated and the run exits 0.
-            Err(e) => return Err(Trouble::StdinRead(strerror(&e))),
+            Err(_) => return Err(Trouble::StdinRead(line_no)),
         }
         let Ok(line) = String::from_utf8(raw) else {
             return Err(Trouble::StdinNotUtf8);

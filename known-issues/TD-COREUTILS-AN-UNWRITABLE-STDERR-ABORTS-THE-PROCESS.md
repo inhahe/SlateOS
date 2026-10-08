@@ -216,11 +216,17 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Seven programs still lack it: `bc ed find hostname kill more
-patch` (`df` was converted on 2026-10-08: its help and version had gone out
-by `print!`, which panics on a failed write, and its table through Rust's
+all. Six programs still lack it: `ed find hostname kill more patch`.
+`df` was converted on 2026-10-08: its help and version had gone out by
+`print!`, which panics on a failed write, and its table through Rust's
 `Stdout` with a failure turned into status 1 and nothing said; it is
-gnulib's `close_stdout` now, measured by `df-diff.sh`'s descriptor cases).
+gnulib's `close_stdout` now, measured by `df-diff.sh`'s descriptor cases.
+`bc` the same day, to what Ubuntu's bc does, which is not GNU's: Debian's
+`05_notice_read_write_errors.diff` checks each value, string and diagnostic
+as it is written and ends the run at the first failure (`dc: could not
+write output file: REASON`, sic), leaves `--help` and `--version`
+unchecked, and a closed standard input is the scanner's `read() in flex
+scanner failed`; `bc-diff.sh` holds twenty descriptor cases.
 That list is now
 pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
 a program is added without the guard, when one is converted without being

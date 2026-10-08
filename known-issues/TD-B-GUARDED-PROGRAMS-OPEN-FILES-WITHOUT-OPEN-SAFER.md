@@ -2,7 +2,8 @@
 
 **Status:** PARTLY FIXED 2026-10-08 (lane B): `tee`, the program whose
 difference corrupted data, opens its files as its upstream does now, and so
-does `csplit`, whose pieces kept a diagnostic inside them.
+do `csplit`, whose pieces kept a diagnostic inside them, and the digest
+programs, whose `--check` read its own list as a `-` line's input.
 **OPEN** for the other programs whose upstream keeps its files off
 descriptors 0-2 (the list at the end): each is converted with the harness
 case that shows the difference, not all at once.
@@ -71,16 +72,32 @@ those has to be ported as upstream does it, which is not `fd_safer` either.
 **Still to do** -- each with a closed-descriptor case in its harness that
 fails before and agrees after:
 
-* `stdio--.h` (`fopen_safer`): the `*sum` programs and `cksum` (their
-  inputs and `-c`'s list), `pr` (its inputs). `ptx` has no `fopen` of its
-  own: its input and word files are read by gnulib's `read_file`, which
-  opens plainly, so only its output operand's `freopen` is the safe one.
+* `stdio--.h` (`fopen_safer`): `pr` (its inputs). `ptx` has no `fopen`
+  of its own: its input and word files are read by gnulib's `read_file`,
+  which opens plainly, so only its output operand's `freopen` is the safe
+  one.
 * `freopen`/`fd_reopen` (onto 0 or 1): `dircolors`, `du --files0-from`,
   `shuf`, `tsort`, `uniq`, `ptx`'s output, `csplit`'s and `split`'s input,
   `stty -F`, `touch`, `dd`, `nohup`.
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
   `copy.c`), `split`'s output files.
 * `ln`'s target directory (`openat_safer`).
+
+**The `*sum` programs, `sum` and `cksum`, 2026-10-08.** All built from
+`digest.c` upstream, as ours share `coreutils::digest`, whose two opens --
+each input, and `--check`'s list -- were plain. With standard input closed
+the list became it, and a `-` line in the list read the list itself:
+
+```
+md5sum -c SUMS <&-       (SUMS lists a, then -)
+  ours: a: OK / -: OK, status 1
+  GNU:  a: OK / -: FAILED open or read, then '-: Bad file descriptor'
+        and 'WARNING: 1 listed file could not be read', status 1
+```
+
+Both are `stdfd::open_read_safer` now. `digest-diff.sh` has seven
+closed-standard-input cases for each of the seven programs; three differed
+before.
 
 **`sort`'s temporary files, 2026-10-08.** `sort` had none until its
 external merge was written (`known-issues-resolved/TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG.md`);

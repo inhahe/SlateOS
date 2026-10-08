@@ -113,7 +113,9 @@ for log in make-gcc make-libgcc make-libstdcxx; do
 done
 # The std module's failure is one the build tolerates (above), so it is
 # looked for: a GCC whose `import std;` is empty is not the one to install.
-if [ "$(grep -c 'Cannot compile std module' make-libstdcxx.log)" -ne 0 ]; then
+# The message as a line of its own -- make echoes the recipe that prints it
+# into the same log, so the bare words are there whether it failed or not.
+if [ "$(grep -c '^Cannot compile std module$' make-libstdcxx.log)" -ne 0 ]; then
     echo "STD_MODULE_NOT_COMPILED -- make-libstdcxx.log says why"
     exit 1
 fi

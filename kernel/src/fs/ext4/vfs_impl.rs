@@ -2534,15 +2534,18 @@ fn test_dir_type_conversions() -> KernelResult<()> {
         crate::serial_println!("[ext4-vfs]   FAIL: BLKDEV type");
         return Err(KernelError::InternalError);
     }
-    // Types the VFS still has no `EntryType` for fall back to File.  More than
-    // one is checked because the fallback is a catch-all `_` arm: one of them
-    // passing does not show the others are not matched earlier by mistake,
-    // and UNKNOWN (0) in particular is the value a directory entry carries
-    // when the filesystem was built without the filetype feature. (A FIFO has
-    // no `EntryType` yet: known-issues
-    // A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES.)
-    if dir_type_to_entry_type(dir_type::FIFO) != EntryType::File {
-        crate::serial_println!("[ext4-vfs]   FAIL: FIFO fallback");
+    // A FIFO's node is a FIFO since named pipes (design-decisions 1551); this
+    // checked for the File fallback until 2026-10-08, the first boot that
+    // reached it after.
+    if dir_type_to_entry_type(dir_type::FIFO) != EntryType::Fifo {
+        crate::serial_println!("[ext4-vfs]   FAIL: FIFO type");
+        return Err(KernelError::InternalError);
+    }
+    // A type the VFS has no `EntryType` for falls back to File: UNKNOWN (0),
+    // the value a directory entry carries when the filesystem was built
+    // without the filetype feature, and anything out of range.
+    if dir_type_to_entry_type(0xFF) != EntryType::File {
+        crate::serial_println!("[ext4-vfs]   FAIL: out-of-range fallback");
         return Err(KernelError::InternalError);
     }
     if dir_type_to_entry_type(dir_type::UNKNOWN) != EntryType::File {

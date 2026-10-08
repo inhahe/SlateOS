@@ -58547,12 +58547,13 @@ fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
 
 /// TD4 extraction: clone() CLONE_VFORK/CLONE_PARENT routing self-test.
 ///
-/// Proves CLONE_VFORK no longer returns -ENOSYS up-front (it degenerates
-/// to plain fork, reaching fork::fork_process which yields -ESRCH in the
-/// self-test context), while CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
-/// still reject with -ENOSYS (PID reparenting / namespace infrastructure
-/// is missing). Self-contained — references only module-level items.
-/// See [`self_test_errno_mapping`] for the TD4 rationale.
+/// Proves CLONE_VFORK and CLONE_PTRACE no longer return -ENOSYS up-front
+/// (the one degenerates to plain fork, the other is honoured by
+/// `ptrace::attach_new`; both reach fork::fork_process, which yields -ESRCH
+/// in the self-test context), while CLONE_PARENT / CLONE_NEWNS still reject
+/// with -ENOSYS (PID reparenting / namespace infrastructure is missing).
+/// Self-contained — references only module-level items. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
 #[inline(never)]
 fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
     use crate::serial_println;
@@ -58578,24 +58579,29 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
         user_rsp: 0,
         user_rflags: 0,
     };
-    match dispatch_linux_with_frame(&mut f) {
-        Some(v) if v == -i64::from(errno::ENOSYS) => {
-            serial_println!("[syscall/linux]   FAIL: clone(CLONE_VFORK) still ENOSYS");
-            return Err(KernelError::InternalError);
-        }
-        // Any other negative errno (likely -ESRCH) proves we
-        // reached fork::fork_process rather than rejecting up-front.
-        Some(v) if v < 0 => {}
-        other => {
-            serial_println!("[syscall/linux]   FAIL: clone(CLONE_VFORK) → {:?}", other);
-            return Err(KernelError::InternalError);
+    for (name, bit) in &[
+        ("CLONE_VFORK", clone_flags::CLONE_VFORK),
+        ("CLONE_PTRACE", clone_flags::CLONE_PTRACE),
+    ] {
+        f.arg0 = clone_flags::SIGCHLD | *bit;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ENOSYS) => {
+                serial_println!("[syscall/linux]   FAIL: clone({}) still ENOSYS", name);
+                return Err(KernelError::InternalError);
+            }
+            // Any other negative errno (likely -ESRCH) proves we
+            // reached fork::fork_process rather than rejecting up-front.
+            Some(v) if v < 0 => {}
+            other => {
+                serial_println!("[syscall/linux]   FAIL: clone({}) → {:?}", name, other);
+                return Err(KernelError::InternalError);
+            }
         }
     }
 
     for (name, bit) in &[
         ("CLONE_PARENT", clone_flags::CLONE_PARENT),
         ("CLONE_NEWNS", clone_flags::CLONE_NEWNS),
-        ("CLONE_PTRACE", clone_flags::CLONE_PTRACE),
     ] {
         f.arg0 = clone_flags::SIGCHLD | *bit;
         match dispatch_linux_with_frame(&mut f) {

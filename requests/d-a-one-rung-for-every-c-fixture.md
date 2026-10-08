@@ -119,23 +119,25 @@ will close them myself as each one goes on.
 | `ctest-renice` | -- (filed with getpriority and setpriority reaching your calls, 2026-10-07; `known-issues/D-POSIX-SETPRIORITY-RENICED-THE-CALLER.md`); a parent lowers its child's priority, a raise beyond `RLIMIT_NICE` is `EACCES`, pid 1 is `EPERM` (asked to keep the nice it has), no such process `ESRCH`, a group reads as its most favoured member, `nice(-1)` is `EPERM`; needs your `SYS_PROCESS_GET_PRIORITY` and `SYS_PROCESS_SET_PRIORITY`, and must run **without** IO_REALTIME | - | 30 |
 | `ctest-affinity` | -- (filed with the affinity calls and `sched_getcpu` reaching yours, 2026-10-07; `known-issues/D-POSIX-AFFINITY-SETTERS-REPORTED-A-CHANGE-THEY-NEVER-MADE.md`); pinned to each CPU in turn a thread reads back that CPU and `sched_getcpu` and `getcpu` say it is there, a new thread inherits the mask, `pthread_setaffinity_np` pins another thread, and no CPU (`EINVAL`), no such process (`ESRCH`) and pid 1 (`EPERM`, asked to keep its mask) are refused; needs your `SYS_SCHED_SET_AFFINITY`, `SYS_SCHED_GET_AFFINITY` and `SYS_CPU_CURRENT`, and means most with more than one CPU | - | 30 |
 | `ctest-siginfo` | -- (filed with the library reading your extended signal frame and sending through `SYS_SIGNAL_QUEUE`/`TGKILL`, 2026-10-07; `known-issues/D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE.md`); what a handler and `sigwaitinfo` are told, against Linux's answers: `raise`, `kill`, `sigqueue` and `tgkill` of itself, `setitimer`'s `SIGALRM` (`SI_KERNEL`), a child's `kill`, `sigqueue` and exit (`CLD_EXITED`, status 7), a child killed by `SIGTERM` (`CLD_KILLED`, 15), `tgkill` into another process, a zombie signalled, and the refusals; needs your extended frame, `SYS_SIGNAL_QUEUE` and `SYS_SIGNAL_TGKILL`, and must run as an ordinary user | - | 30 |
+| `ctest-tmpfile` | -- (filed with `O_TMPFILE` and `linkat` reaching your calls, 2026-10-07); a nameless file that takes writes and is in no listing, named by `linkat` with `AT_EMPTY_PATH` and through `/proc/self/fd/N`, an `O_EXCL` one never named (`ENOENT`), one closed without a name leaving nothing, and the refusals (`ENOTDIR`, `EINVAL`, `EEXIST`); needs `SYS_FS_TMPFILE` as it is since 2026-10-01 and your `SYS_FS_LINK_HANDLE`, in `/tmp/ctest-tmpfile` | file | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
 The nine rows from `ctest-sigpipe` to `ctest-string` were added on
 2026-10-06, which made twenty-one fixtures waiting where the summary above
-says eleven; the fifteen after them came on 2026-10-07 -- GDB, Mono, binutils
+says eleven; the sixteen after them came on 2026-10-07 -- GDB, Mono, binutils
 and GCC on the image, each run by the fixture named for it, and Unix sockets
 with names, shared anonymous memory, close-on-exec at a native exec, record
 locks, appends, positional I/O, timed joins, ignored signals, renicing, CPU
-affinity and each signal's record, which your `SYS_UNIX_*`, native
-`MAP_SHARED`, `SYS_PROCESS_SET_EXEC_CLOSE`, `SYS_FS_RECORD_LOCK`,
-`SYS_FS_SET_STATUS_FLAGS`, `SYS_FS_PREAD`/`PWRITE`, `SYS_THREAD_JOIN_TIMEOUT`,
-`SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED`,
+affinity, each signal's record and files made with no name, which your
+`SYS_UNIX_*`, native `MAP_SHARED`, `SYS_PROCESS_SET_EXEC_CLOSE`,
+`SYS_FS_RECORD_LOCK`, `SYS_FS_SET_STATUS_FLAGS`, `SYS_FS_PREAD`/`PWRITE`,
+`SYS_THREAD_JOIN_TIMEOUT`, `SYS_SIGNAL_SET_IGNORED`/`GET_IGNORED`,
 `SYS_PROCESS_GET_PRIORITY`/`SET_PRIORITY`,
 `SYS_SCHED_SET_AFFINITY`/`GET_AFFINITY`, `SYS_CPU_CURRENT`, the extended
-signal frame and `SYS_SIGNAL_QUEUE`/`TGKILL` made possible.
+signal frame, `SYS_SIGNAL_QUEUE`/`TGKILL`, `SYS_FS_TMPFILE` and
+`SYS_FS_LINK_HANDLE` made possible.
 `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned

@@ -268,6 +268,22 @@ pub const SYS_FS_PREAD: u64 = 1080;
 /// POSIX has it (lane A's design-decisions §969; Linux appends). Lane A's
 /// (1081); a kernel without it answers `NoSuchSyscall`.
 pub const SYS_FS_PWRITE: u64 = 1081;
+/// Open a regular file with no name in a directory, as Linux's `O_TMPFILE`:
+/// `fs_tmpfile(dir_ptr, dir_len, flags) -> handle`. It exists only through the
+/// handle and goes at its last close, unless [`SYS_FS_LINK_HANDLE`] names it
+/// first; `flags` are the native open flags -- an access mode that allows
+/// writing, `APPEND`, and `EXCL`, which forbids it a name ever. Its mode is
+/// 0600. `InvalidArgument` for flags that do not allow writing,
+/// `NotADirectory`, `NotSupported` on a filesystem that cannot keep a file
+/// with no name. Kernels before lane A's of 2026-10-01 refused it.
+pub const SYS_FS_TMPFILE: u64 = 648;
+/// Give the file a handle holds a name: `fs_link_handle(handle, path_ptr,
+/// path_len) -> 0`, Linux's `linkat(fd, "", ..., AT_EMPTY_PATH)`. A file made
+/// by [`SYS_FS_TMPFILE`] without `EXCL` gets its first name; one with a name,
+/// another. `NotFound` for a file deleted while open or made with `EXCL`; the
+/// new name as `SYS_FS_LINK` asks it. Lane A's (1096); a kernel without it
+/// answers `NoSuchSyscall`.
+pub const SYS_FS_LINK_HANDLE: u64 = 1096;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

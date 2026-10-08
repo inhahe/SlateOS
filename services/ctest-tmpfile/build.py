@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Reproducible build recipe for the `ctest-tmpfile` SlateOS fixture.
+
+Produces `ctest-tmpfile.elf`, a native SlateOS (`x86_64-slateos`) binary
+compiled from `main.c` by `zig cc` (clang + musl headers) and linked against
+the posix `libc.a` sysroot with rust-lld. `scripts/create-ext4-rootfs.sh`
+stages it at `/tests/ctest-tmpfile.elf`; running it at boot is the kernel's
+side -- the generic rung asked for in
+`requests/d-a-one-rung-for-every-c-fixture.md`, which runs each fixture
+`services/ctest-generic.list` names. It goes on that list once it has passed
+in a lane D boot, as the list's header requires. It needs `file` (it works in
+`/tmp/ctest-tmpfile`), and a kernel with lane A's `SYS_FS_TMPFILE` as it is
+since 2026-10-01 and `SYS_FS_LINK_HANDLE`.
+
+WHAT IT IS FOR.  `open(dir, O_TMPFILE)` makes a file with no name, which a
+program writes whole and then publishes with `linkat` -- the safe way to
+replace a file. Until 2026-10-07 this library answered `EOPNOTSUPP` for
+`O_TMPFILE` and `ENOENT` for the `linkat`; it asks lane A's calls now
+(`posix/src/file.rs`, `open_tmpfile`, `link_descriptor`). This checks what a
+program sees, which is Linux's: a nameless file that takes writes and is in
+no listing, named by `linkat` with `AT_EMPTY_PATH` and by the
+`/proc/self/fd/N` form, an `O_EXCL` one that can never be named, one closed
+without a name leaving nothing behind, and the refusals. The legend of exit
+codes is at the top of `main.c`; 42 is every check.
+
+The same source compiles and passes on Linux (gcc main.c && ./a.out), which
+is how its expectations were checked to be Linux's -- on Linux before 6.10 an
+ordinary user's `AT_EMPTY_PATH` link is `ENOENT`, which the fixture accepts
+there and names the file through `/proc/self/fd` instead.
+
+Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
+the worktree you are actually working in (`scripts/lib/worktree.sh` says why
+naming another checkout in a command is how a lane builds another lane's
+artifact):
+
+    PYTHONPATH="D:/visual studio projects/fastpy" \\
+        python services/ctest-tmpfile/build.py
+
+The posix sysroot (`libc.a`) must already be built and current.
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+from compiler import toolchain
+
+HERE = Path(__file__).resolve().parent
+OS_ROOT = HERE.parent.parent
+SYSROOT_LIB = OS_ROOT / "toolchain" / "sysroot" / "lib"
+
+
+def main() -> None:
+    zig = toolchain._find_zig_cc()
+    if zig is None:
+        sys.exit(
+            "Cannot find `zig` for the SlateOS C cross-compile. Install zig "
+            "(it bundles clang + musl), put it on PATH, or set FASTPY_ZIG."
+        )
+    if not (SYSROOT_LIB / "libc.a").exists():
+        sys.exit(f"Missing sysroot libc.a in {SYSROOT_LIB}; run toolchain/build-sysroot.ps1")
+
+    obj = HERE / "main.o"
+    cmd = [
+        str(zig), "cc",
+        f"--target={toolchain._SLATEOS_ZIG_TARGET}",
+        "-c", "-O2",
+        "-fno-builtin",           # call the sysroot, don't inline/fold
+        "-mcmodel=large",         # match codegen code-model=large
+        "-fno-pic", "-fno-pie",   # match relocation-model=static
+        "-I", str(OS_ROOT / "posix" / "include"),  # the overlay: what musl's headers lack
+        "-Wall", "-Wextra", "-Werror",
+        str(HERE / "main.c"),
+        "-o", str(obj),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0 or not obj.exists():
+        sys.exit(f"C cross-compile failed:\n{result.stdout}\n{result.stderr}")
+
+    exe = toolchain._link_slateos(
+        [obj],
+        HERE / "ctest-tmpfile.elf",
+        entry="_start",
+        sysroot_lib_dir=SYSROOT_LIB,
+        libs=["c"],
+    )
+    print("OBJ:", obj, obj.stat().st_size)
+    print("EXE:", exe, exe.stat().st_size)
+
+
+if __name__ == "__main__":
+    main()

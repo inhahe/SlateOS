@@ -96,25 +96,15 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         return -1;
     }
 
-    // O_TMPFILE (anonymous, auto-unlinked temp file) is not supported.
-    // Our kernel file handles are path-based: read/write re-resolve the
-    // stored path through the VFS on every call, so a nameless/unlinked
-    // inode cannot be represented or kept alive across operations.  Linux
-    // returns EOPNOTSUPP when O_TMPFILE is used on a filesystem that lacks
-    // support, so we return the same here — a clear, spec-compliant
-    // failure rather than silently opening the *directory* path for I/O
-    // (which is what ignoring the flag would do).  Proper O_TMPFILE needs
-    // kernel orphan-inode support; tracked in todo.txt.
-    if flags & RAW_O_TMPFILE_I32 != 0 {
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
-    }
-
     // Resolve relative paths against CWD and normalize.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
+
+    if flags & RAW_O_TMPFILE_I32 != 0 {
+        return open_tmpfile(resolved.get(..resolved_len).unwrap_or(&[]), flags);
+    }
 
     // `/dev/ptmx` and `/dev/pts/<n>` are handled entirely in libc.  Lane A
     // considered a VFS device-node concept for them and declined it on the
@@ -132,6 +122,59 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         return fd;
     }
     open_resolved(resolved, flags, mode)
+}
+
+/// `open(dir, O_TMPFILE | ...)`: a regular file with no name in the directory
+/// `dir`, which exists only through the descriptor until `linkat` gives it one
+/// ([`linkat`]'s `AT_EMPTY_PATH`) and goes at its last close if it never gets
+/// one -- the way to write a file whole and then publish it in one step, as
+/// Linux's `O_TMPFILE` is.  `O_EXCL` forbids naming it ever (Linux's
+/// `O_TMPFILE | O_EXCL`); the flags were checked by `validate_open_flags`:
+/// `O_DIRECTORY` with it, and an access mode that allows writing.
+///
+/// Through `SYS_FS_TMPFILE` (648), which a kernel answers `NotSupported` on a
+/// filesystem that cannot keep a file with no name -- `EOPNOTSUPP`, as Linux
+/// answers -- and which kernels before lane A's of 2026-10-01 refused, so
+/// that until 2026-10-07 this library answered `EOPNOTSUPP` itself.
+///
+/// Not Linux's: the file's permissions are 0600, as the kernel makes them,
+/// whatever `mode` asks, and `fchmod` cannot change them while the file has
+/// no name -- there is no handle-based `chmod` to ask yet
+/// (`known-issues/D-POSIX-O-TMPFILE-MODE-IS-ALWAYS-0600.md`).
+fn open_tmpfile(dir: &[u8], flags: i32) -> Fd {
+    let native = translate_open_flags(flags & (fcntl::O_ACCMODE | fcntl::O_APPEND | fcntl::O_EXCL));
+    let ret = syscall3(
+        crate::syscall::SYS_FS_TMPFILE,
+        dir.as_ptr() as u64,
+        dir.len() as u64,
+        native,
+    );
+    // A kernel without the call -- or, in the host build, no kernel at all.
+    if ret == crate::errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+    if ret < 0 {
+        return errno::translate(ret) as Fd;
+    }
+    let stored_flags =
+        flags & (fcntl::O_ACCMODE | fcntl::O_APPEND | fcntl::O_NONBLOCK | fcntl::O_SYNC);
+    let kernel_handle = ret as u64;
+    let Some(fd_num) = fdtable::alloc_fd_with_flags(HandleKind::File, kernel_handle, stored_flags)
+    else {
+        // Fd table full: let the file go, as its last close does.
+        let _ = syscall1(SYS_FS_CLOSE, kernel_handle);
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+    if flags & fcntl::O_CLOEXEC != 0 {
+        let _ = fdtable::set_fd_flags(fd_num, fdtable::FD_CLOEXEC);
+    }
+    // No path is stored: the file has none, and the descriptor must not
+    // answer for the directory it was made in.
+    fd_num
 }
 
 /// The kernel's half of [`open`]: `resolved` -- absolute and normalised, as
@@ -4635,16 +4678,31 @@ pub extern "C" fn linkat(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // `linkat` accepts `AT_EMPTY_PATH` — "link the file this fd names, under
-    // whatever name it currently has none of" — but Linux gates it on
-    // `CAP_DAC_READ_SEARCH` and, crucially, reports the *absence* of that
-    // capability as ENOENT rather than EPERM, so an unprivileged caller cannot
-    // tell a missing file from a missing privilege. Measured on 6.6:
-    // `linkat(fd, "", dirfd, "l", AT_EMPTY_PATH)` is ENOENT. Since we do not
-    // implement the privileged form, ENOENT is the whole of the behaviour and
-    // the flag needs no separate branch.
+    // `AT_EMPTY_PATH` with an empty `oldpath`: link the file `olddirfd` is
+    // open on -- an `O_TMPFILE` file's first name ([`link_descriptor`]).
+    if flags & AT_EMPTY_PATH != 0 && path_is_empty(oldpath) {
+        if reject_empty_path(newpath) {
+            return -1;
+        }
+        return link_descriptor(olddirfd, newdirfd, newpath);
+    }
     if reject_empty_path(oldpath) || reject_empty_path(newpath) {
         return -1;
+    }
+    // glibc's documented way to name an `O_TMPFILE` file without
+    // `AT_EMPTY_PATH`: `linkat(AT_FDCWD, "/proc/self/fd/N", ..., newpath,
+    // AT_SYMLINK_FOLLOW)`, following the descriptor's link to the file. The
+    // link is this library's to follow (`crate::fdname`), and where it leads
+    // is the descriptor's file.
+    if flags & AT_SYMLINK_FOLLOW != 0 {
+        let mut old_abs = [0u8; crate::unistd::PATH_MAX];
+        let len = absolute_at(olddirfd, oldpath, &mut old_abs);
+        if len == 0 {
+            return -1;
+        }
+        if let Some(n) = old_abs.get(..len).and_then(crate::fdname::descriptor_of) {
+            return link_descriptor(n, newdirfd, newpath);
+        }
     }
     // The pinned route is the unfollowed form only, and both ends must be
     // pinnable. `AT_SYMLINK_FOLLOW` is checked *here* rather than inside
@@ -4687,6 +4745,89 @@ pub extern "C" fn linkat(
 
     // linkat follows a trailing symlink in oldpath only with AT_SYMLINK_FOLLOW.
     link_ex(old_ptr, new_ptr, flags & AT_SYMLINK_FOLLOW != 0)
+}
+
+/// Whether `path` is a non-null empty C string.
+fn path_is_empty(path: *const u8) -> bool {
+    // SAFETY: a non-null `path` is a C string, `linkat`'s contract; its first
+    // byte is readable.
+    !path.is_null() && unsafe { *path } == 0
+}
+
+/// The absolute, normalised path `path` names relative to `dirfd` (or the
+/// working directory, for `AT_FDCWD` or an absolute `path`), in `out`: its
+/// length, or 0 with `errno` set.
+fn absolute_at(dirfd: i32, path: *const u8, out: &mut [u8; crate::unistd::PATH_MAX]) -> usize {
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return resolve_or_err(path, out).unwrap_or(0);
+    }
+    let mut joined = [0u8; crate::unistd::PATH_MAX];
+    if resolve_dirfd_path(dirfd, path, &mut joined) == 0 {
+        return 0;
+    }
+    resolve_or_err(joined.as_ptr(), out).unwrap_or(0)
+}
+
+/// Give the file descriptor `fd` is open on the name `newpath` (relative to
+/// `newdirfd`): `linkat(fd, "", newdirfd, newpath, AT_EMPTY_PATH)`, and the
+/// `/proc/self/fd/N` form of it. An `O_TMPFILE` file gets its first name and
+/// no longer goes at its last close; a file with a name gets another.
+///
+/// Through lane A's `SYS_FS_LINK_HANDLE` (1096), which asks the new name as
+/// `link` asks it -- write access to its directory, the same filesystem, not
+/// taken -- and answers `NotFound` for a file deleted while open or made with
+/// `O_TMPFILE | O_EXCL`, as Linux answers `ENOENT`. Linux before 6.10 asked
+/// `CAP_DAC_READ_SEARCH` as well, and answered `ENOENT` without it, so an
+/// unprivileged caller could not tell a missing privilege from a missing
+/// file; 6.10 lets a process link a file it opened itself, which every
+/// descriptor here is. A kernel without the call answers `ENOENT`, as this
+/// did for every such link until 2026-10-07.
+fn link_descriptor(fd: i32, newdirfd: i32, newpath: *const u8) -> i32 {
+    // The working directory, or a descriptor that is no file: nothing to link
+    // a name to that the kernel's call can name.
+    let entry = match fdtable::get_fd(fd) {
+        Some(e) if e.kind == HandleKind::File => e,
+        Some(_) => {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        None if fd == AT_FDCWD => {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        None => {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+    };
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = absolute_at(newdirfd, newpath, &mut full);
+    if len == 0 {
+        return -1;
+    }
+    let ret = syscall3(
+        crate::syscall::SYS_FS_LINK_HANDLE,
+        entry.handle,
+        full.as_ptr() as u64,
+        len as u64,
+    );
+    match ret {
+        r if r >= 0 => 0,
+        // A kernel without the call -- or, in the host build, no kernel.
+        r if r == crate::errno::native::NO_SUCH_SYSCALL
+            || (cfg!(not(target_os = "none")) && r == crate::syscall::HOST_ENOSYS) =>
+        {
+            errno::set_errno(errno::ENOENT);
+            -1
+        }
+        // Linux's `EPERM` for a directory and for a filesystem without hard
+        // links; the shared mapping says EISDIR and EOPNOTSUPP.
+        crate::errno::native::IS_A_DIRECTORY | crate::errno::native::NOT_SUPPORTED => {
+            errno::set_errno(errno::EPERM);
+            -1
+        }
+        r => errno::translate(r) as i32,
+    }
 }
 
 /// Change file mode bits relative to a directory fd.
@@ -8126,9 +8267,11 @@ fn openat2_forward_inner(
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    if posix_flags & RAW_O_TMPFILE_I32 != 0 {
-        // Our kernel file handles are path-based, so a nameless inode cannot
-        // be represented.  `open` refuses this for the same reason.
+    // O_TMPFILE under a `RESOLVE_*` restriction would need the kernel's walk
+    // to honour it, which `SYS_FS_TMPFILE` does not take: refused, as a
+    // filesystem that cannot is (EOPNOTSUPP). Without one it is `open`'s,
+    // once the path is resolved below.
+    if posix_flags & RAW_O_TMPFILE_I32 != 0 && k_resolve != 0 {
         errno::set_errno(errno::EOPNOTSUPP);
         return -1;
     }
@@ -8161,6 +8304,12 @@ fn openat2_forward_inner(
         }
         n
     };
+
+    // O_TMPFILE with no `RESOLVE_*` restriction (refused above with one): the
+    // same nameless file `open` makes.
+    if posix_flags & RAW_O_TMPFILE_I32 != 0 {
+        return open_tmpfile(resolved.get(..resolved_len).unwrap_or(&[]), posix_flags);
+    }
 
     // `/dev/ptmx` and `/dev/pts/<n>` are answered inside this libc and do not
     // exist in the kernel's namespace at all.  Forwarding one would come back
@@ -11189,10 +11338,10 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// A *well-formed* O_TMPFILE open is the one we genuinely can't service,
-    /// and it still reports EOPNOTSUPP — that verdict corresponds to
-    /// `do_tmpfile` inside `path_openat`, which upstream reaches only after
-    /// the two EINVALs above.
+    /// A *well-formed* O_TMPFILE open reaches the kernel's `SYS_FS_TMPFILE`;
+    /// the host, which has no kernel, answers as a kernel without the call
+    /// does -- EOPNOTSUPP, the verdict of `do_tmpfile` inside `path_openat`,
+    /// which upstream reaches only after the two EINVALs above.
     #[test]
     fn test_open_wellformed_tmpfile_is_still_eopnotsupp() {
         let path = b"/tmp\0";
@@ -12436,6 +12585,64 @@ mod tests {
             -1
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// `linkat(fd, "", ..., AT_EMPTY_PATH)` links the file the descriptor is
+    /// open on, and so does `/proc/self/fd/N` followed: a descriptor that is
+    /// not open is EBADF; one that is no file (the console) has nothing to
+    /// name, ENOENT; and a file's link reaches the kernel's call -- which the
+    /// host, having no kernel, answers as a kernel without
+    /// `SYS_FS_LINK_HANDLE` does, ENOENT.
+    #[test]
+    fn test_linkat_empty_path_links_the_descriptor() {
+        let new = b"/tmp/linked\0";
+        crate::errno::set_errno(0);
+        assert_eq!(
+            linkat(9999, b"\0".as_ptr(), AT_FDCWD, new.as_ptr(), AT_EMPTY_PATH),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        assert_eq!(
+            linkat(0, b"\0".as_ptr(), AT_FDCWD, new.as_ptr(), AT_EMPTY_PATH),
+            -1
+        );
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOENT,
+            "the console"
+        );
+
+        let fd = fdtable::alloc_fd_with_flags(HandleKind::File, 0x7777, fcntl::O_RDWR)
+            .expect("a free descriptor");
+        crate::errno::set_errno(0);
+        assert_eq!(
+            linkat(fd, b"\0".as_ptr(), AT_FDCWD, new.as_ptr(), AT_EMPTY_PATH),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        let mut proc = std::format!("/proc/self/fd/{fd}").into_bytes();
+        proc.push(0);
+        crate::errno::set_errno(0);
+        assert_eq!(
+            linkat(
+                AT_FDCWD,
+                proc.as_ptr(),
+                AT_FDCWD,
+                new.as_ptr(),
+                AT_SYMLINK_FOLLOW
+            ),
+            -1
+        );
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOENT,
+            "through /proc"
+        );
+        assert!(fdtable::close_fd(fd).is_some());
+
+        assert!(path_is_empty(b"\0".as_ptr()));
+        assert!(!path_is_empty(b"a\0".as_ptr()));
+        assert!(!path_is_empty(core::ptr::null()));
     }
 
     #[test]
@@ -14807,10 +15014,10 @@ mod tests {
 
     #[test]
     fn test_open_o_tmpfile_eopnotsupp() {
-        // O_TMPFILE is unsupported: our kernel file handles are path-based
-        // and cannot represent an anonymous unlinked inode.  open() must
-        // fail cleanly with EOPNOTSUPP (as Linux does on unsupported
-        // filesystems) instead of silently opening the directory path.
+        // O_TMPFILE with no kernel to make the file (the host's case, and a
+        // kernel without SYS_FS_TMPFILE): open() fails cleanly with
+        // EOPNOTSUPP, as Linux does on a filesystem that cannot, instead of
+        // silently opening the directory path.
         crate::errno::set_errno(0);
         let ret = open(
             b"/tmp\0".as_ptr(),

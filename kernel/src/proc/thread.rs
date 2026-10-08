@@ -502,9 +502,34 @@ pub fn spawn_user(
     let info_ptr = Box::into_raw(info) as u64;
 
     // Reuse the existing kernel-mode spawn path with the ring 3
-    // trampoline.  The trampoline does IRETQ to the user entry point.
-    match spawn(pid, name, priority, userspace_entry_trampoline, info_ptr) {
+    // trampoline.  The trampoline does IRETQ to the user entry point. In two
+    // phases: a traced creator's thread is traced too
+    // (`PTRACE_O_TRACECLONE`), before it can run, so its first instruction is
+    // its first stop (`ptrace::attach_new`).
+    match spawn_suspended_with_tls(
+        pid,
+        name,
+        priority,
+        userspace_entry_trampoline,
+        info_ptr,
+        0,
+        0,
+    ) {
         Ok(task_id) => {
+            crate::proc::ptrace::attach_new(
+                sched::current_task_id(),
+                pid,
+                task_id,
+                crate::proc::ptrace::Creation::THREAD,
+                crate::syscall::number::SYS_THREAD_CREATE,
+            );
+            if let Err(e) = admit(pid, task_id) {
+                crate::proc::ptrace::forget_new(task_id);
+                // SAFETY: the task never ran, so the trampoline never took
+                // `info_ptr`, which `Box::into_raw` made above.
+                drop(unsafe { Box::from_raw(info_ptr as *mut UserEntryInfo) });
+                return Err(e);
+            }
             serial_println!(
                 "[thread] Spawned user thread (task {}) in process {}: rip={:#x}, rsp={:#x}",
                 task_id,
@@ -1422,12 +1447,29 @@ pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
 /// 2026-10-08 a group exit ended the calling thread alone: a program whose
 /// other threads were alive at its `exit` -- a worker blocked on a queue, a
 /// pool waiting for work -- never ended.
-pub fn exit_group_current(code: i32) -> ! {
+///
+/// `stop`: the caller's registers and system call, for its tracer's
+/// `PTRACE_EVENT_EXIT` stop, made once the other threads are gone and before
+/// this one goes -- its message the process's status (Linux's
+/// `do_group_exit` and `do_exit`). `None` from a path with no registers to
+/// show.
+pub fn exit_group_current(
+    code: i32,
+    stop: Option<(crate::syscall::linux::LinuxTrapRegs, u64)>,
+) -> ! {
     let task_id = sched::current_task_id();
-    if let Some(pid) = owner_process(task_id)
-        && pcb::begin_group_exit(pid, code)
-    {
-        kill_other_threads(pid, task_id);
+    if let Some(pid) = owner_process(task_id) {
+        if pcb::begin_group_exit(pid, code) {
+            kill_other_threads(pid, task_id);
+        }
+        if let Some((regs, nr)) = stop {
+            // The status the process ends with: this exit's, or an earlier
+            // group exit's or fatal signal's, which stands.
+            #[allow(clippy::cast_sign_loss)]
+            let status =
+                pcb::group_exit_wstatus(pid).map_or(((code & 0xff) << 8) as u64, |w| w as u64);
+            crate::proc::ptrace::exit_stop(regs, nr, status);
+        }
     }
     // A thread with no process is a kernel task: it just ends.
     on_thread_exit(task_id);

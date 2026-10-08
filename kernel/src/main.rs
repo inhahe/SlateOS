@@ -3574,6 +3574,12 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_ptrace(),
     );
+    // ptrace's threads, forks and system-call stops (Tier 2).
+    selftest::dispatch_debug(
+        "Linux ptrace tier 2 (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_ptrace_tier2(),
+    );
 
     // exit_group ends every thread of the process, exit the calling one
     // (crate::proc::thread::exit_group_current), from both threads' side.

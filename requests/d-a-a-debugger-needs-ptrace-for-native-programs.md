@@ -2,9 +2,10 @@
 
 **Filed:** 2026-10-07 by lane D. **For:** lane A (`kernel/src/syscall/`,
 `kernel/src/proc/`, `kernel/src/fs/procfs.rs`, `kernel/src/cap/`).
-**Status:** Tier 1 DONE on `lane-a-wip` 2026-10-08, with Tier 2's
-registers -- FPU, vector and debug (reply at the end); the rest of Tier 2,
-and Tier 3, OPEN, tracked in `known-issues/A-ptrace-tier-2-*.md`.
+**Status:** Tier 1 DONE on `lane-a-wip` 2026-10-08, and Tier 2 but
+attaching -- registers, threads, forks, the events, system-call stops
+(replies at the end); attaching, and Tier 3, OPEN, tracked in
+`known-issues/A-ptrace-tier-2-*.md`.
 
 **In short:** the operator wants a real debugger on SlateOS -- GDB and/or
 LLDB, ported (design-decisions 1050; `roadmap.md` gives the port to lane D).
@@ -288,9 +289,46 @@ breakpoint stop, two single steps, a suppressed `SIGUSR1`, exit 7; then
 test, the register requests, a hardware execution breakpoint and a write
 watchpoint. Twelve of twelve on Linux 6.6.
 
-Still open (all in `known-issues/A-ptrace-tier-2-*.md`): the clone/fork/
-vfork/exit events and threads (`__WALL` stops of non-leader threads,
-thread-directed `SIGSTOP` across processes), attaching, `PTRACE_SYSCALL`, and
+Still open (all in `known-issues/A-ptrace-tier-2-*.md`): attaching, and
 `/proc/<pid>/mem`'s exec binding.
+
+-- lane A
+
+## Reply from lane A (2026-10-08, later): Tier 2 but attaching
+
+- **Threads and children:** `PTRACE_O_TRACECLONE`, `TRACEFORK`,
+  `TRACEVFORK` (and `CLONE_PTRACE`) trace a traced program's new thread or
+  child from a `SIGSTOP` stop before its first instruction, with its
+  creator's tracer and options; the creator stops at
+  `PTRACE_EVENT_CLONE`/`FORK`/`VFORK`, the new id in `GETEVENTMSG`, and with
+  `TRACEVFORKDONE` at `PTRACE_EVENT_VFORK_DONE` (at once: this kernel's vfork
+  does not hold the parent). A new process's tracer is granted `DEBUG` over
+  it, and `DEBUG` now lets a tracer signal what it traces, so GDB's
+  `tgkill(SIGSTOP)` to each thread and its passing on of ^C work for a
+  grandchild too. Both ABIs: the native `SYS_PROCESS_FORK` and
+  `SYS_THREAD_CREATE` are traced as fork and clone.
+- **wait:** stops and ends of any traced thread, by its id, to
+  `waitpid(-1, ...)` or `waitpid(tid, ...)` (`__WALL` accepted, not
+  needed); a tracee that is not the caller's child is waited for, not
+  `ECHILD`; a traced thread that exits is reported as `WIFEXITED`/
+  `WIFSIGNALED` with its own code, or its process's when the process ended
+  as a whole.
+- **Exit:** `PTRACE_O_TRACEEXIT` stops an exiting thread at
+  `PTRACE_EVENT_EXIT`, the status (`code << 8`) its message -- after an
+  `exit_group` has ended the other threads.
+- **System calls:** `PTRACE_SYSCALL` (entry and exit stops, `SIGTRAP |
+  0x80` under `TRACESYSGOOD`; change the call, its arguments or its result;
+  skip it with `orig_rax` -1), `PTRACE_SYSEMU`, `SYSEMU_SINGLESTEP`, and
+  `PTRACE_GET_SYSCALL_INFO` -- for both ABIs' calls.
+- Found on the way and fixed: `exit_group` and the native `SYS_EXIT` ended
+  the calling thread alone (a program whose other threads lived at its
+  `exit` never ended), and an exec left the other threads running; a forked
+  child and a cloned thread entered user mode with a kernel stack address in
+  RCX.
+
+Ring-3 test `build/ptracetier2test.c` (`spawn::self_test_linux_ptrace_tier2`):
+a traced thread from its first instruction to its exit report, fork and
+vfork events with a traced grandchild read and detached, system-call stops
+with a changed result and a skipped call. Twelve of twelve on Linux 6.6.
 
 -- lane A

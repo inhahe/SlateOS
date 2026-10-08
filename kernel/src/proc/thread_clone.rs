@@ -396,9 +396,9 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
 ///
 /// `image_raw` is `Box::into_raw(Box::new([u64; REG_IMAGE_LEN]))`,
 /// constructed by [`clone_thread`].  The trampoline reclaims and
-/// frees the box, installs the new FS base if requested, builds an
-/// IRETQ frame from the register image, and transitions to ring 3
-/// with `RAX = 0`.
+/// frees the box, installs the new FS base if requested, gives a traced
+/// thread its first stop, and enters ring 3 with `RAX = 0`
+/// (`crate::proc::user_entry`).
 ///
 /// # Safety
 ///
@@ -430,48 +430,61 @@ extern "C" fn clone_thread_trampoline(image_raw: u64) {
         unsafe { crate::cpu::wrmsr(IA32_FS_BASE, new_fs) };
     }
 
-    let ptr = regs.as_ptr();
+    // The thread's whole register set: its creator's at the call, with the
+    // call's 0 in RAX and RCX/R11 as a SYSRET from it leaves them -- never the
+    // kernel's own values, which this trampoline used to hand ring 3 in them
+    // (`crate::proc::user_entry`).
+    let [
+        rip,
+        _cs,
+        rflags,
+        rsp,
+        _ss,
+        rdi,
+        rsi,
+        rdx,
+        r10,
+        r8,
+        r9,
+        rbx,
+        rbp,
+        r12,
+        r13,
+        r14,
+        r15,
+        _fs,
+    ] = regs;
+    let mut entry = crate::proc::user_entry::UserEntry {
+        rip,
+        rsp,
+        rflags,
+        rax: 0,
+        rbx,
+        rcx: rip,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        r8,
+        r9,
+        r10,
+        r11: rflags,
+        r12,
+        r13,
+        r14,
+        r15,
+    };
 
-    // Build the IRETQ frame and transition to ring 3.
-    //
-    // SAFETY: The cloned thread shares the parent's address space
-    // (CR3 was carried over when the scheduler dispatched this
-    // thread, since `thread::spawn` plants it in the same process's
-    // PML4).  The IRETQ frame is pushed in canonical order (SS, RSP,
-    // RFLAGS, CS, RIP).  RCX is reserved for the image pointer and
-    // is NOT among the restored registers, so all memory reads
-    // complete before any register restore could clobber it.  RAX is
-    // explicitly zeroed so the cloned thread's userspace observes
-    // a `clone()` return value of 0 (Linux ABI: child returns 0,
-    // parent returns the child TID).
-    unsafe {
-        core::arch::asm!(
-            // Push the IRETQ frame (stack grows down -> reverse order).
-            "mov rax, [rcx + 32]", "push rax", // SS
-            "mov rax, [rcx + 24]", "push rax", // RSP (= child_stack)
-            "mov rax, [rcx + 16]", "push rax", // RFLAGS
-            "mov rax, [rcx + 8]",  "push rax", // CS
-            "mov rax, [rcx + 0]",  "push rax", // RIP
-            // Restore general-purpose registers from the image.
-            "mov rdi, [rcx + 40]",
-            "mov rsi, [rcx + 48]",
-            "mov rdx, [rcx + 56]",
-            "mov r10, [rcx + 64]",
-            "mov r8,  [rcx + 72]",
-            "mov r9,  [rcx + 80]",
-            "mov rbx, [rcx + 88]",
-            "mov rbp, [rcx + 96]",
-            "mov r12, [rcx + 104]",
-            "mov r13, [rcx + 112]",
-            "mov r14, [rcx + 120]",
-            "mov r15, [rcx + 128]",
-            // clone() return value in the cloned thread is 0.
-            "xor rax, rax",
-            "iretq",
-            in("rcx") ptr,
-            options(noreturn),
-        );
-    }
+    // A traced thread's first stop, before its first instruction
+    // (`ptrace::first_entry`): its tracer may change the registers.
+    crate::proc::ptrace::first_entry(&mut entry);
+
+    // SAFETY: the cloned thread shares its creator's address space, which the
+    // scheduler made the active one before dispatching it; RIP is the
+    // creator's own return address and RSP the caller-supplied stack (or a
+    // tracer's, which `ptrace`'s register checks keep to user addresses), and
+    // RFLAGS the creator's own, made safe when the image was built.
+    unsafe { crate::proc::user_entry::enter(&entry) }
 }
 
 // ---------------------------------------------------------------------------
@@ -626,11 +639,23 @@ pub fn clone_thread(
         register_clear_child_tid(task_id, args.child_tid_ptr);
     }
 
+    // A traced creator's thread is traced too, when its tracer asked
+    // (`PTRACE_O_TRACECLONE`, or CLONE_PTRACE): before it can run, so its
+    // first instruction is its first stop.
+    crate::proc::ptrace::attach_new(
+        crate::sched::current_task_id(),
+        parent_pid,
+        task_id,
+        crate::proc::ptrace::Creation::from_clone(args.flags, args.flags & 0xff),
+        frame.syscall_nr,
+    );
+
     // Phase 2: everything the exit path needs is registered — let the child run.
     // On failure `admit` has already unwound the thread registration and
     // destroyed the task, but the ctid entry we just installed is keyed on a
     // task id that will never exit, so drop it here rather than leaking it.
     if let Err(e) = thread::admit(parent_pid, task_id) {
+        crate::proc::ptrace::forget_new(task_id);
         forget_clear_child_tid(task_id);
         // SAFETY: `image_raw` came from `Box::into_raw` above and was not
         // consumed — the task never ran, so the trampoline never freed it.

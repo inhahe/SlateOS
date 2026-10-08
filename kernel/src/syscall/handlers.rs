@@ -479,7 +479,17 @@ pub fn sys_yield(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let exit_code = args.arg0 as i32;
-    crate::proc::thread::exit_group_current(exit_code)
+    crate::proc::thread::exit_group_current(exit_code, None)
+}
+
+/// [`sys_exit`] from the system-call path, the caller's registers in
+/// `frame`: its tracer's `PTRACE_EVENT_EXIT` stop shows them. Never returns.
+pub(crate) fn sys_exit_with_frame(frame: &mut super::entry::SyscallFrame) -> ! {
+    #[allow(clippy::cast_possible_truncation)]
+    let exit_code = frame.arg0 as i32;
+    // `rax` as during any call.
+    let regs = regs_from_syscall_frame(frame, -38);
+    crate::proc::thread::exit_group_current(exit_code, Some((regs, frame.syscall_nr)))
 }
 
 /// Linux `exit` (60): end the calling thread alone -- the rest of its process
@@ -489,12 +499,34 @@ pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_exit_thread(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let exit_code = args.arg0 as i32;
+    exit_thread(exit_code)
+}
+
+/// [`sys_exit_thread`] from the system-call path, the caller's registers in
+/// `frame`: its tracer's `PTRACE_EVENT_EXIT` stop shows them, the code
+/// (`(code & 0xff) << 8`) its message. Never returns.
+pub(crate) fn sys_exit_thread_with_frame(frame: &mut super::entry::SyscallFrame) -> ! {
+    #[allow(clippy::cast_possible_truncation)]
+    let exit_code = frame.arg0 as i32;
+    // `rax` as during any call.
+    let regs = regs_from_syscall_frame(frame, -38);
+    #[allow(clippy::cast_sign_loss)]
+    let status = ((exit_code & 0xff) << 8) as u64;
+    crate::proc::ptrace::exit_stop(regs, frame.syscall_nr, status);
+    exit_thread(exit_code)
+}
+
+/// The body of [`sys_exit_thread`]: the code recorded -- for the process,
+/// and for a tracer that waits for this thread apart from it -- then the
+/// thread gone.
+fn exit_thread(exit_code: i32) -> ! {
     let task_id = sched::current_task_id();
     // A kernel task has no process to give a status to. A process that is
     // gone cannot be told one.
     if let Some(pid) = crate::proc::thread::owner_process(task_id) {
         let _ = crate::proc::pcb::set_thread_exit_code(pid, exit_code);
     }
+    crate::proc::ptrace::note_exit_code(task_id, exit_code);
     // The process becomes a zombie when its last thread has gone.
     crate::proc::thread::on_thread_exit(task_id);
     sched::task_exit()
@@ -8425,7 +8457,17 @@ pub(crate) fn check_signal_target(
             target,
             crate::cap::Rights::DELETE,
         );
-        if !is_parent && !holds_cap {
+        // A debugger may stop and interrupt what it debugs -- GDB stops each
+        // thread with tgkill(SIGSTOP), and passes on the user's ^C -- whether
+        // or not it is the parent (an auto-attached child's tracer is its
+        // grandparent): `DEBUG` (design-decisions 1547).
+        let debugs = pcb::has_capability_for(
+            caller,
+            crate::cap::ResourceType::Process,
+            target,
+            crate::cap::Rights::DEBUG,
+        );
+        if !is_parent && !holds_cap && !debugs {
             return Err(KernelError::PermissionDenied);
         }
     }
@@ -10153,7 +10195,7 @@ pub(crate) struct SyscallExit {
 /// registers, `rax` the value being returned, and `rcx`/`r11` what the
 /// `syscall` instruction left there -- the return address and RFLAGS --
 /// unless a signal return restored real ones into the frame (`exit_full`).
-fn regs_from_syscall_frame(
+pub(crate) fn regs_from_syscall_frame(
     frame: &super::entry::SyscallFrame,
     ret_val: i64,
 ) -> super::linux::LinuxTrapRegs {
@@ -10212,7 +10254,7 @@ pub(crate) fn exec_stop(frame: &mut super::entry::SyscallFrame, nr: u64) -> i64 
 
 /// Make `regs` -- a signal handler's entry state -- what the system call
 /// returns to. (`rax` is the call's return value, which the caller sets.)
-fn regs_into_syscall_frame(
+pub(crate) fn regs_into_syscall_frame(
     frame: &mut super::entry::SyscallFrame,
     regs: &super::linux::LinuxTrapRegs,
 ) {

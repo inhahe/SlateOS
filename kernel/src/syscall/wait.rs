@@ -224,19 +224,35 @@ pub fn scan_once(parent_pid: ProcessId, req: WaitRequest) -> KernelResult<Option
             WaitTarget::Pgid(g) => (None, Some(g)),
             WaitTarget::Any => (None, None),
         };
-        if let Some((id, code)) =
+        if let Some((id, report)) =
             crate::proc::ptrace::take_stop_report(parent_pid, which, pgid, !req.nowait)
         {
+            use crate::proc::ptrace::TraceReport;
+            let event = match report {
+                TraceReport::Stopped(code) => ChildEvent::Traced(code),
+                // A traced thread's own end (`ptrace::on_thread_exit`): its
+                // status, as a process's would read.
+                TraceReport::Exited(status) => ChildEvent::Exited(exit_info_of(status)),
+            };
             return Ok(Some(FoundEvent {
                 pid: id,
                 uid: pcb::process_uid(id).unwrap_or(0),
                 usage: crate::proc::thread::process_usage_both(id),
-                event: ChildEvent::Traced(code),
+                event,
             }));
         }
     }
 
     if let WaitTarget::Pid(child) = req.target {
+        // A tracee that is not the caller's child -- a thread, or a traced
+        // child's own child -- is the tracer's to wait for: nothing to report
+        // yet, so the wait blocks rather than answering ECHILD.
+        if req.classes.traced
+            && crate::proc::ptrace::traces(parent_pid, child)
+            && pcb::parent(child) != Some(parent_pid)
+        {
+            return Ok(None);
+        }
         if req.classes.exited {
             if let Some((info, uid)) = pcb::peek_exit(parent_pid, child)? {
                 // Snapshot usage while the PCB still exists: `try_reap`
@@ -293,10 +309,14 @@ pub fn scan_once(parent_pid: ProcessId, req: WaitRequest) -> KernelResult<Option
             }
             Ok(None) => {}
             Err(e) => {
-                // "No eligible child" from the exit scan. If a job-control
-                // class was also requested, fall through to its scan, which
-                // reaches the same conclusion by the same rule; otherwise
-                // surface ECHILD now.
+                // "No eligible child" from the exit scan -- unless the caller
+                // traces something, which it waits for as for a child. If a
+                // job-control class was also requested, fall through to its
+                // scan, which reaches the same conclusion by the same rule;
+                // otherwise surface ECHILD now.
+                if req.classes.traced && crate::proc::ptrace::has_tracees(parent_pid) {
+                    return Ok(None);
+                }
                 if !want_jc {
                     return Err(e);
                 }
@@ -319,16 +339,34 @@ pub fn scan_once(parent_pid: ProcessId, req: WaitRequest) -> KernelResult<Option
                 !req.nowait,
             ),
         };
-        if let Some((cpid, ev)) = jc? {
-            return Ok(Some(FoundEvent {
-                pid: cpid,
-                uid: pcb::process_uid(cpid).unwrap_or(0),
-                usage: crate::proc::thread::process_usage_both(cpid),
-                event: ChildEvent::JobControl(ev),
-            }));
+        match jc {
+            Ok(Some((cpid, ev))) => {
+                return Ok(Some(FoundEvent {
+                    pid: cpid,
+                    uid: pcb::process_uid(cpid).unwrap_or(0),
+                    usage: crate::proc::thread::process_usage_both(cpid),
+                    event: ChildEvent::JobControl(ev),
+                }));
+            }
+            Ok(None) => {}
+            // No child, but tracees: the tracer's wait goes on.
+            Err(_) if req.classes.traced && crate::proc::ptrace::has_tracees(parent_pid) => {}
+            Err(e) => return Err(e),
         }
     }
     Ok(None)
+}
+
+/// A traced thread's wait status (`ptrace::TraceReport::Exited`) as the
+/// [`ExitInfo`] a process's end is reported from: an exit with its code, or a
+/// death by its signal.
+fn exit_info_of(status: i32) -> ExitInfo {
+    let sig = status & 0x7f;
+    if sig == 0 {
+        ExitInfo::exited(status.wrapping_shr(8) & 0xff)
+    } else {
+        ExitInfo::killed(u8::try_from(sig).unwrap_or(u8::MAX))
+    }
 }
 
 /// What a wait observed. Returned by [`wait_for_child_event`].
@@ -371,13 +409,33 @@ pub fn wait_for_child_event(
             if signal::has_pending_in_mask(parent_pid, deliverable) {
                 return Ok(WaitOutcome::Restart);
             }
-            pcb::set_wait_task(child_pid, task_id)?;
-            if let Some(found) = scan_once(parent_pid, req)? {
+            // A tracee that is not a child has no slot of the caller's on its
+            // record: the tracer waits on its own any-child slot, which every
+            // stop and exit of a tracee wakes (`ptrace`).
+            let any_slot = req.classes.traced
+                && pcb::parent(child_pid) != Some(parent_pid)
+                && crate::proc::ptrace::traces(parent_pid, child_pid);
+            if any_slot {
+                pcb::set_wait_any_task(parent_pid, task_id)?;
+            } else {
+                pcb::set_wait_task(child_pid, task_id)?;
+            }
+            let found = scan_once(parent_pid, req);
+            // The any-child slot is the caller's own: left behind, it would
+            // wake this task for a later report it is no longer waiting for.
+            // (A no-op once a waker has taken it.)
+            if any_slot && !matches!(found, Ok(None)) {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+            }
+            if let Some(found) = found? {
                 return Ok(WaitOutcome::Changed(found));
             }
             signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
             if signal::has_pending_in_mask(parent_pid, deliverable) {
                 signal::deregister_signalfd_waiter(parent_pid, task_id);
+                if any_slot {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                }
                 continue;
             }
             sched::block_current_on(crate::wchan::Wait::new(
@@ -385,6 +443,9 @@ pub fn wait_for_child_event(
                 child_pid,
             ));
             signal::deregister_signalfd_waiter(parent_pid, task_id);
+            if any_slot {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+            }
         }
     } else {
         loop {

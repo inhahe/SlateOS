@@ -49,6 +49,7 @@ pub mod signal;
 pub mod spawn;
 pub mod thread;
 pub mod thread_clone;
+pub mod user_entry;
 
 use crate::error::KernelResult;
 use crate::serial_println;

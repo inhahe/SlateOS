@@ -93,6 +93,9 @@ pub struct ForkCloneTid {
     /// `CLONE_CHILD_SETTID` / `CLONE_CHILD_CLEARTID` target in the
     /// child's address space.
     pub child_tid_ptr: u64,
+    /// How the child was made, for a traced parent's tracer: a fork (the
+    /// default), a vfork, or a clone (`crate::proc::ptrace::attach_new`).
+    pub trace: crate::proc::ptrace::Creation,
 }
 
 /// Heap-boxed image handed to [`fork_child_trampoline`] via
@@ -106,8 +109,8 @@ struct ForkChildImage {
     settid_ptr: u64,
 }
 
-// Byte offsets into the register image, used by the inline-asm
-// trampoline.  Keep these in sync with `build_reg_image`.
+// The register image's slots, which the trampoline takes apart in this
+// order. Keep these in sync with `build_reg_image`.
 //
 // [0]  RIP      [1]  CS       [2]  RFLAGS   [3]  RSP      [4]  SS
 // [5]  RDI      [6]  RSI      [7]  RDX      [8]  R10      [9]  R8
@@ -118,9 +121,9 @@ struct ForkChildImage {
 ///
 /// The child resumes at the same user RIP/RSP/RFLAGS as the parent,
 /// with all general-purpose registers identical *except* RAX, which the
-/// trampoline forces to 0.  RCX and R11 are intentionally omitted: the
-/// `SYSCALL`/`SYSRET` ABI clobbers them, so userspace never relies on
-/// their values after a syscall returns.
+/// trampoline forces to 0.  RCX and R11 are not kept: the
+/// `SYSCALL`/`SYSRET` ABI clobbers them, and the trampoline gives them what a
+/// `SYSRET` from the call leaves -- the return address and the flags.
 ///
 /// `rsp_override` is `None` for a plain `fork()` (the child keeps the
 /// parent's stack pointer in its CoW copy of the stack) and `Some(sp)`
@@ -154,8 +157,8 @@ fn build_reg_image(frame: &SyscallFrame, rsp_override: Option<u64>) -> [u64; REG
 /// `image_raw` is a `Box<[u64; REG_IMAGE_LEN]>` (built by
 /// [`fork_process`]) leaked via [`Box::into_raw`].  The trampoline
 /// reclaims and frees the box, copies the register image onto its own
-/// kernel stack, then builds an `IRETQ` frame and transitions to ring 3
-/// with `RAX = 0`.
+/// kernel stack, gives a traced child its first stop, and enters ring 3 with
+/// `RAX = 0` (`crate::proc::user_entry`).
 ///
 /// This runs on the child thread's freshly allocated kernel stack the
 /// first time the scheduler dispatches it.
@@ -168,7 +171,7 @@ extern "C" fn fork_child_trampoline(image_raw: u64) {
     // `fork_process_clone` for this thread alone.  No other code observes
     // it.
     let boxed = unsafe { Box::from_raw(image_raw as *mut ForkChildImage) };
-    let mut regs: [u64; REG_IMAGE_LEN] = boxed.regs;
+    let regs: [u64; REG_IMAGE_LEN] = boxed.regs;
     let settid_ptr = boxed.settid_ptr;
     drop(boxed); // Free the heap allocation now — IRETQ never returns.
 
@@ -195,6 +198,55 @@ extern "C" fn fork_child_trampoline(image_raw: u64) {
         };
     }
 
+    // The child's whole register set: the parent's at its call, with the
+    // call's 0 in RAX, and RCX and R11 as a SYSRET from the call leaves them
+    // (the return address and the flags) -- never the kernel's own values,
+    // which this trampoline used to hand ring 3 in them
+    // (`crate::proc::user_entry`).
+    let [
+        rip,
+        _cs,
+        rflags,
+        rsp,
+        _ss,
+        rdi,
+        rsi,
+        rdx,
+        r10,
+        r8,
+        r9,
+        rbx,
+        rbp,
+        r12,
+        r13,
+        r14,
+        r15,
+    ] = regs;
+    let mut entry = crate::proc::user_entry::UserEntry {
+        rip,
+        rsp,
+        rflags,
+        rax: 0,
+        rbx,
+        rcx: rip,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        r8,
+        r9,
+        r10,
+        r11: rflags,
+        r12,
+        r13,
+        r14,
+        r15,
+    };
+
+    // A traced child's first stop, before its first instruction
+    // (`ptrace::first_entry`): its tracer may change the registers.
+    crate::proc::ptrace::first_entry(&mut entry);
+
     // The rseq work the child's first dispatch left it owing: it inherited
     // the forking thread's registration (`fork_process_clone_inner`), and its
     // area still holds the parent's `cpu_id`. Last before the IRETQ, with
@@ -203,51 +255,14 @@ extern "C" fn fork_child_trampoline(image_raw: u64) {
     // A SIGSEGV posted for a malformed area waits, like every signal pending
     // at the child's start, for its first return from the kernel: this path
     // delivers none.
-    if let Some(rip) = regs.first_mut() {
-        let _ = crate::rseq::exit_to_user(rip);
-    }
+    let _ = crate::rseq::exit_to_user(&mut entry.rip);
 
-    let ptr = regs.as_ptr();
-
-    // Build the IRETQ frame and transition to ring 3.
-    //
-    // SAFETY: The child's copy-on-write address space is active (the
-    // scheduler switched CR3 to the child's PML4 before dispatching
-    // this thread).  Every byte read here comes from `regs`, a live
-    // stack array; `ptr` is kept in RCX, which is *not* among the
-    // restored registers, so the memory reads complete before any
-    // restore clobbers state.  The IRETQ frame is pushed in the
-    // canonical order (SS, RSP, RFLAGS, CS, RIP) and matches the
-    // selectors loaded into CS/SS.  RAX is zeroed so the child's
-    // userspace observes a `fork()` return value of 0.
-    unsafe {
-        core::arch::asm!(
-            // Push the IRETQ frame (stack grows down → reverse order).
-            "mov rax, [rcx + 32]", "push rax", // SS
-            "mov rax, [rcx + 24]", "push rax", // RSP
-            "mov rax, [rcx + 16]", "push rax", // RFLAGS
-            "mov rax, [rcx + 8]",  "push rax", // CS
-            "mov rax, [rcx + 0]",  "push rax", // RIP
-            // Restore general-purpose registers from the image.
-            "mov rdi, [rcx + 40]",
-            "mov rsi, [rcx + 48]",
-            "mov rdx, [rcx + 56]",
-            "mov r10, [rcx + 64]",
-            "mov r8,  [rcx + 72]",
-            "mov r9,  [rcx + 80]",
-            "mov rbx, [rcx + 88]",
-            "mov rbp, [rcx + 96]",
-            "mov r12, [rcx + 104]",
-            "mov r13, [rcx + 112]",
-            "mov r14, [rcx + 120]",
-            "mov r15, [rcx + 128]",
-            // Child's fork() return value is 0.
-            "xor rax, rax",
-            "iretq",
-            in("rcx") ptr,
-            options(noreturn),
-        );
-    }
+    // SAFETY: the child's copy-on-write address space is active (the
+    // scheduler switched CR3 to the child's PML4 before dispatching this
+    // thread); RIP, RSP and RFLAGS are the parent's own user values from its
+    // system call, or a tracer's, which `ptrace`'s register checks keep to
+    // what a user context may hold.
+    unsafe { crate::proc::user_entry::enter(&entry) }
 }
 
 // ---------------------------------------------------------------------------
@@ -871,8 +886,20 @@ fn fork_process_clone_inner(
                 super::thread_clone::register_clear_child_tid(task_id, clone_tid.child_tid_ptr);
             }
 
+            // A traced parent's child is traced too, when its tracer asked
+            // (`PTRACE_O_TRACEFORK`/`TRACEVFORK`, or CLONE_PTRACE): before it
+            // can run, so its first instruction is its first stop.
+            crate::proc::ptrace::attach_new(
+                crate::sched::current_task_id(),
+                child_pid,
+                task_id,
+                clone_tid.trace,
+                frame.syscall_nr,
+            );
+
             // Phase 2: all exit-path state is registered — let the child run.
             if let Err(e) = thread::admit(child_pid, task_id) {
+                crate::proc::ptrace::forget_new(task_id);
                 super::thread_clone::forget_clear_child_tid(task_id);
                 // SAFETY: `image_raw` came from `Box::into_raw` above and was
                 // not consumed — the task never ran, so the trampoline never

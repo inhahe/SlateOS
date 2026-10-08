@@ -3459,95 +3459,53 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
         user_rsp
     );
 
-    // GDT selectors for ring 3.
-    let user_cs = u64::from(crate::gdt::USER_CS); // 0x23
-    let user_ds = u64::from(crate::gdt::USER_DS); // 0x1B
-
     // RFLAGS: IF=1 (interrupts enabled), reserved bit 1 must be set.
-    // IOPL=0 (no direct I/O port access from ring 3).
-    let rflags: u64 = 0x202;
+    // IOPL=0 (no direct I/O port access from ring 3). Every general register
+    // zero. Two reasons this is required and not hygiene:
+    //
+    //   1. Without it, ring 3 reads kernel register residue at its first
+    //      instruction. Disassembled from the 2026-09-21 release kernel: rbp
+    //      still held a KERNEL STACK ADDRESS (push rbp; mov rbp, rsp with no
+    //      leave before the iretq), and rbx/r8..r15 were untouched by this
+    //      function entirely. That is a kernel-address leak handed to ring 3.
+    //   2. A user stub that sets only the registers it needs still has the
+    //      rest forwarded as syscall arguments. That is how SYS_PROCESS_EXEC
+    //      came to read argv from rdx = 0x1B -- the USER_DS selector this
+    //      function loaded into edx to push as SS -- so it read user address
+    //      27 and returned InvalidAddress (-101) for a perfectly valid ELF
+    //      (known-issues.md 2026-09-21). And rdx = 0x1B is an ABI violation
+    //      in its own right: System V x86-64 says rdx at process entry holds
+    //      a function pointer to register with atexit, or zero -- so zero is
+    //      not merely a defined value for rdx; it is the value the ABI
+    //      specifies.
+    //
+    // Why ZERO, and why that is not a matter of taste: every ring-3 entry
+    // defines this boundary as its own semantics demand. A forked child and a
+    // cloned thread take their creator's registers, because a child inherits;
+    // `sys_process_exec_with_frame_inner` zeroes them before returning to a
+    // new image, because a new image inherits nothing. A fresh spawn -- and a
+    // native thread, which starts at a function of its own -- is the new-image
+    // case. All of them now enter through `crate::proc::user_entry`, which
+    // loads every register from the image.
+    let mut entry = crate::proc::user_entry::UserEntry {
+        rip: entry_rip,
+        rsp: user_rsp,
+        rflags: 0x202,
+        ..crate::proc::user_entry::UserEntry::default()
+    };
 
-    // Transition to ring 3 via IRETQ.
-    //
-    // SAFETY: The user address space has been set up by spawn_process:
-    // - ELF segments are loaded at the correct virtual addresses.
-    // - A user stack is mapped at USER_STACK_TOP.
-    // - The GDT has valid ring 3 code and data descriptors.
-    // - TSS.RSP0 and PER_CPU.kernel_rsp are set by the scheduler
-    //   (do_switch) so that SYSCALL and interrupts from ring 3 will
-    //   use the correct kernel stack.
-    //
-    // The IRETQ pushes are in reverse order because the stack grows
-    // downward.  IRETQ pops: RIP, CS, RFLAGS, RSP, SS.
-    unsafe {
-        core::arch::asm!(
-            "push {ss}",       // SS
-            "push {rsp_val}",  // RSP
-            "push {rflags}",   // RFLAGS
-            "push {cs}",       // CS
-            "push {rip}",      // RIP
-            // Every IRETQ operand is now on the stack, so all GP registers
-            // are dead and may be cleared. Two reasons this is required and
-            // not hygiene:
-            //
-            //   1. Without it, ring 3 reads kernel register residue at its
-            //      first instruction. Disassembled from the 2026-09-21
-            //      release kernel: rbp still holds a KERNEL STACK ADDRESS
-            //      (push rbp; mov rbp, rsp with no leave before the iretq),
-            //      and rbx/r8..r15 are untouched by this function entirely.
-            //      That is a kernel-address leak handed to ring 3.
-            //   2. A user stub that sets only the registers it needs still
-            //      has the rest forwarded as syscall arguments. That is how
-            //      SYS_PROCESS_EXEC came to read argv from rdx = 0x1B --
-            //      the USER_DS selector this very function loads into edx
-            //      to push as SS -- so it read user address 27
-            //   3. And rdx=0x1B is an ABI VIOLATION in its own right.
-            //      System V x86-64 says rdx at process entry holds a
-            //      function pointer to register with atexit, or zero.
-            //      0x1B is neither. It is harmless here only because
-            //      our __libc_start_main names that parameter
-            //      `_rtld_fini` and never calls it -- a conforming
-            //      runtime would call (*rtld_fini)() at exit and jump
-            //      to address 27. So zero is not merely A defined
-            //      value for rdx; it is THE value the ABI specifies.
-            //      and return InvalidAddress (-101) for a perfectly valid
-            //      ELF -- see known-issues.md 2026-09-21.
-            //
-            // Why ZERO, and why that is not a matter of taste: all four
-            // ring-3 entries define this boundary in the way their own
-            // semantics demand. `fork.rs` and `thread_clone.rs` RESTORE the
-            // saved set, because a child inherits. And
-            // `sys_process_exec_with_frame_inner` ZEROES arg0..arg5, rbx,
-            // rbp and r12..r15 before returning to a new image, because a
-            // new image inherits nothing. Fresh spawn is that same
-            // new-image case, and was the only one defining nothing.
-            // rsp is deliberately untouched -- IRETQ
-            // pops its frame from it. 32-bit `xor` zero-extends, clearing
-            // the full 64-bit register in a shorter encoding.
-            "xor eax, eax",
-            "xor ebx, ebx",
-            "xor ecx, ecx",
-            "xor edx, edx",
-            "xor esi, esi",
-            "xor edi, edi",
-            "xor ebp, ebp",
-            "xor r8d, r8d",
-            "xor r9d, r9d",
-            "xor r10d, r10d",
-            "xor r11d, r11d",
-            "xor r12d, r12d",
-            "xor r13d, r13d",
-            "xor r14d, r14d",
-            "xor r15d, r15d",
-            "iretq",
-            ss = in(reg) user_ds,
-            rsp_val = in(reg) user_rsp,
-            rflags = in(reg) rflags,
-            cs = in(reg) user_cs,
-            rip = in(reg) entry_rip,
-            options(noreturn),
-        );
-    }
+    // A traced thread's first stop, before its first instruction -- a native
+    // thread its traced creator made (`ptrace::first_entry`).
+    crate::proc::ptrace::first_entry(&mut entry);
+
+    // SAFETY: The user address space has been set up by spawn_process (or
+    // the creating process, for a thread): its code is mapped at the entry
+    // point and its stack at the stack pointer, both user addresses -- or a
+    // tracer's, which `ptrace`'s register checks keep to user addresses; the
+    // GDT has valid ring 3 descriptors; and TSS.RSP0 and PER_CPU.kernel_rsp
+    // are set by the scheduler, so SYSCALL and interrupts from ring 3 use the
+    // right kernel stack.
+    unsafe { crate::proc::user_entry::enter(&entry) }
 }
 
 // ---------------------------------------------------------------------------
@@ -23897,6 +23855,128 @@ pub fn self_test_linux_exec_threads() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux exec with threads (ring 3: an exec from either thread, the other \
          spinning or waiting, ends it first): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of ptrace's threads, forks and system-call stops through the
+/// Linux ABI: [`elf::build_linux_ptrace_tier2_test_elf`]
+/// (`build/ptracetier2test.c`). A traced child's thread is traced from its
+/// first instruction (`PTRACE_EVENT_CLONE`, a `SIGSTOP` start), stopped by a
+/// `tgkill`, an `int3` and its exit (`PTRACE_EVENT_EXIT`), and reported as it
+/// exits; a fork and a vfork make their events (`VFORK_DONE` too) and a
+/// traced grandchild the tracer reads and detaches; `PTRACE_SYSCALL` stops at
+/// a call's entry and exit, with `PTRACE_GET_SYSCALL_INFO`, a changed result
+/// and a skipped call (`crate::proc::ptrace`, design-decisions 1547).
+pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux ptrace tier 2 (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_ptrace_tier2_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-ptrace-tier2"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-ptrace-tier2",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ptrace tier 2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ptrace tier 2 (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "a child's PTRACE_TRACEME failed",
+            Some(0x31) => "mmap of a thread stack failed",
+            Some(0x32) => "the traced child's clone failed",
+            Some(0x33 | 0x34) => "a traced child's own fork/vfork or wait for it failed",
+            Some(0x35) => "the system-call child did not see 12345 and 777",
+            Some(0x40 | 0x41) => "the thread child did not stop for its SIGSTOP",
+            Some(0x42 | 0x43) => "SETOPTIONS(TRACECLONE|TRACEEXIT) or CONT failed",
+            Some(0x44..=0x4b) => {
+                "the clone was not a PTRACE_EVENT_CLONE stop naming the thread, with the thread \
+                 starting in a SIGSTOP stop of its own (rax 0)"
+            }
+            Some(0x4c | 0x4d) => "CONT of the child or its thread failed",
+            Some(0x4e | 0x4f) => "a tgkill'd SIGSTOP did not stop the traced thread",
+            Some(0x50..=0x53) => "POKEDATA, or the thread's int3 stop, failed",
+            Some(0x54 | 0x55) => "the thread's exit did not stop at PTRACE_EVENT_EXIT (0x400)",
+            Some(0x56 | 0x57) => "the thread's exit was not reported to its tracer as WIFEXITED 4",
+            Some(0x5c | 0x5d) => "the first thread's own SIGSTOP did not stop it",
+            Some(0x58 | 0x59) => "exit_group did not stop at PTRACE_EVENT_EXIT (0x900)",
+            Some(0x5a | 0x5b) => "the thread child did not end 9",
+            Some(0x60..=0x63) => "the fork child's start, SETOPTIONS(TRACEFORK) or CONT failed",
+            Some(0x64 | 0x65) => "the fork was not a PTRACE_EVENT_FORK stop naming the grandchild",
+            Some(0x66 | 0x67) => {
+                "the grandchild did not start in a SIGSTOP stop, or its memory could not be read"
+            }
+            Some(0x68) => "DETACH of the grandchild failed",
+            Some(0x69 | 0x6a) => "the fork child did not end 0x15 (its grandchild's 5)",
+            Some(0x70..=0x73) => "the vfork child's start, SETOPTIONS or CONT failed",
+            Some(0x74 | 0x75) => {
+                "the vfork was not a PTRACE_EVENT_VFORK stop naming the grandchild"
+            }
+            Some(0x76 | 0x77) => "the vfork grandchild did not start stopped, or DETACH failed",
+            Some(0x78..=0x7a) => "no PTRACE_EVENT_VFORK_DONE stop naming the grandchild",
+            Some(0x7b | 0x7c) => "the vfork child did not end 0x16 (its grandchild's 6)",
+            Some(0x80..=0x83) => {
+                "the system-call child's start, SETOPTIONS or PTRACE_SYSCALL failed"
+            }
+            Some(0x84..=0x89) => {
+                "getpid's entry stop was not SIGTRAP|0x80 with orig_rax 39, rax -ENOSYS and \
+                 PTRACE_GET_SYSCALL_INFO's op 1"
+            }
+            Some(0x8a..=0x8f) => {
+                "getpid's exit stop was not op 2 with the pid, or its result could not be changed"
+            }
+            Some(0x90..=0x96) => {
+                "write(-1) could not be skipped at its entry with 777, its exit stopped at"
+            }
+            Some(0x97 | 0x98) => "the system-call child did not end 0x2B",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ptrace tier 2 (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux ptrace tier 2 (ring 3: a traced thread from its first instruction, its \
+         tgkill, int3 and exit stops and its exit report; fork and vfork events and a traced \
+         grandchild; system-call entry and exit stops, a changed result, a skipped call): OK"
     );
     Ok(())
 }

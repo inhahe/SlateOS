@@ -5059,6 +5059,20 @@ impl Process {
     }
 }
 
+/// The wait status of process `pid`'s end as a whole -- a group exit, a fatal
+/// signal, a crash ([`begin_group_exit`]) -- or `None` while none has begun:
+/// what a thread of it reports when it is waited for apart from its process
+/// (`crate::proc::ptrace`), as Linux's `wait_task_zombie` reports the group's
+/// code for a thread of a process exiting as a whole.
+#[must_use]
+pub fn group_exit_wstatus(pid: ProcessId) -> Option<i32> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .filter(|p| p.group_exit)
+        .map(|p| p.exit_info().to_wstatus())
+}
+
 /// How process `pid` ended, if it has: its exit code, crash and terminating
 /// signal together (`None` for no such process). For reports made while the
 /// process is still in the table, such as the parent's `SIGCHLD`.

@@ -381,6 +381,9 @@ pub mod si_code {
     /// kernel writes none today, so nothing reports it yet; it is here so that
     /// a status word with the core bit set has a code to map to.
     pub const CLD_DUMPED: i32 = 3;
+    /// `SIGCHLD`: a tracee stopped for its tracer (`si_status` the stop's
+    /// signal) -- `crate::proc::ptrace`.
+    pub const CLD_TRAPPED: i32 = 4;
     /// `SIGCHLD`: child stopped (`si_status` is the stop signal).
     pub const CLD_STOPPED: i32 = 5;
     /// `SIGCHLD`: a stopped child continued (`si_status` is `SIGCONT`).

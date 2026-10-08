@@ -393,15 +393,32 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
 /// The body of [`syscall_handler_inner`]: run the call `f` describes and
 /// deliver a signal pending on its way out. Returns the value for RAX.
 fn handle_syscall(f: &mut SyscallFrame) -> i64 {
+    // A traced thread's entry stop (`ptrace::syscall_entry`): a call its
+    // tracer says to skip returns what it left in `rax`, makes its exit stop
+    // and takes the way out any call takes.
+    if let Some(skipped) = crate::proc::ptrace::syscall_entry(f) {
+        let mut ret = skipped;
+        crate::proc::ptrace::syscall_exit(f, &mut ret);
+        if super::handlers::deliver_pending_signal(f, &mut ret) {
+            return 0;
+        }
+        return super::linux::resolve_syscall_restart(f, ret);
+    }
+
     // Check for syscalls that need to modify the frame directly
     // (they change RIP/RSP rather than just returning a value).
     if f.syscall_nr == super::number::SYS_PROCESS_EXEC {
-        return super::handlers::sys_process_exec_with_frame(f);
+        let mut ret = super::handlers::sys_process_exec_with_frame(f);
+        crate::proc::ptrace::syscall_exit(f, &mut ret);
+        return ret;
     }
     if f.syscall_nr == super::number::SYS_PROCESS_FORK {
         // fork only *reads* the parent frame to snapshot the child's
-        // resume state; the parent returns the child PID normally.
-        return super::handlers::sys_process_fork_with_frame(f);
+        // resume state; the parent returns the child PID normally -- after
+        // its tracer's fork event, when it has one (`ptrace::syscall_exit`).
+        let mut ret = super::handlers::sys_process_fork_with_frame(f);
+        crate::proc::ptrace::syscall_exit(f, &mut ret);
+        return ret;
     }
     if f.syscall_nr == super::number::SYS_EXCEPTION_RETURN {
         return super::handlers::sys_exception_return_with_frame(f);
@@ -447,6 +464,7 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
 
     if abi_mode == crate::proc::pcb::AbiMode::Linux {
         if let Some(mut rax) = super::linux::dispatch_linux_with_frame(f) {
+            crate::proc::ptrace::syscall_exit(f, &mut rax);
             // Same signal-delivery hook as the regular return path —
             // ensures pending signals can interrupt around an execve
             // boundary, exactly as in native sys_process_exec_with_frame.
@@ -455,6 +473,9 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
             }
             return rax;
         }
+    } else if f.syscall_nr == super::number::SYS_EXIT {
+        // The native exit, with the registers its tracer's exit stop shows.
+        super::handlers::sys_exit_with_frame(f);
     }
 
     let result = match abi_mode {
@@ -471,6 +492,8 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
     // path (rewind-to-restart or convert-to-EINTR baked into the saved
     // context), so we just return.
     let mut ret = result.value;
+    // A traced thread's creation event and exit stop (`ptrace::syscall_exit`).
+    crate::proc::ptrace::syscall_exit(f, &mut ret);
     if super::handlers::deliver_pending_signal(f, &mut ret) {
         return 0;
     }

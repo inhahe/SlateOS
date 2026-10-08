@@ -1776,6 +1776,9 @@ pub fn dispatch_linux_with_frame(frame: &mut crate::syscall::entry::SyscallFrame
         nr::EXECVEAT => Some(linux_execveat(frame)),
         nr::RT_SIGRETURN => Some(linux_rt_sigreturn(frame)),
         nr::SIGALTSTACK => Some(linux_sys_sigaltstack(frame)),
+        // The registers a tracer's exit stop shows (`ptrace::exit_stop`).
+        nr::EXIT => handlers::sys_exit_thread_with_frame(frame),
+        nr::EXIT_GROUP => handlers::sys_exit_with_frame(frame),
         _ => None,
     }
 }
@@ -2717,7 +2720,19 @@ pub fn force_sigsegv(pid: pcb::ProcessId, sig: u32) -> bool {
 /// against a plain fork.  We pay the CoW page table walk vfork was
 /// trying to avoid, but the program behaves the same.
 fn linux_fork(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
-    linux_fork_common(frame, crate::proc::fork::ForkCloneTid::default())
+    // A vfork is a vfork to its tracer (`PTRACE_EVENT_VFORK`).
+    let trace = if frame.syscall_nr == nr::VFORK {
+        crate::proc::ptrace::Creation::VFORK
+    } else {
+        crate::proc::ptrace::Creation::FORK
+    };
+    linux_fork_common(
+        frame,
+        crate::proc::fork::ForkCloneTid {
+            trace,
+            ..crate::proc::fork::ForkCloneTid::default()
+        },
+    )
 }
 
 /// Shared fork body for `linux_fork` (plain `FORK`/`VFORK`) and the
@@ -2818,13 +2833,11 @@ fn linux_clone_inner(
         // CLONE_VFORK on a thread-creation clone is nonsensical — the
         // new "child" shares the address space, so blocking the
         // parent until the child execs/exits is meaningless.  Reject
-        // unambiguously.  CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
-        // need infrastructure (PID reparenting, mount namespaces,
-        // ptrace lineage) we don't have yet.
-        const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK
-            | clone_flags::CLONE_PARENT
-            | clone_flags::CLONE_NEWNS
-            | clone_flags::CLONE_PTRACE;
+        // unambiguously.  CLONE_PARENT / CLONE_NEWNS need
+        // infrastructure (PID reparenting, mount namespaces) we don't
+        // have yet. (CLONE_PTRACE is honoured: `ptrace::attach_new`.)
+        const UNSUPPORTED_BITS: u64 =
+            clone_flags::CLONE_VFORK | clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS;
         if (flags & UNSUPPORTED_BITS) != 0 {
             return -i64::from(errno::ENOSYS);
         }
@@ -2893,8 +2906,7 @@ fn linux_clone_inner(
             | clone_flags::CLONE_SYSVSEM
             | clone_flags::CLONE_SETTLS
             | clone_flags::CLONE_PARENT
-            | clone_flags::CLONE_NEWNS
-            | clone_flags::CLONE_PTRACE;
+            | clone_flags::CLONE_NEWNS;
         if flags & VFORK_REJECTED_BITS != 0 {
             return -i64::from(errno::ENOSYS);
         }
@@ -2909,6 +2921,7 @@ fn linux_clone_inner(
             flags,
             parent_tid_ptr,
             child_tid_ptr,
+            trace: crate::proc::ptrace::Creation::from_clone(flags, flags & 0xff),
         };
         return match crate::proc::fork::fork_process_vfork(
             parent_pid,
@@ -2961,11 +2974,10 @@ fn linux_clone_inner(
         return -i64::from(errno::ENOSYS);
     }
 
-    // CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE need infrastructure
-    // we don't have (PID reparenting, mount namespaces, ptrace
-    // lineage) — reject up-front.
-    const UNSUPPORTED_BITS: u64 =
-        clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS | clone_flags::CLONE_PTRACE;
+    // CLONE_PARENT / CLONE_NEWNS need infrastructure we don't have (PID
+    // reparenting, mount namespaces) — reject up-front. (CLONE_PTRACE is
+    // honoured: `ptrace::attach_new`.)
+    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS;
     if flags & UNSUPPORTED_BITS != 0 {
         return -i64::from(errno::ENOSYS);
     }
@@ -2996,6 +3008,7 @@ fn linux_clone_inner(
         flags,
         parent_tid_ptr,
         child_tid_ptr,
+        trace: crate::proc::ptrace::Creation::from_clone(flags, flags & 0xff),
     };
     linux_fork_common(frame, clone_tid)
 }

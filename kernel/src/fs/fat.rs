@@ -5659,6 +5659,7 @@ pub fn self_test() -> KernelResult<()> {
                 EntryKind::Directory => '5',
                 EntryKind::File => '0',
                 EntryKind::Symlink => '2',
+                EntryKind::Fifo => '6',
                 EntryKind::Other(b) => b as char,
             };
             crate::serial_println!(

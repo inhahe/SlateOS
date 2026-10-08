@@ -135095,6 +135095,7 @@ fn cmd_tar(args: &str) {
                 let type_ch = match entry.kind {
                     crate::fs::tar::EntryKind::Directory => 'd',
                     crate::fs::tar::EntryKind::Symlink => 'l',
+                    crate::fs::tar::EntryKind::Fifo => 'p',
                     _ => '-',
                 };
                 if verbose {
@@ -135158,6 +135159,26 @@ fn cmd_tar(args: &str) {
                                 out_path.display(),
                                 entry.link_target.display()
                             );
+                        }
+                    }
+                    crate::fs::tar::EntryKind::Fifo => {
+                        if let Some(parent) = out_path.parent()
+                            && !parent.is_empty()
+                        {
+                            // Best-effort, as for a file: a failure surfaces
+                            // as the mkfifo error below.
+                            let _ = Vfs::mkdir_all(parent);
+                        }
+                        let mode = u16::try_from(entry.mode & 0o7777).unwrap_or(0o600);
+                        match Vfs::mknod_fifo(&out_path, mode) {
+                            Ok(_) | Err(crate::error::KernelError::AlreadyExists) => {}
+                            Err(e) => {
+                                shell_println!("tar: mkfifo '{}': {:?}", out_path.display(), e);
+                                set_exit(1);
+                            }
+                        }
+                        if verbose {
+                            shell_println!("x {} (named pipe)", out_path.display());
                         }
                     }
                     crate::fs::tar::EntryKind::Other(t) => {

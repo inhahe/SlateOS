@@ -61,6 +61,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::ProcessId;
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -736,7 +737,11 @@ struct SignalState {
     /// [`on_thread_exit`]. A thread's blocked mask is its own (Linux:
     /// `sigprocmask` and `pthread_sigmask` are both per thread), inherited
     /// from the thread that created it.
-    threads: BTreeMap<TaskId, ThreadSignals>,
+    ///
+    /// Boxed, as [`SIGNAL_STATES`]' values are, for the same reason: a
+    /// `ThreadSignals` is over 2 KiB, and a map that holds its values inline
+    /// moves each one through every level of an insert.
+    threads: BTreeMap<TaskId, Box<ThreadSignals>>,
     /// Userspace trampoline address (0 = not registered).
     trampoline: u64,
     /// The trampoline asked for the extended frame -- the context and then
@@ -891,7 +896,7 @@ impl SignalState {
     /// thread without one, or a caller from outside the process -- the
     /// template.
     fn thread(&self, tid: TaskId) -> &ThreadSignals {
-        self.threads.get(&tid).unwrap_or(&self.template)
+        self.threads.get(&tid).map_or(&self.template, Box::as_ref)
     }
 
     /// [`Self::thread`], to change.
@@ -931,7 +936,17 @@ impl SignalState {
 }
 
 /// All per-process signal state, keyed by process ID.
-static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, SignalState>> = Mutex::new(BTreeMap::new());
+///
+/// **Boxed.** A `SignalState` is over 4 KiB -- two [`PendingSet`]s, each a
+/// record per signal -- and a `BTreeMap` holding values inline passes the
+/// value by value through every level of an insert (`insert`, `entry`,
+/// `insert_recursing`, `split`, `slice_insert`), each frame with its own copy
+/// in a debug build: 55 KiB of kernel stack for one insert. `fork` inserts the
+/// child's state with a syscall's frames already below it, and on 2026-10-08
+/// that overran the 64 KiB kernel stack -- a double fault in `slice_insert`
+/// under `inherit_for_fork`, the first time `ctest-coreutils-runs` forked.
+/// Boxed, an insert moves a pointer.
+static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, Box<SignalState>>> = Mutex::new(BTreeMap::new());
 
 /// Count of pending signals across all processes.
 ///
@@ -990,7 +1005,7 @@ static SIGNALFD_WAITERS: Mutex<BTreeMap<ProcessId, Vec<SignalFdWaiter>>> =
 
 /// Run `f` with the [`SIGNAL_STATES`] lock held and interrupts disabled.
 #[inline]
-fn with_states<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, SignalState>) -> R) -> R {
+fn with_states<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, Box<SignalState>>) -> R) -> R {
     crate::cpu::without_interrupts(|| {
         let mut states = SIGNAL_STATES.lock();
         f(&mut states)
@@ -1467,7 +1482,12 @@ pub fn on_exec(pid: ProcessId) {
             }
             state.threads.clear();
             let blocked = mine.as_ref().map_or(state.template.blocked, |t| t.blocked);
-            state.template = ThreadSignals::new(blocked, AltStack::DISABLED);
+            // The template's `pending` is always empty, so this is all of a
+            // fresh `ThreadSignals::new(blocked, AltStack::DISABLED)`, without
+            // one on the stack.
+            state.template.blocked = blocked;
+            state.template.saved_sigmask = None;
+            state.template.altstack = AltStack::DISABLED;
             if let Some(mut t) = mine {
                 t.altstack = AltStack::DISABLED;
                 t.saved_sigmask = None;
@@ -1492,35 +1512,34 @@ pub fn on_exec(pid: ProcessId) {
 /// child is freshly created, so there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
     let me = sched::current_task_id();
+    // Made on the heap before the lock, and filled in there: a `SignalState`
+    // built on the stack and moved into the map is the 4 KiB copy the map's
+    // boxing exists to avoid (see `SIGNAL_STATES`).
+    let mut inherited = Box::<SignalState>::default();
     with_states(|states| {
         // What the child takes from the parent; everything else starts empty
         // -- the pending sets and the timer queue among them (the parent's
         // POSIX timers are not inherited either, so nothing of theirs belongs
         // here).
-        let inherited = states
-            .get(&parent)
-            .map(|s| {
-                let t = s.thread(me);
-                SignalState {
-                    // Inherited, per sigaltstack(2): "a child created via
-                    // fork(2) inherits a copy of its parent's alternate signal
-                    // stack settings". The child's CoW-copied stack lives at the
-                    // same user address, exactly as the trampoline does. (Not
-                    // preserved across execve -- see `on_exec`.)
-                    template: ThreadSignals::new(t.blocked, t.altstack),
-                    trampoline: s.trampoline,
-                    // The trampoline's frame goes with it.
-                    extended_frame: s.extended_frame,
-                    onstack_mask: s.onstack_mask,
-                    // A forked child has its parent's dispositions -- its
-                    // libc's table is a copy of the parent's memory -- so the
-                    // kernel's part of them is copied too.
-                    ignored: s.ignored,
-                    nocldwait: s.nocldwait,
-                    ..SignalState::default()
-                }
-            })
-            .unwrap_or_default();
+        if let Some(s) = states.get(&parent) {
+            let t = s.thread(me);
+            // Inherited, per sigaltstack(2): "a child created via fork(2)
+            // inherits a copy of its parent's alternate signal stack
+            // settings". The child's CoW-copied stack lives at the same user
+            // address, exactly as the trampoline does. (Not preserved across
+            // execve -- see `on_exec`.)
+            inherited.template.blocked = t.blocked;
+            inherited.template.altstack = t.altstack;
+            inherited.trampoline = s.trampoline;
+            // The trampoline's frame goes with it.
+            inherited.extended_frame = s.extended_frame;
+            inherited.onstack_mask = s.onstack_mask;
+            // A forked child has its parent's dispositions -- its libc's
+            // table is a copy of the parent's memory -- so the kernel's part
+            // of them is copied too.
+            inherited.ignored = s.ignored;
+            inherited.nocldwait = s.nocldwait;
+        }
         // If the child somehow already had pending signals recorded, drop
         // them from the global counter before overwriting.
         if let Some(existing) = states.get(&child) {
@@ -1551,6 +1570,8 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
 /// recorded for `child` is replaced.
 pub fn start_spawned(parent: ProcessId, child: ProcessId, sigmask: Option<u64>, sigdefault: u64) {
     let me = sched::current_task_id();
+    // On the heap from the start, as `inherit_for_fork`'s is.
+    let mut started = Box::<SignalState>::default();
     with_states(|states| {
         let (parent_blocked, parent_ignored) = if parent == 0 {
             (0, 0)
@@ -1565,17 +1586,9 @@ pub fn start_spawned(parent: ProcessId, child: ProcessId, sigmask: Option<u64>, 
                 PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
             }
         }
-        states.insert(
-            child,
-            SignalState {
-                template: ThreadSignals::new(
-                    sigmask.unwrap_or(parent_blocked) & !uncatchable_mask(),
-                    AltStack::DISABLED,
-                ),
-                ignored: parent_ignored & !sigdefault,
-                ..SignalState::default()
-            },
-        );
+        started.template.blocked = sigmask.unwrap_or(parent_blocked) & !uncatchable_mask();
+        started.ignored = parent_ignored & !sigdefault;
+        states.insert(child, started);
     });
 }
 
@@ -1590,14 +1603,17 @@ pub fn start_spawned(parent: ProcessId, child: ProcessId, sigmask: Option<u64>, 
 /// forked child's is its parent's.
 pub fn on_thread_start(pid: ProcessId, tid: TaskId) {
     let creator = sched::current_task_id();
+    // On the heap before the lock, and filled in under it (see
+    // `SIGNAL_STATES` for why the map holds boxes).
+    let mut thread = Box::new(ThreadSignals::new(0, AltStack::DISABLED));
     with_states(|states| {
         let state = states.entry(pid).or_default();
         let first = state.threads.is_empty();
         let from_creator = state.threads.get(&creator).map(|t| t.blocked);
-        let thread = match from_creator {
-            Some(blocked) => ThreadSignals::new(blocked, AltStack::DISABLED),
-            None if first => ThreadSignals::new(state.template.blocked, state.template.altstack),
-            None => ThreadSignals::new(state.template.blocked, AltStack::DISABLED),
+        (thread.blocked, thread.altstack) = match from_creator {
+            Some(blocked) => (blocked, AltStack::DISABLED),
+            None if first => (state.template.blocked, state.template.altstack),
+            None => (state.template.blocked, AltStack::DISABLED),
         };
         state.threads.entry(tid).or_insert(thread);
     });
@@ -1728,7 +1744,7 @@ pub struct SignalSets {
 pub fn sets(pid: ProcessId) -> SignalSets {
     with_states(|states| {
         states.get(&pid).map_or_else(SignalSets::default, |s| {
-            let main = s.threads.values().next().unwrap_or(&s.template);
+            let main = s.threads.values().next().map_or(&s.template, Box::as_ref);
             SignalSets {
                 pending: s.shared.bits,
                 thread_pending: main.pending.bits,
@@ -1993,7 +2009,10 @@ pub fn set_thread_pending_info(pid: ProcessId, tid: TaskId, sig: u32, info: SigI
         if !state.threads.contains_key(&tid) {
             // A thread that started before its state could be made (none
             // should): from the template, as `on_thread_start` would have.
-            let t = ThreadSignals::new(state.template.blocked, AltStack::DISABLED);
+            let t = Box::new(ThreadSignals::new(
+                state.template.blocked,
+                AltStack::DISABLED,
+            ));
             state.threads.insert(tid, t);
         }
         state
@@ -2053,7 +2072,7 @@ pub fn clear_pending(pid: ProcessId, mask: u64) {
                 threads,
                 timer_queue,
                 ..
-            } = state;
+            } = &mut **state;
             drop_records(shared, mask);
             for t in threads.values_mut() {
                 drop_records(&mut t.pending, mask);
@@ -2451,7 +2470,7 @@ pub(crate) fn take_deliverable_info_as(pid: ProcessId, me: TaskId) -> Option<(u3
                 timer_queue,
                 ignored,
                 ..
-            } = state;
+            } = &mut **state;
             let ignored = if keep_ignored { 0 } else { *ignored };
             let mut mine = threads.get_mut(&me);
             let blocked = mine.as_ref().map_or(template.blocked, |t| t.blocked);
@@ -2557,7 +2576,7 @@ pub(crate) fn take_pending_info_in_mask_as(
                 threads,
                 timer_queue,
                 ..
-            } = state;
+            } = &mut **state;
             let mine = threads.get_mut(&me);
             let own = mine.as_ref().map_or(0, |t| t.pending.bits) & mask;
             let (set, target, eligible) = match mine {
@@ -2730,7 +2749,7 @@ pub fn remove_timer_signal(pid: ProcessId, timer_id: i32) -> bool {
                 threads,
                 timer_queue,
                 ..
-            } = state;
+            } = &mut **state;
             match q.target {
                 Some(tid) => {
                     if let Some(t) = threads.get_mut(&tid) {
@@ -2917,7 +2936,7 @@ fn test_per_thread_state() -> KernelResult<()> {
         if let Some(s) = st.get_mut(&p) {
             let m = s.thread(t1).blocked;
             s.threads
-                .insert(0x7A3, ThreadSignals::new(m, AltStack::DISABLED));
+                .insert(0x7A3, Box::new(ThreadSignals::new(m, AltStack::DISABLED)));
         }
     });
     check(
@@ -3084,7 +3103,7 @@ fn test_linux_altstack() -> KernelResult<()> {
         with_states(|st| {
             if let Some(s) = st.get_mut(&p) {
                 s.threads
-                    .insert(0x7B3, ThreadSignals::new(0, AltStack::DISABLED));
+                    .insert(0x7B3, Box::new(ThreadSignals::new(0, AltStack::DISABLED)));
             }
         });
         check(

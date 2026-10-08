@@ -187,6 +187,21 @@ pub const SYS_SIGNAL_SET_IGNORED: u64 = 1098;
 /// `signal_get_ignored(out)`, for start-up to seed its disposition table.
 /// Lane A's (1099); a kernel without it answers `NoSuchSyscall`.
 pub const SYS_SIGNAL_GET_IGNORED: u64 = 1099;
+/// Send a signal carrying a value: `signal_queue(pid, sig, value) -> 0`, the
+/// native `sigqueue`. The receiver is told `SI_QUEUE`, the sender's pid and
+/// real uid, and `value`. `pid` names one process: not above zero is
+/// `NoSuchProcess`; then `NoSuchProcess`, `ProcessExited` for a zombie,
+/// `InvalidArgument` for a signal outside `0..=64`, `PermissionDenied`, in
+/// Linux's order. Signal 0 checks and posts nothing. Lane A's (1086); a kernel
+/// without it answers `NoSuchSyscall`.
+pub const SYS_SIGNAL_QUEUE: u64 = 1086;
+/// Send a signal to a thread of a process: `signal_tgkill(tgid, tid, sig) ->
+/// 0`, the native `tgkill`. Checks that `tid` is a thread of `tgid` and posts
+/// in the same step; the receiver is told `SI_TKILL`. `InvalidArgument` for an
+/// id not above zero, `NoSuchProcess` when `tid` is not of `tgid`, then as
+/// [`SYS_SIGNAL_QUEUE`]. Lane A's (1087); a kernel without it answers
+/// `NoSuchSyscall`.
+pub const SYS_SIGNAL_TGKILL: u64 = 1087;
 pub const SYS_PROCESS_KILL: u64 = 506;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 /// Spawn with an explicit capability policy. arg0 = `*const SpawnEx2Args`.

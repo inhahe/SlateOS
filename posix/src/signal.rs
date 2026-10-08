@@ -209,6 +209,13 @@ process_global! {
     #[cfg_attr(not(target_os = "none"), allow(dead_code))]
     fn ignored_unsupported_ptr() -> core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
+
+    /// Whether the kernel builds this process's signal frames extended,
+    /// with each signal's record after the context ([`SignalInfoTail`]) --
+    /// its answer to `init_signals`'s registration. The choice is kept
+    /// across `fork`, as this is; an `exec`'s new image registers again.
+    fn extended_frame_ptr() -> core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
 }
 
 /// `SYS_SIGNAL_SET_IGNORED`'s flag: `SIGCHLD` has `SA_NOCLDWAIT`.
@@ -362,6 +369,12 @@ const ACCEPTORS: usize = 32;
 /// and a signal the dispatch brings then is the dispatch's to deal with.
 const CLOSED: i32 = -1;
 
+/// `got`'s value while a dispatch hands a signal over: it has claimed the
+/// waiter and is writing the signal's record, and stores the signal when the
+/// record is written -- so a waiter that sees the signal sees its record.
+/// A few stores; the waiter waits them out.
+const CLAIMING: i32 = -2;
+
 /// A thread waiting to take a signal (`sigtimedwait`, `sigwaitinfo`,
 /// `sigwait`), as the trampoline's dispatch sees it.
 ///
@@ -379,12 +392,19 @@ pub(crate) struct Acceptor {
     /// The signals it takes (signal N at bit N - 1), which the kernel lets
     /// through meanwhile; 0 while not published.
     set: core::sync::atomic::AtomicU64,
-    /// 0 while it waits, the signal handed to it, or [`CLOSED`].  The futex
-    /// word it sleeps on.
+    /// 0 while it waits, [`CLAIMING`] while a signal is handed over, the
+    /// signal handed to it, or [`CLOSED`].  The futex word it sleeps on.
     got: core::sync::atomic::AtomicI32,
     /// Signals of its set that came once `got` was filled: handed back to
     /// the kernel when the waiter stops, by it or by the dispatch.
     extra: core::sync::atomic::AtomicU64,
+    /// The record of the signal in `got` ([`Record`]): its code and sender
+    /// pid, packed as `code | pid << 32` ...
+    code_pid: core::sync::atomic::AtomicU64,
+    /// ... the sender's uid ...
+    uid: core::sync::atomic::AtomicU32,
+    /// ... and its value.  Written while `got` is [`CLAIMING`].
+    value: core::sync::atomic::AtomicU64,
 }
 
 impl Acceptor {
@@ -395,6 +415,32 @@ impl Acceptor {
             set: core::sync::atomic::AtomicU64::new(0),
             got: core::sync::atomic::AtomicI32::new(0),
             extra: core::sync::atomic::AtomicU64::new(0),
+            code_pid: core::sync::atomic::AtomicU64::new(0),
+            uid: core::sync::atomic::AtomicU32::new(0),
+            value: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Keep `record` for the waiter, as the signal is handed over.
+    fn store_record(&self, record: Record) {
+        use core::sync::atomic::Ordering::SeqCst;
+        let code = u64::from(record.code.cast_unsigned());
+        let pid = u64::from(record.pid.cast_unsigned());
+        self.code_pid.store(code | (pid << 32), SeqCst);
+        self.uid.store(record.uid, SeqCst);
+        self.value.store(record.value, SeqCst);
+    }
+
+    /// The record kept with the signal handed over.
+    fn load_record(&self) -> Record {
+        use core::sync::atomic::Ordering::SeqCst;
+        let code_pid = self.code_pid.load(SeqCst);
+        let [c0, c1, c2, c3, p0, p1, p2, p3] = code_pid.to_le_bytes();
+        Record {
+            code: i32::from_le_bytes([c0, c1, c2, c3]),
+            pid: i32::from_le_bytes([p0, p1, p2, p3]),
+            uid: self.uid.load(SeqCst),
+            value: self.value.load(SeqCst),
         }
     }
 }
@@ -417,7 +463,12 @@ impl Acceptor {
 /// signal kept in `extra` is either in the `extra` the waiter empties or
 /// kept pending here -- or both, which costs nothing: a pending signal is
 /// pending once.
-fn hand_to_a_waiter(sig: i32) -> bool {
+///
+/// The waiter that takes it is told its record, `origin`'s: claimed with
+/// [`CLAIMING`], the record written, and then the signal.  A signal kept in
+/// `extra` is handed back to the kernel as this process's own, and its record
+/// goes with that.
+fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
     use core::sync::atomic::Ordering::SeqCst;
     let bit = sigmask_bit(sig);
     if bit == 0 {
@@ -427,7 +478,9 @@ fn hand_to_a_waiter(sig: i32) -> bool {
     let waiters = unsafe { &*acceptors_ptr() };
     let wants = |a: &&Acceptor| a.set.load(SeqCst) & bit != 0;
     for a in waiters.iter().filter(wants) {
-        if a.got.compare_exchange(0, sig, SeqCst, SeqCst).is_ok() {
+        if a.got.compare_exchange(0, CLAIMING, SeqCst, SeqCst).is_ok() {
+            a.store_record(origin.record());
+            a.got.store(sig, SeqCst);
             crate::lowlevellock::futex_wake_all(&a.got);
             return true;
         }
@@ -436,7 +489,8 @@ fn hand_to_a_waiter(sig: i32) -> bool {
         let got = a.got.load(SeqCst);
         // 0: freed since the first pass, and perhaps claimed for another
         // wait; the signal is kept pending below, and the kernel delivers it
-        // again if that wait is for it.
+        // again if that wait is for it.  [`CLAIMING`] is a signal being
+        // handed over: taken, as one already handed is.
         if got == CLOSED || got == 0 {
             continue;
         }
@@ -463,7 +517,7 @@ fn accept(
     set: u64,
     deadline: Option<&crate::stat::Timespec>,
     mark: crate::interrupt::Mark,
-) -> Result<i32, i32> {
+) -> Result<(i32, Record), i32> {
     use core::sync::atomic::Ordering::SeqCst;
     let wanted = set & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
     // SAFETY: this process's table of waiters; every field is an atomic.
@@ -485,6 +539,12 @@ fn accept(
         let got = a.got.load(SeqCst);
         if got > 0 {
             break Ok(got);
+        }
+        if got == CLAIMING {
+            // A signal is being handed over: its record is a few stores
+            // from done. A yield cannot fail in a way that matters.
+            let _ = crate::pthread::sched_yield();
+            continue;
         }
         if mark.interrupted(crate::interrupt::Restart::Never) {
             break Err(errno::EINTR);
@@ -519,7 +579,23 @@ fn accept(
     // has the kernel let it through.
     a.set.store(0, SeqCst);
     mask_changed();
-    let got = a.got.swap(CLOSED, SeqCst);
+    // Closed -- once a dispatch that has begun to hand a signal over has
+    // finished, so that the signal and its record are this call's.
+    let got = loop {
+        match a.got.compare_exchange(0, CLOSED, SeqCst, SeqCst) {
+            Ok(_) => break 0,
+            Err(CLAIMING) => {
+                // A yield cannot fail in a way that matters: the loop asks
+                // again either way.
+                let _ = crate::pthread::sched_yield();
+            }
+            Err(handed) => {
+                a.got.store(CLOSED, SeqCst);
+                break handed;
+            }
+        }
+    };
+    let record = a.load_record();
     let extra = a.extra.swap(0, SeqCst);
     for n in 1..=64 {
         if extra & sigmask_bit(n) != 0 {
@@ -529,7 +605,11 @@ fn accept(
     a.busy.store(false, SeqCst);
     // A signal handed over as the wait decided otherwise is still this
     // call's to answer.
-    if got > 0 { Ok(got) } else { outcome }
+    if got > 0 {
+        Ok((got, record))
+    } else {
+        outcome.map(|sig| (sig, record))
+    }
 }
 
 /// In a child of `fork`: forget the parent's waiters, whose threads the
@@ -1467,32 +1547,94 @@ enum Origin {
     Killed,
 }
 
-/// The `siginfo_t` a handler is given: the signal, and who sent it as far as
-/// `origin` tells.
-///
-/// Raised here (`SI_TKILL`) or sent by `kill` to this process's own pid
-/// (`SI_USER`), the sender is this process: its pid and real uid. Delivered
-/// by the kernel, `SI_USER` and no more: the native frame carries the
-/// signal's number alone, and the kernel's record of the rest -- its code,
-/// its sender, `sigqueue`'s value -- does not reach the trampoline (known-issues
-/// `D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE`).
-fn siginfo_for(sig: i32, origin: Origin) -> SiginfoT {
-    let mut info = SiginfoT {
-        si_signo: sig,
-        ..SiginfoT::default()
-    };
-    match origin {
-        Origin::Kernel(_) => info.si_code = SI_USER,
-        Origin::Raised | Origin::Killed => {
-            info.si_code = if matches!(origin, Origin::Raised) {
-                SI_TKILL
-            } else {
-                SI_USER
-            };
-            info.si_pid = crate::process::getpid();
-            info.si_uid = crate::unistd::getuid();
+impl Origin {
+    /// Who sent the signal and what it carries, as far as `self` tells.
+    ///
+    /// Raised here (`SI_TKILL`) or sent by `kill` to this process's own pid
+    /// (`SI_USER`), the sender is this process: its pid and real uid.
+    /// Delivered by the kernel, what the kernel recorded when it was sent --
+    /// its code, its sender, `sigqueue`'s value, a child's exit status -- from
+    /// the extended frame ([`Record::from_frame`]).
+    fn record(self) -> Record {
+        match self {
+            Self::Kernel(ctx) => Record::from_frame(ctx),
+            Self::Raised => Record::from_self(SI_TKILL),
+            Self::Killed => Record::from_self(SI_USER),
         }
     }
+}
+
+/// Who sent a signal and what it carries: a `siginfo_t`'s `si_code`,
+/// `si_pid`, `si_uid` and `si_value` -- `si_status` for `SIGCHLD`, and
+/// `si_timerid` and `si_overrun` for `SI_TIMER`, at the same offsets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Record {
+    code: i32,
+    pid: i32,
+    uid: u32,
+    value: u64,
+}
+
+impl Record {
+    /// Sent by this process, with `code`: its pid and real uid.
+    fn from_self(code: i32) -> Self {
+        Self {
+            code,
+            pid: crate::process::getpid(),
+            uid: crate::unistd::getuid(),
+            value: 0,
+        }
+    }
+
+    /// The record the kernel put after the context `ctx` points at -- when it
+    /// builds this process's frames extended ([`extended_frame_ptr`]) and
+    /// there is a frame. Otherwise `SI_USER` and no sender: all an older
+    /// kernel's frame says, the signal's number alone (until 2026-10-07, every
+    /// kernel's: known-issues
+    /// `D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE`).
+    fn from_frame(ctx: *const SignalContext) -> Self {
+        // SAFETY: an atomic, shared by every thread.
+        let extended = unsafe { &*extended_frame_ptr() }.load(core::sync::atomic::Ordering::SeqCst);
+        if !extended || ctx.is_null() {
+            return Self {
+                code: SI_USER,
+                ..Self::default()
+            };
+        }
+        // SAFETY: the kernel builds this process's frames extended, so the
+        // 24 bytes after the 136-byte context it handed the trampoline are
+        // the tail it wrote with it, on this thread's stack; read unaligned,
+        // to take nothing on trust about the frame's alignment.
+        let tail = unsafe {
+            ctx.cast::<u8>()
+                .add(SIGNAL_CONTEXT_SIZE)
+                .cast::<SignalInfoTail>()
+                .read_unaligned()
+        };
+        Self::from_tail(tail)
+    }
+
+    /// The record in an extended frame's tail.
+    fn from_tail(tail: SignalInfoTail) -> Self {
+        Self {
+            code: tail.si_code,
+            pid: tail.si_pid.cast_signed(),
+            uid: tail.si_uid,
+            value: tail.si_value,
+        }
+    }
+}
+
+/// The `siginfo_t` a handler or a wait is given: the signal, and `record`.
+fn siginfo_for(sig: i32, record: Record) -> SiginfoT {
+    let mut info = SiginfoT {
+        si_signo: sig,
+        si_code: record.code,
+        si_pid: record.pid,
+        si_uid: record.uid,
+        ..SiginfoT::default()
+    };
+    info.set_value(record.value);
     info
 }
 
@@ -1610,7 +1752,7 @@ fn fill_fp_control(uc: &mut crate::ucontext::UcontextT) {
 /// `top` says, and return the mask to restore -- `uc_sigmask` as the handler
 /// left it.
 ///
-/// `info` is what `origin` can tell ([`siginfo_for`]). `uc` holds the mask as
+/// `info` is what `origin` can tell ([`Origin::record`]). `uc` holds the mask as
 /// the signal came (`blocked`), the alternate stack as registered, the
 /// floating-point control state, and -- for a signal the
 /// kernel delivered -- the interrupted registers from its frame, which the
@@ -1628,7 +1770,7 @@ fn run_siginfo_handler(
     blocked: u64,
     top: Option<usize>,
 ) -> u64 {
-    let mut info = siginfo_for(sig, origin);
+    let mut info = siginfo_for(sig, origin.record());
     let mut uc = crate::ucontext::UcontextT::ZERO;
     uc.uc_sigmask.bits[0] = blocked;
     uc.uc_stack = altstack_for_ucontext();
@@ -1853,7 +1995,7 @@ fn dispatch_from(sig: i32, origin: Origin) -> i32 {
     }
     // A signal a thread is waiting to take is taken, not delivered: no
     // handler runs and no default action is taken.
-    if hand_to_a_waiter(sig) {
+    if hand_to_a_waiter(sig, origin) {
         return 0;
     }
 
@@ -1980,6 +2122,47 @@ pub struct SignalContext {
 /// `SIGNAL_CONTEXT_SIZE` (17 × 8 = 136 bytes).
 pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 
+/// `SYS_SIGNAL_REGISTER`'s flag asking for the **extended** frame: the
+/// [`SignalContext`], then the signal's record ([`SignalInfoTail`]). The
+/// kernel answers the flags it will honour, so a kernel that answers 0 --
+/// every one before lane A's, which ignored the argument -- builds the frame
+/// it always built, and this library reads that one.
+// Asked for by the target's `init_signals` alone: the host has no kernel.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+const SIGNAL_FRAME_SIGINFO: u64 = 1;
+
+/// What follows the [`SignalContext`] in the extended frame, at
+/// `ctx + 136`: who sent the signal and what it carries.
+///
+/// **ABI-critical**, as the context is: the layout of the kernel's
+/// `kernel/src/proc/signal.rs::SignalInfoTail`, proposed in
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`. 24 bytes,
+/// 160 with the context, which keeps the context's alignment and the fake
+/// return slot below it where they were.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignalInfoTail {
+    /// `si_code`: who sent it -- `SI_USER`, `SI_QUEUE`, `SI_TKILL`,
+    /// `SI_KERNEL`, `SI_TIMER`, or for `SIGCHLD` a `CLD_*` code.
+    pub si_code: i32,
+    /// `si_pid`: the sender, or for `SIGCHLD` the child; for `SI_TIMER` the
+    /// timer (`si_timerid`, at the same offset in `siginfo_t`).
+    pub si_pid: u32,
+    /// `si_uid`: the sender's real uid, or the child's; for `SI_TIMER` the
+    /// overrun count (`si_overrun`).
+    pub si_uid: u32,
+    /// Zero.
+    pub pad: u32,
+    /// `si_value` for `SI_QUEUE` and `SI_TIMER`; for `SIGCHLD`, `si_status`
+    /// -- the exit status, or the signal that killed or stopped the child --
+    /// which shares its offset in `siginfo_t`.
+    pub si_value: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<SignalInfoTail>() == 24);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_pid) == 4);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_value) == 16);
+
 /// C entry point invoked by the assembly trampoline.
 ///
 /// Runs the registered disposition for `signum` on this thread, with the
@@ -2060,9 +2243,20 @@ unsafe extern "C" {
 #[cfg(target_os = "none")]
 pub fn init_signals() {
     let addr = __signal_trampoline as *const () as usize as u64;
-    // A failure here just means async delivery stays in the kernel's
-    // default-action mode; nothing else in startup depends on it.
-    let _ = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_REGISTER, addr);
+    // With the extended frame asked for: the kernel answers whether it will
+    // build it, and the dispatch reads the record only if it said so. A
+    // failure just means async delivery stays in the kernel's default-action
+    // mode; nothing else in startup depends on it.
+    let honoured = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_REGISTER,
+        addr,
+        SIGNAL_FRAME_SIGINFO,
+    );
+    // SAFETY: an atomic; start-up has one thread.
+    unsafe { &*extended_frame_ptr() }.store(
+        honoured > 0 && honoured.unsigned_abs() & SIGNAL_FRAME_SIGINFO != 0,
+        core::sync::atomic::Ordering::SeqCst,
+    );
     let mut inherited: u64 = 0;
     let read = crate::syscall::syscall2(
         crate::syscall::SYS_SIGNAL_MASK,
@@ -2224,6 +2418,31 @@ fn signal_send_errno(ret: i64) -> i32 {
     }
 }
 
+/// A native send's answer `ret` for signal `sig`, as Linux's `kill`,
+/// `sigqueue` and `tgkill` give it: `Ok`, or the errno.
+///
+/// A target that has exited and not been reaped -- a zombie -- is answered
+/// `ProcessExited` by every native send, ahead of the signal's number and the
+/// caller's right (`check_signal_target`). Linux finds a zombie and answers
+/// 0, or `EINVAL` for a signal number it does not have (measured on 6.6:
+/// `kill`, `sigqueue` and `tgkill` of an unreaped child all succeed), so that
+/// is what it is here: the signal goes nowhere, as on Linux, where a zombie
+/// runs nothing. Until 2026-10-07 `kill` answered `ESRCH` for one, which a
+/// supervisor signalling a child that has just exited read as a failure.
+fn send_answer(ret: i64, sig: i32) -> Result<(), i32> {
+    if ret >= 0 {
+        return Ok(());
+    }
+    if ret == errno::native::PROCESS_EXITED {
+        return if (0..NSIG).contains(&sig) {
+            Ok(())
+        } else {
+            Err(errno::EINVAL)
+        };
+    }
+    Err(signal_send_errno(ret))
+}
+
 /// Send a signal to a process.
 ///
 /// ## Signal delivery model (Phase 211)
@@ -2352,13 +2571,16 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
             // signal pending and either delivers it to the target's
             // trampoline or applies the default action.  We don't
             // classify by disposition here — that is the target's job.
+            // A zombie is a send that succeeded, as on Linux ([`send_answer`]).
             let ret =
                 crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, pid as u64, sig as u64);
-            if ret < 0 {
-                errno::set_errno(signal_send_errno(ret));
-                return -1;
+            match send_answer(ret, sig) {
+                Ok(()) => 0,
+                Err(e) => {
+                    errno::set_errno(e);
+                    -1
+                }
             }
-            0
         }
     }
 }
@@ -2426,40 +2648,82 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 /// Send `sig` to thread `tid` of process `tgid` (Linux; glibc's since
 /// 2.30). Returns 0, or -1 with `errno` set.
 ///
-/// Signals here are process-directed, as [`crate::pthread::pthread_kill`]
-/// explains. To the calling thread, `sig` is dispatched at once, as `raise`
-/// dispatches it, and an `SA_SIGINFO` handler is told `SI_TKILL`. To any
-/// other thread -- of this process or another -- it goes to that thread's
-/// process, and whichever of its threads next dispatches runs it; the kernel
-/// has no native thread-directed send, which
-/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` asks for.
+/// To the calling thread, `sig` is dispatched at once, as `raise` dispatches
+/// it, and an `SA_SIGINFO` handler is told `SI_TKILL`. To any other thread --
+/// of this process or another -- it goes through lane A's `SYS_SIGNAL_TGKILL`
+/// (1087), which checks that `tid` is a thread of `tgid` and posts in the
+/// same step, so that a thread id reused since the caller learnt it cannot
+/// carry the signal into some other process, and the receiver is told
+/// `SI_TKILL` with this process's pid and uid. The signal goes to the
+/// thread's process, and whichever of its threads next returns to userspace
+/// runs it: signals here are process-directed, as
+/// [`crate::pthread::pthread_kill`] explains.
 ///
-/// What `tgkill` is for is kept all the same: `tid` must be a thread of
-/// `tgid`, or the answer is `ESRCH`, so that a thread id reused since the
-/// caller learnt it cannot carry the signal into some other process. This
-/// process's threads are this library's own to know
-/// ([`crate::pthread::thread_is_live`]); another's are looked for in
-/// `/proc/<tgid>/task/<tid>` -- which a process without a File capability
-/// with METADATA rights may not look at, and then the thread is not
-/// signalled: `EPERM` (or `ESRCH` when the process is not there at all),
-/// never a guess.
+/// On a kernel without that call, the check is this library's: this
+/// process's threads are its own to know ([`crate::pthread::thread_is_live`]);
+/// another's are looked for in `/proc/<tgid>/task/<tid>` -- which a process
+/// without a File capability with METADATA rights may not look at, and then
+/// the thread is not signalled: `EPERM` (or `ESRCH` when the process is not
+/// there at all), never a guess. The send is then `SYS_SIGNAL_SEND`'s, and
+/// the receiver is told `SI_USER`.
 ///
-/// Errors, in Linux's order: `EINVAL` for a `tgid` or `tid` not above
-/// zero; `ESRCH` when `tid` is not a thread of `tgid`, `EPERM` when that
-/// cannot be checked; `EINVAL` for a signal outside `0..NSIG`; then what
-/// the kernel answers the send, `EPERM` among it. Signal 0 checks, and
-/// sends nothing.
+/// Errors, in Linux's order (measured on 6.6): `EINVAL` for a `tgid` or
+/// `tid` not above zero; `ESRCH` when `tid` is not a thread of `tgid`;
+/// `EINVAL` for a signal outside `0..NSIG`; `EPERM` for a thread not the
+/// caller's to signal. A thread of a process that has exited and not been
+/// reaped is signalled, as on Linux, to no effect ([`send_answer`]). Signal
+/// 0 checks, and sends nothing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig: i32) -> i32 {
-    if tgid <= 0 || tid <= 0 {
+    let (Ok(process), Ok(thread)) = (u64::try_from(tgid), u64::try_from(tid)) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    if process == 0 || thread == 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
     let own = tgid == crate::process::getpid();
-    let calling = own && tid == crate::process::gettid();
-    let exists = if calling {
-        true
-    } else if own {
+    if own && tid == crate::process::gettid() {
+        if !(0..NSIG).contains(&sig) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        if sig == 0 {
+            return 0;
+        }
+        return dispatch_self_signal(sig);
+    }
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_SIGNAL_TGKILL,
+        process,
+        thread,
+        u64::from(sig.cast_unsigned()),
+    );
+    let answer = if no_send_call(ret) {
+        tgkill_without_the_call(tgid, tid, sig, own)
+    } else {
+        send_answer(ret, sig)
+    };
+    match answer {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// [`tgkill`] to a thread other than the calling one, on a kernel without
+/// `SYS_SIGNAL_TGKILL`: the thread looked for here, then the signal sent to
+/// its process with `SYS_SIGNAL_SEND`.
+fn tgkill_without_the_call(
+    tgid: crate::types::PidT,
+    tid: crate::types::PidT,
+    sig: i32,
+    own: bool,
+) -> Result<(), i32> {
+    let exists = if own {
         u64::try_from(tid).is_ok_and(crate::pthread::thread_is_live)
     } else {
         match proc_task_exists(tgid, tid) {
@@ -2475,32 +2739,22 @@ pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig:
                 let alive =
                     crate::syscall::syscall1(crate::syscall::SYS_PROCESS_IS_READY, tgid as u64)
                         >= 0;
-                errno::set_errno(if alive { errno::EPERM } else { errno::ESRCH });
-                return -1;
+                return Err(if alive { errno::EPERM } else { errno::ESRCH });
             }
         }
     };
     if !exists {
-        errno::set_errno(errno::ESRCH);
-        return -1;
+        return Err(errno::ESRCH);
     }
     if !(0..NSIG).contains(&sig) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+        return Err(errno::EINVAL);
     }
     if sig == 0 {
-        return 0;
-    }
-    if calling {
-        return dispatch_self_signal(sig);
+        return Ok(());
     }
     #[allow(clippy::cast_sign_loss)]
     let ret = crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, tgid as u64, sig as u64);
-    if ret < 0 {
-        errno::set_errno(signal_send_errno(ret));
-        return -1;
-    }
-    0
+    send_answer(ret, sig)
 }
 
 /// Whether `/proc/<tgid>/task/<tid>` exists: whether `tid` is a thread of
@@ -3515,14 +3769,13 @@ pub extern "C" fn sigtimedwait(
     // kernel's 64 signals.
     let wanted = unsafe { set.cast::<u64>().read_unaligned() };
     match accept(wanted, deadline.as_ref(), mark) {
-        Ok(sig) => {
+        Ok((sig, record)) => {
             if !info.is_null() {
-                let si = SiginfoT {
-                    si_signo: sig,
-                    ..SiginfoT::default()
-                };
                 // SAFETY: a non-null `info` is a writable `siginfo_t`.
-                unsafe { info.cast::<SiginfoT>().write_unaligned(si) };
+                unsafe {
+                    info.cast::<SiginfoT>()
+                        .write_unaligned(siginfo_for(sig, record));
+                };
             }
             sig
         }
@@ -3555,64 +3808,73 @@ pub extern "C" fn sigwaitinfo(set: *const SigsetT, info: *mut core::ffi::c_void)
     sigtimedwait(set, info, core::ptr::null())
 }
 
-/// Queue a signal to a process with an attached `sigval`.
+/// Queue a signal to a process with an attached `sigval`: the receiver's
+/// `SA_SIGINFO` handler, or its `sigwaitinfo`, is told `SI_QUEUE`, this
+/// process's pid and real uid, and `value` as `si_value`.
 ///
-/// Stub: validates arguments per Linux
-/// `kernel/signal.c::sys_rt_sigqueueinfo`, then returns `-1` with
-/// `ENOSYS` (no signal delivery mechanism).
+/// Sent through lane A's `SYS_SIGNAL_QUEUE` (1086), which posts the signal
+/// with its record; the receiver's frame brings it
+/// ([`Record::from_frame`]).  The kernel decides who may, as for [`kill`]
+/// (§314: Linux's `check_kill_permission`, which a library cannot evaluate
+/// for another process).
 ///
-/// # Linux semantics
+/// Errors, in Linux's order (measured on 6.6 -- `do_rt_sigqueueinfo` and
+/// `kill_proc_info`):
 ///
-/// `sys_rt_sigqueueinfo` calls `do_rt_sigqueueinfo`, which rejects
-/// `pid <= 0` with `-EINVAL` at the very top — *before* any task
-/// lookup.  Unlike `kill(2)`, `sigqueue(3)` does not accept
-/// process-group, "self", or "all-processes" forms; the target must
-/// be a real positive PID.
+/// 1. No such process → `ESRCH` -- and `pid` not above zero is one: unlike
+///    `kill`, `sigqueue` names one process, never a group, itself by 0 or
+///    every process, and `find_vpid` finds nothing there.  (Until 2026-10-07
+///    this answered `EINVAL`, on a reading of Linux that its measured answer
+///    does not bear out.)
+/// 2. `sig` outside `0..NSIG` → `EINVAL`, once the process is found.
+/// 3. Not the caller's to signal → `EPERM`.
 ///
-/// # Authority (§314; was a Phase-204 `CAP_KILL` gate)
-///
-/// Linux gates cross-uid signal delivery via `check_kill_permission()` →
-/// `kill_ok_by_cred()` — same-uid **or** `CAP_KILL` — exactly as for
-/// [`kill`], and libc can evaluate that rule no better here than it can
-/// there.  This function is additionally still a **stub**: it delivers
-/// nothing.  Refusing with `EPERM` on a conservative capability projection
-/// would invent an authority failure for an operation that was never going
-/// to happen, and a port reading that `EPERM` would conclude it lacks a
-/// privilege rather than that the call is unimplemented.  `ENOSYS` is the
-/// answer that is true.
-///
-/// When real delivery lands here it takes the same shape as `kill`: issue
-/// the send and report what the kernel says.
-///
-/// Errors (Linux-matching priority order):
-///
-/// 1. `pid <= 0`                                       → `EINVAL`
-///    (Linux: `do_rt_sigqueueinfo` — fires before `find_vpid`.)
-/// 2. `sig < 0 || sig >= NSIG`                         → `EINVAL`
-///    `sig == 0` is permitted (existence-probe form).  Linux
-///    validates sig deep in `__send_signal_locked::valid_signal`,
-///    after process lookup; here the stub mirrors that EINVAL value
-///    without modelling process existence.
-/// 3. `ENOSYS` for any otherwise-valid call.
+/// Signal 0 checks all of that and sends nothing.  On a kernel without the
+/// call this cannot send a value, and answers `ENOSYS` for any call that
+/// gets that far -- a send without the value would hand the receiver a
+/// `si_value` the caller did not give.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> i32 {
-    // 1. pid <= 0 → EINVAL.  Linux's do_rt_sigqueueinfo rejects this
-    //    before any task lookup, so it fires before sig validation.
-    if pid <= 0 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
+pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, value: usize) -> i32 {
+    match queue_signal(pid, sig, value as u64) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
     }
-    // 2. sig validation: in Linux this lives inside the per-task send
-    //    path and surfaces as EINVAL once the process is found.
-    if !(0..NSIG).contains(&sig) {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
+}
+
+/// [`sigqueue`]'s body, for it and `pthread_sigqueue`: `Ok`, or the errno.
+pub(crate) fn queue_signal(pid: crate::types::PidT, sig: i32, value: u64) -> Result<(), i32> {
+    // Not above zero names no process: ESRCH, before anything else.
+    let Ok(target) = u64::try_from(pid) else {
+        return Err(errno::ESRCH);
+    };
+    if target == 0 {
+        return Err(errno::ESRCH);
     }
-    // 3. No CAP_KILL gate (§314): same reasoning as kill(), plus this is
-    //    still a stub — an EPERM here would report a privilege failure for
-    //    a send that does not happen either way.
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_SIGNAL_QUEUE,
+        target,
+        u64::from(sig.cast_unsigned()),
+        value,
+    );
+    if no_send_call(ret) {
+        // A kernel without it: the checks this library can make, then ENOSYS.
+        if !(0..NSIG).contains(&sig) {
+            return Err(errno::EINVAL);
+        }
+        return Err(errno::ENOSYS);
+    }
+    send_answer(ret, sig)
+}
+
+/// Whether `ret` says the kernel has no such send: one before lane A's
+/// `SYS_SIGNAL_QUEUE` and `SYS_SIGNAL_TGKILL`, or, in the host build, no
+/// kernel at all.
+fn no_send_call(ret: i64) -> bool {
+    ret == errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
 }
 
 // ---------------------------------------------------------------------------
@@ -3739,6 +4001,25 @@ impl Default for SiginfoT {
     fn default() -> Self {
         // SAFETY: SiginfoT is a C struct, zero-init is valid.
         unsafe { core::mem::zeroed() }
+    }
+}
+
+impl SiginfoT {
+    /// Write the eight bytes at offset 24: `si_value` (a `union sigval`, its
+    /// `sival_int` the low half on this little-endian machine), which for
+    /// `SIGCHLD` is `si_status` and the padding after it.
+    fn set_value(&mut self, value: u64) {
+        let [a, b, c, d, e, f, g, h] = value.to_le_bytes();
+        self.si_status = i32::from_le_bytes([a, b, c, d]);
+        self._status_pad = u32::from_le_bytes([e, f, g, h]);
+    }
+
+    /// The eight bytes at offset 24, as [`SiginfoT::set_value`] writes them.
+    #[cfg(test)]
+    fn value(&self) -> u64 {
+        let [a, b, c, d] = self.si_status.to_le_bytes();
+        let [e, f, g, h] = self._status_pad.to_le_bytes();
+        u64::from_le_bytes([a, b, c, d, e, f, g, h])
     }
 }
 
@@ -6522,30 +6803,38 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    // --- pid <= 0 names no process: ESRCH, as measured ---
+    //
+    // Measured on Linux 6.6 (2026-10-07): `sigqueue(0, ...)`, `(-1, ...)`
+    // and `(-5, 0)` all answer ESRCH. `do_rt_sigqueueinfo` checks no pid;
+    // `kill_proc_info`'s `find_vpid` finds nothing for one not above zero,
+    // before the signal number is looked at. "Phase 123" read the source
+    // as an EINVAL check at the top, and these tests pinned that; the
+    // measurement does not bear it out.
+
     #[test]
-    fn test_sigqueue_zero_pid_einval() {
-        // Phase 123: unlike kill(), sigqueue does not accept pid == 0
-        // (process-group "self"); Linux's do_rt_sigqueueinfo rejects
-        // pid <= 0 with EINVAL before any task lookup.
+    fn test_sigqueue_zero_pid_esrch() {
+        // Unlike kill(), sigqueue does not take pid 0 as the caller's
+        // group: it names one process, and there is none numbered 0.
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(0, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
-    fn test_sigqueue_negative_pid_einval() {
+    fn test_sigqueue_negative_pid_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
-    fn test_sigqueue_pgrp_form_einval() {
+    fn test_sigqueue_pgrp_form_esrch() {
         // pid < -1 in kill() means "process group |pid|"; sigqueue
         // rejects it as EINVAL per do_rt_sigqueueinfo.
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-100, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
@@ -6556,7 +6845,7 @@ mod tests {
         // do_rt_sigqueueinfo before send_signal validates sig).
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, -1, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
@@ -6566,26 +6855,19 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // --- Phase 123: pid<=0 errno corrected, prologue order matches
-    //                Linux do_rt_sigqueueinfo ---
-    //
-    // Previous behaviour returned ESRCH for pid <= 0 citing
-    // find_task_by_vpid; that lookup is never reached because
-    // do_rt_sigqueueinfo intercepts the case with EINVAL before
-    // anything else.
+    // --- the same, at the edges of the pid range ---
 
-    /// Phase 123: i32::MIN as pid → EINVAL.  Confirms the `pid <= 0`
-    /// check uses signed comparison, not a `pid == 0 || pid < 0` pair
-    /// that might trip on signed-overflow corner cases.
+    /// `i32::MIN` as pid → ESRCH: the conversion to the kernel's unsigned
+    /// id refuses it rather than wrapping it into some process's number.
     #[test]
-    fn test_sigqueue_phase123_i32_min_pid_einval() {
+    fn test_sigqueue_phase123_i32_min_pid_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(i32::MIN, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Phase 123: smallest positive pid (1) with a valid sig reaches
-    /// ENOSYS — confirms `pid > 0` opens the gate.
+    /// The smallest positive pid (1) with a valid sig reaches the send --
+    /// on the host, which has no kernel, ENOSYS.
     #[test]
     fn test_sigqueue_phase123_pid_one_reaches_enosys() {
         crate::errno::set_errno(0);
@@ -6593,8 +6875,8 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// Phase 123: i32::MAX as pid with a valid sig reaches ENOSYS —
-    /// no upper bound on the pid check.
+    /// `i32::MAX` as pid with a valid sig reaches the send -- ENOSYS on
+    /// the host -- with no upper bound in the library's check.
     #[test]
     fn test_sigqueue_phase123_i32_max_pid_reaches_enosys() {
         crate::errno::set_errno(0);
@@ -6602,72 +6884,68 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// Phase 123: pid <= 0 with sig == 0 (existence probe).  pid
-    /// check fires first → EINVAL, even though sig is benign.
+    /// pid 0 with signal 0, the existence probe: no process is numbered
+    /// 0, so ESRCH.
     #[test]
-    fn test_sigqueue_phase123_zero_pid_existence_probe_einval() {
+    fn test_sigqueue_phase123_zero_pid_existence_probe_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(0, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Phase 123: negative pid with sig == NSIG (above range).  Both
-    /// pid and sig would fault; pid check (Linux do_rt_sigqueueinfo)
-    /// fires first.  Same EINVAL value, but order now matches Linux.
+    /// A negative pid with a signal past the range: the process is looked
+    /// for first, as Linux's `kill_proc_info` does, so ESRCH, not EINVAL.
     #[test]
-    fn test_sigqueue_phase123_neg_pid_sig_at_nsig_einval() {
+    fn test_sigqueue_phase123_neg_pid_sig_at_nsig_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-5, NSIG, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Phase 123: pid <= 0 with i32::MAX sig.  Pid check fires before
-    /// sig range check.
+    /// A pid not above zero with `i32::MAX` for a signal: ESRCH, the
+    /// lookup before the signal's range.
     #[test]
-    fn test_sigqueue_phase123_neg_pid_sig_i32_max_einval() {
+    fn test_sigqueue_phase123_neg_pid_sig_i32_max_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, i32::MAX, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Phase 123: errno recovery — EINVAL followed by ENOSYS cleanly
-    /// overwrites.
+    /// errno recovery — ESRCH followed by ENOSYS cleanly overwrites.
     #[test]
-    fn test_sigqueue_phase123_recovery_einval_then_enosys() {
+    fn test_sigqueue_phase123_recovery_esrch_then_enosys() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(0, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         assert_eq!(sigqueue(100, SIGUSR1, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// Phase 123: errno recovery — ENOSYS followed by EINVAL.
+    /// errno recovery — ENOSYS followed by ESRCH.
     #[test]
-    fn test_sigqueue_phase123_recovery_enosys_then_einval() {
+    fn test_sigqueue_phase123_recovery_enosys_then_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(100, SIGUSR1, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         assert_eq!(sigqueue(-1, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Phase 123 workflow: glibc's `sigqueue(3)` from a service
-    /// daemon that misuses `getpid()` returning 0 for an
-    /// unregistered thread state.  pid==0 must surface EINVAL so the
-    /// daemon's error path triggers, not a "no such process" misread.
+    /// A daemon that sends to a pid field it never filled in -- 0 -- is
+    /// told there is no such process, as Linux tells it.
     #[test]
     fn test_sigqueue_phase123_workflow_daemon_self_pid_zero() {
         crate::errno::set_errno(0);
         // sig is valid; pid is 0 (programmer mistake — used pid_t
         // zero-init field without populating it).
         assert_eq!(sigqueue(0, SIGUSR1, 0xDEAD_BEEF_usize), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     /// Phase 123 workflow: realtime-signal queue from a media
-    /// pipeline — `sigqueue(buddy_pid, SIGRTMIN+3, frame_id)`.  Must
-    /// reach ENOSYS (stub) rather than be misread as ESRCH for a
-    /// supposedly-vanished buddy.
+    /// pipeline — `sigqueue(buddy_pid, SIGRTMIN+3, frame_id)`.  With no
+    /// kernel to send through (the host's case, and a kernel without
+    /// `SYS_SIGNAL_QUEUE`), ENOSYS, not a misread ESRCH.
     #[test]
     fn test_sigqueue_phase123_workflow_realtime_queue_reaches_enosys() {
         crate::errno::set_errno(0);
@@ -6678,33 +6956,33 @@ mod tests {
 
     /// Phase 123 buggy-caller: caller computes `pid = strtol(arg, ..)`
     /// on a malformed arg, getting `0`.  Subsequent `sigqueue(0,
-    /// SIGTERM, ...)` must EINVAL — not silently target some random
-    /// process group as `kill(2)` would.
+    /// SIGTERM, ...)` is ESRCH -- it does not silently target the
+    /// caller's process group as `kill(2)` would.
     #[test]
-    fn test_sigqueue_phase123_buggy_caller_strtol_zero_einval() {
+    fn test_sigqueue_phase123_buggy_caller_strtol_zero_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(0, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     /// Phase 123 buggy-caller: pid arithmetic underflow.  Subtracting
-    /// from a small pid in a buggy script produces a negative pid;
-    /// must EINVAL.
+    /// from a small pid in a buggy script produces a negative pid:
+    /// ESRCH, which names no group either.
     #[test]
-    fn test_sigqueue_phase123_buggy_caller_underflow_pid_einval() {
+    fn test_sigqueue_phase123_buggy_caller_underflow_pid_esrch() {
         crate::errno::set_errno(0);
         let bogus_pid: crate::types::PidT = 3_i32.wrapping_sub(10);
         assert_eq!(sigqueue(bogus_pid, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
-    /// Phase 123: pid <= 0 with sig == 0 + arbitrary value param —
-    /// confirms `_value` is ignored by the validation chain.
+    /// pid not above zero, signal 0 and an arbitrary value: the value
+    /// plays no part in the answer.
     #[test]
-    fn test_sigqueue_phase123_value_ignored_on_einval() {
+    fn test_sigqueue_phase123_value_ignored_on_esrch() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, 0, usize::MAX), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     // =================================================================
@@ -6763,10 +7041,11 @@ mod tests {
 
     // -- ordering: argument validation still precedes everything ----------
 
-    /// `pid <= 0` is rejected before the body — argument validation is a
-    /// question libc can answer completely, unlike an authority question.
+    /// `pid <= 0` is answered before the body -- ESRCH, no such process, as
+    /// Linux answers (measured) -- whatever the capability words say: it is
+    /// a question libc can answer completely, unlike an authority question.
     #[test]
-    fn test_sigqueue_bad_pid_einval_precedes_body() {
+    fn test_sigqueue_bad_pid_esrch_precedes_body() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
@@ -6774,8 +7053,8 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(
             crate::errno::get_errno(),
-            crate::errno::EINVAL,
-            "EINVAL for bad pid must precede the ENOSYS body"
+            crate::errno::ESRCH,
+            "ESRCH for a pid that names no process must precede the ENOSYS body"
         );
     }
 
@@ -7722,9 +8001,15 @@ mod tests {
         a.set
             .store(sigmask_bit(SIGUSR1) | sigmask_bit(SIGUSR2), SeqCst);
 
-        assert!(hand_to_a_waiter(SIGUSR1));
+        assert!(hand_to_a_waiter(
+            SIGUSR1,
+            Origin::Kernel(core::ptr::null_mut())
+        ));
         assert_eq!(a.got.load(SeqCst), SIGUSR1);
-        assert!(hand_to_a_waiter(SIGUSR2));
+        assert!(hand_to_a_waiter(
+            SIGUSR2,
+            Origin::Kernel(core::ptr::null_mut())
+        ));
         assert_eq!(
             a.got.load(SeqCst),
             SIGUSR1,
@@ -7737,15 +8022,21 @@ mod tests {
         );
         a.got.store(CLOSED, SeqCst);
         assert!(
-            !hand_to_a_waiter(SIGUSR2),
+            !hand_to_a_waiter(SIGUSR2, Origin::Kernel(core::ptr::null_mut())),
             "one that has stopped takes nothing"
         );
-        assert!(!hand_to_a_waiter(SIGHUP), "outside the set");
+        assert!(
+            !hand_to_a_waiter(SIGHUP, Origin::Kernel(core::ptr::null_mut())),
+            "outside the set"
+        );
 
         a.set.store(0, SeqCst);
         a.extra.store(0, SeqCst);
         a.busy.store(false, SeqCst);
-        assert!(!hand_to_a_waiter(SIGUSR1), "no one waits");
+        assert!(
+            !hand_to_a_waiter(SIGUSR1, Origin::Kernel(core::ptr::null_mut())),
+            "no one waits"
+        );
     }
 
     /// While a thread waits for a set, the kernel lets the set through and
@@ -7848,13 +8139,19 @@ mod tests {
         }
         a.got.store(SIGUSR1, SeqCst);
         b.got.store(0, SeqCst);
-        assert!(hand_to_a_waiter(SIGUSR2));
+        assert!(hand_to_a_waiter(
+            SIGUSR2,
+            Origin::Kernel(core::ptr::null_mut())
+        ));
         assert_eq!(b.got.load(SeqCst), SIGUSR2, "the free one takes it");
         assert_eq!(a.extra.load(SeqCst), 0, "not kept for the other");
 
         b.set.store(0, SeqCst);
         a.got.store(CLOSED, SeqCst);
-        assert!(!hand_to_a_waiter(SIGUSR2), "no waiter takes it");
+        assert!(
+            !hand_to_a_waiter(SIGUSR2, Origin::Kernel(core::ptr::null_mut())),
+            "no waiter takes it"
+        );
         assert_eq!(a.extra.load(SeqCst), 0);
         for w in [a, b] {
             w.set.store(0, SeqCst);
@@ -7918,7 +8215,10 @@ mod tests {
             0,
             "blocked, as the program has it"
         );
-        assert!(!hand_to_a_waiter(SIGUSR2), "no one waits");
+        assert!(
+            !hand_to_a_waiter(SIGUSR2, Origin::Kernel(core::ptr::null_mut())),
+            "no one waits"
+        );
         apply_blocked_low(saved);
     }
 
@@ -7933,6 +8233,7 @@ mod tests {
         code: i32,
         pid: i32,
         uid: u32,
+        value: u64,
         mask: u64,
         rip: i64,
         rsp: i64,
@@ -7948,7 +8249,7 @@ mod tests {
     std::thread_local! {
         static SEEN: core::cell::Cell<Seen> = const {
             core::cell::Cell::new(Seen {
-                signo: 0, code: 0, pid: 0, uid: 0, mask: 0, rip: 0, rsp: 0, rax: 0,
+                signo: 0, code: 0, pid: 0, uid: 0, value: 0, mask: 0, rip: 0, rsp: 0, rax: 0,
                 rcx: 0, r11: 0, stack_flags: 0, fpregs_inside: false, mxcsr: 0, calls: 0,
             })
         };
@@ -7970,6 +8271,7 @@ mod tests {
             code: info.si_code,
             pid: info.si_pid,
             uid: info.si_uid,
+            value: info.value(),
             mask: uc.uc_sigmask.bits[0],
             rip: uc.uc_mcontext.gregs[REG_RIP],
             rsp: uc.uc_mcontext.gregs[REG_RSP],
@@ -8125,6 +8427,215 @@ mod tests {
         );
 
         signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// An extended frame as the kernel lays it on the stack: the context,
+    /// then the record.
+    #[repr(C)]
+    struct ExtendedFrame {
+        ctx: SignalContext,
+        tail: SignalInfoTail,
+    }
+
+    impl ExtendedFrame {
+        fn with(tail: SignalInfoTail) -> Self {
+            Self {
+                // SAFETY: a plain struct of integers; all zero is valid.
+                ctx: unsafe { core::mem::zeroed() },
+                tail,
+            }
+        }
+    }
+
+    /// Whether this thread's stand-in for the kernel builds extended frames
+    /// (the host's process globals are per thread).
+    fn set_extended_frames(on: bool) {
+        // SAFETY: an atomic.
+        unsafe { &*extended_frame_ptr() }.store(on, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A kernel that builds the extended frame hands each signal's record to
+    /// the handler: `sigqueue`'s code, sender and value, a child's exit and
+    /// its status, a timer's `SI_KERNEL`.  One that does not -- an older
+    /// kernel, which answered 0 to the flag -- leaves the record unread: the
+    /// frame then ends at the context, and `SI_USER` with no sender is all
+    /// there is to say.
+    #[test]
+    fn an_extended_frame_brings_each_signal_s_record() {
+        assert_eq!(
+            core::mem::offset_of!(ExtendedFrame, tail),
+            SIGNAL_CONTEXT_SIZE
+        );
+        install_siginfo(SIGUSR1);
+        let mut frame = ExtendedFrame::with(SignalInfoTail {
+            si_code: SI_QUEUE,
+            si_pid: 4242,
+            si_uid: 1000,
+            pad: 0,
+            si_value: 0x0123_4567_89ab_cdef,
+        });
+
+        set_extended_frames(false);
+        assert_eq!(
+            dispatch_from(SIGUSR1, Origin::Kernel(&raw mut frame.ctx)),
+            0
+        );
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!(
+            (seen.code, seen.pid, seen.uid, seen.value),
+            (SI_USER, 0, 0, 0)
+        );
+
+        set_extended_frames(true);
+        assert_eq!(
+            dispatch_from(SIGUSR1, Origin::Kernel(&raw mut frame.ctx)),
+            0
+        );
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!(
+            (seen.code, seen.pid, seen.uid, seen.value),
+            (SI_QUEUE, 4242, 1000, 0x0123_4567_89ab_cdef),
+            "sigqueue's record, its value whole"
+        );
+
+        install_siginfo(SIGCHLD);
+        frame.tail = SignalInfoTail {
+            si_code: CLD_KILLED,
+            si_pid: 77,
+            si_uid: 0,
+            pad: 0,
+            si_value: 15,
+        };
+        assert_eq!(
+            dispatch_from(SIGCHLD, Origin::Kernel(&raw mut frame.ctx)),
+            0
+        );
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.signo, seen.code, seen.pid), (SIGCHLD, CLD_KILLED, 77));
+        assert_eq!(seen.value, 15, "si_status, at si_value's offset");
+
+        install_siginfo(SIGALRM);
+        frame.tail = SignalInfoTail {
+            si_code: SI_KERNEL,
+            ..SignalInfoTail::default()
+        };
+        assert_eq!(
+            dispatch_from(SIGALRM, Origin::Kernel(&raw mut frame.ctx)),
+            0
+        );
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.code, seen.pid, seen.uid), (SI_KERNEL, 0, 0));
+
+        set_extended_frames(false);
+        signal(SIGUSR1, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+        signal(SIGALRM, SIG_DFL);
+    }
+
+    /// A waiter is told the record of the signal it takes: the dispatch
+    /// claims it, writes the record, and only then the signal.
+    #[test]
+    fn a_waiter_is_told_the_record_of_what_it_takes() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // SAFETY: this thread's table (the host's is per thread).
+        let a = &unsafe { &*acceptors_ptr() }[0];
+        assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
+        a.got.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.set.store(sigmask_bit(SIGUSR1), SeqCst);
+
+        let mut frame = ExtendedFrame::with(SignalInfoTail {
+            si_code: SI_QUEUE,
+            si_pid: 31337,
+            si_uid: 7,
+            pad: 0,
+            si_value: u64::MAX,
+        });
+        set_extended_frames(true);
+        assert!(hand_to_a_waiter(
+            SIGUSR1,
+            Origin::Kernel(&raw mut frame.ctx)
+        ));
+        set_extended_frames(false);
+        assert_eq!(a.got.load(SeqCst), SIGUSR1);
+        let record = a.load_record();
+        assert_eq!(
+            record,
+            Record {
+                code: SI_QUEUE,
+                pid: 31337,
+                uid: 7,
+                value: u64::MAX,
+            }
+        );
+        let info = siginfo_for(SIGUSR1, record);
+        assert_eq!(
+            (info.si_code, info.si_pid, info.si_uid),
+            (SI_QUEUE, 31337, 7)
+        );
+        assert_eq!(info.value(), u64::MAX);
+        assert_eq!(info.si_status, -1, "sival_int is the low half");
+
+        // One raised here is this process's: SI_TKILL, its pid and uid.
+        a.got.store(0, SeqCst);
+        assert!(hand_to_a_waiter(SIGUSR1, Origin::Raised));
+        let record = a.load_record();
+        assert_eq!(record.code, SI_TKILL);
+        assert_eq!(record.pid, crate::process::getpid());
+        assert_eq!(record.uid, crate::unistd::getuid());
+
+        a.set.store(0, SeqCst);
+        a.got.store(0, SeqCst);
+        a.busy.store(false, SeqCst);
+    }
+
+    /// A send to a process that has exited and not been reaped succeeds, as
+    /// Linux's `kill`, `sigqueue` and `tgkill` do (measured); a bad signal
+    /// number for one is still `EINVAL`; the rest are the shared mapping's.
+    #[test]
+    fn a_send_to_a_zombie_succeeds_as_on_linux() {
+        assert_eq!(send_answer(0, SIGTERM), Ok(()));
+        assert_eq!(send_answer(errno::native::PROCESS_EXITED, SIGTERM), Ok(()));
+        assert_eq!(send_answer(errno::native::PROCESS_EXITED, 0), Ok(()));
+        assert_eq!(
+            send_answer(errno::native::PROCESS_EXITED, NSIG),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            send_answer(errno::native::NO_SUCH_PROCESS, SIGTERM),
+            Err(errno::ESRCH)
+        );
+        assert_eq!(
+            send_answer(errno::native::PERMISSION_DENIED, SIGTERM),
+            Err(errno::EPERM)
+        );
+        assert_eq!(
+            send_answer(errno::native::INVALID_ARGUMENT, 99),
+            Err(errno::EINVAL)
+        );
+        assert!(no_send_call(errno::native::NO_SUCH_SYSCALL));
+        assert!(no_send_call(crate::syscall::HOST_ENOSYS));
+        assert!(!no_send_call(errno::native::NO_SUCH_PROCESS));
+    }
+
+    /// `tgkill` to a thread other than the calling one goes to the kernel;
+    /// the host, which has none, takes the library's own check: a thread of
+    /// this process that is not live is `ESRCH`, and ids not above zero are
+    /// `EINVAL` before anything is asked.
+    #[test]
+    fn tgkill_checks_its_ids_before_it_asks() {
+        let me = crate::process::getpid();
+        crate::errno::set_errno(0);
+        assert_eq!(tgkill(0, 1, SIGUSR1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(tgkill(me, -1, SIGUSR1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(tgkill(me, i32::MAX, SIGUSR1), -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ESRCH,
+            "no such thread here"
+        );
     }
 
     /// From a kernel frame the handler reads the interrupted registers, and

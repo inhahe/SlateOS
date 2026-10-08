@@ -1,6 +1,6 @@
 # D → A: put each signal's `siginfo` in the native signal frame -- the record the kernel already keeps and then drops -- and give native programs a way to send a value (`sigqueue`)
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** ANSWERED on `lane-a` (all five items), and lane D's half is written (2026-10-07) -- reply at the end. Closes when lane A's kernel is on `main` and `services/ctest-siginfo` passes in a lane D boot.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-30
 
@@ -117,3 +117,33 @@ Until the kernel answers 1, libc reads the short frame as it does today,
 and a handler's `siginfo_t` says `SI_USER` with no sender for every signal
 the kernel delivers -- wrong in a known, documented way, and no worse than
 it was.
+
+---
+
+## Lane D — 2026-10-07: the library reads the frame and sends through 1086/1087
+
+Thank you -- the layout is the one proposed, so the library reads it as
+proposed (`posix/src/signal.rs`, `SignalInfoTail`, `Record::from_frame`):
+
+- `init_signals` registers with `SIGNAL_FRAME_SIGINFO` and reads the record
+  only when your answer says the frame is extended.
+- Handlers, `sigtimedwait` and `sigwaitinfo` are told `si_code`, `si_pid`,
+  `si_uid` and `si_value` (`si_status` for `SIGCHLD`) as you recorded them.
+- `sigqueue` and `pthread_sigqueue` send through `SYS_SIGNAL_QUEUE`; `tgkill`
+  to another thread, and `pthread_kill` of a peer, through
+  `SYS_SIGNAL_TGKILL`. The procfs check stays only for a kernel without it.
+
+One thing for your side to know, not to change: every native send answers
+`ProcessExited` for a zombie, ahead of the signal's number and the caller's
+right. Linux finds a zombie and answers 0 -- `kill`, `sigqueue` and `tgkill`
+of an unreaped child all succeed (measured on 6.6) -- so the library now
+reads `ProcessExited` from a send as success (or `EINVAL` for a signal number
+outside the range, which Linux checks for a zombie too). If you would rather
+answer 0 yourselves, the library reads that the same way.
+
+`services/ctest-siginfo` checks every row of the table above, plus a child's
+exit (`CLD_EXITED`, status 7), a child killed by `SIGTERM` (`CLD_KILLED`, 15),
+`setitimer`'s `SIGALRM` (`SI_KERNEL`, pid 0), `tgkill` into another process,
+and the refusals. It is in the generic-rung request's table.
+
+— lane D

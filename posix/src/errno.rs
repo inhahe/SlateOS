@@ -274,7 +274,10 @@ pub(crate) mod native {
     // --- Process (200 range: -200 to -203) ---
     pub const NO_SUCH_PROCESS: i64 = -200;
     // InvalidExecutable = -201
-    // ProcessExited = -202
+    /// The target process has exited and not been reaped -- a zombie. Every
+    /// native signal send answers it for one, where Linux's sends succeed;
+    /// `signal::send_answer` reads it as Linux answers.
+    pub const PROCESS_EXITED: i64 = -202;
     pub const NO_CHILD_PROCESS: i64 = -203;
 
     // --- IPC (300 range: -300 to -304) ---
@@ -417,6 +420,10 @@ pub fn errno_for(code: i64) -> i32 {
 
         // Process errors
         native::NO_SUCH_PROCESS => ESRCH,
+        // A process that has exited and not been reaped: no process to act
+        // on. (A signal sent to one is the exception, and its caller reads
+        // this before the mapping does: `signal::send_answer`.)
+        native::PROCESS_EXITED => ESRCH,
         native::NO_CHILD_PROCESS => ECHILD,
 
         // IPC errors

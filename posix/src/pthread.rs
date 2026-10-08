@@ -1573,18 +1573,18 @@ pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
         let e = errno::get_errno();
         return if e == 0 { errno::EINVAL } else { e };
     }
-    // Peer thread: process-directed delivery (see the doc comment above).
-    let self_pid = syscall::syscall0(syscall::SYS_PROCESS_ID);
-    #[allow(clippy::cast_sign_loss)]
-    let ret = syscall::syscall2(syscall::SYS_SIGNAL_SEND, self_pid as u64, sig as u64);
-    if ret < 0 {
-        // The target is our own process and the thread was just confirmed
-        // to exist, so a failure here is not "no such process"; report what
-        // the kernel actually said rather than guessing.
-        #[allow(clippy::cast_possible_truncation)]
-        return errno::translate(ret) as i32;
+    // Peer thread: process-directed delivery (see the doc comment above),
+    // through `tgkill` -- the kernel's `SYS_SIGNAL_TGKILL` where it has it,
+    // which checks the thread is this process's and tells the receiver
+    // `SI_TKILL`, as glibc's `pthread_kill` does with Linux's `tgkill`.
+    let Ok(tid) = crate::types::PidT::try_from(thread) else {
+        return errno::ESRCH;
+    };
+    if crate::signal::tgkill(crate::process::getpid(), tid, sig) == 0 {
+        0
+    } else {
+        errno::get_errno()
     }
-    0
 }
 
 /// glibc's internal signals -- `SIGCANCEL` (32) and `SIGSETXID` (33) -- which
@@ -1594,16 +1594,22 @@ fn is_internal_signal(sig: i32) -> bool {
 }
 
 /// Send `sig` with `value` to `thread`, a thread of this process (glibc 2.11's
-/// `pthread_sigqueue`): `ESRCH` for a thread that is not live, `EINVAL` for a
-/// signal glibc keeps for itself or one past the range, 0 for signal 0 --
-/// the existence probe, answered here -- and otherwise `ENOSYS`. The kernel
-/// queues no value with a signal (`sigqueue` answers `ENOSYS` the same way),
-/// and a send without it would hand the handler a `si_value` the caller did
-/// not give; when the kernel can carry one, this sends it.
+/// `pthread_sigqueue`): the receiver is told `SI_QUEUE`, this process's pid
+/// and uid, and `value` as `si_value`.  `ESRCH` for a thread that is not live,
+/// `EINVAL` for a signal glibc keeps for itself or one past the range, 0 for
+/// signal 0 -- the existence probe, answered here.
+///
+/// Sent as [`crate::signal::sigqueue`] sends, through lane A's
+/// `SYS_SIGNAL_QUEUE`, to this process: signals here are process-directed,
+/// as [`pthread_kill`] explains, so whichever thread next returns to
+/// userspace runs it -- the value and the code are what glibc's
+/// `rt_tgsigqueueinfo` would give.  On a kernel without that call it answers
+/// `ENOSYS`: a send without the value would hand the handler a `si_value`
+/// the caller did not give.
 ///
 /// glibc's order: the thread first, then the signal.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_sigqueue(thread: PthreadT, sig: i32, _value: usize) -> i32 {
+pub extern "C" fn pthread_sigqueue(thread: PthreadT, sig: i32, value: usize) -> i32 {
     if !thread_is_live(thread) {
         return errno::ESRCH;
     }
@@ -1613,7 +1619,10 @@ pub extern "C" fn pthread_sigqueue(thread: PthreadT, sig: i32, _value: usize) ->
     if sig == 0 {
         return 0;
     }
-    errno::ENOSYS
+    match crate::signal::queue_signal(crate::process::getpid(), sig, value as u64) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
 }
 
 /// Obtain a clock id that measures a thread's CPU time.
@@ -6294,10 +6303,11 @@ mod tests {
 
     /// `pthread_sigqueue`, in glibc's order: the thread, then the signal --
     /// its own two (32 and 33) and those past the range refused -- then the
-    /// probe answered, and a real send `ENOSYS`, the kernel carrying no
-    /// value with a signal.
+    /// probe answered, and a real send `ENOSYS` here: the host has no kernel
+    /// to send through, as a kernel without `SYS_SIGNAL_QUEUE` has none that
+    /// carries a value.
     #[test]
-    fn pthread_sigqueue_checks_as_glibcs_and_cannot_send() {
+    fn pthread_sigqueue_checks_as_glibcs_and_cannot_send_without_the_call() {
         let stale: PthreadT = u64::MAX - 1;
         let me = pthread_self();
         assert_eq!(pthread_sigqueue(stale, -1, 0), errno::ESRCH);

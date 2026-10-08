@@ -91,8 +91,8 @@ compare_with() {
   # once took GNU 3.8 s for `sleep 0.1 -- 0.1` while another lane wrote a
   # disk image in WSL -- so the minimum is the measurement, and a real
   # difference (an operand ignored) survives every retry.
-  local try t scratch_out scratch_err
-  for try in 1 2; do
+  local t scratch_out scratch_err
+  for _ in 1 2; do
     [ "$dt" -le 2 ] && break
     [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_msg" = "$g_msg" ] || break
     scratch_out=$(mktemp); scratch_err=$(mktemp)

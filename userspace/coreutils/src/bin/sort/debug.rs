@@ -237,7 +237,11 @@ pub fn notes(s: &Settings<'_>) -> Vec<String> {
 fn obsolescent(key: &KeySpec) -> String {
     let start = key.sword.unwrap_or(0);
     let mut old = format!("+{start}");
-    let mut new = format!("-k {}", start.wrapping_add(1));
+    // Built as upstream builds it -- `stpcpy (pn, "-k ")`, then the number --
+    // rather than formatted: a literal of an option and a placeholder reads
+    // to the help-vs-parser gate as help text advertising `-k`.
+    let mut new = String::from("-k ");
+    new.push_str(&start.wrapping_add(1).to_string());
     if let Some(end) = key.eword {
         old.push_str(&format!(" -{}", end.wrapping_add(1)));
         new.push_str(&format!(

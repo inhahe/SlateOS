@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `mkfifo`, `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -52,3 +52,8 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   umasks, and `-Z`/`--context` as upstream takes them without SELinux
   (design-decisions §1064). The walk fix reached `install` too, whose harness
   gained the cases. 284 agree, 4 differ on purpose (help and version text).
+* **`mkfifo`, 2026-10-07** -- `scripts/mkfifo-diff.sh`. Converted with it:
+  `-Z`/`--context` (§1064), and the mode set as upstream sets it -- the umask
+  read and left alone, the FIFO made under it and `lchmod`ed to `-m`'s mode --
+  where the umask used to be zeroed for the rest of the process. 144 agree, 5
+  differ on purpose (help and version text).

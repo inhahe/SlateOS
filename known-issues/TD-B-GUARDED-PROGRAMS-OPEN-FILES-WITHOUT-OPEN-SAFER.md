@@ -80,10 +80,12 @@ fails before and agrees after:
   `stty -F`, `touch`, `dd`, `nohup`.
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
   `copy.c`), `split`'s output files.
-* `stdlib--.h`: `sort`'s temporary files -- none exist yet, since ours
-  sorts in memory (`TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG`);
-  they are made safe when they are made.
 * `ln`'s target directory (`openat_safer`).
+
+**`sort`'s temporary files, 2026-10-08.** `sort` had none until its
+external merge was written (`known-issues-resolved/TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG.md`);
+they were made as upstream's `mkostemp_safer` makes them from the first,
+never on descriptor 0, 1 or 2 (`sort/external.rs`, `make_temp_file`).
 
 **`csplit`, 2026-10-08.** Its pieces were plain opens. With standard
 error closed a piece became descriptor 2, and a `match not found` said

@@ -1,33 +1,72 @@
 ## TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG (lane B, 2026-10-08)
 
-**Status:** PARTLY FIXED. `-R` and `--debug` work as of 2026-10-08 (below).
-**OPEN** for the external merge, and the resource options it reads.
+**Status:** RESOLVED 2026-10-08 (lane B). All three -- `-R`, `--debug` and
+the external merge with the resource options it reads -- are upstream's
+now, each held to GNU 9.4 by `scripts/sort-diff.sh` (560 cases). What is
+left is performance, not behaviour: `TD-B-SORT-SORTS-ON-ONE-THREAD`.
 
 Found while checking `sort` for the safer opens
 (`TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER`): three things
-GNU's `sort` does that ours did not. They were written down on 2026-08-16 as
+GNU's `sort` did that ours did not. They were written down on 2026-08-16 as
 "remaining limitations" inside an entry that was then moved to
 `known-issues-resolved/` (`B-b-sort-had-three-flags-and-got-all-three-wrong`),
 so nothing open tracked them since.
 
-**In short:** every input is sorted in memory, so a file larger than memory
-cannot be sorted at all, and the options that steer GNU's temporary files
-are accepted and ignored -- not even checked: `sort -S x`, `--batch-size=1`
-and `--parallel=0` sort, where GNU refuses each with status 2.
+**In short, as it was:** every input was sorted in memory, so a file larger
+than memory could not be sorted at all, and the options that steer GNU's
+temporary files were accepted and ignored -- not even checked: `sort -S x`,
+`--batch-size=1` and `--parallel=0` sorted, where GNU refuses each with
+status 2. `-R` and `--debug` were refused.
 
-| what | ours | GNU coreutils 9.4 |
-|---|---|---|
-| inputs larger than the sort buffer | read whole into memory | sorted a buffer at a time into temporary files (`-T DIR`, `$TMPDIR`, `/tmp`), merged `--batch-size` at a time, compressed through `--compress-program` |
-| `-S`, `-T`, `--batch-size`, `--compress-program`, `--parallel` | accepted, ignored | obeyed; observable with a small `-S`, e.g. `sort -S 1k -T /nonexistent big` is `sort: cannot create temporary file in '/nonexistent': No such file or directory`, status 2 |
+### Done: the external merge and the resource options, 2026-10-08
 
-**Where:** `userspace/coreutils/src/bin/sort/main.rs` (the `b'S' | b'T' |
-b'y'` arm, and the long options that fall through to "accepted and
-ignored").
+`sort/external.rs` is upstream's `sort`, `fillbuf`, `merge`, `mergefps`,
+`avoid_trashing_input` and `check`: the input read a buffer at a time,
+each buffer that does not end the input sorted into a temporary file, the
+files merged `--batch-size` at a time; `-m` through the same merge, `-c`
+reading only until the first line out of order. Nothing is read whole into
+memory any more.
 
-**The fix:** port it from `sort.c`, held to GNU's by `sort-diff.sh`: the
-resource options parsed and checked as `specify_sort_size`,
-`specify_nmerge` and `specify_nthreads` check them, and the external merge
--- whose temporary files are `mkstemp_safer`'s, as upstream's are.
+The output never depended on where the input is cut; *when a temporary
+file is made* does, so the buffer is upstream's to the byte --
+`sort_buffer_size` and `default_sort_size` for its size, `fillbuf`'s
+`readsize` and its `line_bytes` per line (48 with one thread, more with
+more: the thread count is `num_processors`, now `coreutils::nproc`), a line
+longer than the buffer growing it as `x2nrealloc` grows it, and a buffer
+that ends one input taking in the next. None of that size is allocated:
+upstream's lazily-touched `malloc` would be committed memory on SlateOS, so
+the buffer holds the bytes read and keeps upstream's arithmetic beside
+them. `sort-diff.sh` finds the threshold where it is: `-S 1k`, `2k`, `4k`
+and `8k` against `-T /nonexistent` on a 300-line file, each agreeing.
+
+Temporary files are `mkostemp_safer`'s in the `-T` directories in turn,
+then `$TMPDIR` (empty means `/`), then `/tmp`; `--compress-program` writes
+and reads them through `PROG` and `PROG -d`, its failure upstream's
+`'PROG' [-d] terminated abnormally`. They are removed as each merge
+finishes with them, and on every way out: `die`, the end of the run, and
+upstream's signals (`SIGINT`, `SIGTERM`, `SIGPIPE` and the rest, unless
+inherited ignored), caught for that alone and re-raised. `-o` naming an
+input of `-m` is read through a copy, as upstream's `avoid_trashing_input`
+copies it; `-o`'s file is created at the start and emptied only when the
+output starts, as `check_output` and `stream_open` do.
+
+The resource options are parsed and refused as upstream's
+`specify_sort_size`, `specify_nmerge` and `specify_nthreads` refuse them
+(`sort/limits.rs`): `invalid -S argument 'x'`, `-S argument '10Q' too
+large`, the two-line `--batch-size` refusals with the ceiling from this
+process's descriptor limit, `number in parallel must be nonzero`, and
+`multiple compress programs specified`. Found on the way and fixed with
+them: `-y`, Solaris's ignored option, swallowed the next word whatever it
+was, where upstream takes it only when it is all digits -- so `sort -y
+file` sorted standard input instead of `file`.
+
+`sort-diff.sh` has 38 cases for these: spilling under `-S 1k` with `-n`,
+`-r`, `-u`, `-s`, `-R`, `-z` and small `--batch-size`; `-T` that names no
+directory, round-robin, `TMPDIR` set and empty; `gzip` as the compress
+program and a missing one; `-m` past its batch size; `-o` onto an input of
+`-m` and of a spilling sort, the output file compared; and no temporary
+file left behind -- after a spill, a merge, a failure, and a `SIGINT` while
+reading. 36 more check the options themselves.
 
 ### Done: `--debug`, 2026-10-08
 

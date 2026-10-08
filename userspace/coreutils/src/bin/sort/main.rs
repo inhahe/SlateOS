@@ -19,6 +19,7 @@
 //! | `-t SEP` | field separator |
 //! | `-u` | output only the first of each run of equal keys |
 //! | `-z` | lines end with NUL, not newline |
+//! | `-S` `-T` `--batch-size` `--compress-program` | the buffer's size, where temporary files go, how many files one merge reads, what compresses them |
 //!
 //! Every option also has a long form, which may be abbreviated to any
 //! unambiguous prefix (`--rev`) and takes its value either way round
@@ -71,9 +72,20 @@
 //! (`known-issues/TD-SORT-C-LOCALE-ONLY-COLLATION.md`). `scripts/sort-diff.sh`
 //! runs GNU under `LC_ALL=C.UTF-8`, so the comparison is against that ordering
 //! -- which differs from the `C` locale's in what `-R` hashes (`order::random`).
+//!
+//! ## More than fits in memory
+//!
+//! The input is read a buffer at a time, as upstream reads it; what does not
+//! fit in one buffer is sorted into temporary files and merged, and `-m`
+//! merges by the same code. Nothing is read whole into memory, so an input of
+//! any size can be sorted in a buffer of `-S`. When a temporary file is made
+//! is observable, so the buffer's size and filling are upstream's to the
+//! byte: see the `external` module.
 
 mod debug;
+mod external;
 mod keydef;
+mod limits;
 mod order;
 
 use coreutils::diag;
@@ -87,9 +99,8 @@ use std::process::ExitCode;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
-use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef, quotef_os};
+use coreutils::quote::{quote, quoteaf_os, quotef, quotef_os};
 use coreutils::randint::{RandError, RandRead};
-use coreutils::stdio::StdioFile;
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
 
@@ -138,10 +149,16 @@ Other:
       --help                    print this and exit
       --version                 print the version and exit
 
-Accepted and ignored, because this sort holds the whole input in memory:
-  -S, --buffer-size=SIZE        -T, --temporary-directory=DIR
-      --parallel=N                  --compress-program=PROG
-      --batch-size=N
+Resources, for input that does not fit in memory:
+  -S, --buffer-size=SIZE        sort in a buffer of SIZE: KiB, or a b, K, M, G,
+                                T, P, E, Z, Y, R or Q suffix, or N% of memory
+  -T, --temporary-directory=DIR put temporary files in DIR, not $TMPDIR or /tmp;
+                                given more than once, each in turn
+      --batch-size=N            merge at most N files at once
+      --compress-program=PROG   compress temporary files with PROG, and read
+                                them back with PROG -d
+      --parallel=N              size the buffer for N threads, as upstream
+                                does; this sort runs on one
 
 A long option may be abbreviated to any unambiguous prefix, and takes its value
 either as --key=2 or as --key 2.
@@ -196,6 +213,16 @@ struct Config {
     /// Whether the one key is the global options' own -- upstream's
     /// `gkey_only`, under which `--debug` says less.
     gkey_only: bool,
+    /// `-S`: the sort buffer's size in bytes, 0 when none was given.
+    sort_size: usize,
+    /// `-T`: where temporary files go, in the order given.
+    temp_dirs: Vec<OsString>,
+    /// `--batch-size`: how many files one merge reads.
+    nmerge: u32,
+    /// `--parallel`: how many threads may sort, 0 when none was given.
+    nthreads: usize,
+    /// `--compress-program`: what compresses the temporary files.
+    compress_program: Option<OsString>,
 }
 
 impl Default for Config {
@@ -217,6 +244,11 @@ impl Default for Config {
             debug: false,
             global: KeySpec::whole_line(),
             gkey_only: false,
+            sort_size: 0,
+            temp_dirs: Vec::new(),
+            nmerge: limits::NMERGE_DEFAULT,
+            nthreads: 0,
+            compress_program: None,
         }
     }
 }
@@ -231,42 +263,49 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     stdfd::restore();
+    // Upstream catches its signals before it reads its options, and after
+    // the inherited dispositions are back, so that one its parent ignored
+    // stays ignored.
+    external::install_signal_handlers();
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cfg = match parse_args(&raw, getopt::posixly_correct(), posixver::posix2_version()) {
         Ok(c) => c,
         Err(e) => die_with(&e.message(), e.status),
     };
+    let status = run(&cfg);
+    // Upstream's `exit_cleanup`: whatever temporary file is left goes.
+    external::remove_all();
+    status
+}
 
-    // Every input is read before anything is written, which is what lets
-    // `sort -o f f` work: by the time the output file is truncated its old
-    // contents are already in memory.
-    let contents = read_inputs(&cfg);
-    let per_file: Vec<Vec<&[u8]>> = contents.iter().map(|c| split_lines(c, cfg.delim)).collect();
-
+/// The run itself, in upstream's order: `-c` reads its one input and
+/// answers; anything else checks that every named input can be read and
+/// opens `-o`'s file, then merges or sorts.
+fn run(cfg: &Config) -> ExitCode {
     if let Some(mode) = cfg.check {
-        return ExitCode::from(check(
-            &cfg,
-            per_file.first().map_or(&[], Vec::as_slice),
-            mode,
-        ));
+        let ordered = external::check(cfg, mode == Check::Diagnose);
+        return ExitCode::from(if ordered { 0 } else { 1 });
     }
-
-    let ordered = if cfg.merge {
-        merge(&cfg, &per_file)
+    check_inputs(cfg);
+    let mut output = external::Output::open(cfg);
+    let result = if cfg.merge {
+        let files = cfg
+            .files
+            .iter()
+            .cloned()
+            .map(external::MergeFile::input)
+            .collect();
+        let mut temps = external::Temps::new(cfg);
+        external::merge(cfg, &mut temps, files, &mut output)
     } else {
-        let mut lines: Vec<&[u8]> = per_file.iter().flatten().copied().collect();
-        // Stable, because `-s` and `-u` both stop the comparison short of the
-        // whole-line fallback and then rely on the input order to decide.
-        lines.sort_by(|a, b| compare(&cfg, a, b));
-        lines
+        external::sort(cfg, &mut output)
     };
-
-    // Reported in `write_out`, which knows which of upstream's calls failed;
-    // what comes back is the status to end with.
-    if let Err(status) = write_out(&cfg, &ordered) {
+    if let Err(status) = result {
         return status;
     }
-
+    if let Err(status) = output.finish(cfg) {
+        return status;
+    }
     // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) sort_die
     // (_("close failed"), "-")`.
     if cfg.files.iter().any(|f| f == "-")
@@ -274,44 +313,14 @@ fn run_main() -> ExitCode {
     {
         die(&format!("close failed: -: {}", strerror(&e)));
     }
-
     ExitCode::SUCCESS
 }
 
-// ── reading the inputs ──────────────────────────────────────────────────────
-
-/// One input as upstream holds it: standard input, or a file it opened.
-enum Opened {
-    Stdin,
-    File(File),
-}
-
-/// Every input's bytes, in order, read in the order upstream opens, checks
-/// and reads them. Nobody can see that order until standard input is closed,
-/// and then it is exactly what decides the answer -- each row measured
-/// against GNU sort 9.4:
-///
-/// * `check_inputs` first asks every *named* file `euidaccess (R_OK)`, before
-///   anything is opened: `sort - nosuch <&-` is `cannot read: nosuch`.
-/// * Sorting opens the first input and then `fstat`s every `-` once, sizing
-///   its buffer (`sort_buffer_size`): `sort <&-` and `sort - f <&-` are
-///   `stat failed: -: Bad file descriptor`, status 2.
-/// * But a file opened while descriptor 0 is closed *becomes* descriptor 0,
-///   and `xfclose` never closes descriptor 0 -- "allow reading stdin from tty
-///   more than once". So in `sort f - <&-` the `-` is `f` again, at its end:
-///   the output is `f` sorted, status 0. Merging opens every input before
-///   reading any, so `sort -m - f <&-` reads `f` through the `-`.
-/// * `-c` reads its one input and asks nothing first: `read failed: -`.
-fn read_inputs(cfg: &Config) -> Vec<Vec<u8>> {
-    let files = &cfg.files;
-    if cfg.check.is_some() {
-        return files
-            .iter()
-            .map(|path| read_opened(open_input(path), path))
-            .collect();
-    }
-    // `check_inputs`.
-    for path in files.iter().filter(|p| *p != "-") {
+/// Upstream's `check_inputs`: every named input must be readable --
+/// `euidaccess (R_OK)` -- before anything is opened. `sort - nosuch <&-` is
+/// `cannot read: nosuch`, not a complaint about standard input.
+fn check_inputs(cfg: &Config) {
+    for path in cfg.files.iter().filter(|p| *p != "-") {
         if let Err(e) = stdfd::readable(&arg_bytes(path)) {
             die(&format!(
                 "cannot read: {}: {}",
@@ -320,95 +329,6 @@ fn read_inputs(cfg: &Config) -> Vec<Vec<u8>> {
             ));
         }
     }
-    if cfg.merge {
-        let opened: Vec<Opened> = files.iter().map(open_input).collect();
-        return opened
-            .into_iter()
-            .zip(files)
-            .map(|(input, path)| read_opened(input, path))
-            .collect();
-    }
-    let mut contents = Vec::with_capacity(files.len());
-    for (n, path) in files.iter().enumerate() {
-        let input = open_input(path);
-        if n == 0 {
-            // `sort_buffer_size`, asked once, with only the first input open.
-            for dash in files.iter().filter(|p| *p == "-") {
-                if let Err(e) = stdfd::probe(0) {
-                    die(&format!(
-                        "stat failed: {}: {}",
-                        quotef_os(dash),
-                        strerror(&e)
-                    ));
-                }
-            }
-        }
-        contents.push(read_opened(input, path));
-    }
-    contents
-}
-
-/// Upstream's `xfopen` for reading.
-fn open_input(path: &OsString) -> Opened {
-    if path == "-" {
-        return Opened::Stdin;
-    }
-    match File::open(path) {
-        Ok(file) => Opened::File(file),
-        Err(e) => die(&format!(
-            "open failed: {}: {}",
-            quotef_os(path),
-            strerror(&e)
-        )),
-    }
-}
-
-/// Read one opened input to its end, then `xfclose` it.
-fn read_opened(input: Opened, path: &OsString) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let read = match &input {
-        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
-        Opened::Stdin => stdfd::RawStdin.read_to_end(&mut bytes),
-        Opened::File(file) => {
-            let mut handle: &File = file;
-            handle.read_to_end(&mut bytes)
-        }
-    };
-    if let Err(e) = read {
-        die(&format!(
-            "read failed: {}: {}",
-            quotef_os(path),
-            strerror(&e)
-        ));
-    }
-    if let Opened::File(file) = input {
-        if on_descriptor_zero(&file) {
-            // `xfclose` leaves a stream on descriptor 0 open, and a later `-`
-            // reads it: kept open, deliberately, for the rest of the process.
-            std::mem::forget(file);
-        } else if let Err(e) = stdfd::close(file) {
-            die(&format!(
-                "close failed: {}: {}",
-                quotef_os(path),
-                strerror(&e)
-            ));
-        }
-    }
-    bytes
-}
-
-/// Whether `file` was opened onto descriptor 0 -- which happens only when
-/// standard input was closed.
-#[cfg(unix)]
-fn on_descriptor_zero(file: &File) -> bool {
-    use std::os::fd::AsRawFd;
-    file.as_raw_fd() == 0
-}
-
-/// No descriptor numbers off unix.
-#[cfg(not(unix))]
-fn on_descriptor_zero(_file: &File) -> bool {
-    false
 }
 
 // ── comparison ──────────────────────────────────────────────────────────────
@@ -432,86 +352,6 @@ fn compare(cfg: &Config, a: &[u8], b: &[u8]) -> Ordering {
     }
     let diff = a.cmp(b);
     if cfg.reverse { diff.reverse() } else { diff }
-}
-
-/// Merge inputs that are each already sorted.
-///
-/// This is a real k-way merge and not a re-sort, because the two differ on
-/// input that is not in fact sorted and GNU's answer there is the merge's.
-/// Ties go to the earliest file, which is what makes `-m` stable.
-fn merge<'a>(cfg: &Config, per_file: &[Vec<&'a [u8]>]) -> Vec<&'a [u8]> {
-    let total: usize = per_file.iter().map(Vec::len).sum();
-    let mut out: Vec<&[u8]> = Vec::with_capacity(total);
-    let mut at: Vec<usize> = vec![0; per_file.len()];
-    loop {
-        let mut best: Option<usize> = None;
-        for (index, lines) in per_file.iter().enumerate() {
-            let Some(line) = lines.get(at.get(index).copied().unwrap_or(0)) else {
-                continue;
-            };
-            let better = match best.and_then(|b| {
-                per_file
-                    .get(b)
-                    .and_then(|f| f.get(at.get(b).copied().unwrap_or(0)))
-            }) {
-                None => true,
-                Some(current) => compare(cfg, line, current) == Ordering::Less,
-            };
-            if better {
-                best = Some(index);
-            }
-        }
-        let Some(index) = best else { break };
-        if let Some(line) = per_file
-            .get(index)
-            .and_then(|f| f.get(at.get(index).copied().unwrap_or(0)))
-        {
-            out.push(line);
-        }
-        if let Some(slot) = at.get_mut(index) {
-            *slot = slot.saturating_add(1);
-        }
-    }
-    out
-}
-
-/// `-c` / `-C`: is the input already in order?
-///
-/// Returns the exit status. With `-u` an equal pair is also a failure, since
-/// the file would not be the output of `sort -u`.
-fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> u8 {
-    // The name as given, which need not be text: upstream prints it bare.
-    let name = cfg
-        .files
-        .first()
-        .map_or(std::borrow::Cow::Borrowed(b"-".as_slice()), |f| os_bytes(f));
-    for index in 1..lines.len() {
-        let (Some(prev), Some(cur)) = (lines.get(index.saturating_sub(1)), lines.get(index)) else {
-            continue;
-        };
-        let diff = compare(cfg, prev, cur);
-        let disordered = if cfg.unique {
-            diff != Ordering::Less
-        } else {
-            diff == Ordering::Greater
-        };
-        if disordered {
-            if mode == Check::Diagnose {
-                // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
-                // diagnostic that never arrived has to reach `close_stderr`'s flag.
-                let mut err = Stream::stderr();
-                // The offending line goes out as bytes: it is not necessarily
-                // text, and a diagnostic is not a reason to mangle it.
-                let _ = err.write_all(b"sort: ");
-                let _ = err.write_all(&name);
-                let _ = write!(err, ":{}: disorder: ", index.saturating_add(1));
-                let _ = err.write_all(cur);
-                let _ = err.write_all(&[cfg.delim]);
-            }
-            return 1;
-        }
-    }
-    0
 }
 
 // ── input and output ────────────────────────────────────────────────────────
@@ -576,113 +416,6 @@ fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
         names.push(os_from_bytes(name));
     }
     Ok(names)
-}
-
-/// Split input into lines on `delim`.
-///
-/// A final line with no terminator is still a line — `printf 'b\na'` has two —
-/// and the terminator is supplied on output, so the result is terminated even
-/// when the input was not.
-fn split_lines(data: &[u8], delim: u8) -> Vec<&[u8]> {
-    let mut lines: Vec<&[u8]> = Vec::new();
-    let mut start = 0usize;
-    for (index, &byte) in data.iter().enumerate() {
-        if byte == delim {
-            lines.push(data.get(start..index).unwrap_or_default());
-            start = index.saturating_add(1);
-        }
-    }
-    if start < data.len() {
-        lines.push(data.get(start..).unwrap_or_default());
-    }
-    lines
-}
-
-/// Write the result as upstream does: each line with `write_line`'s one
-/// `fwrite`, then `xfclose`'s `fflush`, and the process's status in `Err`
-/// when it must end with another.
-///
-/// Through [`StdioFile`], which reproduces glibc's buffer, because *which*
-/// call fails is part of the output: a failure while the lines are going out
-/// is `write failed`, one at the final `fflush` is `fflush failed`, each
-/// naming the output -- `'standard output'`, or `-o`'s file, which upstream
-/// has moved onto descriptor 1. Either way upstream then dies, and the
-/// `close_stdout` in its `exit_cleanup` adds a `write error` with no reason:
-/// measured, `sort f >&-` and `sort f >/dev/full` both print the pair and exit
-/// 2. A reader that went away ends both at that write by `SIGPIPE`, which
-/// `stdfd::restore` put back; inherited ignored, the `EPIPE` is reported as
-/// any other failure is, as upstream reports it. Where the signal could not be
-/// put back (`stdfd::reader_gone`), upstream would have died saying nothing,
-/// so nothing is said and the run keeps its status (design-decisions 377).
-/// Before this, every failure was one `write failed: REASON` and a broken pipe
-/// was 2.
-///
-/// Upstream traps `SIGPIPE` to delete its temporary files before dying of it.
-/// This sort keeps the whole input in memory and makes none, so it has
-/// nothing to clean up and dies of the signal directly.
-fn write_out(cfg: &Config, lines: &[&[u8]]) -> Result<(), ExitCode> {
-    let (mut out, name) = match &cfg.output {
-        None => (StdioFile::stdout(), quotef(b"standard output")),
-        Some(path) => match File::create(path) {
-            Ok(file) => (StdioFile::from_file(file), quotef_os(path)),
-            Err(e) => die(&format!(
-                "open failed: {}: {}",
-                quotef_os(path),
-                strerror(&e)
-            )),
-        },
-    };
-    let failed = |what: &str, e: &io::Error| -> ExitCode {
-        if stdfd::reader_gone(e) {
-            return ExitCode::SUCCESS;
-        }
-        diag!("sort: {what}: {name}: {}", strerror(e));
-        diag!("sort: write error");
-        ExitCode::from(2)
-    };
-    let mut previous: Option<&[u8]> = None;
-    // One record per `fwrite`, its delimiter included, as upstream writes it:
-    // the sizes of the writes are what decide where glibc's buffer flushes.
-    let mut record: Vec<u8> = Vec::new();
-    for line in lines {
-        if cfg.unique
-            && let Some(prev) = previous
-            && compare(cfg, prev, line) == Ordering::Equal
-        {
-            continue;
-        }
-        record.clear();
-        if cfg.debug {
-            // `--debug` cannot be combined with `-o`, so this is standard
-            // output, as upstream's `write_line` requires.
-            debug::annotate(
-                &mut record,
-                line,
-                &cfg.keys,
-                cfg.tab,
-                !(cfg.unique || cfg.stable),
-            );
-        } else {
-            record.extend_from_slice(line);
-            record.push(cfg.delim);
-        }
-        if let Err(e) = out.write(&record) {
-            return Err(failed("write failed", &e));
-        }
-        previous = Some(line);
-    }
-    if let Err(e) = out.flush() {
-        return Err(failed("fflush failed", &e));
-    }
-    // `-o`'s file is upstream's standard output, closed by `close_stdout`; a
-    // failure there is its `write error`, with the reason.
-    if cfg.output.is_some()
-        && let Err(e) = out.close()
-    {
-        diag!("sort: write error: {}", strerror(&e));
-        return Err(ExitCode::from(2));
-    }
-    Ok(())
 }
 
 // ── command line ────────────────────────────────────────────────────────────
@@ -798,6 +531,24 @@ fn parse_args(
         let mut rest = bytes.get(1..).unwrap_or_default().to_vec();
         while let Some(&flag) = rest.first() {
             rest.remove(0);
+            if flag == b'y' {
+                // Solaris's `-y`, accepted and ignored. It takes the rest of
+                // its word, or else the next word -- but only a next word of
+                // nothing but digits: anything else is left to be read as an
+                // option or an operand, upstream's `optind -= (*p != '\0')`.
+                // So `sort -y file` sorts `file`.
+                if rest.is_empty() {
+                    let next = raw
+                        .get(i)
+                        .ok_or_else(|| SORT.short_missing_argument(flag))?;
+                    if arg_bytes(next).iter().all(u8::is_ascii_digit) {
+                        i = i.saturating_add(1);
+                    }
+                } else {
+                    rest.clear();
+                }
+                continue;
+            }
             // An option that takes a value takes the rest of this bundle, or
             // the next argument if the bundle is exhausted.
             let mut take_value = |rest: &mut Vec<u8>| -> Result<Vec<u8>, Fatal> {
@@ -829,13 +580,17 @@ fn parse_args(
                     .push(parse_key(&take_value(&mut rest)?).map_err(fatal)?),
                 b't' => cfg.tab = Some(parse_tab(&take_value(&mut rest)?, cfg.tab).map_err(fatal)?),
                 b'o' => cfg.output = Some(os_from_bytes(&take_value(&mut rest)?)),
-                // Resource hints. This sort holds the whole input in memory, so
-                // there are no temporary files to place, no external program to
-                // compress them with, and nothing to parallelise; accepting and
-                // ignoring them keeps existing command lines working.
-                b'S' | b'T' | b'y' => {
-                    let _ = take_value(&mut rest)?;
+                b'S' => {
+                    cfg.sort_size = limits::specify_sort_size(
+                        cfg.sort_size,
+                        cfg.nmerge,
+                        "-S",
+                        &take_value(&mut rest)?,
+                        limits::physmem_total,
+                    )
+                    .map_err(fatal)?;
                 }
+                b'T' => cfg.temp_dirs.push(os_from_bytes(&take_value(&mut rest)?)),
                 // `other` is a byte, not a `char`: `other as char` would map
                 // 0xC3 to `Ã` and re-encode it as two bytes, so a bundle like
                 // `-é` would be reported as an option nobody typed.
@@ -886,6 +641,11 @@ fn parse_args(
     // it. So `--random-source=/nonexistent` costs nothing without `-R`.
     if cfg.keys.iter().any(|key| key.kind == Kind::Random) {
         cfg.salted = salted_state(cfg.random_source.as_ref())?;
+    }
+    // Upstream checks the size again against the final `--batch-size`, which
+    // may have come after `-S`.
+    if cfg.sort_size > 0 {
+        cfg.sort_size = cfg.sort_size.max(limits::min_sort_size(cfg.nmerge));
     }
 
     if cfg.check.is_some() && cfg.files.len() > 1 {
@@ -1047,7 +807,37 @@ fn long_option(
             cfg.random_source = Some(source);
         }
         "debug" => cfg.debug = true,
-        // Accepted and ignored, as for their short forms.
+        "buffer-size" => {
+            cfg.sort_size = limits::specify_sort_size(
+                cfg.sort_size,
+                cfg.nmerge,
+                "--buffer-size",
+                &need(),
+                limits::physmem_total,
+            )
+            .map_err(fatal)?;
+        }
+        "temporary-directory" => cfg.temp_dirs.push(os_from_bytes(&need())),
+        "batch-size" => {
+            let max = limits::max_nmerge(limits::rlimit(limits::Resource::Files));
+            cfg.nmerge = limits::specify_nmerge(&need(), max).map_err(fatal)?;
+        }
+        "parallel" => {
+            cfg.nthreads = limits::specify_nthreads("--parallel", &need()).map_err(fatal)?;
+        }
+        // Named twice, it must be the same program: upstream compares the
+        // names as given.
+        "compress-program" => {
+            let program = os_from_bytes(&need());
+            if cfg
+                .compress_program
+                .as_ref()
+                .is_some_and(|known| *known != program)
+            {
+                return Err(fatal("multiple compress programs specified".to_string()));
+            }
+            cfg.compress_program = Some(program);
+        }
         _ => {}
     }
     Ok(())
@@ -1217,6 +1007,8 @@ fn die(msg: &str) -> ! {
 /// too, exactly as it would on any path that does return.
 fn die_with(msg: &str, status: i32) -> ! {
     diag!("sort: {msg}");
+    // Upstream's `exit_cleanup` runs on this way out too.
+    external::remove_all();
     stdfd::exit_now(u8::try_from(status).unwrap_or(2), 2)
 }
 
@@ -1229,6 +1021,26 @@ fn die_with(msg: &str, status: i32) -> ! {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Split input into lines on `delim`.
+    ///
+    /// A final line with no terminator is still a line — `printf 'b\na'` has two —
+    /// and the terminator is supplied on output, so the result is terminated even
+    /// when the input was not.
+    fn split_lines(data: &[u8], delim: u8) -> Vec<&[u8]> {
+        let mut lines: Vec<&[u8]> = Vec::new();
+        let mut start = 0usize;
+        for (index, &byte) in data.iter().enumerate() {
+            if byte == delim {
+                lines.push(data.get(start..index).unwrap_or_default());
+                start = index.saturating_add(1);
+            }
+        }
+        if start < data.len() {
+            lines.push(data.get(start..).unwrap_or_default());
+        }
+        lines
+    }
 
     /// `parse_args` with `POSIXLY_CORRECT` unset and `_POSIX2_VERSION` at its
     /// default, so no test depends on the environment `cargo test` inherited.
@@ -1595,34 +1407,5 @@ mod tests {
         let cfg = cfg_of(&["+file"]);
         assert!(cfg.keys.is_empty());
         assert_eq!(cfg.files, vec![OsString::from("+file")]);
-    }
-
-    #[test]
-    fn check_reports_the_first_line_out_of_order() {
-        let cfg = cfg_of(&["-c"]);
-        let data = b"b\na\n".to_vec();
-        let lines = split_lines(&data, b'\n');
-        assert_eq!(check(&cfg, &lines, Check::Quiet), 1);
-        let cfg = cfg_of(&["-c"]);
-        let data = b"a\nb\n".to_vec();
-        let lines = split_lines(&data, b'\n');
-        assert_eq!(check(&cfg, &lines, Check::Quiet), 0);
-        // With `-u`, an equal pair is also out of order.
-        let cfg = cfg_of(&["-cu"]);
-        let data = b"a\na\n".to_vec();
-        let lines = split_lines(&data, b'\n');
-        assert_eq!(check(&cfg, &lines, Check::Quiet), 1);
-    }
-
-    #[test]
-    fn merge_is_a_merge_and_not_a_re_sort() {
-        // GNU's `-m` on input that is not in fact sorted answers with the
-        // merge, which is not what sorting the concatenation would give.
-        let cfg = cfg_of(&["-m"]);
-        let a = b"3\n1\n".to_vec();
-        let b = b"2\n".to_vec();
-        let per_file = vec![split_lines(&a, b'\n'), split_lines(&b, b'\n')];
-        let out = merge(&cfg, &per_file);
-        assert_eq!(out, vec![b"2".as_slice(), b"3".as_slice(), b"1".as_slice()]);
     }
 }

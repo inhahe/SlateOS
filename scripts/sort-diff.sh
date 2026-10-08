@@ -516,6 +516,19 @@ run_case -S 1M cols.txt
 run_case -T . cols.txt
 run_case --parallel=2 cols.txt
 run_case --buffer-size=1M cols.txt
+run_case -S 0 cols.txt
+run_case -S 1b cols.txt
+run_case -S 50% cols.txt
+run_case -S 2k -S 1M cols.txt
+run_case --batch-size=2 cols.txt
+run_case -T /nonexistent cols.txt
+run_case -y cols.txt
+run_case -y 10 cols.txt
+run_case -y10 cols.txt
+run_case -y '' cols.txt
+run_case -y -r cols.txt
+run_case -ry 5 cols.txt
+run_case cols.txt -y
 
 # --- failure, and the exit status that reports it ---------------------------
 run_case nosuchfile.txt
@@ -733,6 +746,37 @@ xfail_msg() {
   return 0
 }
 
+# The resource options are read and checked as upstream's specify_sort_size,
+# specify_nmerge and specify_nthreads read them, though the input fits in
+# memory: xstrtol_fatal's straight quotes, specify_nmerge's curly pairs, and
+# a --batch-size ceiling from this process's descriptor limit.
+run_msg -S x
+run_msg -S 10Q
+run_msg -S 1x
+run_msg -S 1bb
+run_msg -S ''
+run_msg --buffer-size=x
+run_msg --buf=x
+run_msg -S 1 -S x
+run_msg --batch-size=1
+run_msg --batch-size=0
+run_msg --batch-size=x
+run_msg --batch-size=-2
+run_msg --batch-size=99999999999
+run_msg --batch-size=4294967298
+run_msg --parallel=0
+run_msg --parallel=x
+run_msg --parallel=99999999999999999999999
+run_msg --compress-program=a --compress-program=b
+run_msg --compress-program=a --compress-program=a
+run_msg -T /nonexistent
+# -y is Solaris's, accepted and ignored. Its argument is the rest of its
+# word, or the next word only when that is all digits; any other next word
+# is read as an option or an operand.
+run_msg -y
+run_msg -y 10
+run_msg -y10
+
 # -R's failures, worded: an unopenable, a short and an unreadable source, two
 # different sources, and the orderings it cannot be combined with.
 run_msg -R --random-source=nosuchfile
@@ -947,6 +991,122 @@ run_fd stdout-full big.txt
 run_fd stdout-full -m big.txt big.txt
 run_fd stdout-full -o /dev/full unsorted.txt
 run_fd stdout-full -o /dev/full big.txt
+
+# --- what does not fit: temporary files, and the merge that reads them ---------
+# With -S 1k the input outgrows the buffer, each buffer is sorted into a
+# temporary file, and the files are merged -- the output is the sort of the
+# whole. What shows is *whether* a temporary file was wanted: -T naming a
+# directory that is not there is an error then and only then, upstream's
+# buffer arithmetic (sort_buffer_size, fillbuf) deciding which. Round-robin
+# over several -T, then $TMPDIR, then /tmp.
+seq 1 20000                                             > seq20k.txt
+seq 20000 -1 1                                          > seq20krev.txt
+seq 1 300 | sed 's/$/ x/'                               > mid.txt
+head -c 5000 /dev/zero | tr '\0' x                      > long.txt
+printf '\na\n'                                          >> long.txt
+run_case -S 1k seq20k.txt
+run_case -S 1k -n seq20krev.txt
+run_case -S 1k -nr seq20k.txt
+run_case -S 1k -nu seq20k.txt seq20krev.txt
+run_case -S 1k -s -k1,1.1 seq20krev.txt
+run_case -S 1k -R --random-source=count.src mid.txt
+run_case -S 1k --batch-size=2 seq20krev.txt
+run_case -S 1k --batch-size=3 -n seq20krev.txt seq20k.txt
+run_case -S 1k -T /nonexistent seq20k.txt
+run_case -S 1k -T /nonexistent cols.txt
+run_case -S 1k -T /nonexistent mid.txt
+run_case -S 1k -T . -T /nonexistent seq20k.txt
+run_case -S 1k -T /nonexistent long.txt
+run_case -S 2k -T /nonexistent mid.txt
+run_case -S 4k -T /nonexistent mid.txt
+run_case -S 8k -T /nonexistent mid.txt
+run_case -S 1k -z -T /nonexistent nul.txt
+run_case -S 1k --compress-program=gzip -n seq20krev.txt
+run_case -S 1k --compress-program=nosuchprog seq20k.txt
+ENVV=(TMPDIR=/nonexistent)
+run_case -S 1k seq20k.txt
+run_case -S 1k -T . seq20k.txt
+ENVV=(TMPDIR=)
+run_case -S 1k seq20k.txt
+ENVV=()
+# -m merges --batch-size files at a time; more files than that is a pass
+# into a temporary file first.
+seq 1 3 > m1.txt; seq 4 6 > m2.txt; seq 7 9 > m3.txt
+run_case -m --batch-size=2 m1.txt m2.txt m3.txt
+run_case -m --batch-size=2 -T /nonexistent m1.txt m2.txt m3.txt
+run_case -m --batch-size=3 -T /nonexistent m1.txt m2.txt m3.txt
+run_case -m -u --batch-size=2 m1.txt m1.txt m2.txt
+run_case -m --batch-size=2 m3.txt m2.txt m1.txt m3.txt m2.txt
+
+# -o naming an input: sorting reads every input before the output is
+# emptied; merging copies such an input to a temporary file first
+# (avoid_trashing_input) -- which is why -T matters there.
+run_o() {
+  local out=$1; shift
+  local o_rc g_rc o_err g_err
+  o_err=$(mktemp); g_err=$(mktemp)
+  rm -rf o_dir g_dir; mkdir o_dir g_dir
+  cp ./*.txt o_dir/ 2>/dev/null; cp ./*.txt g_dir/ 2>/dev/null
+  ( cd o_dir && $OURS_RUN "$@" >/dev/null 2>"$o_err" ); o_rc=$?
+  ( cd g_dir && $GNU_RUN  "$@" >/dev/null 2>"$g_err" ); g_rc=$?
+  local o_loud=no g_loud=no o_has=no g_has=no
+  [ -s "$o_err" ] && o_loud=yes
+  [ -s "$g_err" ] && g_loud=yes
+  [ -e "o_dir/$out" ] && o_has=yes
+  [ -e "g_dir/$out" ] && g_has=yes
+  if [ "$o_rc" = "$g_rc" ] && [ "$o_loud" = "$g_loud" ] && [ "$o_has" = "$g_has" ] \
+     && { [ "$o_has" = no ] || cmp -s "o_dir/$out" "g_dir/$out"; }; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): %s {%s}\n  gnu  (rc=%s): %s {%s}' \
+      "$o_rc" "$(od -An -c "o_dir/$out" 2>/dev/null | tr -s ' \n' ' ' | cut -c1-200)" "$(tr '\n' '|' <"$o_err")" \
+      "$g_rc" "$(od -An -c "g_dir/$out" 2>/dev/null | tr -s ' \n' ' ' | cut -c1-200)" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err"; rm -rf o_dir g_dir
+  report "sort $* [then $out]"
+}
+run_o m1.txt -m -o m1.txt m1.txt m2.txt
+run_o m1.txt -m -o m1.txt m2.txt m1.txt m1.txt
+run_o m1.txt -m -T /nonexistent -o m1.txt m1.txt m2.txt
+run_o seq20k.txt -S 1k -o seq20k.txt seq20k.txt seq20krev.txt
+run_o seq20krev.txt -n -o seq20krev.txt seq20krev.txt
+run_o new.txt -o new.txt nosuchfile.txt
+
+# Nothing is left behind: in a directory of its own, after a sort that
+# spilled, after one that failed for want of a directory, and after one
+# killed while it was reading.
+run_clean() {
+  local o_left g_left
+  rm -rf o_tmp g_tmp; mkdir o_tmp g_tmp
+  TMPDIR=$PWD/o_tmp $OURS_RUN "$@" >/dev/null 2>&1
+  TMPDIR=$PWD/g_tmp $GNU_RUN  "$@" >/dev/null 2>&1
+  o_left=$(find o_tmp -mindepth 1 | wc -l); g_left=$(find g_tmp -mindepth 1 | wc -l)
+  if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+    AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+  rm -rf o_tmp g_tmp
+  report "sort $* [temporary files left]"
+}
+run_clean -S 1k seq20k.txt
+run_clean -S 1k --batch-size=2 seq20krev.txt
+run_clean -S 1k -m --batch-size=2 m1.txt m2.txt m3.txt
+run_clean -S 1k seq20k.txt nosuchfile.txt
+run_killed() {
+  local side=$1 dir=$2 pid
+  mkdir "$dir"
+  { cat seq20k.txt; sleep 3; } | TMPDIR=$PWD/$dir env PATH="$bindir/$side" sort -S 1k >/dev/null 2>&1 &
+  pid=$!
+  sleep 1
+  kill -INT "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  find "$dir" -mindepth 1 | wc -l
+}
+rm -rf o_kill g_kill
+o_left=$(run_killed ours o_kill); g_left=$(run_killed gnu g_kill)
+if [ "$o_left" = "$g_left" ]; then AGREED=yes; else
+  AGREED=no; REPORT="  ours left $o_left, gnu left $g_left"; fi
+rm -rf o_kill g_kill
+report "sort -S 1k, interrupted while reading [temporary files left]"
 
 # --- POSIXLY_CORRECT -----------------------------------------------------------
 # glibc's getopt ends option parsing at the first operand while it is set -- to

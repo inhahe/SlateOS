@@ -685,8 +685,9 @@ pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
 /// the programs whose upstream is safe -- what `tee` needed: `printf
 /// 'hello\n' | tee out.txt >&-` wrote `hello` into `out.txt` twice and
 /// exited 0, where GNU's writes it once and says `tee: 'standard output':
-/// Bad file descriptor`. `known-issues/TD-B-GUARDED-PROGRAMS-OPEN-FILES-
-/// WITHOUT-OPEN-SAFER.md` lists which programs are converted.
+/// Bad file descriptor`. `known-issues-resolved/TD-B-GUARDED-PROGRAMS-OPEN-
+/// FILES-WITHOUT-OPEN-SAFER.md` lists, program by program, which were
+/// converted and which were measured and left as they are.
 pub trait OpenSafer {
     /// [`std::fs::OpenOptions::open`], kept off descriptors 0-2.
     ///

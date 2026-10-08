@@ -1,15 +1,16 @@
 ## TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER (lane B, 2026-10-07)
 
-**Status:** PARTLY FIXED 2026-10-08 (lane B): `tee`, the program whose
-difference corrupted data, opens its files as its upstream does now, and so
-do `csplit`, whose pieces kept a diagnostic inside them, the digest
-programs, whose `--check` read its own list as a `-` line's input, `pr`,
-whose `-m` read a file twice -- once as itself and once as `-` -- and the
-`freopen` programs (`uniq`, `shuf`, `tsort`, `dircolors`, `du
---files0-from`, `ptx -G`), one of which aborted.
-**OPEN** for the other programs whose upstream keeps its files off
-descriptors 0-2 (the list at the end): each is converted with the harness
-case that shows the difference, not all at once.
+**Status:** FIXED 2026-10-08 (lane B). Every program whose upstream keeps
+the files it opens off descriptors 0-2, or puts one *on* 0 or 1 on purpose,
+now does what upstream does -- or was measured with those descriptors closed
+and cannot be told apart, which its harness now holds. Converted: `tee`,
+whose difference corrupted data; `csplit`, whose pieces kept a diagnostic;
+the digest programs, whose `--check` read its own list as a `-` line's
+input; `pr`, whose `-m` read a file twice; the `freopen` programs (`uniq`,
+`shuf`, `tsort`, `dircolors`, `du --files0-from`, `ptx -G`), one of which
+aborted; and `dd`, which read its own output file as its input. Measured and
+left as they are: `split`, `date -f`, `stty -F`, `touch`, `cp`, `mv`,
+`install` and `ln` (each says why, below).
 
 **In short:** a program can be started with a standard descriptor closed
 (`tee out.txt >&-`). The descriptor guard (`guard_std_fds!`) keeps it closed,
@@ -72,15 +73,32 @@ and 1 at all but put it there on purpose (grepped, coreutils 9.4):
 `stty -F`, `touch` and `dd if=`, and onto 1 in `dd of=` and `nohup`. Each of
 those has to be ported as upstream does it, which is not `fd_safer` either.
 
-**Still to do** -- each with a closed-descriptor case in its harness that
-fails before and agrees after:
+**Measured and left as they are, 2026-10-08.** Upstream treats these
+specially and ours does not, and with standard descriptors closed the two
+still cannot be told apart. Each harness now holds cases that would show it if
+that changed -- and each closing was checked to reach the program, since a
+verbose case agrees whether or not its descriptor was really closed:
 
-* `fd_reopen` (onto 0 or 1): `stty -F`, `touch`. (`dd` is done, below;
-  `nohup`'s was already right, and now shares `stdfd::move_to`; `csplit`'s
-  and `split`'s inputs were measured and cannot be told apart -- below.)
-* `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
-  `copy.c`).
-* `ln`'s target directory (`openat_safer`).
+* `stty -F DEVICE` -- upstream reopens the device over descriptor 0; ours
+  uses it where its open put it, which with standard output closed is
+  descriptor 1, but read-only, so writing the settings there fails with the
+  `EBADF` a closed descriptor gives. `stty-diff.sh`: eleven cases, through a
+  `TTYRUN_CLOSE` knob in its terminal runner.
+* `touch` -- upstream opens each file onto descriptor 0 and closes it; ours
+  opens it where it lands. Nothing reads standard input or writes standard
+  output but `--help`. `touch-diff.sh`: six cases.
+* `cp`, `mv` and `install` -- `copy.c` opens through `fcntl--.h`; ours opens
+  plainly, and `-v`'s line is written before each copy opens its files, so
+  no file of ours holds descriptor 1 when standard output is written.
+  `cp-diff.sh` six cases, `mv-diff.sh` five, and `install-diff.sh` three
+  with both descriptors closed beside the nine it had.
+* `ln A B DIR` -- upstream keeps DIR open (`openat_safer`) and links relative
+  to it; ours opens it only to ask whether it is a directory, closes it, and
+  links by name. `ln-diff.sh`: seven cases.
+* `split` and `date -f`: below. `csplit`'s input, also upstream's
+  `fd_reopen`, cannot be seen either: ours reads the whole input and closes
+  it before the first piece is made. `nohup`'s `fd_reopen` was already right,
+  and now shares `stdfd::move_to`.
 
 **The `*sum` programs, `sum` and `cksum`, 2026-10-08.** All built from
 `digest.c` upstream, as ours share `coreutils::digest`, whose two opens --

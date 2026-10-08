@@ -22418,14 +22418,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         // The two namespace trees, whose guessed parent was the root.
-        let out = capture_command("namespace create zzrungns 1O");
+        //
+        // `namespace create` went with the old mount-namespace registry
+        // (87c13c347, 2026-10-07): a mount namespace is made by a process now
+        // -- `unshare -m`, `clone(CLONE_NEWNS)` -- and the shell only lists
+        // them. Its remaining operand is the id `namespace mounts` lists, and
+        // a guess there would still have been the root: a mistyped id
+        // answered with the system's own mounts as if they were the asked-for
+        // namespace's. (Debug boot 2 of lane-a-wip's fast runs, 2026-10-08,
+        // panicked here on the removed subcommand's usage line.)
+        let out = capture_command("namespace mounts 1O");
         assert_output_contains(
-            "an unreadable mount-namespace parent is named, not read as the root",
+            "an unreadable mount-namespace id is named, not read as the root",
             &out,
-            b"`1O' is not a parent namespace id",
+            b"`1O' is not a mount namespace id",
         );
-        assert_eq!(last_exit(), 1, "`namespace create zzrungns 1O` errors");
-        assert_output_lacks("and no namespace was created", &out, b"created (id=");
+        assert_eq!(last_exit(), 1, "`namespace mounts 1O` errors");
+        assert_output_lacks("and no namespace's mounts were listed", &out, b"/ ");
 
         let out = capture_command("pidns create 1O");
         assert_output_contains(
@@ -30060,9 +30069,9 @@ fn cmd_namespace(args: &str) {
             }
         }
         Some("mounts") => {
-            let Some(id) = parts.get(1).and_then(|p| p.parse::<u64>().ok()) else {
-                shell_println!("Usage: namespace mounts ID");
-                set_exit(1);
+            // A word that is not an id is named, not answered with the root
+            // namespace's mounts (design-decisions.md §600).
+            let Some(id) = required_id(&parts, "namespace", "mounts", "mount namespace") else {
                 return;
             };
             if id != mntns::ROOT && crate::fs::Vfs::mount_count_in(id) == 0 {

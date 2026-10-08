@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**482 programs; 323 on the image, 6 carried inside the kernel.**
+**483 programs; 324 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 297
+## Userland utilities and services (`userspace/`, lane B) -- 298
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -313,6 +313,7 @@ two disagree.
 | `wpa` | WiFi Protected Access multi-personality binary. | yes |  |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
 | `xdg-open` | XDG File Association Tools | yes | `xdg` | `xdg-mime`, `mimeopen` |
+| `xxd` | Make a hex dump, or turn one back into binary: vim 9.1.0016's, ported. | yes | `coreutils` |  |
 | `yacc` | LALR(1) parser generator | yes |  |  |
 | `yes` | Output a string repeatedly until killed. | yes | `coreutils` |  |
 | `zip` | Zip/unzip archive utility. | yes |  | `unzip` |

@@ -51,10 +51,16 @@
 //! over unread bytes that `exit` makes -- which is what decides where the
 //! *next* reader of a shared standard input starts. See its docs.
 //!
-//! What it does not reproduce: seeking by the caller, wide streams, and the
-//! line-buffered corner where a failed flush of a complete line is reported
-//! to `fwrite`'s caller as success -- a terminal that rejects writes is not a
-//! case anyone has measured.
+//! Both kinds of stream seek as `fseek` does ([`StdioFile::seek`],
+//! [`StdioReader::seek`], [`StdioReader::rewind`]): a written stream flushes
+//! first, a read one counts from the next byte it would hand out, and a
+//! standard descriptor moves for everyone who shares it -- `xxd -r` rewinds
+//! its standard input and seeks its output.
+//!
+//! What it does not reproduce: wide streams, and the line-buffered corner
+//! where a failed flush of a complete line is reported to `fwrite`'s caller
+//! as success -- a terminal that rejects writes is not a case anyone has
+//! measured.
 
 use std::io;
 
@@ -232,6 +238,34 @@ impl StdioFile {
         let result = write_held(&mut held, &mut |bytes| self.write_out(bytes));
         self.buf = held;
         result
+    }
+
+    /// `fseek`, then `ftell`: whatever is held written out, the descriptor
+    /// moved, and where it now is.
+    ///
+    /// glibc's `fseek` on a stream being written flushes it first and gives
+    /// up if that fails, moving nothing. It also allocates the buffer of a
+    /// stream nothing has been written to yet, so the next write is not the
+    /// "first" one of the module docs: it finds room. (glibc turns a
+    /// `SEEK_END` on a regular file into a `SEEK_SET` past its `st_size`,
+    /// which lands in the same place.)
+    ///
+    /// # Errors
+    ///
+    /// The flush's, or `lseek(2)`'s -- `ESPIPE` for a pipe or a terminal,
+    /// `EINVAL` for a position before the start.
+    pub fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        if self.buffering == Buffering::Unallocated {
+            self.buffering = self.choose_buffering();
+        }
+        self.flush()?;
+        match &mut self.sink {
+            Sink::Descriptor(fd) => stdfd::seek(*fd, to),
+            Sink::File(file) => io::Seek::seek(file, to),
+            Sink::Closed => Err(io::Error::from_raw_os_error(EBADF)),
+            #[cfg(test)]
+            Sink::Memory(_) => Err(io::Error::from_raw_os_error(ESPIPE)),
+        }
     }
 
     /// `fclose`: flush, then close the descriptor.
@@ -486,10 +520,31 @@ impl MemorySource {
         self.at = self.at.saturating_sub(n);
         Ok(())
     }
+
+    /// `lseek(2)` anywhere: `EINVAL` before the start, and past the end
+    /// allowed, as a regular file allows it.
+    fn seek_to(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        if !self.seekable {
+            return Err(io::Error::from_raw_os_error(ESPIPE));
+        }
+        let invalid = || io::Error::from_raw_os_error(EINVAL);
+        let base = |n: usize| i64::try_from(n).map_err(|_| invalid());
+        let target = match to {
+            io::SeekFrom::Start(n) => i64::try_from(n).map_err(|_| invalid())?,
+            io::SeekFrom::Current(d) => base(self.at)?.checked_add(d).ok_or_else(invalid)?,
+            io::SeekFrom::End(d) => base(self.data.len())?.checked_add(d).ok_or_else(invalid)?,
+        };
+        let target = usize::try_from(target).map_err(|_| invalid())?;
+        self.at = target;
+        u64::try_from(target).map_err(|_| invalid())
+    }
 }
 
 /// `ESPIPE`: what `lseek` answers on a pipe, which glibc's sync ignores.
 const ESPIPE: i32 = 29;
+
+/// `EINVAL`: what `lseek` answers for a position before the start.
+const EINVAL: i32 = 22;
 
 /// One stdio `FILE` opened for reading: glibc's `getdelim`, `getc` with
 /// `ungetc`, `feof`, `ferror`, `clearerr` and `setvbuf (_IONBF)`, and the
@@ -674,6 +729,89 @@ impl StdioReader {
         }
     }
 
+    /// `fread (out, 1, out.len (), fp)`: glibc's `_IO_file_xsgetn`. How many
+    /// bytes were read, and the error of the `read(2)` that stopped it short,
+    /// if one did (after which [`StdioReader::has_error`] is true).
+    ///
+    /// What is buffered is used first. A remainder smaller than the buffer
+    /// refills it, a block at a time; one as large or larger is read
+    /// *directly* into `out`, in a whole number of blocks (any number of
+    /// bytes, for a buffer under 128), bypassing the buffer -- so a large
+    /// `fread` takes from a shared descriptor exactly what it asked for and
+    /// leaves nothing for `exit` to give back. A direct read does not mark the
+    /// stream used, as glibc's does not orient it; and it is made even after
+    /// an end of file, which only the buffered path treats as sticky.
+    pub fn fread(&mut self, out: &mut [u8]) -> (usize, Option<io::Error>) {
+        // `_IO_doallocbuf`, before anything: the size decides the path.
+        if self.buffering == ReadBuffering::Unallocated {
+            self.buffering = ReadBuffering::Full(self.block_size());
+        }
+        let size = match self.buffering {
+            ReadBuffering::Full(n) => n,
+            ReadBuffering::Unallocated | ReadBuffering::Unbuffered => 1,
+        };
+        let mut done = 0usize;
+        while done < out.len() {
+            let want = out.len().saturating_sub(done);
+            let avail = self.buf.get(self.pos..).unwrap_or_default();
+            let take = avail.len().min(want);
+            if let (Some(dst), Some(src)) = (
+                out.get_mut(done..done.saturating_add(take)),
+                avail.get(..take),
+            ) {
+                dst.copy_from_slice(src);
+            }
+            self.pos = self.pos.saturating_add(take);
+            done = done.saturating_add(take);
+            let want = out.len().saturating_sub(done);
+            if want == 0 {
+                break;
+            }
+            if want < size {
+                match self.underflow() {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => return (done, Some(e)),
+                }
+            }
+            // Straight into the caller's buffer, keeping block alignment.
+            self.buf.clear();
+            self.pos = 0;
+            let count = if size >= 128 {
+                want.saturating_sub(want.checked_rem(size).unwrap_or(0))
+            } else {
+                want
+            };
+            let Some(dst) = out.get_mut(done..done.saturating_add(count)) else {
+                break;
+            };
+            let got = loop {
+                let r = match &mut self.source {
+                    Source::Descriptor(fd) => stdfd::read(*fd, dst),
+                    Source::File(f) => io::Read::read(f, dst),
+                    #[cfg(test)]
+                    Source::Memory(m) => m.give(dst),
+                };
+                match r {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    other => break other,
+                }
+            };
+            match got {
+                Ok(0) => {
+                    self.eof = true;
+                    break;
+                }
+                Ok(n) => done = done.saturating_add(n),
+                Err(e) => {
+                    self.error = true;
+                    return (done, Some(e));
+                }
+            }
+        }
+        (done, None)
+    }
+
     /// `getc`: the next byte, taken. `None` at the end of the file.
     ///
     /// # Errors
@@ -704,21 +842,81 @@ impl StdioReader {
     /// `rewind`: back to the start of the file, with the end of file and any
     /// error forgotten. A stream over something that cannot seek stays where
     /// it is, buffer and all, as glibc's failed seek leaves it.
+    ///
+    /// A standard descriptor moves too, as `rewind (stdin)` moves it -- and
+    /// with it the position the shell's next command starts from: measured,
+    /// `{ read -r line; xxd -r; } < dump` reverts the whole dump, the line
+    /// `read` took included.
     pub fn rewind(&mut self) {
-        let sought = match &mut self.source {
-            Source::File(f) => io::Seek::seek(f, io::SeekFrom::Start(0)).map(drop),
-            // A standard descriptor is not this stream's to move to an
-            // absolute position, and nothing asks it to be.
-            Source::Descriptor(_) => Err(io::Error::from_raw_os_error(ESPIPE)),
-            #[cfg(test)]
-            Source::Memory(m) => m.seek_back(m.at),
-        };
-        if sought.is_ok() {
-            self.buf.clear();
-            self.pos = 0;
-        }
+        // Its failure is the "cannot seek" case above, which `rewind` has no
+        // way to report.
+        drop(self.seek(io::SeekFrom::Start(0)));
         self.eof = false;
         self.error = false;
+    }
+
+    /// `fseek`, then `ftell`: the stream moved, and where it now is.
+    ///
+    /// An offset from the current position counts from the next byte the
+    /// caller would be handed, not from where the descriptor is, so what is
+    /// buffered and unread is taken off it. A seek that succeeds drops the
+    /// buffer and forgets the end of file; one that fails changes nothing.
+    ///
+    /// glibc reaches some targets by other calls -- a `SEEK_SET` to the block
+    /// boundary below and a read up to the target, a `SEEK_END` made a
+    /// `SEEK_SET` by `fstat` -- which end in the same place.
+    ///
+    /// # Errors
+    ///
+    /// `lseek(2)`'s: `ESPIPE` for a pipe or a terminal, `EINVAL` for a place
+    /// before the start, `EBADF` for a closed descriptor.
+    pub fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        let to = match to {
+            io::SeekFrom::Current(delta) => {
+                let unread =
+                    i64::try_from(self.buf.len().saturating_sub(self.pos)).unwrap_or(i64::MAX);
+                io::SeekFrom::Current(
+                    delta
+                        .checked_sub(unread)
+                        .ok_or_else(|| io::Error::from_raw_os_error(EINVAL))?,
+                )
+            }
+            other => other,
+        };
+        let at = match &mut self.source {
+            Source::Descriptor(fd) => stdfd::seek(*fd, to),
+            Source::File(f) => io::Seek::seek(f, to),
+            #[cfg(test)]
+            Source::Memory(m) => m.seek_to(to),
+        }?;
+        self.buf.clear();
+        self.pos = 0;
+        self.eof = false;
+        Ok(at)
+    }
+
+    /// `fclose`: the descriptor closed -- a standard one too, as
+    /// `fclose (stdin)` closes 0 -- and `close(2)`'s failure returned.
+    ///
+    /// Nothing is given back. Only `exit` seeks a stream back over its
+    /// read-ahead ([`StdioReader::exit_sync`]); `fclose` does not, so after
+    /// `xxd -l 5` has closed a shared standard input, the next reader starts
+    /// past the whole block `xxd` read -- measured, `cat` gets nothing of a
+    /// 111-byte file.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `close(2)` reports: `EBADF` for a standard descriptor that
+    /// was closed when the program started.
+    pub fn fclose(self) -> io::Result<()> {
+        match self.source {
+            Source::Descriptor(fd) => stdfd::close_descriptor(fd),
+            Source::File(f) => stdfd::close(f),
+            #[cfg(test)]
+            Source::Memory(m) => m
+                .close_result
+                .map_or(Ok(()), |errno| Err(io::Error::from_raw_os_error(errno))),
+        }
     }
 
     /// `fclose` of a stream that opened its file: the descriptor closed, and
@@ -1287,5 +1485,87 @@ mod tests {
         let mut r = source(b"y\nrest\n", 8, false);
         assert_eq!(line(&mut r), b"y\n");
         assert_eq!(close_verdict(r), Verdict::Quiet);
+    }
+
+    // ------------------------------------------------------------- seeking
+
+    #[test]
+    fn a_seek_from_here_counts_from_the_next_byte_not_the_descriptor() {
+        let mut r = source(b"abcdefgh", 4, true);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        // The descriptor is at 4 with "bcd" unread: +1 from the next byte is
+        // offset 2, not 5.
+        assert_eq!(r.seek(std::io::SeekFrom::Current(1)).unwrap(), 2);
+        assert_eq!(r.getc().unwrap(), Some(b'c'));
+        assert_eq!(r.seek(std::io::SeekFrom::End(-1)).unwrap(), 7);
+        assert_eq!(r.getc().unwrap(), Some(b'h'));
+        assert_eq!(r.getc().unwrap(), None);
+        // Past the end is allowed; a seek forgets the end of file.
+        assert_eq!(r.seek(std::io::SeekFrom::Start(100)).unwrap(), 100);
+        assert!(!r.at_eof());
+        assert_eq!(r.getc().unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_seek_changes_nothing() {
+        let mut r = source(b"abc", 8, false);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        let e = r.seek(std::io::SeekFrom::Start(0)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(super::ESPIPE));
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+        let mut r = source(b"abc", 8, true);
+        let e = r.seek(std::io::SeekFrom::Current(-1)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(super::EINVAL));
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+    }
+
+    #[test]
+    fn rewind_goes_back_to_the_start_and_forgets_the_end() {
+        let mut r = source(b"ab", 8, true);
+        assert_eq!(line(&mut r), b"ab");
+        assert!(r.at_eof());
+        r.rewind();
+        assert!(!r.at_eof());
+        assert_eq!(line(&mut r), b"ab");
+        // A pipe stays where it is, and still forgets the end.
+        let mut r = source(b"ab", 1, false);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        r.rewind();
+        assert_eq!(r.getc().unwrap(), Some(b'b'));
+    }
+
+    #[test]
+    fn fclose_reports_the_close_and_gives_nothing_back() {
+        let mut r = source(b"abcdef", 8, true);
+        assert_eq!(r.getc().unwrap(), Some(b'a'));
+        assert!(r.fclose().is_ok());
+        let mut r = source(b"", 8, true);
+        mem(&mut r).close_result = Some(EBADF);
+        assert_eq!(r.fclose().unwrap_err().raw_os_error(), Some(EBADF));
+    }
+
+    #[test]
+    fn a_seek_on_a_stream_being_written_flushes_first() {
+        let mut f = disk(128, 1000);
+        f.write(b"abc").unwrap();
+        // The memory disk cannot seek, but the held bytes went out first.
+        assert!(f.seek(std::io::SeekFrom::Current(0)).is_err());
+        assert_eq!((f.pending(), writes(&f)), (0, vec![3]));
+        // A flush that fails is the seek's failure.
+        let mut f = disk(128, 0);
+        f.write(b"abc").unwrap();
+        let e = f.seek(std::io::SeekFrom::Current(0)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(28));
+    }
+
+    #[test]
+    fn a_seek_allocates_the_buffer_so_the_next_write_finds_room() {
+        let mut f = fresh(128, 1000);
+        drop(f.seek(std::io::SeekFrom::Start(0)));
+        // Not the first write any more: 300 bytes fill the buffer, which
+        // goes, then one whole block goes directly and 44 are held -- where a
+        // first write would have sent 256 in one piece.
+        f.write(&[b'a'; 300]).unwrap();
+        assert_eq!((f.pending(), writes(&f)), (44, vec![128, 128]));
     }
 }

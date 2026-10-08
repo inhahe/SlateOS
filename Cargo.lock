@@ -661,6 +661,7 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "cstrtol",
  "embed-manifest",
  "ere",
  "errmsg",

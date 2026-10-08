@@ -26,6 +26,7 @@ use crate::serial_println;
 use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -1219,6 +1220,11 @@ pub struct Process {
     /// -- the precise counterpart of the two above, which the CPU-time
     /// clocks read (`sched::CpuSample`).
     pub acct_cycles: u64,
+    /// The running totals its CPU-time timers are checked against, which
+    /// every thread of it holds (`sched::ProcCpuAccount`): kept once such a
+    /// timer is armed ([`activate_cpu_account`]). A fork's child gets a new
+    /// one; exec keeps it, as Linux's CPU clocks and itimers run on.
+    pub cpu_account: Arc<crate::sched::ProcCpuAccount>,
 
     // --- Children CPU-time accounting (POSIX cutime/cstime) ---
     //
@@ -1515,6 +1521,7 @@ impl Process {
             acct_user_ticks: 0,
             acct_sys_ticks: 0,
             acct_cycles: 0,
+            cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
             child_user_ticks: 0,
             child_sys_ticks: 0,
             acct_min_flt: 0,
@@ -2050,6 +2057,7 @@ pub fn fork_create(
         acct_user_ticks: 0,
         acct_sys_ticks: 0,
         acct_cycles: 0,
+        cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
         child_user_ticks: 0,
         child_sys_ticks: 0,
         // Page-fault accounting also resets on fork.
@@ -2083,6 +2091,11 @@ pub fn fork_create(
     for handle in fork_retain_handles {
         let _ = crate::fs::handle::dup_shared(handle);
     }
+
+    // The child inherits RLIMIT_CPU, and is held to it by its own CPU time:
+    // arm the thresholds on its (fresh) clock. Its itimers are not
+    // inherited, as on Linux.
+    crate::proc::cputimer::rlimit_cpu_changed(pid);
 
     Ok(pid)
 }
@@ -2125,7 +2138,43 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.threads.push(task_id);
+    // The thread charges its process's running CPU-time totals from now on
+    // (`PROCESS_TABLE` -> `SCHED`, the documented order). Under the table's
+    // lock, so `activate_cpu_account` sees it either in `threads` or holding
+    // the account, never neither.
+    crate::sched::set_cpu_account(task_id, Arc::clone(&proc.cpu_account));
     Ok(())
+}
+
+/// Make process `pid`'s running CPU-time totals be kept, if they are not
+/// already -- a CPU-time timer is being armed against it -- and answer its
+/// account, or `None` if there is no such process.
+///
+/// Filled from the same snapshot [`process_counters`] reads, under the
+/// table's lock and then the scheduler's (`sched::activate_cpu_account`), so
+/// the totals agree with the process's clocks from the first tick.
+pub fn activate_cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuAccount>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    if !proc.cpu_account.is_active() {
+        let exited = crate::sched::CpuSample {
+            cycles: proc.acct_cycles,
+            user_ticks: proc.acct_user_ticks,
+            sys_ticks: proc.acct_sys_ticks,
+        };
+        crate::sched::activate_cpu_account(&proc.cpu_account, exited, &proc.threads);
+    }
+    Some(Arc::clone(&proc.cpu_account))
+}
+
+/// Process `pid`'s CPU-time account, active or not, or `None` if there is no
+/// such process.
+#[must_use]
+pub fn cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuAccount>> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| Arc::clone(&p.cpu_account))
 }
 
 /// Per-thread accounting totals folded into a process as the thread leaves it.
@@ -3129,6 +3178,13 @@ pub fn set_rlimit(
         return Err(KernelError::PermissionDenied);
     }
     proc.rlimits[resource as usize] = (new_cur, new_max);
+    drop(table);
+    // RLIMIT_CPU is enforced by thresholds on the process's CPU time, armed
+    // from the limits (Linux's `update_rlimit_cpu`); after the table's lock,
+    // which arming takes.
+    if resource == crate::proc::cputimer::RLIMIT_CPU {
+        crate::proc::cputimer::rlimit_cpu_changed(pid);
+    }
     Ok(())
 }
 
@@ -7471,6 +7527,8 @@ fn destroy_process_resources(
     crate::proc::itimer::cancel_real(pid);
     // Delete its POSIX timers, so none can queue a signal for a dead PID.
     crate::proc::posix_timer::process_exit(pid);
+    // And its CPU-time itimers and RLIMIT_CPU thresholds.
+    crate::proc::cputimer::process_exit(pid);
     // Drop any Linux per-signal sigaction state for this process.
     crate::syscall::linux::linux_sigaction_on_exit(pid);
 

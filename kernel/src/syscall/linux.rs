@@ -1419,15 +1419,19 @@ pub mod restart_block {
     use crate::sync::PreemptSpinMutex as Mutex;
     use alloc::collections::BTreeMap;
 
-    /// A saved `nanosleep`-family resume: the absolute hrtimer-clock deadline
-    /// to sleep until, and the user `rem` pointer (0 = none) to update if the
-    /// resumed sleep is interrupted again.
+    /// A saved `nanosleep`-family resume: the absolute deadline to sleep
+    /// until, and the user `rem` pointer (0 = none) to update if the resumed
+    /// sleep is interrupted again.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct NanosleepBlock {
-        /// Absolute deadline on the `hrtimer::now_ns()` monotonic clock.
+        /// Absolute deadline: on the `hrtimer::now_ns()` monotonic clock, or
+        /// on `clock` if there is one.
         pub deadline_ns: u64,
         /// User pointer to a `struct timespec` for the remaining time, or 0.
         pub rem_ptr: u64,
+        /// The CPU-time clock a `clock_nanosleep` on one sleeps on (Linux's
+        /// `posix_cpu_nsleep_restart`), or `None` for the monotonic clock.
+        pub clock: Option<crate::proc::cputimer::CpuClock>,
     }
 
     static BLOCKS: Mutex<BTreeMap<TaskId, NanosleepBlock>> = Mutex::new(BTreeMap::new());
@@ -9213,9 +9217,152 @@ fn nanosleep_core(deadline_ns: u64, rem_ptr: u64) -> SyscallResult {
         restart_block::NanosleepBlock {
             deadline_ns,
             rem_ptr,
+            clock: None,
         },
     );
     restart::restart_result(restart::ERESTART_RESTARTBLOCK)
+}
+
+/// `clock_nanosleep` on CPU-time clock `clockid` -- 2, or a negative id that
+/// is no CLOCKFD one -- for `req` ns (or until the clock reads `req`, for
+/// `abstime`): Linux's `posix_cpu_nsleep`. A thread may not sleep on its own
+/// clock (`EINVAL`: it would never advance); an id that names nothing is
+/// `EINVAL`, as for a timer.
+fn cpu_nanosleep(clockid: i32, abstime: bool, req: u64, rem_ptr: u64) -> SyscallResult {
+    const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
+    let tid = crate::sched::current_task_id();
+    if clockid < 0 && clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
+        let upid = !(clockid >> 3);
+        if upid == 0 || u64::try_from(upid).is_ok_and(|u| u == tid) {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    let clock = match cpu_clock(clockid, caller_pid(), tid, false) {
+        Ok(Some(clock)) => clock,
+        Ok(None) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
+    };
+    let Some(now) = clock.read() else {
+        return linux_err(errno::EINVAL);
+    };
+    let target = if abstime {
+        req
+    } else {
+        now.saturating_add(req)
+    };
+    let rem_ptr = if abstime { 0 } else { rem_ptr };
+    cpu_nanosleep_until(clock, target, abstime, rem_ptr)
+}
+
+/// `clock_nanosleep` on a CPU-time clock for a native program
+/// (`SYS_CPU_CLOCK`'s `CPU_CLOCK_NANOSLEEP`): Linux's checks in Linux's
+/// order -- `CLOCK_THREAD_CPUTIME_ID` (3) and a CLOCKFD id `EOPNOTSUPP`, any
+/// other clock that is not a CPU-time one `EINVAL`, then the request
+/// (`EFAULT`, `EINVAL`) -- and [`cpu_nanosleep`]. A native program has no
+/// `restart_syscall`: an interrupted sleep answers `EINTR`, the time left
+/// written to `rem_ptr` for a relative one, for its C library to go round
+/// again if it means to.
+pub(crate) fn cpu_nanosleep_native(
+    clockid: i32,
+    flags: u64,
+    req_ptr: u64,
+    rem_ptr: u64,
+) -> SyscallResult {
+    const TIMER_ABSTIME: u64 = 1;
+    const CLOCKFD: i32 = 3;
+    const CLOCKFD_MASK: i32 = 7;
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+    if clockid == 3 || (clockid < 0 && clockid & CLOCKFD_MASK == CLOCKFD) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    if clockid != 2 && clockid >= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let req = match read_timespec(req_ptr) {
+        Ok(t) => t,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
+        return linux_err(errno::EINVAL);
+    }
+    let answer = cpu_nanosleep(clockid, flags & TIMER_ABSTIME != 0, req.to_nanos(), rem_ptr);
+    if restart::sentinel_magnitude(answer.value).is_some() {
+        restart_block::clear(crate::sched::current_task_id());
+        return linux_err(errno::EINTR);
+    }
+    answer
+}
+
+/// Sleep, interruptibly, until CPU-time clock `clock` reads `target` -- the
+/// body of [`cpu_nanosleep`] and of `restart_syscall` resuming one.
+///
+/// No timer interrupt can be set for a moment a CPU clock reaches: the
+/// sleeper wakes at the earliest moment it could have -- the time left on
+/// the clock, divided by the CPUs that can advance it (one for a thread's,
+/// every CPU for a process's), and at least a tick -- and looks again, so a
+/// clock that runs flat out is caught within a tick and one that does not run
+/// at all costs a wakeup per the time left. A clock whose thread or process
+/// has gone never reaches it; only a signal ends that sleep, as on Linux.
+///
+/// Interrupted: an absolute sleep restarts as it was asked (`ERESTARTNOHAND`);
+/// a relative one writes the CPU time left to `rem_ptr` and resumes through
+/// `restart_syscall` -- or, a handler run, answers `EINTR`.
+fn cpu_nanosleep_until(
+    clock: crate::proc::cputimer::CpuClock,
+    target: u64,
+    abstime: bool,
+    rem_ptr: u64,
+) -> SyscallResult {
+    const GONE_POLL_NS: u64 = 1_000_000_000;
+    let task = crate::sched::current_task_id();
+    let pid = caller_pid();
+    let pace = match clock.target {
+        CpuClockTarget::Thread(_) => 1,
+        CpuClockTarget::Process(_) => u64::try_from(crate::smp::cpu_count().max(1)).unwrap_or(1),
+    };
+    loop {
+        let now = clock.read();
+        if now.is_some_and(|n| n >= target) {
+            restart_block::clear(task);
+            return SyscallResult::ok(0);
+        }
+        let Some(pid) = pid else {
+            // The kernel sleeps on no CPU clock.
+            return linux_err(errno::EINVAL);
+        };
+        let wait = now
+            .map_or(GONE_POLL_NS, |n| {
+                target.saturating_sub(n).checked_div(pace).unwrap_or(0)
+            })
+            .max(crate::sched::TICK_NS);
+        let deadline = crate::hrtimer::now_ns().saturating_add(wait);
+        if interruptible_sleep_until(pid, task, deadline) {
+            continue;
+        }
+        // A signal. A sleep whose time has come meanwhile is done.
+        let left = clock.read().map_or(target, |n| target.saturating_sub(n));
+        if left == 0 {
+            restart_block::clear(task);
+            return SyscallResult::ok(0);
+        }
+        if abstime {
+            return restart::restart_result(restart::ERESTARTNOHAND);
+        }
+        if rem_ptr != 0
+            && let Err(e) = write_timespec(rem_ptr, LinuxTimespec::from_nanos(left))
+        {
+            return linux_err(linux_errno_for(e));
+        }
+        restart_block::save_nanosleep(
+            task,
+            restart_block::NanosleepBlock {
+                deadline_ns: target,
+                rem_ptr,
+                clock: Some(clock),
+            },
+        );
+        return restart::restart_result(restart::ERESTART_RESTARTBLOCK);
+    }
 }
 
 /// `nanosleep(req, rem)` — sleep for the requested timespec, interruptibly.
@@ -20454,19 +20601,19 @@ fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
 // Interval timers (getitimer, setitimer) and the legacy alarm() / pause()
 //
 // Linux delivers ITIMER_REAL via SIGALRM, ITIMER_VIRTUAL via SIGVTALRM,
-// ITIMER_PROF via SIGPROF.  We now back ITIMER_REAL with a real
-// hrtimer-driven per-process timer (see proc::itimer):
+// ITIMER_PROF via SIGPROF.  ITIMER_REAL is a real hrtimer-driven
+// per-process timer (see proc::itimer); ITIMER_VIRTUAL and ITIMER_PROF run
+// on the process's VIRT and PROF CPU-time clocks, checked at the tick (see
+// proc::cputimer):
 //
-//   - getitimer(ITIMER_REAL) reports the live remaining/interval.
-//     VIRTUAL and PROF still report a zeroed (disarmed) timer because they
-//     need per-task CPU-time accounting hooks we don't have yet.
+//   - getitimer reports the live remaining/interval of each.
 //
 //   - setitimer(ITIMER_REAL) arms (or, for a zero it_value, disarms) the
 //     real timer; on expiry it posts SIGALRM via proc::signal::set_pending,
 //     which delivers to a registered handler at the next syscall-return
 //     checkpoint and wakes any pause()/signalfd/rt_sigtimedwait waiter.
-//     setitimer(VIRTUAL|PROF) still accepts cancellation and returns
-//     -ENOSYS on a non-zero arm.
+//     setitimer(VIRTUAL|PROF) arms the CPU-time itimer the same way, a tick
+//     added to the value as Linux's set_cpu_itimer adds it.
 //     A process with NO SIGALRM handler is terminated (exit 128+SIGALRM) at
 //     the next syscall-return checkpoint when the timer fires, matching
 //     Linux; the dominant case (handler installed before arming) delivers to
@@ -20538,15 +20685,16 @@ fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
     }
 
     let mut buf = [0u8; ITIMERVAL_SIZE];
-    // ITIMER_REAL is implemented; report its remaining/interval. VIRTUAL(1)
-    // and PROF(2) need per-task CPU-time accounting we don't have, so they
-    // report a zeroed (disarmed) timer. An in-kernel caller has no
-    // per-process timer, so it also reports zero.
-    if which_i32 == 0 {
-        if let Some(pid) = caller_pid() {
-            let (remaining_ns, interval_ns) = crate::proc::itimer::get_real(pid);
-            itimerval_fill(&mut buf, remaining_ns, interval_ns);
-        }
+    // The process's timer of that kind: remaining and interval. An
+    // in-kernel caller has no per-process timer, so it reports zero.
+    if let Some(pid) = caller_pid() {
+        let (remaining_ns, interval_ns) = if which_i32 == 0 {
+            crate::proc::itimer::get_real(pid)
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            crate::proc::cputimer::get_itimer(pid, which_i32 as u32).unwrap_or((0, 0))
+        };
+        itimerval_fill(&mut buf, remaining_ns, interval_ns);
     }
     // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range above.
     let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), value, ITIMERVAL_SIZE) };
@@ -20635,39 +20783,42 @@ fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
     // Linux's do_setitimer ordering (a faulting `old_value` returns EFAULT
     // with the new timer already armed). `value_*`/`interval_*` were
     // validated non-negative with usec in [0, 1e6) above.
-    if which_i32 == 0 {
-        if let Some(pid) = caller_pid() {
+    if let Some(pid) = caller_pid() {
+        #[allow(clippy::cast_sign_loss)]
+        let value_ns = crate::proc::itimer::timeval_to_ns(value_sec as u64, value_usec as u64);
+        #[allow(clippy::cast_sign_loss)]
+        let interval_ns =
+            crate::proc::itimer::timeval_to_ns(interval_sec as u64, interval_usec as u64);
+        let (prev_remaining_ns, prev_interval_ns) = if which_i32 == 0 {
+            crate::proc::itimer::set_real(pid, value_ns, interval_ns)
+        } else {
+            // ITIMER_VIRTUAL (1) / ITIMER_PROF (2), validated above.
             #[allow(clippy::cast_sign_loss)]
-            let value_ns = crate::proc::itimer::timeval_to_ns(value_sec as u64, value_usec as u64);
-            #[allow(clippy::cast_sign_loss)]
-            let interval_ns =
-                crate::proc::itimer::timeval_to_ns(interval_sec as u64, interval_usec as u64);
-            let (prev_remaining_ns, prev_interval_ns) =
-                crate::proc::itimer::set_real(pid, value_ns, interval_ns);
-            if old_value != 0 {
-                if let Err(e) = crate::mm::user::validate_user_write(old_value, ITIMERVAL_SIZE) {
-                    return linux_err(linux_errno_for(e));
-                }
-                let mut old_buf = [0u8; ITIMERVAL_SIZE];
-                itimerval_fill(&mut old_buf, prev_remaining_ns, prev_interval_ns);
-                // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range.
-                let r = unsafe {
-                    crate::mm::user::copy_to_user(old_buf.as_ptr(), old_value, ITIMERVAL_SIZE)
-                };
-                if let Err(e) = r {
-                    return linux_err(linux_errno_for(e));
-                }
+            match crate::proc::cputimer::set_itimer(pid, which_i32 as u32, value_ns, interval_ns) {
+                Ok(prev) => prev,
+                Err(e) => return linux_err(linux_errno_for(e)),
             }
-            return SyscallResult::ok(0);
+        };
+        if old_value != 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(old_value, ITIMERVAL_SIZE) {
+                return linux_err(linux_errno_for(e));
+            }
+            let mut old_buf = [0u8; ITIMERVAL_SIZE];
+            itimerval_fill(&mut old_buf, prev_remaining_ns, prev_interval_ns);
+            // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(old_buf.as_ptr(), old_value, ITIMERVAL_SIZE)
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
         }
-        // No per-process timer context (boot/kernel caller): fall through to
-        // the legacy cancel-only path below.
+        return SyscallResult::ok(0);
     }
 
     if !is_cancel {
-        // ITIMER_VIRTUAL/PROF need per-task CPU-time accounting we don't
-        // have yet (and an in-kernel ITIMER_REAL caller has no process timer
-        // to arm). Refuse honestly so the caller knows to fall back.
+        // An in-kernel caller has no process timer to arm. Refuse honestly
+        // so the caller knows to fall back.
         return linux_err(errno::ENOSYS);
     }
 
@@ -36037,6 +36188,11 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
 fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
     let task = crate::sched::current_task_id();
     match restart_block::take(task) {
+        Some(restart_block::NanosleepBlock {
+            deadline_ns,
+            rem_ptr,
+            clock: Some(clock),
+        }) => cpu_nanosleep_until(clock, deadline_ns, false, rem_ptr),
         Some(block) => nanosleep_core(block.deadline_ns, block.rem_ptr),
         None => linux_err(errno::EINTR),
     }
@@ -37270,9 +37426,9 @@ enum TimerClockKind {
     /// A clock timers run on here.
     Timeable(crate::proc::posix_timer::TimerClock),
     /// A CPU-time clock -- `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`
-    /// or a process's or thread's (a negative id, as glibc passes them). Linux
-    /// times them; this kernel keeps no per-task CPU time to fire on, so once
-    /// the id is found valid the answer is `EOPNOTSUPP`.
+    /// or a process's or thread's (a negative id, as glibc passes them),
+    /// decoded by [`cpu_clock`] once the timer's id is taken, as Linux's
+    /// `posix_cpu_timer_create` checks it then.
     CpuTime(i32),
     /// `CLOCK_REALTIME_ALARM` / `CLOCK_BOOTTIME_ALARM`: need `CAP_WAKE_ALARM`.
     Alarm,
@@ -37301,37 +37457,8 @@ fn timer_clock_kind(clockid: i32) -> Result<TimerClockKind, i32> {
     }
 }
 
-/// Which of a task's CPU-time measures a CPU-time clock reads -- Linux's
-/// `CPUCLOCK_WHICH`, the low two bits of a negative clock id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CpuClockKind {
-    /// `CPUCLOCK_PROF` (0): user plus system time, sampled at the tick.
-    Prof,
-    /// `CPUCLOCK_VIRT` (1): user time alone, sampled at the tick.
-    Virt,
-    /// `CPUCLOCK_SCHED` (2): run time, measured at each context switch --
-    /// the precise measure, and the one `CLOCK_PROCESS_CPUTIME_ID` and
-    /// `CLOCK_THREAD_CPUTIME_ID` read.
-    Sched,
-}
-
-/// Whose processor time a CPU-time clock reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CpuClockTarget {
-    /// One thread's (a scheduler task id).
-    Thread(u64),
-    /// A whole process's: every thread it has, and every one it had.
-    Process(u64),
-}
-
-/// A CPU-time clock, decoded ([`cpu_clock`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CpuClock {
-    /// What it measures.
-    pub kind: CpuClockKind,
-    /// Whose.
-    pub target: CpuClockTarget,
-}
+use crate::proc::cputimer::{CpuClock, CpuClockTarget};
+use crate::sched::CpuClockKind;
 
 /// What `clockid` names as a CPU-time clock, for a call made by task `tid`
 /// of process `pid` (`None`: a kernel task, which counts as a process of one
@@ -37410,33 +37537,16 @@ pub(crate) fn cpu_clock(
 }
 
 /// Read CPU-time clock `clock`, in nanoseconds, or `EINVAL` if what it
-/// measures has gone (a thread that exited, a process reaped).
-///
-/// `CPUCLOCK_SCHED` reads the precise run time; `CPUCLOCK_PROF` and
-/// `CPUCLOCK_VIRT` the ticks, each worth a whole tick -- what Linux's read
-/// under tick accounting, so a PROF or VIRT clock moves in steps of the tick
-/// as its timers (`ITIMER_PROF`, `ITIMER_VIRTUAL`) are charged.
+/// measures has gone (a process reaped, a thread's task reaped)
+/// ([`CpuClock::read`]).
 pub(crate) fn read_cpu_clock(clock: CpuClock) -> Result<u64, i32> {
-    let sample = match clock.target {
-        CpuClockTarget::Thread(t) => crate::sched::cpu_sample(t),
-        CpuClockTarget::Process(p) => crate::proc::thread::process_cpu_sample(p),
-    }
-    .ok_or(errno::EINVAL)?;
-    Ok(match clock.kind {
-        CpuClockKind::Sched => sample.ns(),
-        CpuClockKind::Prof => sample.prof_ns(),
-        CpuClockKind::Virt => sample.virt_ns(),
-    })
+    clock.read().ok_or(errno::EINVAL)
 }
 
-/// The resolution of CPU-time clock `clock`, in nanoseconds -- Linux's
-/// `posix_cpu_clock_getres`: 1 for `CPUCLOCK_SCHED`, a tick for the sampled
-/// ones.
+/// The resolution of CPU-time clock `clock`, in nanoseconds
+/// ([`CpuClock::resolution`]).
 pub(crate) const fn cpu_clock_res(clock: CpuClock) -> u64 {
-    match clock.kind {
-        CpuClockKind::Sched => 1,
-        CpuClockKind::Prof | CpuClockKind::Virt => crate::sched::TICK_NS,
-    }
+    clock.resolution()
 }
 
 /// Linux's `good_sigevent` for `caller`'s new timer `id`: what its expiry
@@ -37495,8 +37605,8 @@ fn timer_notify(
 /// `EOPNOTSUPP`); an id (`EAGAIN`, from `RLIMIT_SIGPENDING` or the ids
 /// running out); the sigevent's content (`EINVAL`); the id out to `out`, for
 /// the Linux call (`EFAULT`); then the clock's own refusals (`EPERM` for an
-/// alarm clock, `EINVAL` / `EOPNOTSUPP` for a CPU-time one). An id taken and
-/// then refused is used up, as on Linux. Answers the new timer's id.
+/// alarm clock, `EINVAL` for a CPU-time one that names nothing). An id taken
+/// and then refused is used up, as on Linux. Answers the new timer's id.
 pub(crate) fn timer_create_common(clock_arg: u64, sevp: u64, out: Option<u64>) -> Result<i32, i32> {
     use crate::proc::posix_timer;
     let event = if sevp == 0 {
@@ -37545,12 +37655,13 @@ pub(crate) fn timer_create_common(clock_arg: u64, sevp: u64, out: Option<u64>) -
         TimerClockKind::Timeable(clock) => clock,
         TimerClockKind::Alarm => return refuse(errno::EPERM),
         TimerClockKind::CpuTime(c) => {
-            return refuse(
-                match cpu_clock(c, caller, crate::sched::current_task_id(), false) {
-                    Ok(_) => errno::EOPNOTSUPP,
-                    Err(e) => e,
-                },
-            );
+            match cpu_clock(c, caller, crate::sched::current_task_id(), false) {
+                Ok(Some(clock)) => posix_timer::TimerClock::Cpu(clock),
+                // `timer_clock_kind` only calls 2, 3 and non-CLOCKFD
+                // negative ids CPU-time ones, and those all decode.
+                Ok(None) => return refuse(errno::EINVAL),
+                Err(e) => return refuse(e),
+            }
         }
     };
     let Some((pid, id)) = reserved else {
@@ -37617,6 +37728,18 @@ fn write_timer_itimerspec(ptr: u64, spec: TimerSpecNs) -> Result<(), i32> {
     unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), ptr, buf.len()) }.map_err(linux_errno_for)
 }
 
+/// The errno a POSIX timer call answers for `e`: `EINVAL` for no such timer,
+/// `EAGAIN` for no room, `ESRCH` for a CPU-time timer whose thread or process
+/// has gone (Linux's `posix_cpu_timer_set`).
+const fn timer_errno(e: crate::proc::posix_timer::TimerError) -> i32 {
+    use crate::proc::posix_timer::TimerError;
+    match e {
+        TimerError::NoSuchTimer => errno::EINVAL,
+        TimerError::Again => errno::EAGAIN,
+        TimerError::TargetGone => errno::ESRCH,
+    }
+}
+
 /// A timer id argument: `timer_t` is an `int`, the register's low half.
 #[allow(clippy::cast_possible_truncation)]
 const fn timer_id_arg(arg: u64) -> i32 {
@@ -37641,7 +37764,7 @@ pub(crate) fn timer_settime_common(
     let pid = caller_pid().ok_or(errno::EINVAL)?;
     let abstime = flags & u64::from(posix_timer::TIMER_ABSTIME) != 0;
     let old = posix_timer::settime(pid, timer_id_arg(id_arg), abstime, value, interval)
-        .map_err(|_| errno::EINVAL)?;
+        .map_err(timer_errno)?;
     if old_ptr != 0 {
         write_timer_itimerspec(old_ptr, old)?;
     }
@@ -37652,8 +37775,7 @@ pub(crate) fn timer_settime_common(
 /// setting out (`EFAULT`).
 pub(crate) fn timer_gettime_common(id_arg: u64, cur_ptr: u64) -> Result<(), i32> {
     let pid = caller_pid().ok_or(errno::EINVAL)?;
-    let cur =
-        crate::proc::posix_timer::gettime(pid, timer_id_arg(id_arg)).map_err(|_| errno::EINVAL)?;
+    let cur = crate::proc::posix_timer::gettime(pid, timer_id_arg(id_arg)).map_err(timer_errno)?;
     write_timer_itimerspec(cur_ptr, cur)
 }
 
@@ -51234,6 +51356,27 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     //
     // (Pre-batch we also skipped (1), (2), (4) entirely; those
     // were fixed in earlier batches and are preserved below.)
+    //
+    // The CPU-time clocks -- CLOCK_PROCESS_CPUTIME_ID (2) and a process's
+    // or another thread's by id -- sleep until the clock reads the time
+    // (`cpu_nanosleep`); CLOCK_THREAD_CPUTIME_ID (3) has no nsleep, nor has
+    // a CLOCKFD id (a clock behind a file descriptor): EOPNOTSUPP.
+    if clockid_i32 == 2 || clockid_i32 < 0 {
+        const CLOCKFD: i32 = 3;
+        const CLOCKFD_MASK: i32 = 7;
+        if clockid_i32 & CLOCKFD_MASK == CLOCKFD {
+            return linux_err(errno::EOPNOTSUPP);
+        }
+        let req = match read_timespec(req_ptr) {
+            Ok(t) => t,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+        if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
+            return linux_err(errno::EINVAL);
+        }
+        let abstime = flags & TIMER_ABSTIME != 0;
+        return cpu_nanosleep(clockid_i32, abstime, req.to_nanos(), args.arg3);
+    }
     // Valid posix clockids: REALTIME(0), MONOTONIC(1),
     // PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
     // REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
@@ -59153,6 +59296,7 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         let b = NanosleepBlock {
             deadline_ns: 1_234_567,
             rem_ptr: 0xdead_beef,
+            clock: None,
         };
         restart_block::save_nanosleep(t1, b);
         if restart_block::take(t2).is_some() {

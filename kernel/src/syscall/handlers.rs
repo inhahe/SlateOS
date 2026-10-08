@@ -8244,14 +8244,17 @@ pub fn sys_posix_timer(args: &SyscallArgs) -> SyscallResult {
 /// [`SYS_CPU_CLOCK`](super::number::SYS_CPU_CLOCK).
 pub fn sys_cpu_clock(args: &SyscallArgs) -> SyscallResult {
     use super::linux::{self, errno, linux_err};
-    use super::number::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME};
+    use super::number::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME, CPU_CLOCK_NANOSLEEP};
     let op = args.arg0;
-    if op != CPU_CLOCK_GETTIME && op != CPU_CLOCK_GETRES {
-        return linux_err(errno::EINVAL);
-    }
     // clockid_t is an int: the register's low half.
     #[allow(clippy::cast_possible_truncation)]
     let clockid = args.arg1 as i32;
+    if op == CPU_CLOCK_NANOSLEEP {
+        return linux::cpu_nanosleep_native(clockid, args.arg2, args.arg3, args.arg4);
+    }
+    if op != CPU_CLOCK_GETTIME && op != CPU_CLOCK_GETRES {
+        return linux_err(errno::EINVAL);
+    }
     let clock = match linux::cpu_clock(
         clockid,
         caller_pid(),
@@ -20650,7 +20653,9 @@ pub fn sys_process_chroot(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// The only interval timer this kernel keeps. Matches Linux's `ITIMER_REAL`.
+/// The wall-clock interval timer. Matches Linux's `ITIMER_REAL`; the CPU-time
+/// ones, `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2), are
+/// [`crate::proc::cputimer`]'s.
 const ITIMER_REAL: u64 = 0;
 
 /// Saturating `u64` nanoseconds → the `i64` a syscall returns in a register.
@@ -20664,16 +20669,16 @@ fn itimer_ns_to_reg(ns: u64) -> i64 {
     i64::try_from(ns).unwrap_or(i64::MAX)
 }
 
-/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm the calling process's real
-/// interval timer, reporting what it held before.
+/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm one of the calling
+/// process's interval timers, reporting what it held before.
 ///
 /// See [`crate::syscall::number::SYS_ITIMER_SET`] for the contract, and
 /// `design-decisions.md` §925 for why both previous values come back in
 /// registers rather than through a caller-supplied buffer.
 pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{cputimer, thread};
 
-    if args.arg0 != ITIMER_REAL {
+    if args.arg0 > u64::from(cputimer::ITIMER_PROF) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -20682,8 +20687,16 @@ pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    let (prev_value_ns, prev_interval_ns) =
-        crate::proc::itimer::set_real(pid, args.arg1, args.arg2);
+    let (prev_value_ns, prev_interval_ns) = if args.arg0 == ITIMER_REAL {
+        crate::proc::itimer::set_real(pid, args.arg1, args.arg2)
+    } else {
+        // ITIMER_VIRTUAL or ITIMER_PROF: below 3, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        match cputimer::set_itimer(pid, args.arg0 as u32, args.arg1, args.arg2) {
+            Ok(prev) => prev,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
 
     SyscallResult::ok2(
         itimer_ns_to_reg(prev_value_ns),
@@ -20691,14 +20704,14 @@ pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
     )
 }
 
-/// `SYS_ITIMER_GET` (1070) — report the calling process's real interval timer
-/// as `(remaining_ns, interval_ns)`, without disturbing it.
+/// `SYS_ITIMER_GET` (1070) — report one of the calling process's interval
+/// timers as `(remaining_ns, interval_ns)`, without disturbing it.
 ///
 /// See [`crate::syscall::number::SYS_ITIMER_GET`].
 pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{cputimer, thread};
 
-    if args.arg0 != ITIMER_REAL {
+    if args.arg0 > u64::from(cputimer::ITIMER_PROF) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -20707,6 +20720,15 @@ pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    let (value_ns, interval_ns) = crate::proc::itimer::get_real(pid);
+    let (value_ns, interval_ns) = if args.arg0 == ITIMER_REAL {
+        crate::proc::itimer::get_real(pid)
+    } else {
+        // ITIMER_VIRTUAL or ITIMER_PROF: below 3, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        match cputimer::get_itimer(pid, args.arg0 as u32) {
+            Ok(cur) => cur,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
     SyscallResult::ok2(itimer_ns_to_reg(value_ns), itimer_ns_to_reg(interval_ns))
 }

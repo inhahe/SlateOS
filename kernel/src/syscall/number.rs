@@ -5408,15 +5408,20 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 /// Chosen number 1068, next free slot after 1067.
 pub const SYS_PROCESS_CHROOT: u64 = 1068;
 
-/// `SYS_ITIMER_SET` — arm, re-arm or disarm the calling process's real
-/// interval timer, and report what it held before.
+/// `SYS_ITIMER_SET` — arm, re-arm or disarm one of the calling process's
+/// interval timers, and report what it held before.
 ///
 /// `(which, value_ns, interval_ns) -> ok2(prev_value_ns, prev_interval_ns)`
 ///
-/// The timer counts wall-clock time and raises `SIGALRM` in the calling process
-/// when it expires. A non-zero `interval_ns` re-arms it to that period after
-/// each expiry; zero makes it one-shot. `value_ns == 0` disarms it regardless
-/// of `interval_ns`, matching `setitimer(2)`.
+/// `which` is Linux's: `ITIMER_REAL` (0) counts wall-clock time and raises
+/// `SIGALRM`; `ITIMER_VIRTUAL` (1) counts the process's user time and raises
+/// `SIGVTALRM`; `ITIMER_PROF` (2) counts its user plus system time and raises
+/// `SIGPROF` -- the two CPU-time ones checked at the 10 ms tick, a tick added
+/// to the value as Linux adds it ([`crate::proc::cputimer`]). A non-zero
+/// `interval_ns` re-arms the timer to that period after each expiry; zero
+/// makes it one-shot. `value_ns == 0` disarms it regardless of `interval_ns`,
+/// matching `setitimer(2)` (a CPU-time one keeps the interval, which it
+/// reports, as Linux's does).
 ///
 /// **Nanoseconds, not `struct itimerval`.** The native ABI does not carry
 /// Linux's four-field `{tv_sec, tv_usec}` pair: [`crate::proc::itimer`] stores
@@ -5441,11 +5446,9 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 ///
 /// # Errors
 ///
-/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
-///   `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) count CPU time consumed by the
-///   process, which this kernel does not account for per-process. Refusing is
-///   honest; accepting would reproduce, one layer down, the exact "reports
-///   success and arms nothing" defect this call exists to remove.
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is above 2.
+///   (Until 2026-10-08 `ITIMER_VIRTUAL` and `ITIMER_PROF` were refused here,
+///   the kernel keeping no per-process CPU time to count them on.)
 /// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// No capability is required: the timer belongs to the calling process and
@@ -5458,17 +5461,19 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 /// Chosen number 1069, next free slot after 1068.
 pub const SYS_ITIMER_SET: u64 = 1069;
 
-/// `SYS_ITIMER_GET` — report the calling process's real interval timer.
+/// `SYS_ITIMER_GET` — report one of the calling process's interval timers.
 ///
 /// `(which) -> ok2(value_ns, interval_ns)`
 ///
-/// `value_ns` is the time remaining until the next `SIGALRM`, not the value the
-/// timer was armed with, and is zero when the timer is disarmed. Reading does
-/// not disturb the timer.
+/// `which` as for [`SYS_ITIMER_SET`]. `value_ns` is the time remaining until
+/// the timer's next signal (for a CPU-time one, the process's CPU time still
+/// to use; a tick if it is already due), not the value the timer was armed
+/// with, and is zero when the timer is disarmed. Reading does not disturb the
+/// timer.
 ///
 /// # Errors
 ///
-/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is above 2.
 /// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// Chosen number 1070, next free slot after 1069.
@@ -6885,6 +6890,19 @@ pub const SYS_CAP_REQUEST_WAIT: u64 = 1155;
 /// |---|---|---|
 /// | [`CPU_CLOCK_GETTIME`] | `clock_gettime` | the clock's value, in nanoseconds |
 /// | [`CPU_CLOCK_GETRES`] | `clock_getres` | its resolution, in nanoseconds |
+/// | [`CPU_CLOCK_NANOSLEEP`] | `clock_nanosleep` | 0 once the clock reads the time |
+///
+/// `CPU_CLOCK_NANOSLEEP` takes `arg2` the flags (`TIMER_ABSTIME` 1), `arg3`
+/// the request (`struct timespec *`) and `arg4` where to write the time left
+/// (or 0), and sleeps until the clock -- 2, or a process's or another of the
+/// caller's threads' by id -- has advanced by the request (or reads it, for
+/// `TIMER_ABSTIME`), as Linux's `clock_nanosleep` does: within a tick of it,
+/// and for ever if nothing advances it, a process sleeping on its own clock
+/// with no other thread running included. `-EOPNOTSUPP` for 3 and a CLOCKFD
+/// id, `-EINVAL` for the caller's own thread's clock (it could never
+/// advance) and anything that is not a CPU-time clock. Interrupted by a
+/// signal it answers `-EINTR`, the time left written for a relative sleep:
+/// there is no `restart_syscall` for native programs.
 ///
 /// `clockid` is `CLOCK_PROCESS_CPUTIME_ID` (2), `CLOCK_THREAD_CPUTIME_ID`
 /// (3), or a process's or thread's clock as `clock_getcpuclockid` and
@@ -6905,6 +6923,8 @@ pub const SYS_CPU_CLOCK: u64 = 1156;
 pub const CPU_CLOCK_GETTIME: u64 = 0;
 /// [`SYS_CPU_CLOCK`] operation: its resolution.
 pub const CPU_CLOCK_GETRES: u64 = 1;
+/// [`SYS_CPU_CLOCK`] operation: sleep until the clock reads a time.
+pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

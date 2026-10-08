@@ -34,6 +34,7 @@
 //!
 //! `THREAD_OWNERS` → `PROCESS_TABLE` → `CAP_TABLE` → `SCHED`.
 
+pub mod cputimer;
 pub mod elf;
 pub mod exception;
 pub mod fork;
@@ -77,6 +78,7 @@ pub fn self_test() -> KernelResult<()> {
     itimer::self_test()?;
     serial_println!("[proc] Running POSIX timer self-test...");
     posix_timer::self_test()?;
+    cputimer::self_test()?;
     serial_println!("[proc] Running nice-authority self-test...");
     priority::self_test()?;
     serial_println!("[proc] Running fork self-test...");

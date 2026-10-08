@@ -1,36 +1,29 @@
-### A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED -- 2026-10-07 -- OPEN (lane A)
+### A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED -- 2026-10-07 -- FIXED on lane-a-wip, awaiting a boot (lane A)
 
-**Status:** OPEN (lane A). The reading half is **fixed on lane-a-wip
-2026-10-08, awaiting a boot** (design-decisions §1549); the timer half is
-next.
+**Status:** FIXED on lane-a-wip 2026-10-08, awaiting a boot: the reading half
+(design-decisions §1549) and the timing half (§1550). Move to
+`known-issues-resolved/` once a boot has run the three ring-3 tests below.
 
 **In short:** a program can ask how much processor time it has used, and set
 a timer that fires after it has used so much. The first answered how long the
-computer had been up; it now answers with the time each thread has run. The
-second is still refused, so a CPU-time limit set with a timer cannot be set.
+computer had been up, and the second was refused. Both now work as on Linux.
 
 **Fixed (reading):** `clock_gettime`/`clock_getres`/`clock_settime` on
 `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the per-process and
-per-thread ids (`syscall::linux::cpu_clock`, `read_cpu_clock`), and natively
-`SYS_CPU_CLOCK` (1156): the precise run time for `CPUCLOCK_SCHED`, the
-sampled ticks for PROF and VIRT. Ring-3 tests `self_test_linux_cpu_clocks`
-(12/12 on Linux 6.6.87) and `self_test_native_cpu_clock`.
+per-thread ids (`syscall::linux::cpu_clock`, `proc::cputimer::CpuClock`), and
+natively `SYS_CPU_CLOCK` (1156): the precise run time for `CPUCLOCK_SCHED`,
+the sampled ticks for PROF and VIRT.
 
-**Still open (timing):**
+**Fixed (timing):** `timer_create` on every CPU-time clock (natively too,
+through `SYS_POSIX_TIMER`); `clock_nanosleep` on `CLOCK_PROCESS_CPUTIME_ID`
+and a process's or another thread's clock (natively `CPU_CLOCK_NANOSLEEP`);
+`setitimer`/`getitimer` `ITIMER_VIRTUAL` and `ITIMER_PROF` (natively
+`SYS_ITIMER_SET`/`GET` 1 and 2); `RLIMIT_CPU`'s `SIGXCPU` and `SIGKILL`. All
+checked at the tick (`sched::cpu_timers_due`, `proc::cputimer::expire`,
+`posix_timer::expire_cpu`).
 
-- `timer_create` on any CPU-time clock answers `EOPNOTSUPP` after checking
-  the id (`syscall::linux::timer_create_common`, `TimerClockKind::CpuTime`),
-  natively too (`SYS_POSIX_TIMER`).
-- `clock_nanosleep` on `CLOCK_PROCESS_CPUTIME_ID` sleeps on the monotonic
-  clock; on a process's or thread's clock by id it answers `EINVAL`.
-- `setitimer(ITIMER_VIRTUAL / ITIMER_PROF)` have no timer behind them
-  (`proc::itimer` is `ITIMER_REAL` only).
-- `RLIMIT_CPU` is recorded and enforced by nothing (`SIGXCPU` at the soft
-  limit, `SIGKILL` at the hard one).
+**Tests:** `self_test_linux_cpu_clocks`, `self_test_native_cpu_clock`,
+`self_test_linux_cpu_timers` (ring 3; the Linux ones twelve of twelve on
+Linux 6.6.87), and `cputimer::self_test`.
 
-**Proper fix:** a CPU-time timer -- POSIX timer, `ITIMER_VIRTUAL`,
-`ITIMER_PROF`, the `RLIMIT_CPU` limits, a CPU-clock sleep -- is checked at
-each tick of a task of its process or thread (Linux's `run_posix_cpu_timers`,
-cheap when the earliest expiry is cached where the tick can see it), and an
-expiry queues its signal through the same path as the other timers
-(`posix_timer`'s `fire`).
+**Left:** `RLIMIT_RTTIME` (`A-RLIMIT-RTTIME-IS-NOT-ENFORCED`).

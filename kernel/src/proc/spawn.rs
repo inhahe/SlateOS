@@ -24390,6 +24390,118 @@ pub fn self_test_linux_cpu_clocks() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of the CPU-time timers through the Linux ABI:
+/// [`elf::build_linux_cpu_timers_test_elf`] (`build/cputimertest.c`). POSIX
+/// timers on the process and thread CPU clocks, `ITIMER_PROF` and
+/// `ITIMER_VIRTUAL`, `clock_nanosleep` on CPU clocks, timers on another
+/// thread's and a child's clock, and `RLIMIT_CPU` -- all fired from the tick
+/// (`sched::cpu_timers_due`, `proc::cputimer::expire`,
+/// `posix_timer::expire_cpu`).
+pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 180_000_000_000;
+
+    serial_println!("[spawn] Running Linux CPU-time timers (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_cpu_timers_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-timers"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-cpu-timers",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: CPU-time timers spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: CPU-time timers (ring 3) — the program did not finish in 180 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "a mailbox mmap failed",
+            Some(0x31) => "rt_sigaction failed",
+            Some(0x32) => "timer_create on a CPU-time clock failed",
+            Some(0x33 | 0x34) => "the worker thread did not start or stop",
+            Some(0x35) => "wait4 failed",
+            Some(0x40) => "timer_settime on the process clock failed",
+            Some(0x41) => "timer_gettime showed more than was set, or nothing",
+            Some(0x42) => "the process-clock timer fired while the process slept",
+            Some(0x43) => "the process-clock timer did not fire while the process spun",
+            Some(0x44) => "the process-clock timer fired before its time",
+            Some(0x45) => "an expired one-shot timer still read time left",
+            Some(0x46) => "timer_delete failed",
+            Some(0x48) => "timer_settime on the thread clock failed",
+            Some(0x49) => "the periodic thread-clock timer did not signal five times",
+            Some(0x4A) => "the periodic thread-clock timer ran ahead of its clock",
+            Some(0x4B) => "timer_getoverrun or timer_delete failed",
+            Some(0x50 | 0x52) => "setitimer(ITIMER_PROF / ITIMER_VIRTUAL) failed",
+            Some(0x51) => "getitimer(ITIMER_PROF) showed more than was set, or nothing",
+            Some(0x53) => "SIGPROF or SIGVTALRM did not come while the process spun",
+            Some(0x54) => "a fired one-shot itimer still read time left",
+            Some(0x55..=0x57) => "setitimer did not answer the old setting, or disarm",
+            Some(0x60 | 0x61) => "a sleep on the process clock did not end as a worker spun",
+            Some(0x62) => "an absolute sleep on the process clock did not end on time",
+            Some(0x63) => "a sleep on the worker's clock did not end",
+            Some(0x64..=0x66) => "a lone sleep on the process clock was not ended by a signal",
+            Some(0x67) => "a sleep on the caller's own thread clock was not EINVAL",
+            Some(0x68) => "a sleep on clock 3 or a CLOCKFD id was not EOPNOTSUPP",
+            Some(0x69) => "a sleep on a pid that is no process's was not EINVAL",
+            Some(0x70 | 0x71) => "a timer on the worker's clock did not fire as it spun",
+            Some(0x72) => "a timer on an exited thread's clock could still be set",
+            Some(0x73) => "a timer on an exited thread's clock did not read zeros",
+            Some(0x74 | 0x75) => "fork, or a timer on the child's clock, failed",
+            Some(0x76) => "a timer on the child's clock did not fire as it spun",
+            Some(0x77) => "the spinning child did not exit cleanly",
+            Some(0x78 | 0x7A) => "fork or setrlimit(RLIMIT_CPU) failed",
+            Some(0x79) => "RLIMIT_CPU's hard limit did not end the child with SIGKILL",
+            Some(0x7B) => "RLIMIT_CPU's hard limit never ended the child",
+            Some(0x7C) => "RLIMIT_CPU's soft limit did not send exactly one SIGXCPU",
+            Some(0x7D) => "the soft limit was not raised a second at SIGXCPU",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: CPU-time timers (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux CPU-time timers (ring 3: process and thread CPU-clock timers fire on \
+         CPU time, not sleep; ITIMER_PROF/VIRTUAL; clock_nanosleep on CPU clocks; another \
+         thread's and a child's clock; RLIMIT_CPU SIGXCPU then SIGKILL): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of `SYS_CPU_CLOCK`, the CPU-time clocks through the native
 /// door: [`elf::build_native_cpu_clock_test_elf`] (`build/cpuclocknative.c`).
 /// The same clock ids and answers as the Linux ABI's (`handlers::sys_cpu_clock`
@@ -24466,6 +24578,13 @@ pub fn self_test_native_cpu_clock() -> KernelResult<()> {
             Some(0x62) => "the parent could not read the child's process clock",
             Some(0x63) => "the parent could read the child's thread clock",
             Some(0x64) => "the child's exit code was lost",
+            Some(0x70) => "CPU_CLOCK_NANOSLEEP to a time already passed did not return at once",
+            Some(0x71) => "CPU_CLOCK_NANOSLEEP on clock 3 or a CLOCKFD id was not -EOPNOTSUPP",
+            Some(0x72) => "CPU_CLOCK_NANOSLEEP on a clock it cannot sleep on was not -EINVAL",
+            Some(0x73) => "CPU_CLOCK_NANOSLEEP with no request was not -EFAULT",
+            Some(0x74..=0x76) => "SYS_ITIMER_SET/GET of ITIMER_PROF did not arm, show, disarm",
+            Some(0x77) => "SYS_ITIMER_SET of ITIMER_VIRTUAL did not arm and disarm",
+            Some(0x78) => "SYS_ITIMER_SET of interval timer 3 was not refused",
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };

@@ -58,8 +58,23 @@ not a CPU-time one, and for an unknown `op`.
 5. `clock_settime` on 2 or 3 is `EINVAL` (as Linux 6.6.87 answers); on a
    negative CPU id `EPERM` if `CPU_CLOCK_GETRES` accepts it, else `EINVAL`.
 
-`clock_nanosleep` on `CLOCK_PROCESS_CPUTIME_ID` and `timer_create` on the
-CPU-time clocks come next, with CPU-time timers; a later notice will say so.
+## And the timers on them (design-decisions §1550)
+
+6. `timer_create` on a CPU-time clock now works through `SYS_POSIX_TIMER`
+   unchanged: pass the clock id; it used to answer `-EOPNOTSUPP`.
+7. `clock_nanosleep` on 2 or a negative CPU id → `SYS_CPU_CLOCK(2 =
+   CPU_CLOCK_NANOSLEEP, clockid, flags, req, rem)`: `0`, or `-EINTR` with the
+   time left written for a relative sleep (no `restart_syscall` natively),
+   `-EOPNOTSUPP` for 3 and a CLOCKFD id, `-EINVAL` for the caller's own thread
+   clock. glibc answers 3 itself with `EINVAL` before the call; do the same if
+   you match glibc.
+8. `setitimer`/`getitimer` `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) →
+   `SYS_ITIMER_SET`/`SYS_ITIMER_GET` with that `which` (they refused it until
+   now): `SIGVTALRM`/`SIGPROF` come as on Linux. A disarmed CPU itimer keeps
+   and reports its interval.
+9. `RLIMIT_CPU` is enforced now (`SIGXCPU` at the soft limit and each second
+   after -- the soft limit moves up a second each time, as Linux's does --
+   `SIGKILL` at the hard one); nothing to call, but a fixture may want it.
 
 ## Reply
 

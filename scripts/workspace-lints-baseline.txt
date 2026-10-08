@@ -124,7 +124,6 @@ userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
 userspace/ss
-userspace/sysctl
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
 userspace/top

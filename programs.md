@@ -260,7 +260,7 @@ two disagree.
 | `swapoff` | Disable devices and files for paging and swapping. | yes | `swapon` |  |
 | `swapon` | Enable devices and files for paging and swapping. | yes |  |  |
 | `sync` | Synchronize cached writes to persistent storage. | yes | `coreutils` |  |
-| `sysctl` | View and Modify Kernel Parameters | yes |  |  |
+| `sysctl` | Read and write kernel parameters at run time: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |

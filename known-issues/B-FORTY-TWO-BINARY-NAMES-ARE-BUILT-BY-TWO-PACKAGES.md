@@ -14,7 +14,9 @@ gained procps-ng's `vmstat`, which made `vmstat` a name two packages build;
 `userspace/vmstat` was measured against the same harness and retired in the
 same commit (`TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH.md`
 has the numbers), so `check-bin-collisions.py` never saw the two together on
-a branch and the image never staged either one by accident.
+a branch and the image never staged either one by accident. The same day,
+the same for `sysctl`: procps-ng's in `coreutils`, `userspace/sysctl`
+measured and retired in one commit.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

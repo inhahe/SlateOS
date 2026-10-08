@@ -4133,13 +4133,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysctl"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "sysinfo"
 version = "0.1.0"
 dependencies = [

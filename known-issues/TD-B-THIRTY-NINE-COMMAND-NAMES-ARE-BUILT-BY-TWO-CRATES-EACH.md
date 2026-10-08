@@ -196,6 +196,27 @@ Two measured examples:
   no `-p`, `-y`, `-V` or `-h`. It also sat in `argv-utf8-baseline.txt` as
   `argv-as-string`. Nothing to port.
 
+* **`sysctl`** — **RETIRED 2026-10-08, the same way and the same day.**
+  `coreutils/src/bin/sysctl.rs` is procps-ng 4.0.4's `sysctl.c` and the
+  `procio.c` it reads and writes through; `userspace/sysctl` was written from
+  the manual. `scripts/sysctl-diff.sh`, which runs both over a fixture
+  `/proc/sys` and fixture configuration directories and compares what each
+  left in the files as well as what each printed:
+
+      coreutils sysctl    138 passed,   0 differed,  2 differ on purpose
+      userspace/sysctl      6 passed, 132 differed,  2 differ on purpose
+
+  Its six passes are the three plainest reads (`kernel.hostname`,
+  `kernel/hostname`, `-n kernel.hostname`) and three runs with standard
+  error closed or full. **What the loser knew that the winner did not:
+  nothing procps has.** It searched `/sys/kernel` when `/proc/sys` lacked a
+  key, which procps never does; it had `--search` (procps' `-r` is a regular
+  expression, not a substring) and `--values-only`, and took a bare `help`;
+  its `-q` meant "print no names" where procps' means "say nothing about a
+  write", and its `-w` took the key and value as two words. It had no `-N`,
+  `-b`, `-e`, `-r`, `-f`, `--system`, `--dry-run` or `--deprecated`. It also
+  sat in `argv-utf8-baseline.txt` as `argv-as-string`. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

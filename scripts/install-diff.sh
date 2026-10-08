@@ -133,6 +133,15 @@ run_side() {
       env LC_ALL=C.UTF-8 PATH="$bindir/$side" ${CASE_ENV:+"$CASE_ENV"} install "$@" )
 }
 
+# `run_side` with standard error closed for `install` alone, through a
+# shell's `exec 2>&-`: `timeout` and `env` keep theirs.
+run_side_errclosed() {
+  local dir=$1 side=$2; shift 2
+  ( cd "$dir" && umask "${CASE_UMASK:-022}" && diff_run timeout -k 2 20 \
+      env LC_ALL=C.UTF-8 PATH="$bindir/$side" \
+      /bin/sh -c 'exec 2>&-; exec install "$@"' sh "$@" )
+}
+
 compare() {
   local o_dir g_dir o_out g_out o_err g_err o_rc g_rc
   o_dir=$(mktemp -d); g_dir=$(mktemp -d)
@@ -142,6 +151,23 @@ compare() {
   if [ -n "$TO_FULL" ]; then
     run_side "$o_dir" ours "$@" </dev/null >/dev/full 2>"$o_err"; o_rc=$?
     run_side "$g_dir" gnu  "$@" </dev/null >/dev/full 2>"$g_err"; g_rc=$?
+  elif [ -n "${CASE_FD:-}" ]; then
+    # The other descriptors: `CASE_FD=closed|inclosed|errfull|errclosed`.
+    case $CASE_FD in
+      closed)
+        run_side "$o_dir" ours "$@" </dev/null >&- 2>"$o_err"; o_rc=$?
+        run_side "$g_dir" gnu  "$@" </dev/null >&- 2>"$g_err"; g_rc=$? ;;
+      inclosed)
+        run_side "$o_dir" ours "$@" <&- >"$o_bin" 2>"$o_err"; o_rc=$?
+        run_side "$g_dir" gnu  "$@" <&- >"$g_bin" 2>"$g_err"; g_rc=$? ;;
+      errfull)
+        run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>/dev/full; o_rc=$?
+        run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>/dev/full; g_rc=$? ;;
+      errclosed)
+        run_side_errclosed "$o_dir" ours "$@" </dev/null >"$o_bin"; o_rc=$?
+        run_side_errclosed "$g_dir" gnu  "$@" </dev/null >"$g_bin"; g_rc=$? ;;
+      *) echo "install-diff: no such CASE_FD: $CASE_FD" >&2; exit 2 ;;
+    esac
   else
     run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
     run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
@@ -179,7 +205,7 @@ report() {
 }
 
 run_case() {
-  local label="${CASE_UMASK:+umask $CASE_UMASK; }${CASE_ENV:+$CASE_ENV }install $*${TO_FULL:+  [>/dev/full]}"
+  local label="${CASE_UMASK:+umask $CASE_UMASK; }${CASE_ENV:+$CASE_ENV }install $*${TO_FULL:+  [>/dev/full]}${CASE_FD:+  [$CASE_FD]}"
   compare "$@"; TO_FULL=
   report "$label"
 }
@@ -387,6 +413,28 @@ run_case --verbose -D a.txt n/m/o
 TO_FULL=1; run_case -v a.txt out.txt
 TO_FULL=1; run_case a.txt out.txt
 TO_FULL=1; run_case -dv a/b
+TO_FULL=1; run_case --help
+TO_FULL=1; run_case --version
+
+# --- the other descriptors, now that the guard leaves them as given ---------------------------------------
+CASE_FD=closed run_case -v a.txt out.txt
+CASE_FD=closed run_case a.txt out.txt
+CASE_FD=closed run_case -dv a/b
+CASE_FD=closed run_case -Dv a.txt x/y/z.txt
+CASE_FD=closed run_case -v a.txt b.txt dest
+CASE_FD=closed run_case --help
+CASE_FD=closed run_case --version
+CASE_FD=inclosed run_case a.txt out.txt
+CASE_FD=inclosed run_case -v a.txt b.txt dest
+CASE_FD=errfull run_case a.txt out.txt
+CASE_FD=errfull run_case nosuch.txt out.txt
+CASE_FD=errfull run_case -v nosuch.txt a.txt dest
+CASE_FD=errfull run_case --context=x a.txt out.txt
+CASE_FD=errfull run_case -q
+CASE_FD=errclosed run_case a.txt out.txt
+CASE_FD=errclosed run_case nosuch.txt out.txt
+CASE_FD=errclosed run_case -v nosuch.txt a.txt dest
+CASE_FD=errclosed run_case -d nox/x
 
 # --- SELinux, on a kernel without it ----------------------------------------------------------------------
 run_case -Z a.txt out.txt

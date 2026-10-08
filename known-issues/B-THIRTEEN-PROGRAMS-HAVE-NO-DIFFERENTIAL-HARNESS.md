@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -65,3 +65,10 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   directory really has an entry), `Symbolic link not followed` for `rmdir
   link/`, and `failed to remove` without "directory" for an ancestor that
   fails with `ENOTDIR`. 100 agree, 4 differ on purpose.
+* **`readlink`, 2026-10-07** -- `scripts/readlink-diff.sh`. Its answers
+  are absolute paths, so both sides run one after the other in the same
+  directory, rebuilt between them, rather than in two copies side by side.
+  Reading a link, the three canonical modes over dangling links, loops, a
+  file in the middle of a name and `..` after a link, `-n` (refused for two
+  operands), `-z`, last-wins `-q`/`-s`/`-v`, and every descriptor: 243 agree,
+  0 differ, 4 differ on purpose. The 2026-10-03 port needed no change.

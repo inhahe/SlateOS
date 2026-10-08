@@ -365,6 +365,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/quote-sweep.py` | One-shot: route every file name in a coreutils diagnostic through `quote`. |
 | `scripts/raced-globals.py` | Find mutable process-globals that two or more `#[test]`s drive unserialised. |
 | `scripts/read-error-diff.sh` | read-error-diff.sh — one question, asked of every utility that answers it: |
+| `scripts/readlink-diff.sh` | Differential test: our `readlink` against GNU coreutils 9.4's. |
 | `scripts/reclaim-space.py` | Free space on the shared build volume, without guessing what is in use. |
 | `scripts/reintro-benchmark.py` | Reintroduction check for the benchmark scroll fixes. |
 | `scripts/reintro-credmanager.py` | Reintroduction check for the credmanager scroll fixes. |
@@ -527,4 +528,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_517 scripts._
+_518 scripts._

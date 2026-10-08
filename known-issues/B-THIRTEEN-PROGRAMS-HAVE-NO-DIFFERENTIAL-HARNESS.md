@@ -19,7 +19,6 @@ device`, status 1), and no harness was there to show it.
 | program | upstream to measure against |
 |---|---|
 | `sleep` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
-| `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
 | `fetch` | none: a SlateOS program, so its tests are its own |
@@ -83,3 +82,10 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   options too, except `--help` and `--version` spelled in full and alone, and
   those two followed by `close_stdout`, so even `true --help >/dev/full` is a
   write error: 68 agree, 0 differ, 4 differ on purpose. No change needed.
+* **`which`, 2026-10-07** -- `scripts/which-diff.sh`, against GNU which
+  2.21 (`/usr/bin/which.gnu`; the table above had named debianutils', a
+  different program). 65 agree, 0 differ, 15 differ on purpose: our help and
+  version text, and the departures `B-WHICH-DIVERGES-FROM-GNU-IN-FOUR-MEASURED-
+  PLACES` records. Its first run corrected that record twice -- a claimed
+  `--skip-tilde` divergence GNU does not have, and a write-error divergence
+  `which.rs` had made without recording it.

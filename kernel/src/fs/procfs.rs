@@ -21,11 +21,12 @@
 //! ├── cacheinfo      Buffer cache and VFS dcache statistics
 //! ├── locks          Advisory file lock information
 //! ├── fdinfo         Open file handle listing
-//! ├── diskstats      Block device statistics
+//! ├── diskstats      Per-device block I/O counts (Linux 6.6's layout)
 //! ├── interrupts     APIC timer and IRQ state
 //! ├── devices        PCI device listing
 //! ├── net            Network interface configuration
-//! ├── vmstat         Virtual memory statistics (frames, swap, zram, OOM)
+//! ├── vmstat         Virtual memory statistics (frames, swap, zram, OOM;
+//! │                  and Linux's pgpgin/pgpgout/pswpin/pswpout)
 //! ├── buddyinfo      Buddy allocator free blocks per order
 //! ├── swaps          Active swap devices with usage and priority
 //! ├── fsstats        Per-filesystem debug statistics
@@ -1484,67 +1485,48 @@ pub fn self_test_locks() -> KernelResult<()> {
     Ok(())
 }
 
-/// `/proc/diskstats` — block device statistics.
+/// `/proc/diskstats` -- block device statistics, in Linux 6.6's layout
+/// (`diskstats_show`): one line per device, `major minor name` and its
+/// seventeen counters, no header, as procps, `iostat` and every other reader
+/// parse it; procps refuses the whole file for one line that does not hold
+/// the first fourteen fields (lane B's
+/// `requests/b-a-procps-vmstat-reads-four-paging-counters-...`). Until
+/// 2026-10-08 it was a table of this kernel's own, with a header and a
+/// buffer-cache summary, which `vmstat -d` could not read.
+///
+/// The counts are the block layer's per-device statistics
+/// (`blkdev::DeviceStats`): requests, 512-byte sectors and milliseconds, for
+/// reads, writes and discards. Nothing here merges requests or flushes a
+/// device's cache, so the merge and flush counts are 0, and the registry
+/// runs one request at a time, so none is in progress when this is read; the
+/// device numbers are `stat`'s (`fs::devnum::for_block`).
 fn gen_diskstats() -> Vec<u8> {
-    let devices = crate::blkdev::list_devices_full();
-    let cache_stats = super::cache::stats();
-
-    let mut text = String::from("DEVICE     SECTORS      SIZE         RO    CACHE\n");
-
-    if devices.is_empty() {
-        text.push_str("(no block devices)\n");
-    } else {
-        for dev in &devices {
-            // Calculate size from sector count.
-            let bytes = dev.sector_count.saturating_mul(dev.sector_size as u64);
-            let size_str = if bytes >= 1_073_741_824 {
-                format!("{} GiB", bytes / 1_073_741_824)
-            } else if bytes >= 1_048_576 {
-                format!("{} MiB", bytes / 1_048_576)
-            } else if bytes >= 1024 {
-                format!("{} KiB", bytes / 1024)
-            } else {
-                format!("{} B", bytes)
-            };
-
-            let ro_str = if dev.read_only { "yes" } else { "no" };
-
-            text.push_str(&format!(
-                "{:<10} {:<12} {:<12} {:<5} {}/{}\n",
-                dev.name,
-                dev.sector_count,
-                size_str,
-                ro_str,
-                cache_stats.entries_used,
-                cache_stats.capacity,
-            ));
-        }
+    use core::fmt::Write as _;
+    let ms = |ns: u64| ns / 1_000_000;
+    let mut text = String::new();
+    for (dev, st) in crate::blkdev::device_stats() {
+        let num = crate::fs::devnum::for_block(&dev.name);
+        let busy = ms(st.busy_ns());
+        // Writing to a `String` cannot fail.
+        let _ = writeln!(
+            text,
+            "{:4} {:7} {} {} 0 {} {} {} 0 {} {} 0 {} {} {} 0 {} {} 0 0",
+            num.major,
+            num.minor,
+            dev.name,
+            st.reads,
+            st.read_sectors,
+            ms(st.read_ns),
+            st.writes,
+            st.write_sectors,
+            ms(st.write_ns),
+            busy,
+            busy,
+            st.discards,
+            st.discard_sectors,
+            ms(st.discard_ns),
+        );
     }
-
-    // Cache summary.
-    let hit_rate = if cache_stats.reads > 0 {
-        cache_stats.hits.saturating_mul(100) / cache_stats.reads
-    } else {
-        0
-    };
-    text.push_str(&format!(
-        "\nBuffer cache: {} hits / {} reads ({}% hit rate), {} readaheads\n",
-        cache_stats.hits, cache_stats.reads, hit_rate, cache_stats.readaheads,
-    ));
-
-    // Device I/O activity tracking.
-    let io = crate::blkdev::io_stats();
-    let idle_secs = if io.last_io_tick > 0 {
-        let elapsed = crate::apic::tick_count().saturating_sub(io.last_io_tick);
-        elapsed / 100 // ~100 Hz timer
-    } else {
-        0
-    };
-    text.push_str(&format!(
-        "Device I/O: {} reads, {} writes, idle {} sec\n",
-        io.total_reads, io.total_writes, idle_secs,
-    ));
-
     text.into_bytes()
 }
 
@@ -1791,7 +1773,42 @@ fn gen_vmstat() -> Vec<u8> {
     s.push_str(&format!("oom_events {}\n", info.oom_events));
     s.push_str(&format!("oom_kills {}\n", info.oom_kills));
 
+    s.push_str(&vmstat_paging_lines());
     s.into_bytes()
+}
+
+/// `/proc/vmstat`'s four Linux paging counters, alongside the native keys
+/// (lane B's `requests/b-a-procps-vmstat-reads-four-paging-counters-...`):
+/// procps' `vmstat` reads its `bi`/`bo` and `si`/`so` columns, and `-s`'s
+/// "paged in/out" and "pages swapped in/out" rows, from them, and a key it
+/// cannot find reads as 0.
+///
+/// - `pgpgin`, `pgpgout`: KiB read from and written to the block devices --
+///   Linux counts 512-byte sectors and halves them for this file
+///   (`vmstat_start`), whatever the name says -- from the block layer's
+///   per-device counts (`blkdev::device_stats`). A device unregistered since
+///   takes its counts with it.
+/// - `pswpin`, `pswpout`: pages read back from swap and written to it
+///   (`mm::swap::swap_traffic`), in this system's 16 KiB pages, the size
+///   `sysconf(_SC_PAGESIZE)` reports and `vmstat` converts these by.
+fn vmstat_paging_lines() -> String {
+    let (read_sectors, write_sectors) =
+        crate::blkdev::device_stats()
+            .iter()
+            .fold((0u64, 0u64), |(r, w), (_, st)| {
+                (
+                    r.saturating_add(st.read_sectors),
+                    w.saturating_add(st.write_sectors),
+                )
+            });
+    let (swapped_in, swapped_out) = crate::mm::swap::swap_traffic();
+    format!(
+        "pgpgin {}\npgpgout {}\npswpin {}\npswpout {}\n",
+        read_sectors / 2,
+        write_sectors / 2,
+        swapped_in,
+        swapped_out
+    )
 }
 
 /// `/proc/buddyinfo` — buddy allocator free block counts per order.
@@ -18841,6 +18858,9 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // --- /proc/diskstats and /proc/vmstat's paging counters ---
+    self_test_diskstats(&mut fs)?;
+
     // --- /proc/sys sysctl tree ---
     // The sysctl tree is the only nested-directory subtree besides per-PID
     // `task/`/`fd/`.  Verify the router classifies its dirs/files/bogus paths,
@@ -19261,6 +19281,153 @@ fn test_pid_signal_sets() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// `/proc/diskstats` in Linux 6.6's layout -- every line `major minor name`
+/// and seventeen counters, no header, which procps refuses whole for one line
+/// short of fourteen fields -- carrying the block layer's counts; and
+/// `/proc/vmstat`'s `pgpgin`/`pgpgout` (KiB) and `pswpin`/`pswpout` beside
+/// the native keys (lane B's procps request). A scratch RAM disk is
+/// registered, read, written and discarded on, and unregistered again.
+fn self_test_diskstats(fs: &mut ProcFs) -> KernelResult<()> {
+    use crate::blkdev::{self, SECTOR_SIZE};
+    use crate::serial_println;
+
+    const NAME: &str = "zzdiskstats0";
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[procfs]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    }
+    fn vmstat_key(fs: &mut ProcFs, key: &str) -> Option<u64> {
+        let data = fs.read_file(Path::new("/vmstat")).ok()?;
+        let text = core::str::from_utf8(&data).ok()?;
+        text.lines().find_map(|line| {
+            let (k, v) = line.split_once(' ')?;
+            if k == key {
+                v.trim().parse().ok()
+            } else {
+                None
+            }
+        })
+    }
+    /// The device's line in `/proc/diskstats`, as numbers -- every field
+    /// but the name -- or why it is not one.
+    fn disk_line(fs: &mut ProcFs, name: &str) -> Result<Vec<u64>, &'static str> {
+        let data = fs
+            .read_file(Path::new("/diskstats"))
+            .map_err(|_| "/diskstats could not be read")?;
+        let text = core::str::from_utf8(&data).map_err(|_| "/diskstats is not text")?;
+        let mut found = None;
+        for line in text.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() != 20 {
+                return Err("a /diskstats line does not have Linux 6.6's twenty fields");
+            }
+            let mut numbers = Vec::with_capacity(19);
+            for (i, field) in fields.iter().enumerate() {
+                if i == 2 {
+                    continue;
+                }
+                numbers.push(
+                    field
+                        .parse::<u64>()
+                        .map_err(|_| "a /diskstats field other than the name is not a number")?,
+                );
+            }
+            if fields.get(2) == Some(&name) {
+                found = Some(numbers);
+            }
+        }
+        found.ok_or("the scratch disk has no /diskstats line")
+    }
+
+    // An empty registry's file would prove nothing about a line: add one.
+    blkdev::register(
+        NAME,
+        alloc::boxed::Box::new(blkdev::RamBlockDevice::new(64)),
+    );
+    let (Some(pgpgin_before), Some(pgpgout_before), Some(_), Some(_)) = (
+        vmstat_key(fs, "pgpgin"),
+        vmstat_key(fs, "pgpgout"),
+        vmstat_key(fs, "pswpin"),
+        vmstat_key(fs, "pswpout"),
+    ) else {
+        blkdev::unregister(NAME);
+        return fail("/vmstat lacks pgpgin, pgpgout, pswpin or pswpout");
+    };
+    if vmstat_key(fs, "nr_free_frames").is_none() {
+        blkdev::unregister(NAME);
+        return fail("/vmstat lost its native keys beside the Linux ones");
+    }
+    match disk_line(fs, NAME) {
+        Ok(n) if n.iter().skip(2).all(|&v| v == 0) => {}
+        Ok(_) => {
+            blkdev::unregister(NAME);
+            return fail("a disk nothing has used yet shows I/O in /diskstats");
+        }
+        Err(what) => {
+            blkdev::unregister(NAME);
+            return fail(what);
+        }
+    }
+
+    // One read of four sectors, one write of two, one discard of eight.
+    let mut four = [0u8; 4 * SECTOR_SIZE];
+    let two = [0x5Au8; 2 * SECTOR_SIZE];
+    let io = blkdev::with_device(NAME, |dev| {
+        dev.read_sectors(0, 4, &mut four)?;
+        dev.write_sectors(8, 2, &two)?;
+        dev.discard(16, 8)
+    });
+    if !matches!(io, Some(Ok(()))) {
+        blkdev::unregister(NAME);
+        serial_println!("[procfs]   (scratch disk I/O gave {:?})", io);
+        return fail("the scratch disk's read, write or discard failed");
+    }
+    let line = disk_line(fs, NAME);
+    let pgpgin_after = vmstat_key(fs, "pgpgin");
+    let pgpgout_after = vmstat_key(fs, "pgpgout");
+    blkdev::unregister(NAME);
+    let n = match line {
+        Ok(n) => n,
+        Err(what) => return fail(what),
+    };
+    // Numbers, the name left out: 0 major, 1 minor, 2 reads, 3 merged,
+    // 4 sectors read, 5 ms, 6 writes, 7 merged, 8 sectors written, 9 ms,
+    // 10 in flight, 11 ms busy, 12 weighted, 13 discards, 14 merged,
+    // 15 sectors discarded, 16 ms, 17 flushes, 18 ms.
+    let field = |i: usize| n.get(i).copied().unwrap_or(u64::MAX);
+    if (field(2), field(4)) != (1, 4) {
+        return fail("/diskstats did not count one read of four sectors");
+    }
+    if (field(6), field(8)) != (1, 2) {
+        return fail("/diskstats did not count one write of two sectors");
+    }
+    if (field(13), field(15)) != (1, 8) {
+        return fail("/diskstats did not count one discard of eight sectors");
+    }
+    if field(3) != 0 || field(7) != 0 || field(10) != 0 || field(14) != 0 || field(17) != 0 {
+        return fail("/diskstats shows merges, flushes or I/O in flight nothing here does");
+    }
+    if field(11) < field(5).max(field(9)).max(field(16)) || field(12) != field(11) {
+        return fail("/diskstats' busy time is not every request's time");
+    }
+    // pgpgin and pgpgout are KiB: the four sectors read are 2 more at least
+    // (other I/O may come between), the two written 1.
+    let (Some(pgpgin_after), Some(pgpgout_after)) = (pgpgin_after, pgpgout_after) else {
+        return fail("/vmstat's pgpgin or pgpgout went away");
+    };
+    if pgpgin_after.saturating_sub(pgpgin_before) < 2
+        || pgpgout_after.saturating_sub(pgpgout_before) < 1
+    {
+        return fail("/vmstat's pgpgin and pgpgout did not count the scratch disk's KiB");
+    }
+    serial_println!(
+        "[procfs]   /diskstats: Linux 6.6's twenty fields, a read, a write and a discard \
+         counted; /vmstat: pgpgin, pgpgout, pswpin and pswpout beside the native keys: OK"
+    );
+    Ok(())
 }
 
 /// `/proc/<pid>/stat` fields 7 and 8 for a process whose session holds a

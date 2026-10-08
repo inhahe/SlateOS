@@ -1378,6 +1378,24 @@ impl CompressionStats {
     }
 }
 
+/// Pages read back from swap, whatever the backend: Linux's `pswpin`.
+static PAGES_SWAPPED_IN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Pages written to swap, whatever the backend: Linux's `pswpout`.
+static PAGES_SWAPPED_OUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `(pages read back from swap, pages written to it)` since boot -- each a
+/// 16 KiB frame, the page size the system reports: what `/proc/vmstat`
+/// gives as `pswpin` and `pswpout`, and `vmstat` converts with
+/// `sysconf(_SC_PAGESIZE)`. The zram backend counts too, as Linux's swap
+/// to a zram device does.
+#[must_use]
+pub fn swap_traffic() -> (u64, u64) {
+    (
+        PAGES_SWAPPED_IN.load(core::sync::atomic::Ordering::Relaxed),
+        PAGES_SWAPPED_OUT.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 /// Get aggregated compression statistics from all zram backends.
 ///
 /// Only counts in-memory (zram) backends; disk backends track
@@ -1503,6 +1521,7 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
             state.free_slot(global_slot);
             return Err(e);
         }
+        PAGES_SWAPPED_OUT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let Some(refs) = state.part_refs.get_mut(global_slot as usize) else {
             state.free_slot(global_slot);
             return Err(KernelError::InternalError);
@@ -1671,6 +1690,7 @@ pub(crate) unsafe fn prepare_swap_in(pml4_phys: u64, virt: VirtAddr) -> KernelRe
         }
         state.read_slot(entry.slot(), &mut page_data)?;
     }
+    PAGES_SWAPPED_IN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Drop SWAP lock before frame allocation (lock ordering).
 
     // A new frame, holding the data. (The HHDM first: a frame allocated

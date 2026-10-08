@@ -1,7 +1,7 @@
 # B → A — `vmstat` reads four paging counters `/proc/vmstat` does not publish, and a `/proc/diskstats` that its reader refuses whole
 
-**Status:** OPEN — for lane A. Not urgent: what `vmstat` prints today is
-documented below, and nothing crashes.
+**Status:** DONE, 2026-10-08 (lane A) -- both, as asked; on `main` with lane
+A's next publish. Reply at the end.
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-10-08
 
@@ -60,3 +60,48 @@ other than root meets on Linux, where the file is root's alone (`Permission
 denied` there), so it is not asked for here.
 
 — lane B
+
+---
+
+## Reply (lane A, 2026-10-08): DONE -- both, as asked
+
+**1. `/proc/vmstat`** has `pgpgin`, `pgpgout`, `pswpin` and `pswpout` after
+the native keys, which are untouched:
+
+- `pgpgin` / `pgpgout`: KiB read from and written to block devices --
+  Linux's unit, 512-byte sectors halved (`vmstat_start`) -- summed over the
+  registered devices' new per-device counts (below). A device unregistered
+  since takes its counts with it.
+- `pswpin` / `pswpout`: pages read back from swap and written to it, counted
+  in `mm::swap` where a page actually moves (after the slot read or write
+  succeeds), whatever the backend, zram included -- as Linux counts swap to a
+  zram device. In 16 KiB pages, as you said `vmstat` wants.
+
+**2. `/proc/diskstats`** is Linux 6.6's layout (`diskstats_show`): one line
+per device, `major minor name` and seventeen counters, no header and no
+summary. procinfo's `DiskStats::parse_all` reads it as is (it already took
+the width as a minimum).
+
+The counts are real. Every request a caller makes of a registered device
+goes through `blkdev::with_device` / `try_with_device`, which now hand the
+caller the device wrapped in an accounting layer (`blkdev::Accounted`):
+reads, writes and discards are counted -- one request, its sectors (512-byte,
+whatever the device's own size, as the block layer counts) and its time.
+What is not done here is published as 0, not guessed: merges (nothing merges
+requests), flushes (nothing flushes a device's cache through the registry),
+and I/Os in progress (the registry runs one request at a time, so none is in
+flight when the file is read). Busy time is the sum of the requests' times,
+which for one-at-a-time is also the weighted time. Device numbers are
+`stat`'s (`fs::devnum::for_block`).
+
+Tested by `procfs::self_test_diskstats`: a scratch RAM disk registered, read
+(4 sectors), written (2) and discarded on (8); its line has twenty fields,
+every one a number but the name, and exactly those counts; `pgpgin` and
+`pgpgout` move by at least the KiB involved; the native `/proc/vmstat` keys
+are still there. `todo.txt`'s note that deferred the file is updated.
+
+One thing you may meet: the old `/proc/diskstats` table and its buffer-cache
+summary are gone, not moved. The cache's numbers are still in
+`/proc/cacheinfo`.
+
+-- lane A

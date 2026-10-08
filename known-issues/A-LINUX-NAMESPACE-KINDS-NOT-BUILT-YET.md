@@ -30,7 +30,7 @@ checked against Linux 6.6 as root, and `spawn::self_test_native_namespaces`
 | `/proc/<pid>/task/<tid>/ns`, `/proc/thread-self/ns` | absent | trivial once wanted: a thread's namespaces are its process's here |
 | `NS_GET_USERNS` | `EPERM` | a handle on the owning user namespace, once user namespaces have handles |
 | `/proc/self/{uid_map,gid_map,setgroups}` for `unshare --map-root-user` | absent | the user namespace kind |
-| What a mount namespace still lacks | see known-issues A-LINUX-MOUNT-GAPS | stacked mounts, propagation, `pivot_root(2)` |
+| What a mount namespace still lacks | see known-issues A-LINUX-MOUNT-GAPS | shared propagation |
 
 **Divergence kept on purpose:** namespaces are a process's here and a
 thread's on Linux, so `unshare` or `setns` in one thread moves all its

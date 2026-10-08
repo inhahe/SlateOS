@@ -3364,12 +3364,13 @@ fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
 /// A process sees its own mount namespace's table (`fs::mntns`): the
 /// system's, unless it has unshared one or entered another.  Field choices:
 ///
-/// - `mount_id`: a stable small integer per mount (`base + index`).  Linux
-///   assigns these from a global counter; the exact values are opaque to
-///   parsers, which only require uniqueness and stability within one read.
-/// - `parent_id`: the root mount's id for every entry.  We do not model a
-///   mount tree, so all mounts are reported as children of the root mount;
-///   the root reports itself.  Parsers that build a tree tolerate this.
+/// - `mount_id`: the mount's ID (`MountRecord::mnt_id`), from a counter and
+///   never reused, as Linux's.  A namespace's copy of a mount has its own.
+/// - `parent_id`: the ID of the mount it is attached to -- Linux's mount
+///   tree, which `findmnt` draws from these two fields: a mount on a mount
+///   point's own, a mount on top of another that one's (2026-10-08; every
+///   mount was the root's child until then). The root, attached to nothing
+///   here, gives its own.
 /// - `major:minor`: `0:<dev>`, the device number `stat` reports for files
 ///   on that mount (`vfs::dev_of`), as Linux numbers its anonymous
 ///   filesystems. It was the mount's index until 2026-10-01, which moved when
@@ -3389,15 +3390,10 @@ fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
 fn render_mountinfo(mounts: &[crate::fs::vfs::MountRecord]) -> Vec<u8> {
     use core::fmt::Write as _;
 
-    /// Base for synthetic mount ids.  Linux ids are arbitrary positive
-    /// integers; starting above a small reserved range keeps them clearly
-    /// distinct from the parent-id we report for the root mount.
-    const MOUNT_ID_BASE: usize = 20;
-    let root_id = MOUNT_ID_BASE;
-
     let mut text = String::with_capacity(mounts.len().saturating_mul(96).max(16));
-    for (i, m) in mounts.iter().enumerate() {
-        let mount_id = MOUNT_ID_BASE.saturating_add(i);
+    for m in mounts {
+        let mount_id = m.mnt_id;
+        let parent_id = if m.parent == 0 { m.mnt_id } else { m.parent };
         let minor = m.dev;
         let opts = m.options.to_string();
         let super_opts = if m.fs_read_only { "ro" } else { "rw" };
@@ -3414,7 +3410,7 @@ fn render_mountinfo(mounts: &[crate::fs::vfs::MountRecord]) -> Vec<u8> {
         // fail.
         let _ = writeln!(
             text,
-            "{mount_id} {root_id} 0:{minor} {root} {mount_point} {opts}{optional} - {fstype} none {super_opts}",
+            "{mount_id} {parent_id} 0:{minor} {root} {mount_point} {opts}{optional} - {fstype} none {super_opts}",
         );
     }
     text.into_bytes()
@@ -3441,7 +3437,7 @@ fn host_mount_for<'a>(
 ) -> Option<&'a crate::fs::vfs::MountRecord> {
     global
         .iter()
-        .filter(|m| mount_path_covers(&m.path, host))
+        .filter(|m| !m.hidden && mount_path_covers(&m.path, host))
         .max_by_key(|m| m.path.len())
 }
 
@@ -17606,35 +17602,54 @@ pub fn self_test() -> KernelResult<()> {
         let record =
             |path: &str, fs_type: &str, options: &str, fs_ro: bool, dev: u32, root: &str| {
                 MountRecord {
+                    mnt_id: 0,
+                    parent: 20,
                     path: PathBuf::from(path),
                     fs_type: String::from(fs_type),
                     options: MountOptions::parse(options),
                     fs_read_only: fs_ro,
                     unbindable: false,
+                    hidden: false,
                     dev,
                     root: PathBuf::from(root),
                 }
             };
         // Device numbers out of index order, so a renderer that numbered by
         // position would be caught.
+        // IDs as the table gives them: the root attached to nothing, the
+        // rest to it, and the last to the second.
+        let with_ids = |mnt_id: u64, parent: u64, r: MountRecord| MountRecord {
+            mnt_id,
+            parent,
+            ..r
+        };
         let mounts = [
-            record("/", "ext4", "rw", false, 5, "/"),
+            with_ids(20, 0, record("/", "ext4", "rw", false, 5, "/")),
             // Mounted read-only: the mount and the filesystem both are; the
             // filesystem's options carry no per-mount flag (`noatime`).
-            record("/tmp", "tmpfs", "ro,noatime", true, 2, "/"),
+            with_ids(21, 20, record("/tmp", "tmpfs", "ro,noatime", true, 2, "/")),
             // A mount point containing a space exercises the Linux
             // `mangle()`-equivalent escaping: the space must become `\040`
             // so the space-separated layout stays parseable.
-            record("/mnt/my disk", "ext4", "rw", false, 9, "/"),
+            with_ids(22, 20, record("/mnt/my disk", "ext4", "rw", false, 9, "/")),
             // A bind mount shows its subtree in the root field, mangled as
             // the mount point is, on its source's device; made read-only by
             // a bind remount, so the mount is `ro` and the filesystem `rw`.
-            record("/srv", "ext4", "ro", false, 5, "/data/web site"),
+            with_ids(
+                23,
+                20,
+                record("/srv", "ext4", "ro", false, 5, "/data/web site"),
+            ),
             // Made unbindable: the optional field says so, before the `-`.
-            MountRecord {
-                unbindable: true,
-                ..record("/run/x", "tmpfs", "rw", false, 7, "/")
-            },
+            // Attached to /tmp's mount, whose ID is its parent's.
+            with_ids(
+                24,
+                21,
+                MountRecord {
+                    unbindable: true,
+                    ..record("/tmp/x", "tmpfs", "rw", false, 7, "/")
+                },
+            ),
         ];
         let rendered = render_mountinfo(&mounts);
         let mi_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
@@ -17644,7 +17659,7 @@ pub fn self_test() -> KernelResult<()> {
             "21 20 0:2 / /tmp ro,noatime - tmpfs none ro",
             "22 20 0:9 / /mnt/my\\040disk rw - ext4 none rw",
             "23 20 0:5 /data/web\\040site /srv ro - ext4 none rw",
-            "24 20 0:7 / /run/x rw unbindable - tmpfs none rw",
+            "24 21 0:7 / /tmp/x rw unbindable - tmpfs none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -17725,11 +17740,14 @@ pub fn self_test() -> KernelResult<()> {
         use crate::fs::vfs::{MountOptions, MountRecord};
         use crate::ipc::namespace::MountViewEntry;
         let record = |path: &str, fs_type: &str, dev: u32| MountRecord {
+            mnt_id: 0,
+            parent: 0,
             path: PathBuf::from(path),
             fs_type: String::from(fs_type),
             options: MountOptions::defaults(),
             fs_read_only: false,
             unbindable: false,
+            hidden: false,
             dev,
             root: PathBuf::from("/"),
         };

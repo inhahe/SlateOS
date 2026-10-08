@@ -24711,6 +24711,142 @@ pub fn self_test_linux_bind_mounts() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of stacked mounts and `pivot_root(2)` through the Linux ABI:
+/// [`elf::build_linux_stacked_mounts_test_elf`] (`build/stacktest.c`), run as
+/// root, in a mount namespace of its own. A mount on a mount point covering
+/// the one below, with that one's ID as its parent; a mount covering what was
+/// beneath its directory first; a move and a bind on top; a recursive bind
+/// of a directory onto itself; `pivot_root`'s refusals, `pivot_root(new,
+/// new/old)` and `pivot_root(".", ".")` as runc does it
+/// (`crate::fs::Vfs::mount_on_top`, `pivot_root_tree`).
+pub fn self_test_linux_stacked_mounts() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux stacked mounts and pivot_root (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_stacked_mounts_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-stack"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make namespaces are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-stack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: stacked mounts spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "a process that gave up root was not refused pivot_root with EPERM"
+            }
+            Some(0x32..=0x37) => {
+                "pivot_root(new, new/old) did not make the new root / with the working directory \
+                 on it, the old root and its mounts under /old, or a lazy unmount of /old"
+            }
+            Some(0x38..=0x3d) => {
+                "pivot_root(\".\", \".\") as runc does it did not leave the new root alone at / \
+                 once umount2(\".\", MNT_DETACH) took the old one"
+            }
+            Some(0x40..=0x42) => "it could not make a namespace and a tmpfs of its own",
+            Some(0x43..=0x49) => {
+                "a mount on a mount point did not go on top, cover the one below, name it as \
+                 its parent in mountinfo, or uncover it when it went"
+            }
+            Some(0x4a..=0x4d) => {
+                "a mount on a directory did not cover the mount beneath it, or unmounting it was \
+                 refused for it, or it did not come back"
+            }
+            Some(0x4e..=0x56) => "a move or a bind onto a mount point did not go on top",
+            Some(0x57..=0x5e) => {
+                "a recursive bind of a directory onto itself was refused, did not copy the mount \
+                 beneath, or did not come off with MNT_DETACH alone"
+            }
+            Some(0x5f..=0x64) => {
+                "pivot_root's refusals (EBUSY for /, EINVAL, ENOTDIR, ENOENT) were not Linux's"
+            }
+            Some(0x65) => "the unprivileged child did not end 0x2B",
+            Some(0x66 | 0x67) => {
+                "the pivot_root(new, new/old) child did not end 0x2C, or its parent's namespace \
+                 changed"
+            }
+            Some(0x68 | 0x69) => {
+                "the pivot_root(\".\", \".\") child did not end 0x2D, or its parent's namespace \
+                 changed"
+            }
+            Some(0x6a | 0x6b) => {
+                "its tmpfs did not come off, or its directory could not be removed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Every namespace it made went with it, and the system's table is as it
+    // was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- {} namespaces and {} system mounts \
+             before, {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux stacked mounts and pivot_root (ring 3: on top of a mount point and \
+         covering what was beneath, a move and a bind on top, a directory bound onto itself, \
+         pivot_root's refusals, pivot_root(new, new/old) and pivot_root(\".\", \".\")): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of named pipes through the Linux ABI:
 /// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
 /// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a

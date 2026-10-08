@@ -30688,15 +30688,16 @@ fn mount_source(source: Option<&[u8]>) -> Result<crate::fs::path::PathBuf, Sysca
 /// | `MS_PRIVATE`, `MS_SLAVE`, `MS_UNBINDABLE` (with `MS_REC` or not) | the mount at the target -- and the mounts beneath it under `MS_REC` -- made bindable again, left as it was, or made unbindable (`fs::Vfs::set_propagation`); `EINVAL` if the target is not a mount's root or more than one type is named |
 /// | `MS_SHARED` | `EINVAL`: mounts here never propagate, and saying one does would be false |
 /// | `MS_MOVE` | the mount at `source`, with every mount beneath it, moved to the target (`fs::Vfs::move_mount`): `EINVAL` for no source, one that is not a mount's root, `/`, or a directory and a non-directory; `ELOOP` for a target inside what moves |
-/// | none of these | a new mount of `fstype` (`fs::new_filesystem`) over the device `source`: `EINVAL` with no type, `ENODEV` for a type this kernel has no driver for, `ENOTDIR` for a target that is not a directory, `EBUSY` where something is mounted already |
+/// | none of these | a new mount of `fstype` (`fs::new_filesystem`) over the device `source`: `EINVAL` with no type, `ENODEV` for a type this kernel has no driver for, `ENOTDIR` for a target that is not a directory |
 ///
 /// `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC` and `MS_NOATIME` are the mount's
 /// options -- a remount naming no atime flag keeps the mount's, as Linux's
 /// does; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken and
 /// change nothing, and the `data` options are not read (known-issues
-/// A-LINUX-MOUNT-GAPS). A target that is a mount point already is
-/// `EBUSY` for a new mount, a bind and a move alike: mounts do not stack
-/// here.
+/// A-LINUX-MOUNT-GAPS). A new mount, a bind or a move onto a mount point
+/// goes on top of what is there, which it covers until it goes, as Linux
+/// stacks them (`fs::Vfs::mount_on_top`); refused with `EBUSY` until
+/// 2026-10-08.
 ///
 /// Until 2026-10-08 this answered `EPERM` to every caller, root included,
 /// and checked the privilege before looking the mount point up, as kernels
@@ -30821,7 +30822,7 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
             _ => {}
         }
         match crate::fs::new_filesystem(fstype, source) {
-            Ok(fs) => Vfs::mount_with_options(&target, fs, options),
+            Ok(fs) => Vfs::mount_on_top(&target, fs, options),
             Err(KernelError::NotSupported) => return linux_err(errno::ENODEV),
             Err(e) => Err(e),
         }
@@ -30849,9 +30850,11 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
 /// - otherwise (`MNT_FORCE` too, which aborts nothing here): unmounted, or
 ///   `EBUSY` while a file is held on it or a mount sits beneath it.
 ///
-/// `/` is `EBUSY`. (Linux remounts a process's root read-only and answers 0
-/// there; making the system's root read-only on request was judged worse
-/// than refusing.)
+/// `/` names the mount stacked on the root, if one is -- the old root that
+/// `pivot_root(".", ".")` leaves there, which runc and bubblewrap unmount
+/// next by the working directory they gave it. With none, `/` is `EBUSY`.
+/// (Linux remounts a process's root read-only and answers 0 there; making
+/// the system's root read-only on request was judged worse than refusing.)
 ///
 /// Until 2026-10-08 this answered `EPERM` to every caller after the flags,
 /// before looking the target up, as kernels before 5.9 did; 6.6 answers
@@ -30882,7 +30885,7 @@ fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     if !crate::fs::Vfs::is_mount_point(&target) {
         return linux_err(errno::EINVAL);
     }
-    if target.as_path() == crate::fs::path::Path::new("/") {
+    if target.as_path() == crate::fs::path::Path::new("/") && !crate::fs::Vfs::has_mount_on_root() {
         return linux_err(errno::EBUSY);
     }
     let done = if flags & MNT_EXPIRE != 0 {
@@ -30902,50 +30905,55 @@ fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `pivot_root(new_root, put_old)`.
-fn sys_pivot_root(_args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE2(pivot_root)):
-    //
-    //   SYSCALL_DEFINE2(pivot_root, const char __user *, new_root,
-    //                   const char __user *, put_old)
-    //   {
-    //       ...
-    //       if (!may_mount())                  // (1) CAP_SYS_ADMIN
-    //           return -EPERM;
-    //
-    //       error = user_path_at(AT_FDCWD, new_root,
-    //                            LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &new);
-    //       if (error)
-    //           goto out0;                      // (2) EFAULT / ENOENT
-    //       ...
-    //   }
-    //
-    //   static inline bool may_mount(void) {
-    //       return ns_capable(current->nsproxy->mnt_ns->user_ns,
-    //                         CAP_SYS_ADMIN);
-    //   }
-    //
-    // Linux validates CAP_SYS_ADMIN BEFORE any pointer touch.  Pre-
-    // batch we ran:
-    //   * args.arg0 == 0 || args.arg1 == 0 -> EFAULT
-    //   * validate_user_read(args.arg0, 1)  -> EFAULT on bad range
-    //   * validate_user_read(args.arg1, 1)  -> EFAULT on bad range
-    //   * then EPERM.
-    //
-    // Two concrete divergences from a userspace probe:
-    //   * pivot_root(NULL, NULL)   — Linux: EPERM.  Pre-batch: EFAULT.
-    //   * pivot_root(NULL, valid)  — Linux: EPERM.  Pre-batch: EFAULT.
-    //
-    // Same errno-selection consequence as the module syscalls: tools
-    // that probe whether they have CAP_SYS_ADMIN by attempting a
-    // namespace pivot (some sandbox-setup code does this) need EPERM
-    // to decide "abort, the caller is unprivileged" rather than EFAULT
-    // "the pointer was bad, maybe retry with a different one".
-    //
-    // Architectural directive: we do not yet have a per-mount-namespace
-    // user-ns model and no caller can hold CAP_SYS_ADMIN.  Linux's
-    // gate-1 always trips.  Return EPERM unconditionally.
-    linux_err(errno::EPERM)
+/// A `pivot_root(2)` argument, looked up as `user_path_at(LOOKUP_FOLLOW |
+/// LOOKUP_DIRECTORY)` looks it up: through the caller's working directory
+/// and container root, following links (`EFAULT`, `ENOENT`, `ELOOP`...), and
+/// `ENOTDIR` for one that is not a directory. A host path.
+fn pivot_root_dir(path_ptr: u64) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let host = mount_point(path_ptr, true)?;
+    match crate::fs::Vfs::stat_resolved(&host) {
+        Ok(e) if e.entry_type == crate::fs::EntryType::Directory => Ok(host),
+        Ok(_) => Err(linux_err(errno::ENOTDIR)),
+        Err(e) => Err(linux_err(linux_errno_for(e))),
+    }
+}
+
+/// `pivot_root(new_root, put_old)` -- Linux's, in 6.6's order: root's
+/// authority first, before either pointer is read (`EPERM`,
+/// [`caller_may_mount`] -- sandbox code probes for the privilege this way and
+/// needs `EPERM`, not `EFAULT`, for a NULL argument); then both looked up
+/// ([`pivot_root_dir`]); then `fs::Vfs::pivot_root_tree`: `EBUSY` for a
+/// `new_root` or `put_old` on the root's own mount (`new_root` is `/`, or
+/// under no mount of its own), `EINVAL` for a `new_root` that is not a mount
+/// point or a `put_old` not at or under it. The mount at `new_root` becomes
+/// the root and the old root goes to `put_old` with every mount on it;
+/// `pivot_root(".", ".")` stacks the old root on the new one, for
+/// `umount2(".", MNT_DETACH)` to take.
+///
+/// A caller with a root of its own (`chroot`) is `EINVAL`, as Linux answers
+/// one whose root is not a mount's root.
+///
+/// Until 2026-10-08 this answered `EPERM` to every caller, root included.
+fn sys_pivot_root(args: &SyscallArgs) -> SyscallResult {
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    let new_root = match pivot_root_dir(args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let put_old = match pivot_root_dir(args.arg1) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if caller_pid().is_some_and(|pid| matches!(pcb::get_root_dir(pid), Some(Some(_)))) {
+        return linux_err(errno::EINVAL);
+    }
+    match crate::fs::Vfs::pivot_root_tree(&new_root, &put_old) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::DeviceBusy) => linux_err(errno::EBUSY),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `swapon(path, swapflags)`.

@@ -3705,6 +3705,14 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_bind_mounts(),
     );
+    // Stacked mounts and pivot_root(2): a mount on a mount point, a mount
+    // covering what is beneath, pivot_root (fs::Vfs::mount_on_top,
+    // pivot_root_tree).
+    selftest::dispatch_debug(
+        "Linux stacked mounts and pivot_root (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_stacked_mounts(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).
@@ -3979,6 +3987,14 @@ extern "C" fn kernel_main() -> ! {
         "VFS append atomicity (two concurrent appenders)",
         selftest::Severity::Diagnostic,
         || fs::vfs::self_test_append_is_atomic(),
+    );
+    // The mount tree: covered and stacked mounts, the root's stack
+    // (design-decisions 1557), on tables made for the test.
+    // RAN-IF: "[vfs] Running mount tree self-test..."
+    selftest::dispatch_debug(
+        "VFS mount tree (covered and stacked mounts)",
+        selftest::Severity::Diagnostic,
+        || fs::vfs::self_test_mount_tree(),
     );
     // The pivot the boot makes to put the system image at `/` before init
     // (design-decisions §1513), tried on a tree under /tmp.

@@ -58,10 +58,11 @@ until now, which a bind and its source share). A removal or rename of a name
 that is a mount point is `EBUSY`, checked before the intercept, the
 auto-version and the quota release run, as Linux's `is_local_mountpoint`.
 
-**Not yet** (known-issues A-LINUX-MOUNT-GAPS): a mount over a mount point,
-which Linux stacks and this table refuses (`EBUSY`) -- among others, the
-recursive bind of a directory onto itself that runc makes before
-`pivot_root` --; `pivot_root(2)`; `MS_SHARED`.
+**Not yet** (known-issues A-LINUX-MOUNT-GAPS): `MS_SHARED`. A mount over a
+mount point, which Linux stacks and this table refused (`EBUSY`) -- among
+others the recursive bind of a directory onto itself that runc makes before
+`pivot_root` -- and `pivot_root(2)` followed the same day (design-decisions
+1557).
 
 **Test.** `spawn::self_test_linux_bind_mounts` (`build/bindtest.c`), every
 answer checked against Linux 6.6 as root.

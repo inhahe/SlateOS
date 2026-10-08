@@ -1518,6 +1518,21 @@ struct MountPoint {
     /// under it may be bound elsewhere, and a recursive bind of a tree it is
     /// in leaves it and what is beneath it out ([`Vfs::bind_mount`]).
     unbindable: bool,
+    /// The [`Self::mnt_id`] of the mount this one is attached to -- the one
+    /// a lookup of its mount point reached when it was mounted, which is the
+    /// mount it sits on top of when it was mounted on a mount point -- or 0
+    /// for the table's root. Linux's mount tree: an unmount is refused while
+    /// a mount has another attached to it, a lazy unmount, a move and a
+    /// recursive bind take a mount with everything attached under it, and
+    /// [`recompute_visibility`] reads it. Every entry comes after its parent
+    /// in its table.
+    parent: u64,
+    /// No lookup reaches this mount ([`recompute_visibility`]): another
+    /// mounted later covers it -- on its mount point or on a directory above
+    /// it -- or it is stacked on the table's root, which lookups start at and
+    /// never cross into what is mounted on it. Listed, held and unmounted as
+    /// any other; [`find_mount`] passes it by.
+    hidden: bool,
 }
 
 impl MountPoint {
@@ -1538,11 +1553,14 @@ impl MountPoint {
 
     /// Another entry for the same filesystem: a bind mount of it, or a mount
     /// namespace's copy -- the same filesystem, `fs_id` and filesystem-wide
-    /// read-only flag, this mount's own options, and an id of its own.
-    fn another_mount(&self, path: PathBuf, root: PathBuf) -> Self {
+    /// read-only flag, this mount's own options, an id of its own, attached
+    /// to `parent`.
+    fn another_mount(&self, path: PathBuf, root: PathBuf, parent: u64) -> Self {
         MountPoint {
             path,
             root,
+            parent,
+            hidden: false,
             fs: Arc::clone(&self.fs),
             fs_type: self.fs_type.clone(),
             options: self.options,
@@ -1573,6 +1591,11 @@ pub enum Propagation {
 /// One mount as `/proc/<pid>/mountinfo` shows it ([`Vfs::mounts_with_dev`]).
 #[derive(Debug, Clone)]
 pub struct MountRecord {
+    /// Its mount ID, never reused: mountinfo's first field.
+    pub mnt_id: u64,
+    /// The mount ID of the mount it is attached to, 0 for the table's root:
+    /// mountinfo's second field (the root's own ID there).
+    pub parent: u64,
     /// Where it is mounted.
     pub path: PathBuf,
     /// Its filesystem's type name.
@@ -1590,6 +1613,9 @@ pub struct MountRecord {
     /// The directory of its filesystem it shows: `/`, or a bind mount's
     /// subtree -- mountinfo's fourth field.
     pub root: PathBuf,
+    /// No lookup reaches it: covered by a later mount, or stacked on the
+    /// root. Listed all the same, as Linux lists such mounts.
+    pub hidden: bool,
 }
 
 /// An open regular file held as its filesystem and inode, not its name
@@ -2874,7 +2900,38 @@ impl Vfs {
         fs: Box<dyn FileSystem>,
         options: MountOptions,
     ) -> KernelResult<()> {
-        Self::mount_with_options_in(super::mntns::current(), mount_path.as_ref(), fs, options)
+        Self::mount_with_options_in(
+            super::mntns::current(),
+            mount_path.as_ref(),
+            fs,
+            options,
+            false,
+        )
+    }
+
+    /// [`Self::mount_with_options`], on top of whatever is mounted at
+    /// `mount_path` already -- Linux's `mount(2)`, which stacks: the mount
+    /// below is covered until this one goes. The kernel's own mounts use
+    /// [`Self::mount`], which refuses an occupied mount point instead, so a
+    /// second mount of `/proc` is an error and not a silent shadow. A mount
+    /// on `/` itself goes on top of the root and is reached by nothing, as on
+    /// Linux, where a process's root is where its lookups start.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mount_with_options`], without its `AlreadyExists`.
+    pub fn mount_on_top(
+        mount_path: impl AsRef<Path>,
+        fs: Box<dyn FileSystem>,
+        options: MountOptions,
+    ) -> KernelResult<()> {
+        Self::mount_with_options_in(
+            super::mntns::current(),
+            mount_path.as_ref(),
+            fs,
+            options,
+            true,
+        )
     }
 
     /// [`Self::mount`] into mount namespace `ns`'s table.
@@ -2887,15 +2944,18 @@ impl Vfs {
         mount_path: impl AsRef<Path>,
         fs: Box<dyn FileSystem>,
     ) -> KernelResult<()> {
-        Self::mount_with_options_in(ns, mount_path.as_ref(), fs, MountOptions::defaults())
+        Self::mount_with_options_in(ns, mount_path.as_ref(), fs, MountOptions::defaults(), false)
     }
 
-    /// [`Self::mount_with_options`] into mount namespace `ns`'s table.
+    /// [`Self::mount_with_options`] into mount namespace `ns`'s table: on top
+    /// of what is mounted at `mount_path` already when `on_top`
+    /// ([`Self::mount_on_top`]), else `AlreadyExists` there.
     fn mount_with_options_in(
         ns: u64,
         mount_path: &Path,
         fs: Box<dyn FileSystem>,
         options: MountOptions,
+        on_top: bool,
     ) -> KernelResult<()> {
         if !mount_path.is_absolute() {
             return Err(KernelError::InvalidArgument);
@@ -2954,14 +3014,25 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let table = vfs.table_mut(ns)?;
 
-        // Check for duplicate mount point.  Both sides are normalised, so
-        // `/mnt` and `/mnt/` now collide as they should.
-        if table
-            .iter()
-            .any(|mp| mp.path.as_path() == mount_path.as_path())
-        {
+        // Check for duplicate mount point -- the mount a lookup of it reaches,
+        // or the root for `/`.  Both sides are normalised, so `/mnt` and
+        // `/mnt/` now collide as they should.
+        let occupied = if mount_path.as_path() == Path::new("/") {
+            root_index(table).is_some()
+        } else {
+            mount_at(table, mount_path).is_some()
+        };
+        if occupied && !on_top {
             return Err(KernelError::AlreadyExists);
         }
+        if table.len() >= MAX_MOUNTS {
+            return Err(KernelError::DiskFull);
+        }
+        // Attached to the mount a lookup of the mount point reaches: the one
+        // it covers, when it goes on top of one.
+        let parent = visible_index(table, mount_path)
+            .and_then(|i| table.get(i))
+            .map_or(0, |m| m.mnt_id);
 
         let opts_str = options.to_string();
         crate::serial_println!(
@@ -2982,6 +3053,8 @@ impl Vfs {
             root: PathBuf::from("/"),
             fs_read_only: Arc::new(AtomicBool::new(options.read_only)),
             unbindable: false,
+            parent,
+            hidden: false,
             fs: Arc::new(Mutex::new(fs)),
             fs_type,
             options,
@@ -2990,6 +3063,7 @@ impl Vfs {
             objects: 0,
             expire_mark: false,
         });
+        recompute_visibility(table);
 
         // Mount changes affect path resolution — invalidate entire dcache.
         let mounted_path = mount_path.to_path_buf();
@@ -3024,11 +3098,19 @@ impl Vfs {
             if from != super::mntns::ROOT && !vfs.others.contains_key(&from) {
                 return Err(KernelError::NotFound);
             }
-            let copy: Vec<MountPoint> = vfs
-                .table(from)
-                .iter()
-                .map(|mp| mp.another_mount(mp.path.clone(), mp.root.clone()))
-                .collect();
+            // Each copy attached to the copy of its parent: the same tree.
+            let mut ids: Vec<(u64, u64)> = Vec::new();
+            let mut copy: Vec<MountPoint> = Vec::new();
+            for mp in vfs.table(from) {
+                let parent = ids
+                    .iter()
+                    .find(|(old, _)| *old == mp.parent)
+                    .map_or(0, |&(_, new)| new);
+                let c = mp.another_mount(mp.path.clone(), mp.root.clone(), parent);
+                ids.push((mp.mnt_id, c.mnt_id));
+                copy.push(c);
+            }
+            recompute_visibility(&mut copy);
             vfs.others.insert(to, copy);
         }
         // Path resolution is not cached while more than one table exists
@@ -3071,25 +3153,22 @@ impl Vfs {
 
     /// Index of the mount at `mount_path`, if it may be unmounted right now.
     ///
-    /// `NotFound` if nothing is mounted there, `DeviceBusy` if unmounting it
-    /// would orphan a sub-mount.
+    /// `NotFound` if nothing is mounted there, `PermissionDenied` for `/`
+    /// with nothing stacked on it ([`unmount_target`]), `DeviceBusy` if
+    /// unmounting it would orphan a sub-mount.
     ///
     /// Factored out because [`Self::unmount`] must run this check *twice*: once
     /// to find the filesystem to sync, and again after it has dropped and
     /// retaken the VFS lock, by which point a sub-mount may have appeared.
     fn unmount_index(table: &[MountPoint], mount_path: &Path) -> KernelResult<usize> {
-        let idx = table
-            .iter()
-            .position(|mp| mp.path.as_path() == mount_path)
-            .ok_or(KernelError::NotFound)?;
+        let idx = unmount_target(table, mount_path)?;
 
-        // Check for sub-mounts that would be orphaned.  `path_strictly_under`
-        // matches on component boundaries, so unmounting `/mnt` is not blocked
-        // by an unrelated `/mnt_data` mount, and a `/mnt/` spelling of the
-        // argument still finds the real children.
-        let has_children = table.iter().enumerate().any(|(i, mp)| {
-            i != idx && crate::fs::pathutil::path_strictly_under(&mp.path, mount_path)
-        });
+        // Check for sub-mounts that would be orphaned: a mount attached to
+        // this one, as Linux counts them. A mount beneath the path that was
+        // there first and is covered by this one is not this one's, and does
+        // not keep it.
+        let id = table.get(idx).map_or(0, |m| m.mnt_id);
+        let has_children = table.iter().any(|mp| mp.parent == id);
         if has_children {
             crate::serial_println!(
                 "[vfs] Cannot unmount '{}': has sub-mounts",
@@ -3105,22 +3184,21 @@ impl Vfs {
     /// Syncs the filesystem before removing it to ensure all data is
     /// flushed, and again after (`finish_unmount`).
     ///
+    /// `/` names a mount stacked on the root, the last one, if there is one
+    /// ([`unmount_target`]): what `pivot_root(".", ".")` leaves the old root
+    /// as, and what runc and bubblewrap then unmount by `/`.
+    ///
     /// # Errors
     ///
-    /// `PermissionDenied` for `/`; `NotFound` if nothing is mounted there;
-    /// `DeviceBusy` while a file is held open on it or a mount sits beneath
-    /// it (an orphaned sub-mount could never be reached or unmounted).
+    /// `PermissionDenied` for `/` with nothing stacked on it; `NotFound` if
+    /// nothing is mounted there; `DeviceBusy` while a file is held open on
+    /// it or a mount is attached to it (an orphaned sub-mount could never be
+    /// reached or unmounted).
     pub fn unmount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
         // Normalise to the spelling registration stored, so an unmount is not
         // refused merely because the caller wrote the trailing slash that
-        // `mount` accepted.  This also makes the root check below catch `//`.
+        // `mount` accepted.  This also makes the root check catch `//`.
         let mount_path = &normalize_mount_path(mount_path.as_ref());
-
-        // Refuse to unmount root.  Checked before the table lookup so the answer
-        // does not depend on whether `/` happens to be present.
-        if mount_path.as_path() == Path::new("/") {
-            return Err(KernelError::PermissionDenied);
-        }
 
         // Phase 1: find the mount, take a *handle* to its filesystem, and drop
         // the VFS lock before touching that filesystem.
@@ -3187,6 +3265,8 @@ impl Vfs {
         }
 
         let mp = table.remove(idx);
+        // What it covered is reached again.
+        recompute_visibility(table);
         drop(vfs);
         // Unmount changes affect path resolution — invalidate entire dcache.
         VFS_DCACHE.lock().invalidate_all();
@@ -3205,7 +3285,22 @@ impl Vfs {
     pub fn is_mount_point(path: impl AsRef<Path>) -> bool {
         let path = normalize_mount_path(path.as_ref());
         let ns = super::mntns::current();
-        VFS.lock().table(ns).iter().any(|mp| mp.path == path)
+        let vfs = VFS.lock();
+        let table = vfs.table(ns);
+        if path.as_path() == Path::new("/") {
+            root_index(table).is_some()
+        } else {
+            mount_at(table, &path).is_some()
+        }
+    }
+
+    /// Whether a mount is stacked on the caller's namespace's root -- by
+    /// `pivot_root(".", ".")`, or a mount on `/` -- which `umount2("/")`
+    /// then takes ([`Self::unmount`]).
+    #[must_use]
+    pub fn has_mount_on_root() -> bool {
+        let ns = super::mntns::current();
+        stacked_on_root(VFS.lock().table(ns)).is_some()
     }
 
     /// Detach the mount at `mount_path` and every mount beneath it --
@@ -3214,26 +3309,25 @@ impl Vfs {
     /// working, and each filesystem is finished ([`finish_unmount`]) when the
     /// last of them is released -- at once if none is.
     ///
+    /// "Beneath" is Linux's mount tree: every mount attached to it, at any
+    /// depth ([`MountPoint::parent`]). A mount beneath the path that it
+    /// covers is not its, stays, and is reached again. `/` names a mount
+    /// stacked on the root, as for [`Self::unmount`].
+    ///
     /// # Errors
     ///
-    /// `PermissionDenied` for `/`; `NotFound` if nothing is mounted at
-    /// `mount_path`.
+    /// `PermissionDenied` for `/` with nothing stacked on it; `NotFound` if
+    /// nothing is mounted at `mount_path`.
     pub fn unmount_detach(mount_path: impl AsRef<Path>) -> KernelResult<()> {
         let mount_path = &normalize_mount_path(mount_path.as_ref());
-        if mount_path.as_path() == Path::new("/") {
-            return Err(KernelError::PermissionDenied);
-        }
         let ns = super::mntns::current();
         let now: Vec<MountPoint> = {
             let mut vfs = VFS.lock();
             let table = vfs.table_mut(ns)?;
-            if !table.iter().any(|mp| mp.path == *mount_path) {
-                return Err(KernelError::NotFound);
-            }
-            let (gone, kept): (Vec<MountPoint>, Vec<MountPoint>) = core::mem::take(table)
-                .into_iter()
-                .partition(|mp| crate::fs::pathutil::path_in_subtree(&mp.path, mount_path));
-            *table = kept;
+            let top = unmount_target(table, mount_path)?;
+            let tree = subtree(table, top);
+            let gone = take_entries(table, &tree);
+            recompute_visibility(table);
             let (now, later): (Vec<MountPoint>, Vec<MountPoint>) =
                 gone.into_iter().partition(|mp| mp.objects == 0);
             vfs.detached.extend(later);
@@ -3260,11 +3354,9 @@ impl Vfs {
         let ns = super::mntns::current();
         let marked = {
             let mut vfs = VFS.lock();
-            let mp = vfs
-                .table_mut(ns)?
-                .iter_mut()
-                .find(|mp| mp.path == mount_path)
-                .ok_or(KernelError::NotFound)?;
+            let table = vfs.table_mut(ns)?;
+            let idx = unmount_target(table, &mount_path)?;
+            let mp = table.get_mut(idx).ok_or(KernelError::NotFound)?;
             core::mem::replace(&mut mp.expire_mark, true)
         };
         if marked {
@@ -3375,6 +3467,30 @@ impl Vfs {
                     moves.push((core::mem::replace(&mut m.path, to.clone()), to));
                 }
             }
+            // The tree: the new root takes the old one's place, the old one
+            // sits on it at `put_old`, and the mounts that sat on the old
+            // one -- `/tmp`, `/proc` -- sit on the new one, at their paths.
+            let old_id = table.get(old_idx).map_or(0, |m| m.mnt_id);
+            let new_id = table.get(new_idx).map_or(0, |m| m.mnt_id);
+            let old_parent = table.get(old_idx).map_or(0, |m| m.parent);
+            for m in table.iter_mut() {
+                if m.parent == old_id && m.mnt_id != new_id {
+                    m.parent = new_id;
+                }
+            }
+            if let Some(m) = table.get_mut(new_idx) {
+                m.parent = old_parent;
+            }
+            if let Some(m) = table.get_mut(old_idx) {
+                m.parent = new_id;
+            }
+            // Parents before children: the new root goes where the old one
+            // was, ahead of it and of everything that now sits on it.
+            if new_idx > old_idx {
+                let n = table.remove(new_idx);
+                table.insert(old_idx, n);
+            }
+            recompute_visibility(table);
             (moves, before)
         };
         // Paths now resolve differently: drop every cached lookup.
@@ -3403,6 +3519,146 @@ impl Vfs {
         for (from, to) in &moves {
             crate::serial_println!("[vfs] Pivot: '{}' -> '{}'", from.display(), to.display());
         }
+        Ok(())
+    }
+
+    /// Linux's `pivot_root(2)` over the caller's mount namespace: the mount
+    /// at `new_root` becomes the root, and the old root -- with every mount
+    /// attached under it -- goes to `put_old`, a directory at or under
+    /// `new_root`. Host paths, resolved.
+    ///
+    /// - The mount at `new_root`, with everything attached under it, moves
+    ///   to `/`: `new_root/x` becomes `/x`.
+    /// - The old root moves to where `put_old` is named now -- `put_old`
+    ///   without `new_root` -- and every mount on it moves with it: `/proc`
+    ///   becomes `put_old/proc`. That is Linux's tree; the boot's pivot
+    ///   ([`Self::pivot_root`]) leaves those where they are instead.
+    /// - `put_old` may be `new_root` itself: `pivot_root(".", ".")`, which
+    ///   runc, bubblewrap and LXC use. The old root is then stacked on the
+    ///   new one at `/` -- listed in mountinfo, reached by no lookup -- until
+    ///   `umount2("/")` takes it ([`Self::unmount_detach`]).
+    /// - The processes of the namespace with no root of their own (`chroot`,
+    ///   a container's view) keep their working directories: one in the new
+    ///   root's tree is renamed under `/`, one in the old root's under where
+    ///   that went, and one at the old root itself goes to the new root, as
+    ///   Linux's `chroot_fs_refs` moves it. Advisory locks taken by path move
+    ///   with their files. Other records kept by path -- an open directory, a
+    ///   watch -- are not rewritten: after `pivot_root(".", ".")` a directory
+    ///   held in the old tree is named by a path that leads into the new one.
+    ///
+    /// # Errors
+    ///
+    /// Linux's, in its order: `DeviceBusy` when `new_root` or `put_old` is on
+    /// the root's own mount (`new_root` is `/`, or is not under a mount of
+    /// its own); `InvalidArgument` when `new_root` is not a mount point, or
+    /// `put_old` is not at or under it; `NotFound` for a namespace with no
+    /// root.
+    pub fn pivot_root_tree(
+        new_root: impl AsRef<Path>,
+        put_old: impl AsRef<Path>,
+    ) -> KernelResult<()> {
+        let (new_root, put_old) = (new_root.as_ref(), put_old.as_ref());
+        for p in [new_root, put_old] {
+            if !p.is_absolute() || !p.has_no_dot_components() {
+                return Err(KernelError::InvalidArgument);
+            }
+        }
+        let new_root = normalize_mount_path(new_root);
+        let put_old = normalize_mount_path(put_old);
+        let slash = Path::new("/");
+        let ns = super::mntns::current();
+        // The mounts a lookup reached before, each with whether it moved with
+        // the new root: what renames the records kept by path.
+        let (before, put_old_now) = {
+            let mut vfs = VFS.lock();
+            let table = vfs.table_mut(ns)?;
+            let root = root_index(table).ok_or(KernelError::NotFound)?;
+            let new_idx = visible_index(table, &new_root).ok_or(KernelError::NotFound)?;
+            let old_idx = visible_index(table, &put_old).ok_or(KernelError::NotFound)?;
+            if new_idx == root || old_idx == root {
+                return Err(KernelError::DeviceBusy);
+            }
+            if table.get(new_idx).is_none_or(|m| m.path != new_root) {
+                return Err(KernelError::InvalidArgument);
+            }
+            let new_tree = subtree(table, new_idx);
+            if !new_tree.contains(&old_idx)
+                || !crate::fs::pathutil::path_in_subtree(&put_old, &new_root)
+            {
+                return Err(KernelError::InvalidArgument);
+            }
+            let put_old_now =
+                rebase_under(&put_old, &new_root, slash).ok_or(KernelError::InvalidArgument)?;
+            let before: Vec<(PathBuf, bool)> = table
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| !m.hidden)
+                .map(|(i, m)| (m.path.clone(), new_tree.contains(&i)))
+                .collect();
+            let mut paths: Vec<PathBuf> = Vec::with_capacity(table.len());
+            for (i, m) in table.iter().enumerate() {
+                let moved = if new_tree.contains(&i) {
+                    rebase_under(&m.path, &new_root, slash)
+                } else {
+                    rebase_under(&m.path, slash, &put_old_now)
+                };
+                paths.push(moved.ok_or(KernelError::InvalidArgument)?);
+            }
+            let put_old_mount = table.get(old_idx).map_or(0, |m| m.mnt_id);
+            for (m, path) in table.iter_mut().zip(paths) {
+                m.path = path;
+            }
+            if let Some(m) = table.get_mut(new_idx) {
+                m.parent = 0;
+            }
+            if let Some(m) = table.get_mut(root) {
+                m.parent = put_old_mount;
+            }
+            // The new root's tree first; the old root's after it, attached
+            // now, on top of what is at `put_old`.
+            let newer = take_entries(table, &new_tree);
+            let older = core::mem::replace(table, newer);
+            table.extend(older);
+            recompute_visibility(table);
+            (before, put_old_now)
+        };
+        // Paths now resolve differently: drop every cached lookup.
+        VFS_DCACHE.lock().invalidate_all();
+
+        // A path's name now: by the mount that answered it before.
+        let renamed = |p: &Path| -> Option<PathBuf> {
+            let (_, with_new_root) = before
+                .iter()
+                .filter(|(m, _)| mount_matches(m, p))
+                .max_by_key(|(m, _)| m.len())?;
+            if *with_new_root {
+                rebase_under(p, &new_root, slash)
+            } else {
+                rebase_under(p, slash, &put_old_now)
+            }
+        };
+        // After the table lock: the two are never held together.
+        {
+            let mut locks = LOCK_TABLE.lock();
+            for entry in locks.iter_mut() {
+                if let Some(path) = renamed(&entry.path) {
+                    entry.path = path;
+                }
+            }
+        }
+        super::mntns::rename_working_directories(ns, |cwd| {
+            let cwd = Path::new(cwd);
+            // At the old root itself: to the new root (`chroot_fs_refs`).
+            if cwd == slash {
+                return None;
+            }
+            renamed(cwd).map(|p| p.as_bytes().to_vec())
+        });
+        crate::serial_println!(
+            "[vfs] pivot_root: '{}' is the root; the old root is at '{}'",
+            new_root.display(),
+            put_old_now.display()
+        );
         Ok(())
     }
 
@@ -6015,11 +6271,14 @@ impl Vfs {
         vfs.table(ns)
             .iter()
             .map(|mp| MountRecord {
+                mnt_id: mp.mnt_id,
+                parent: mp.parent,
                 path: mp.path.clone(),
                 fs_type: mp.fs_type.clone(),
                 options: mp.options,
                 fs_read_only: mp.fs_read_only.load(Ordering::Relaxed),
                 unbindable: mp.unbindable,
+                hidden: mp.hidden,
                 dev: dev_of(mp.fs_id),
                 root: mp.root.clone(),
             })
@@ -6029,10 +6288,17 @@ impl Vfs {
     /// Mount the subtree `source` names -- in whichever filesystem serves it
     /// -- at `target` too: Linux's bind mount (`mount --bind`, `MS_BIND`), in
     /// the caller's mount namespace. Both are host paths, resolved. The new
-    /// entry shares the filesystem (its `fs_id`, so a file is the same file
+    /// mount shares the filesystem (its `fs_id`, so a file is the same file
     /// through either path) and shows the subtree from `source` down, with
-    /// the source mount's options. `recursive` (`MS_REC`) binds the mounts
-    /// beneath `source` too, each at the same place under `target`.
+    /// the source mount's options. It goes on top of whatever is at
+    /// `target`, as Linux stacks mounts: a mount point there is covered.
+    ///
+    /// `recursive` (`MS_REC`) binds the mounts beneath `source` too, each at
+    /// the same place under `target`: Linux's `copy_tree` -- every mount
+    /// attached to the source mount below `source`, with everything attached
+    /// under it, and an unbindable one ([`Self::set_propagation`]) left out
+    /// with everything under it. Each copy is attached to the copy of its
+    /// parent, so what was covered there is covered here.
     ///
     /// A file may be bound over a file, as `docker run -v /etc/hosts:...`
     /// does; a directory only over a directory.
@@ -6040,11 +6306,10 @@ impl Vfs {
     /// # Errors
     ///
     /// `InvalidArgument` for a path that is not absolute or has `.`/`..`, or
-    /// a `source` on an unbindable mount ([`Self::set_propagation`]);
-    /// `NotFound` if either does not exist; `NotADirectory` for a directory
-    /// over a non-directory or the reverse, as Linux's `graft_tree` answers;
-    /// `AlreadyExists` where a path the bind would take is a mount point
-    /// already (mounts do not stack here).
+    /// a `source` on an unbindable mount; `NotFound` if either does not
+    /// exist; `NotADirectory` for a directory over a non-directory or the
+    /// reverse, as Linux's `graft_tree` answers; `DiskFull` (Linux's
+    /// `ENOSPC`) past [`MAX_MOUNTS`] mounts in the table.
     pub fn bind_mount(
         source: impl AsRef<Path>,
         target: impl AsRef<Path>,
@@ -6068,41 +6333,57 @@ impl Vfs {
         {
             let mut vfs = VFS.lock();
             let table = vfs.table_mut(ns)?;
-            let first = {
-                let (mp, root) = find_mount(table, &source)?;
-                if mp.unbindable {
-                    return Err(KernelError::InvalidArgument);
-                }
-                mp.another_mount(target.clone(), root)
-            };
+            let src_idx = visible_index(table, &source).ok_or(KernelError::NotFound)?;
+            let parent = visible_index(table, &target)
+                .and_then(|i| table.get(i))
+                .map_or(0, |m| m.mnt_id);
+            let src = table.get(src_idx).ok_or(KernelError::NotFound)?;
+            if src.unbindable {
+                return Err(KernelError::InvalidArgument);
+            }
+            let first = src.another_mount(target.clone(), relative_path(src, &source), parent);
+            // Each original's id beside its copy's, for the copies' parents.
+            let mut copied: Vec<(u64, u64)> = alloc::vec![(src.mnt_id, first.mnt_id)];
             let mut binds = alloc::vec![first];
             if recursive {
-                // An unbindable mount beneath is left out, and so is
-                // everything beneath it, as Linux's `copy_tree` skips it.
-                let skipped: Vec<PathBuf> = table
-                    .iter()
-                    .filter(|mp| {
-                        mp.unbindable && crate::fs::pathutil::path_strictly_under(&mp.path, &source)
-                    })
-                    .map(|mp| mp.path.clone())
-                    .collect();
-                for mp in table.iter() {
-                    if !crate::fs::pathutil::path_strictly_under(&mp.path, &source)
-                        || skipped
-                            .iter()
-                            .any(|u| crate::fs::pathutil::path_in_subtree(&mp.path, u))
+                let src_id = src.mnt_id;
+                let mut include: Vec<usize> = Vec::new();
+                for (i, m) in table.iter().enumerate() {
+                    if m.parent == src_id
+                        && crate::fs::pathutil::path_strictly_under(&m.path, &source)
                     {
-                        continue;
+                        include.extend(subtree(table, i));
                     }
-                    let path = rebase_under(&mp.path, &source, &target)
+                }
+                let mut skip: Vec<usize> = Vec::new();
+                for &i in &include {
+                    if table.get(i).is_some_and(|m| m.unbindable) {
+                        skip.extend(subtree(table, i));
+                    }
+                }
+                include.sort_unstable();
+                include.dedup();
+                // In table order, so a parent's copy is made before its
+                // children's.
+                for &i in include.iter().filter(|i| !skip.contains(i)) {
+                    let Some(m) = table.get(i) else { continue };
+                    let parent_copy = copied
+                        .iter()
+                        .find(|(orig, _)| *orig == m.parent)
+                        .map(|&(_, copy)| copy)
                         .ok_or(KernelError::InvalidArgument)?;
-                    binds.push(mp.another_mount(path, mp.root.clone()));
+                    let path = rebase_under(&m.path, &source, &target)
+                        .ok_or(KernelError::InvalidArgument)?;
+                    let copy = m.another_mount(path, m.root.clone(), parent_copy);
+                    copied.push((m.mnt_id, copy.mnt_id));
+                    binds.push(copy);
                 }
             }
-            if binds.iter().any(|b| table.iter().any(|m| m.path == b.path)) {
-                return Err(KernelError::AlreadyExists);
+            if table.len().saturating_add(binds.len()) > MAX_MOUNTS {
+                return Err(KernelError::DiskFull);
             }
             table.extend(binds);
+            recompute_visibility(table);
         }
         crate::serial_println!(
             "[vfs] Bound '{}' at '{}'{}",
@@ -6118,20 +6399,20 @@ impl Vfs {
         Ok(())
     }
 
-    /// Move the mount at `from`, with every mount beneath it, to `to` --
-    /// Linux's `MS_MOVE` (`mount --move`), in the caller's mount namespace.
-    /// Host paths, resolved. A mount keeps its identity: files held on it stay
-    /// held.
+    /// Move the mount at `from`, with every mount attached under it, to
+    /// `to` -- Linux's `MS_MOVE` (`mount --move`), in the caller's mount
+    /// namespace. Host paths, resolved. It goes on top of whatever is at
+    /// `to`, as Linux stacks mounts, and what it covered at `from` is reached
+    /// again. A mount keeps its identity: files held on it stay held.
     ///
     /// # Errors
     ///
     /// `InvalidArgument` if nothing is mounted at `from` exactly, or one of
     /// the two is a directory and the other not (Linux's `do_move_mount`
     /// answers `EINVAL` there, where a bind answers `ENOTDIR`); `NotFound` if
-    /// `to` does not exist; `TooManyLinks` (Linux's `ELOOP`) for a `to` inside
-    /// `from`'s own tree -- which every path is when `from` is `/`, as Linux
-    /// answers for its root; `AlreadyExists` where a path the move would take
-    /// is a mount point already.
+    /// `to` does not exist; `TooManyLinks` (Linux's `ELOOP`) for a `to` on
+    /// what moves -- which every path is when `from` is `/`, as Linux answers
+    /// for its root.
     pub fn move_mount(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
         let (from, to) = (from.as_ref(), to.as_ref());
         for p in [from, to] {
@@ -6147,39 +6428,41 @@ impl Vfs {
         if is_dir(&from)? != is_dir(&to)? {
             return Err(KernelError::InvalidArgument);
         }
-        if crate::fs::pathutil::path_in_subtree(&to, &from) {
-            return Err(KernelError::TooManyLinks);
-        }
         let ns = super::mntns::current();
         {
             let mut vfs = VFS.lock();
             let table = vfs.table_mut(ns)?;
-            if !table.iter().any(|m| m.path == from) {
-                return Err(KernelError::InvalidArgument);
+            let top = if from.as_path() == Path::new("/") {
+                root_index(table)
+            } else {
+                mount_at(table, &from)
             }
-            let mut plan: Vec<(usize, PathBuf)> = Vec::new();
-            for (i, m) in table.iter().enumerate() {
-                if crate::fs::pathutil::path_in_subtree(&m.path, &from) {
-                    let moved =
-                        rebase_under(&m.path, &from, &to).ok_or(KernelError::InvalidArgument)?;
-                    plan.push((i, moved));
-                }
+            .ok_or(KernelError::InvalidArgument)?;
+            let moved = subtree(table, top);
+            // Where it lands must not be on what moves: Linux walks the
+            // destination's mount up its parents looking for the one moved.
+            let dest = visible_index(table, &to).ok_or(KernelError::NotFound)?;
+            if moved.contains(&dest) {
+                return Err(KernelError::TooManyLinks);
             }
-            let planned = |j: usize| plan.iter().any(|&(i, _)| i == j);
-            for (_, moved) in &plan {
-                if table
-                    .iter()
-                    .enumerate()
-                    .any(|(j, m)| !planned(j) && m.path == *moved)
-                {
-                    return Err(KernelError::AlreadyExists);
-                }
+            let parent = table.get(dest).map_or(0, |m| m.mnt_id);
+            let mut paths: Vec<PathBuf> = Vec::with_capacity(moved.len());
+            for &i in &moved {
+                let m = table.get(i).ok_or(KernelError::NotFound)?;
+                paths.push(rebase_under(&m.path, &from, &to).ok_or(KernelError::InvalidArgument)?);
             }
-            for (i, moved) in plan {
+            for (&i, path) in moved.iter().zip(paths) {
                 if let Some(m) = table.get_mut(i) {
-                    m.path = moved;
+                    m.path = path;
                 }
             }
+            if let Some(m) = table.get_mut(top) {
+                m.parent = parent;
+            }
+            // Attached now: after everything else, in their own order.
+            let went = take_entries(table, &moved);
+            table.extend(went);
+            recompute_visibility(table);
         }
         crate::serial_println!(
             "[vfs] Moved the mount at '{}' to '{}'",
@@ -6191,7 +6474,7 @@ impl Vfs {
     }
 
     /// Change the propagation type of the mount at `mount_path` -- with
-    /// `recursive` (`MS_REC`), of every mount beneath it too: Linux's
+    /// `recursive` (`MS_REC`), of every mount attached under it too: Linux's
     /// `MS_PRIVATE`, `MS_SLAVE` and `MS_UNBINDABLE` (`mount --make-private`
     /// and the rest), in the caller's mount namespace. No mount here
     /// propagates to another (design-decisions 1555), so what can change is
@@ -6211,17 +6494,24 @@ impl Vfs {
         let ns = super::mntns::current();
         let mut vfs = VFS.lock();
         let table = vfs.table_mut(ns)?;
-        if !table.iter().any(|mp| mp.path == mount_path) {
-            return Err(KernelError::NotFound);
+        let top = if mount_path.as_path() == Path::new("/") {
+            root_index(table)
+        } else {
+            mount_at(table, &mount_path)
         }
-        for mp in table.iter_mut().filter(|mp| {
-            mp.path == mount_path
-                || (recursive && crate::fs::pathutil::path_strictly_under(&mp.path, &mount_path))
-        }) {
-            match kind {
-                Propagation::Private => mp.unbindable = false,
-                Propagation::Unbindable => mp.unbindable = true,
-                Propagation::Slave => {}
+        .ok_or(KernelError::NotFound)?;
+        let changed = if recursive {
+            subtree(table, top)
+        } else {
+            alloc::vec![top]
+        };
+        for i in changed {
+            if let Some(mp) = table.get_mut(i) {
+                match kind {
+                    Propagation::Private => mp.unbindable = false,
+                    Propagation::Unbindable => mp.unbindable = true,
+                    Propagation::Slave => {}
+                }
             }
         }
         Ok(())
@@ -6252,17 +6542,11 @@ impl Vfs {
         let ns = super::mntns::current();
         let (fs, info) = {
             let vfs = VFS.lock();
-            // The longest mount path over `path`, the later of two equal ones
-            // -- the one that shadows -- as `check_writable` chooses.
-            let mut best: Option<&MountPoint> = None;
-            for mp in vfs.table(ns) {
-                if mount_matches(&mp.path, path)
-                    && best.is_none_or(|b| mp.path.len() >= b.path.len())
-                {
-                    best = Some(mp);
-                }
-            }
-            let mp = best.ok_or(KernelError::NotFound)?;
+            // The mount a lookup of `path` reaches, as `find_mount` chooses.
+            let table = vfs.table(ns);
+            let mp = visible_index(table, path)
+                .and_then(|i| table.get(i))
+                .ok_or(KernelError::NotFound)?;
             (
                 Arc::clone(&mp.fs),
                 VolumeInfo {
@@ -6411,11 +6695,13 @@ impl Vfs {
         let ns = super::mntns::current();
         let became_writable = {
             let mut vfs = VFS.lock();
-            let Some(mp) = vfs
-                .table_mut(ns)?
-                .iter_mut()
-                .find(|mp| mp.path.as_path() == mount_path.as_path())
-            else {
+            let table = vfs.table_mut(ns)?;
+            let at = if mount_path.as_path() == Path::new("/") {
+                root_index(table)
+            } else {
+                mount_at(table, mount_path)
+            };
+            let Some(mp) = at.and_then(|i| table.get_mut(i)) else {
                 return Err(KernelError::NotFound);
             };
             crate::serial_println!(
@@ -6465,7 +6751,7 @@ impl Vfs {
     ) -> Vec<(PathBuf, MountedFs, PathBuf)> {
         let mut names = Vec::new();
 
-        for mp in table {
+        for mp in table.iter().filter(|mp| !mp.hidden) {
             // `strip_prefix` is component-aligned, so a mount at `/tmpfile`
             // is not treated as living under `/tmp`.  A tail of exactly one
             // component is a direct child; an empty tail is the mount that
@@ -8655,16 +8941,10 @@ impl Vfs {
         // first and covers everything — so `debug_stats` for a path under any
         // submount reported the *root* filesystem's stats.  Every other mount
         // lookup here scores by prefix length; this one did not.
-        let mut best: Option<&MountPoint> = None;
-        for mp in vfs.table(ns) {
-            if !mount_matches(&mp.path, path) {
-                continue;
-            }
-            if best.is_none_or(|b| mp.path.len() > b.path.len()) {
-                best = Some(mp);
-            }
-        }
-        Ok(best.map(|mp| Arc::clone(&mp.fs)))
+        let table = vfs.table(ns);
+        Ok(visible_index(table, path)
+            .and_then(|i| table.get(i))
+            .map(|mp| Arc::clone(&mp.fs)))
     }
 
     /// Query filesystem space and configuration for the mount at `path`.
@@ -10366,41 +10646,223 @@ fn find_mount<'a>(
     table: &'a mut [MountPoint],
     path: &Path,
 ) -> KernelResult<(&'a mut MountPoint, PathBuf)> {
-    if table.is_empty() {
-        return Err(KernelError::NotFound);
-    }
+    let idx = visible_index(table, path).ok_or(KernelError::NotFound)?;
+    let mp = table.get_mut(idx).ok_or(KernelError::NotFound)?;
+    let relative = relative_path(mp, path);
+    Ok((mp, relative))
+}
 
-    // Find the longest matching mount path.
-    let mut best_idx = None;
-    let mut best_len = 0;
-
-    for (i, mp) in table.iter().enumerate() {
-        if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
-            best_idx = Some(i);
-            best_len = mp.path.len();
-        }
-    }
-
-    let idx = best_idx.ok_or(KernelError::NotFound)?;
-
+/// `path` -- under `mp`'s mount point -- as a path in its filesystem: what
+/// follows the mount point, under the subtree the mount shows
+/// ([`under_root`]).
+fn relative_path(mp: &MountPoint, path: &Path) -> PathBuf {
     // Strip the mount prefix to get the relative path.
     // For root mount ("/"), "/foo.txt" → "/foo.txt" (keep the leading /).
     // For submount ("/mnt"), "/mnt/foo.txt" → "/foo.txt".
-    let relative = if best_len <= 1 {
+    let len = mp.path.len();
+    let below = if len <= 1 {
         path // Mount is "/", keep the full path.
     } else {
-        match path.as_bytes().get(best_len..) {
+        match path.as_bytes().get(len..) {
             None | Some([]) => Path::new("/"),
             Some(rest) => Path::new(rest),
         }
     };
+    under_root(&mp.root, below)
+}
 
-    let mp = table.get_mut(idx).ok_or(KernelError::NotFound)?;
-    let relative = under_root(&mp.root, relative);
-    Ok((mp, relative))
+/// The most mounts one table holds: past it a mount, a bind or a copy is
+/// `DiskFull` (Linux's `ENOSPC` at its `fs.mount-max`). [`recompute_visibility`]
+/// compares every pair of mounts, and runs on every change to the table.
+pub const MAX_MOUNTS: usize = 1024;
+
+/// The index of the table's root: the mount at `/` attached to nothing, where
+/// every lookup starts.
+fn root_index(table: &[MountPoint]) -> Option<usize> {
+    table
+        .iter()
+        .position(|m| m.parent == 0 && m.path.as_path() == Path::new("/"))
+}
+
+/// The index of the mount a lookup of `path` ends on: the longest mount path
+/// over it among the mounts a lookup reaches ([`MountPoint::hidden`]).
+fn visible_index(table: &[MountPoint], path: &Path) -> Option<usize> {
+    let mut best: Option<(usize, usize)> = None;
+    for (i, mp) in table.iter().enumerate() {
+        // Component-aligned: a mount at `/tmp` covers `/tmp/x`, never
+        // `/tmpfile`. Of two at one path only one is reachable; the later
+        // wins a tie regardless.
+        if !mp.hidden
+            && mount_matches(&mp.path, path)
+            && best.is_none_or(|(_, len)| mp.path.len() >= len)
+        {
+            best = Some((i, mp.path.len()));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// The index of the mount at `path` exactly that a lookup reaches -- the one
+/// on top there -- if `path` is a mount point.
+fn mount_at(table: &[MountPoint], path: &Path) -> Option<usize> {
+    visible_index(table, path).filter(|&i| table.get(i).is_some_and(|m| m.path.as_path() == path))
+}
+
+/// The last mount stacked on the table's root -- at `/` and attached on top
+/// of it -- which no lookup reaches: `pivot_root(".", ".")` leaves the old
+/// root there.
+fn stacked_on_root(table: &[MountPoint]) -> Option<usize> {
+    let root = root_index(table)?;
+    table
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|&(i, m)| i != root && m.path.as_path() == Path::new("/"))
+        .map(|(i, _)| i)
+}
+
+/// The entry an unmount of `mount_path` takes: the mount a lookup of it
+/// reaches -- the one on top there -- or, for `/`, the last mount stacked on
+/// the root ([`stacked_on_root`]), which no lookup reaches and only `/` can
+/// name. `PermissionDenied` for `/` with nothing stacked on it: the root
+/// itself is never unmounted. `NotFound` if nothing is mounted there.
+fn unmount_target(table: &[MountPoint], mount_path: &Path) -> KernelResult<usize> {
+    if mount_path == Path::new("/") {
+        return stacked_on_root(table).ok_or(KernelError::PermissionDenied);
+    }
+    mount_at(table, mount_path).ok_or(KernelError::NotFound)
+}
+
+/// Take the entries at `indices` out of `table`, in table order, leaving the
+/// rest in theirs.
+fn take_entries(table: &mut Vec<MountPoint>, indices: &[usize]) -> Vec<MountPoint> {
+    let mut taken = Vec::with_capacity(indices.len());
+    let mut kept = Vec::with_capacity(table.len().saturating_sub(indices.len()));
+    for (i, mp) in core::mem::take(table).into_iter().enumerate() {
+        if indices.contains(&i) {
+            taken.push(mp);
+        } else {
+            kept.push(mp);
+        }
+    }
+    *table = kept;
+    taken
+}
+
+/// The mount at `top` and every mount attached under it at any depth, as
+/// indices in table order: what a lazy unmount, a move or a recursive bind
+/// takes with it.
+fn subtree(table: &[MountPoint], top: usize) -> Vec<usize> {
+    let Some(t) = table.get(top) else {
+        return Vec::new();
+    };
+    let mut ids = alloc::vec![t.mnt_id];
+    let mut out = alloc::vec![top];
+    // Parents come before their children, so one pass finds them all; the
+    // loop is only a guard should that ever not hold.
+    loop {
+        let found = out.len();
+        for (i, m) in table.iter().enumerate() {
+            if !out.contains(&i) && ids.contains(&m.parent) {
+                ids.push(m.mnt_id);
+                out.push(i);
+            }
+        }
+        if out.len() == found {
+            break;
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Whether the mount `ancestor` (an id) is on the chain of parents of the
+/// mount at index `i`.
+fn is_ancestor(table: &[MountPoint], ancestor: u64, i: usize) -> bool {
+    let mut p = table.get(i).map_or(0, |m| m.parent);
+    // Bounded by the table: the chain cannot be longer, and a malformed one
+    // must not loop.
+    for _ in 0..table.len() {
+        if p == 0 {
+            return false;
+        }
+        if p == ancestor {
+            return true;
+        }
+        p = table.iter().find(|m| m.mnt_id == p).map_or(0, |m| m.parent);
+    }
+    false
+}
+
+/// Settle [`MountPoint::hidden`] for every mount in `table`, after any change
+/// to it -- the path-table form of Linux's mount tree, where a lookup walks
+/// from the root and crosses into the last mount attached at each mount
+/// point it meets:
+///
+/// - A mount stacked on the root -- at `/`, attached on top of it -- is
+///   reached by nothing, nor is anything attached under it: lookups start
+///   at the root and never cross into what is mounted on it.
+/// - Any other mount is covered when one mounted after it sits on its mount
+///   point or on a directory above it and is not one of its own ancestors:
+///   a lookup crosses into the later one there, and never meets the mount
+///   point this one is attached at. A mount on top of a mount point covers
+///   the one below; a mount on `/mnt` covers `/mnt/usb` mounted before it.
+///
+/// Table order is attach order: a mount is appended when it is attached, and
+/// a move or a pivot re-appends what it attaches.
+fn recompute_visibility(table: &mut [MountPoint]) {
+    let root = root_index(table);
+    let n = table.len();
+    let mut unreachable = alloc::vec![false; n];
+    // Parents come first, so a parent is settled before its children; the
+    // loop is only a guard should that ever not hold.
+    loop {
+        let mut changed = false;
+        for (i, m) in table.iter().enumerate() {
+            if unreachable.get(i).copied().unwrap_or(true) {
+                continue;
+            }
+            let on_root = Some(i) != root && m.path.as_path() == Path::new("/");
+            let under_unreachable = m.parent != 0
+                && table
+                    .iter()
+                    .position(|p| p.mnt_id == m.parent)
+                    .is_some_and(|j| unreachable.get(j).copied().unwrap_or(false));
+            if on_root || under_unreachable {
+                if let Some(u) = unreachable.get_mut(i) {
+                    *u = true;
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut hidden = alloc::vec![false; n];
+    for i in 0..n {
+        let Some(me) = table.get(i) else { continue };
+        let covered = unreachable.get(i).copied().unwrap_or(false)
+            || table
+                .iter()
+                .enumerate()
+                .skip(i.saturating_add(1))
+                .any(|(k, m)| {
+                    !unreachable.get(k).copied().unwrap_or(true)
+                        && crate::fs::pathutil::path_in_subtree(&me.path, &m.path)
+                        && !is_ancestor(table, m.mnt_id, i)
+                });
+        if let Some(h) = hidden.get_mut(i) {
+            *h = covered;
+        }
+    }
+    for (m, h) in table.iter_mut().zip(hidden) {
+        m.hidden = h;
+    }
 }
 
 /// `relative` -- a path below a mount point, `/`-rooted -- as a path in the
+/// mount's filesystem:/// `relative` -- a path below a mount point, `/`-rooted -- as a path in the
 /// mount's filesystem: the same path for a mount of the whole filesystem,
 /// joined under `root` for a bind mount's subtree.
 fn under_root(root: &Path, relative: &Path) -> PathBuf {
@@ -10517,18 +10979,11 @@ fn check_writable(path: &Path) -> KernelResult<()> {
     let ns = super::mntns::current();
     let vfs = VFS.lock();
     // Find mount without &mut (we only need to read options).
-    let mut best_len = 0;
-    let mut best_ro = false;
-    for mp in vfs.table(ns) {
-        if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
-            best_len = mp.path.len();
-            best_ro = mp.read_only();
-        }
-    }
-    if best_len == 0 {
-        return Err(KernelError::NotFound);
-    }
-    if best_ro {
+    let table = vfs.table(ns);
+    let mp = visible_index(table, path)
+        .and_then(|i| table.get(i))
+        .ok_or(KernelError::NotFound)?;
+    if mp.read_only() {
         return Err(KernelError::ReadOnlyFilesystem);
     }
     Ok(())
@@ -16287,6 +16742,119 @@ pub fn self_test_append_is_atomic() -> KernelResult<()> {
             want
         );
         return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// The mount tree's rules, on tables made for the test (no filesystem is
+/// mounted): [`recompute_visibility`] -- a mount covered by a later one on
+/// its mount point or above it, its children with it, one mounted after the
+/// cover reached, a mount stacked on the root and what is under it reached by
+/// nothing -- and what reads it: [`visible_index`], [`mount_at`],
+/// [`unmount_target`], [`subtree`].
+pub fn self_test_mount_tree() -> KernelResult<()> {
+    crate::serial_println!("[vfs] Running mount tree self-test...");
+    match mount_tree_test_body() {
+        Ok(()) => {
+            crate::serial_println!(
+                "[vfs]   mount tree: covered and stacked mounts are passed by, uncovered when \
+                 the cover goes; the root's stack is reached by nothing and named by /: OK"
+            );
+            Ok(())
+        }
+        Err(what) => {
+            crate::serial_println!("[vfs]   FAIL: mount tree: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// [`self_test_mount_tree`]'s body.
+fn mount_tree_test_body() -> Result<(), &'static str> {
+    let fs: MountedFs = Arc::new(Mutex::new(Box::new(super::memfs::MemFs::new())));
+    let entry = |path: &str, mnt_id: u64, parent: u64| MountPoint {
+        path: PathBuf::from(path),
+        root: PathBuf::from("/"),
+        fs: Arc::clone(&fs),
+        fs_type: String::from("memfs"),
+        options: MountOptions::defaults(),
+        fs_read_only: Arc::new(AtomicBool::new(false)),
+        fs_id: 0,
+        objects: 0,
+        mnt_id,
+        expire_mark: false,
+        unbindable: false,
+        parent,
+        hidden: false,
+    };
+    let hidden = |t: &[MountPoint]| t.iter().map(|m| m.hidden).collect::<Vec<bool>>();
+    let id_at = |t: &[MountPoint], path: &str| {
+        visible_index(t, Path::new(path))
+            .and_then(|i| t.get(i))
+            .map(|m| m.mnt_id)
+    };
+
+    // /mnt mounted after /mnt/usb covers it; gone, it uncovers it.
+    let mut t = alloc::vec![
+        entry("/", 1, 0),
+        entry("/mnt/usb", 2, 1),
+        entry("/mnt", 3, 1)
+    ];
+    recompute_visibility(&mut t);
+    if hidden(&t) != [false, true, false] || id_at(&t, "/mnt/usb/x") != Some(3) {
+        return Err("a mount did not cover the one beneath it mounted first");
+    }
+    t.pop();
+    recompute_visibility(&mut t);
+    if hidden(&t) != [false, false] || id_at(&t, "/mnt/usb/x") != Some(2) {
+        return Err("a covered mount was not reached once its cover went");
+    }
+
+    // On top of a mount point: the one below is covered, and with it what is
+    // attached to it; what is mounted after the top one is reached.
+    let mut t = alloc::vec![
+        entry("/", 1, 0),
+        entry("/x", 2, 1),
+        entry("/x/y", 3, 2),
+        entry("/x", 4, 2),
+        entry("/x/z", 5, 4),
+    ];
+    recompute_visibility(&mut t);
+    if hidden(&t) != [false, true, true, false, false]
+        || t.get(mount_at(&t, Path::new("/x")).unwrap_or(0))
+            .map(|m| m.mnt_id)
+            != Some(4)
+        || unmount_target(&t, Path::new("/x")).ok() != Some(3)
+        || id_at(&t, "/x/y/f") != Some(4)
+        || id_at(&t, "/x/z/f") != Some(5)
+        || mount_at(&t, Path::new("/x/y")).is_some()
+    {
+        return Err("a mount on a mount point did not cover the one below and its children");
+    }
+    if subtree(&t, 1) != [1, 2, 3, 4] || subtree(&t, 3) != [3, 4] {
+        return Err("a subtree was not the mount with everything attached under it");
+    }
+    if !is_ancestor(&t, 1, 4) || is_ancestor(&t, 4, 2) || is_ancestor(&t, 3, 0) {
+        return Err("is_ancestor read the chain of parents wrongly");
+    }
+
+    // pivot_root(".", "."): the old root stacked on the new one at /, with
+    // what is attached under it, reached by nothing and named by / alone.
+    let mut t = alloc::vec![entry("/", 7, 0), entry("/", 1, 7), entry("/proc", 2, 1)];
+    recompute_visibility(&mut t);
+    if hidden(&t) != [false, true, true]
+        || id_at(&t, "/proc/self") != Some(7)
+        || stacked_on_root(&t) != Some(1)
+        || unmount_target(&t, Path::new("/")).ok() != Some(1)
+        || subtree(&t, 1) != [1, 2]
+    {
+        return Err("a mount stacked on the root was reached, or not named by /");
+    }
+    let t = alloc::vec![entry("/", 1, 0), entry("/proc", 2, 1)];
+    if unmount_target(&t, Path::new("/")) != Err(KernelError::PermissionDenied)
+        || root_index(&t) != Some(0)
+    {
+        return Err("the root itself was offered to an unmount");
     }
     Ok(())
 }

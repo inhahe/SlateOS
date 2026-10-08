@@ -60,6 +60,38 @@ pub fn any() -> bool {
     OTHERS.load(Ordering::Acquire) != 0
 }
 
+/// Rename the working directories of the processes in mount namespace `ns`
+/// by `rename` -- `None` leaves one as it is -- for a change that moved its
+/// mounts (`Vfs::pivot_root_tree`). A process with a root of its own
+/// (`chroot`, a container's view) is passed by: its working directory is
+/// named from that root, which did not move.
+pub(crate) fn rename_working_directories(ns: MntNsId, rename: impl Fn(&[u8]) -> Option<Vec<u8>>) {
+    for pid in crate::proc::pcb::pids() {
+        if of_process(pid) != ns
+            || matches!(crate::proc::pcb::get_root_dir(pid), Some(Some(_)))
+            || crate::ipc::namespace::mount_view_for(pid).is_some()
+        {
+            continue;
+        }
+        let Some(cwd) = crate::proc::pcb::get_cwd(pid) else {
+            continue;
+        };
+        let Some(renamed) = rename(&cwd) else {
+            continue;
+        };
+        match crate::proc::pcb::set_cwd(pid, renamed) {
+            // Gone meanwhile: it has no working directory to keep.
+            Ok(()) | Err(KernelError::NoSuchProcess) => {}
+            Err(e) => crate::serial_println!(
+                "[mntns] process {}'s working directory could not follow the pivot ({:?}); \
+                 its old name now leads elsewhere",
+                pid,
+                e
+            ),
+        }
+    }
+}
+
 /// The mount namespace of the process `pid` names: the root for one in it,
 /// and for one that does not exist.
 #[must_use]

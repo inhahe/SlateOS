@@ -2668,6 +2668,24 @@ D's to act on once answered).
 - `[D]` Integrate fastpy into the build system — **initiative F, in progress**
   (line ~317)
 
+- `[-]` `[D]` **The library halves of lane A's new native calls** (on
+  `lane-a`; each falls back to the old behaviour on a kernel without its
+  call, so they are safe on `main` before lane A's kernel is). **Done
+  2026-10-07**, each with a `services/ctest-*` fixture that passes on Linux
+  and a row in `requests/d-a-one-rung-for-every-c-fixture.md`: Unix sockets
+  with names (`SYS_UNIX_*`), shared anonymous memory, close-on-exec at a
+  native exec, record locks and `flock`, `F_SETFL`'s `O_APPEND`, positional
+  I/O, timed and try joins, ignored signals across exec, `getpriority` /
+  `setpriority` / `nice`, CPU affinity and `sched_getcpu`, each signal's
+  record (the extended frame, `sigqueue`, `tgkill`), program headers for TLS,
+  `shmat` at an address, `O_TMPFILE` and `linkat(AT_EMPTY_PATH)`, file seals.
+  **Closes** as each fixture passes in a lane D boot on lane A's kernel.
+  **Next:** the device door (1119-1123, `requests/e-ad-no-application-can-
+  reach-the-sound-device.md`: descriptor kinds for the sound card's PCM and
+  control devices, `ioctl`/`read`/`write` through, readiness for `poll`);
+  then `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential service, and the
+  deferred filesystem operations (1126-1128) if a C caller needs them.
+
 - `[D]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~2151).
   **CPython half measured and closed 2026-08-16:** CPython 3.12.3 links against
   our `libc.a` with zero missing symbols (`scripts/cpython-spike/README.md`).

@@ -385,6 +385,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/reintro-toolkit-focus.py` | Prove the toolkit's focus, caret and selection tests are regression tests. |
 | `scripts/resolve-rip.sh` | resolve-rip.sh — map a kernel RIP (or any code address) to the containing |
 | `scripts/rm-diff.sh` | Differential test: our `rm` against GNU coreutils'. |
+| `scripts/rmdir-diff.sh` | Differential test: our `rmdir` against GNU coreutils 9.4's. |
 | `scripts/run-checker.sh` | `run_checker` — the one implementation of "did that checker reach a verdict?" |
 | `scripts/run-timeout.py` | run-timeout.py — run a command with a hard timeout and guaranteed |
 | `scripts/rust_scopes.py` | Resolve, for every line of a Rust file, the item scopes enclosing it. |
@@ -526,4 +527,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_516 scripts._
+_517 scripts._

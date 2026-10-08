@@ -18,7 +18,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `rmdir`, `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
+| `readlink`, `realpath`, `sleep`, `true`, `false` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `which` | Debian's `which` (debianutils) |
 | `renice` | util-linux 2.39.3 |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
@@ -57,3 +57,11 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   read and left alone, the FIFO made under it and `lchmod`ed to `-m`'s mode --
   where the umask used to be zeroed for the rest of the process. 144 agree, 5
   differ on purpose (help and version text).
+* **`rmdir`, 2026-10-07** -- `scripts/rmdir-diff.sh`, written with the port of
+  the two options it refused as not implemented: `-v`, and
+  `--ignore-fail-on-non-empty`, which scripts and makefiles use and which
+  stopped them at the first `rmdir`. Ported with them: upstream's
+  `ignorable_failure` (an `EACCES` counts as "not empty" only when the
+  directory really has an entry), `Symbolic link not followed` for `rmdir
+  link/`, and `failed to remove` without "directory" for an ancestor that
+  fails with `ENOTDIR`. 100 agree, 4 differ on purpose.

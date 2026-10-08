@@ -1767,6 +1767,19 @@ impl Stream {
         Self::new(1, Buffering::Line)
     }
 
+    /// From here on, buffer by line: `setlinebuf (stream)` part way through a
+    /// run, for a utility that calls it after its options rather than before.
+    ///
+    /// `vmstat` does, and the order shows: its `--help`, `--version` and `-f`
+    /// are written before the call, block-buffered, so on a full disk they
+    /// fail at the close with the reason (`vmstat: write error: No space left
+    /// on device`), where the reports written after it fail line by line and
+    /// the close has none to give. What is already buffered stays buffered,
+    /// as glibc's `setvbuf` leaves it.
+    pub fn set_line_buffered(&mut self) {
+        self.with(|inner, _| inner.mode = Buffering::Line);
+    }
+
     /// Standard error, unbuffered, as stdio has it.
     #[must_use]
     pub fn stderr() -> Self {
@@ -2078,6 +2091,20 @@ mod tests {
         let mut s = broken(Buffering::None);
         let _ = s.write(b"x");
         assert!(s.errored(), "an unbuffered write is attempted at once");
+    }
+
+    /// `setlinebuf` part way: a line held while block-buffered stays held,
+    /// and the next newline after the switch writes it out.
+    #[test]
+    fn switching_to_line_buffering_keeps_what_is_held() {
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(b"one\n");
+        assert!(!s.errored(), "block-buffered, a line is held");
+        s.set_line_buffered();
+        assert!(!s.errored(), "the switch itself writes nothing");
+        assert_eq!(inner(&s).buf, b"one\n");
+        let _ = s.write(b"two\n");
+        assert!(s.errored(), "a line finished now is written, and fails");
     }
 
     /// What a stream on a descriptor nothing can be asked about chooses as its

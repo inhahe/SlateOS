@@ -4671,14 +4671,6 @@ name = "vkloader"
 version = "0.1.0"
 
 [[package]]
-name = "vmstat"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "vorbis"
 version = "0.1.0"
 

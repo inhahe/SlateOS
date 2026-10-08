@@ -1,5 +1,5 @@
-//! procps-ng 4.0.4's library: the pieces `uptime`, `w`, `ps`, `pgrep` and `free`
-//! share.
+//! procps-ng 4.0.4's library: the pieces `uptime`, `w`, `ps`, `pgrep`, `free`
+//! and `vmstat` share.
 //!
 //! procps' programs are thin over `libproc2`. The line `uptime` prints is the
 //! first line `w` prints, and both come from one function in
@@ -23,11 +23,15 @@
 //! | [`scanf`] | glibc's `strtol`, `strtoul`, `atoi`, `sscanf` and `strchr`, as the library applies them to a NUL-terminated buffer |
 //! | [`devname`] | `library/devname.c`: a terminal's number to its name |
 //! | [`pwcache`] | `library/pwcache.c`: user and group names by number |
-//! | [`strutils`] | `local/strutils.c`: `strtol_or_err` and `strtod_nol_or_err`, for `free` |
+//! | [`strutils`] | `local/strutils.c`: `strtol_or_err` and `strtod_nol_or_err`, for `free` and `vmstat` |
 //! | [`sysinfo`] | `procps_pid_length`, `btime` from `procps_stat_new`, `MemTotal`, `procps_uptime`, `lookup_wchan` |
 //! | [`namespace`] | `library/namespace.c`: a process's namespaces, by inode |
 //! | [`cvt`] | C's `double`-to-integer casts as gcc compiles them for x86-64 |
-//! | [`meminfo`] | `library/meminfo.c`: `/proc/meminfo` and the figures derived from it, for `free` |
+//! | [`diskstats`] | `library/diskstats.c`: `/proc/diskstats`, each device a disk or a partition by `/sys/block` |
+//! | [`meminfo`] | `library/meminfo.c`: `/proc/meminfo` and the figures derived from it, for `free` and `vmstat` |
+//! | [`slabinfo`] | `library/slabinfo.c`: the caches of `/proc/slabinfo`, version 2 |
+//! | [`stat`] | `library/stat.c`'s summary ticks and system counters from `/proc/stat`, with one reading of history |
+//! | [`vmstat`] | `library/vmstat.c`: the page and swap counters of `/proc/vmstat`, read at most once a second |
 //! | [`signals`] | `local/signals.c`'s `signal_name_to_number`, procps' own spellings of a signal |
 //!
 //! # Why `fscanf`, and not `str::parse`
@@ -46,14 +50,18 @@ use localtime::Tm;
 
 pub mod cvt;
 pub mod devname;
+pub mod diskstats;
 pub mod meminfo;
 pub mod namespace;
 pub mod pwcache;
 pub mod readproc;
 pub mod scanf;
 pub mod signals;
+pub mod slabinfo;
+pub mod stat;
 pub mod strutils;
 pub mod sysinfo;
+pub mod vmstat;
 use procinfo::ProcFs;
 
 use crate::extfloat::{self, ExtF80, Spec};

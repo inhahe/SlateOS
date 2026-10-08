@@ -172,6 +172,30 @@ Two measured examples:
   `invalid option -- 'r'` and `unrecognized option '--raw'` / `'--json'`.
   Nothing to port.
 
+* **`vmstat`** — **RETIRED 2026-10-08, the day the pair came into being.**
+  `coreutils/src/bin/vmstat.rs` arrived that day as a port of procps-ng
+  4.0.4's `vmstat.c` over its library; `userspace/vmstat` had been written
+  from the manual. Same harness, same cases, same fixture machines
+  (`scripts/vmstat-diff.sh`, whose worlds change between readings so the
+  interval lines are compared too):
+
+      coreutils vmstat    191 passed,   0 differed,  7 differ on purpose
+      userspace/vmstat      2 passed, 189 differed,  7 differ on purpose
+
+  The standalone's two passes are `vmstat -Z 2>&-` and `vmstat 0 2>&-`:
+  standard error closed, so neither side can print its complaint and both
+  exit 1 -- agreement with nothing in it to compare.
+
+  **What the loser knew that the winner did not: nothing.** Its one option
+  procps lacks, `--json`, is an invention -- procps answers `unrecognized
+  option '--json'`, measured. The rest of its surface was procps' options,
+  rendered its own way: `-S k` and `-S K` swapped (procps' `k` is 1000 and
+  `K` 1024, measured on the reference: 33626984 k against 32838852 K of one
+  `MemTotal`), the first line's context switches divided by seconds of uptime
+  where procps divides them by CPU ticks, `cache` without `SReclaimable`, and
+  no `-p`, `-y`, `-V` or `-h`. It also sat in `argv-utf8-baseline.txt` as
+  `argv-as-string`. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

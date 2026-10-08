@@ -9,6 +9,13 @@ the standalone crates in a second invocation, so theirs are the copies left in
 Merging the two pairs is asked of lane B in
 `requests/d-b-kill-and-logger-are-built-twice-and-three-image-crates-miss-sysroot-dep.md`.
 
+**2026-10-08 (lane B):** a pair made and unmade in one change. `coreutils`
+gained procps-ng's `vmstat`, which made `vmstat` a name two packages build;
+`userspace/vmstat` was measured against the same harness and retired in the
+same commit (`TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH.md`
+has the numbers), so `check-bin-collisions.py` never saw the two together on
+a branch and the image never staged either one by accident.
+
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this
 tree, as two separate programs with the same name — one inside the big

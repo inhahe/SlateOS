@@ -299,7 +299,7 @@ two disagree.
 | `vdir` | List directory contents in the long format. | yes | `coreutils` |  |
 | `vi` | Modal terminal text editor for SlateOS. | yes |  |  |
 | `visudo` | Edit the sudoers file with syntax checking. | yes | `sudo` |  |
-| `vmstat` | Virtual Memory Statistics Utility | yes |  |  |
+| `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
 | `wall` | Terminal messaging utilities for Slate OS | yes |  |  |
 | `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |

@@ -5925,6 +5925,12 @@ _Port ext4 first. Don't write a custom filesystem._
   agree and 7 differ on purpose, in fixture worlds that include real processes for `pkill`
   to signal and `pidwait` to wait for. `pidwait` is not built until the native ABI has
   `pidfd_open`: `requests/b-ad-pidwait-needs-pidfd-open-on-the-native-abi.md`);
+  `vmstat` (2026-10-08, procps-ng 4.0.4's, replacing `userspace/vmstat`, written from the
+  manual: its `stat`, `meminfo`, `vmstat`, `diskstats` and `slabinfo` readers are the
+  library's, as `coreutils::procps` beside `free`'s, which now shares the `meminfo` one;
+  `scripts/vmstat-diff.sh`: 191 cases agree and 7 differ on purpose, in fixture machines
+  whose files a ticker rewrites between readings, so the interval lines are measured
+  against real differences);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5964,7 +5970,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] uname: system info display (kernel name/release/version, machine, hostname, JSON)
   - [x] lsusb: USB device lister (vendor/product database, tree topology, class filter, verbose)
   - [x] iostat: CPU and I/O statistics (extended stats, delta mode, per-device, human-readable)
-  - [x] vmstat: virtual memory stats (procs, memory, swap, I/O, CPU, interval reporting)
+  - [x] vmstat: procps-ng 4.0.4's, a coreutils program since 2026-10-08 (see the coreutils item) -- the since-boot line and the intervals, with `-a`, `-w`, `-t`, `-n`, `-y` and `-S`; `-s`, `-f`, `-d`, `-D`, `-p` and `-m` (`scripts/vmstat-diff.sh`, 198 cases). On SlateOS its swap and I/O columns read 0, and `-d`, `-D` and `-p` refuse to start, for want of what `/proc/vmstat` and `/proc/diskstats` publish: `requests/b-a-procps-vmstat-reads-four-paging-counters-and-diskstats-that-slateos-does-not-publish.md`
   - [x] traceroute: network path tracing (ICMP TTL increment, reverse DNS, per-hop RTT)
   - [x] logrotate: log rotation — config parsing (stanzas with glob patterns, globals inherited per stanza and overridable without leaking back), daily/weekly/monthly/size schedules, `rotate N` retention, real gzip via the shared `deflate` crate, `missingok`, `notifempty`, `--dry-run`, `--force`, `--state`. Frequency is decided against the STATE FILE, not the log's mtime. An unimplemented directive (`olddir`, `postrotate`, …) is an ERROR with its line number rather than a silent skip — a config file states what should happen to a machine's logs, and ignoring part of it puts files somewhere nobody asked for and reports success. 28 tests. **On the image since 2026-09-13** — and it was the attempt to put it there that found that not one of the 278 Rust utilities under `userspace/` had ever been on the image: see `B-THE-RUST-HALF-OF-OUR-USERLAND-HAD-NEVER-BEEN-ON-THE-IMAGE`. (14 compiled-Python utilities were already promoted into `/bin` by the fastpy block, which the first version of that entry missed — the correction is recorded there.) `scripts/create-ext4-rootfs.sh` now stages every ELF in `target/x86_64-slateos/release/` into `/bin`: a measured image build staged 71 of them (60 MiB), skipping 15 names already owned by fastpy and dash, and took `/bin` from 36 entries to 107. Staged is not run: a boot test asserting one of them executes is lane A's, requested in `requests/b-a-our-own-utilities-are-on-the-image-now-can-a-boot-test-run-one.md`.
   - [x] dd: data copy/convert (block sizes, conversions, progress display, skip/seek)

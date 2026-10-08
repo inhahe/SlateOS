@@ -1438,15 +1438,25 @@ impl Inner {
 
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self, fd: i32) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.drain_checked(fd);
+    }
+
+    /// [`Inner::drain`], also handing back this push's own failure --
+    /// stdio's `fflush` returning `EOF`. Nothing buffered is success,
+    /// whatever failed before, as an `fflush` with nothing to write is.
+    fn drain_checked(&mut self, fd: i32) -> io::Result<()> {
         if self.buf.is_empty() {
-            return;
+            return Ok(());
         }
         before_diagnostic(fd);
         let result = imp::write_all(fd, &self.buf);
         self.buf.clear();
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 
     /// One `write`, honouring the buffering mode: stdio's `fwrite`, through
@@ -1464,18 +1474,28 @@ impl Inner {
     /// that fills part-way it wrote out the remainder glibc keeps for the
     /// close. The `glibc_measured` test holds the table.
     fn put(&mut self, fd: i32, bytes: &[u8]) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.put_checked(fd, bytes);
+    }
+
+    /// [`Inner::put`], also handing back the failure of a write this call
+    /// made -- the flush of a buffer it filled, or its own bytes going
+    /// straight out: stdio's `fwrite` coming up short, `fprintf` returning a
+    /// negative count.
+    fn put_checked(&mut self, fd: i32, bytes: &[u8]) -> io::Result<()> {
         before_diagnostic(fd);
         if bytes.is_empty() {
             // Nothing to write allocates nothing, as `fwrite` of nothing does
             // not: the first real write is still the first.
-            return;
+            return Ok(());
         }
         let line = match self.mode {
             Buffering::None => {
-                if let Err(e) = imp::write_all(fd, bytes) {
+                return imp::write_all(fd, bytes).map_err(|e| {
+                    let copy = clone_error(&e);
                     self.record(fd, e);
-                }
-                return;
+                    copy
+                });
             }
             Buffering::Line => true,
             Buffering::Block => false,
@@ -1495,9 +1515,11 @@ impl Inner {
             imp::write_all(fd, b)
         });
         self.buf = held;
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 }
 
@@ -1732,6 +1754,39 @@ impl Stream {
         self.with(Inner::drain);
     }
 
+    /// `fflush`, with its verdict: push what is buffered, and say whether
+    /// *that* push failed -- not whether anything ever did, which
+    /// [`Stream::errored`] answers. Nothing buffered is success, whatever
+    /// failed before, as `fflush` with nothing to write is.
+    ///
+    /// For a utility that reports a failed flush in its own words before
+    /// [`close_stdout`] has its say: findutils' `cleanup` ends `if (fflush
+    /// (stdout) == EOF) nonfatal_nontarget_file_error (errno, "standard
+    /// output")`, and `-printf`'s `\c` is a checked `fflush` of its stream.
+    ///
+    /// # Errors
+    ///
+    /// This flush's failure, which the stream keeps as well, as it keeps any.
+    pub fn flush_now(&mut self) -> io::Result<()> {
+        self.with(Inner::drain_checked)
+    }
+
+    /// A write that says whether it failed: stdio's `fwrite` coming up short,
+    /// or `fprintf` returning a negative count -- which happens when the call
+    /// itself had to write and the write failed: a buffer it filled could
+    /// not be flushed, or its bytes went straight out (an unbuffered stream)
+    /// and did not arrive. The failure is kept as well, as any write's is.
+    ///
+    /// For a utility that checks its writes one by one, as findutils'
+    /// `checked_fprintf` does for `-printf`, and `list_file` for `-ls`.
+    ///
+    /// # Errors
+    ///
+    /// The failure of a write this call made.
+    pub fn write_checked(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.with(|inner, fd| inner.put_checked(fd, bytes))
+    }
+
     /// Give up on the stream: forget what is still buffered, and forget the
     /// failure that stopped it.
     ///
@@ -1877,6 +1932,33 @@ mod tests {
 
     fn shared() -> std::sync::MutexGuard<'static, ()> {
         SHARED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `write_checked` reports the failure of a write *it* made -- the flush
+    /// of a buffer it filled, or its own bytes on an unbuffered stream -- and
+    /// not before; `flush_now` reports its own push failing, and nothing
+    /// when there was nothing to push, whatever failed earlier.
+    #[test]
+    fn checked_writes_and_flushes_report_their_own_failures() {
+        let mut s = broken(Buffering::Block);
+        // Held in the buffer: nothing has been written, so nothing failed.
+        assert!(s.write_checked(b"abc").is_ok());
+        assert!(!s.errored());
+        // The push of what is held fails, and says so.
+        assert!(s.flush_now().is_err());
+        assert!(s.errored());
+        // Nothing left to push: success, though the stream has failed.
+        assert!(s.flush_now().is_ok());
+        assert!(s.errored());
+
+        // A write that fills the buffer fails in that very call.
+        let mut b = broken(Buffering::Block);
+        assert!(b.write_checked(&vec![b'x'; 20_000]).is_err());
+
+        // Unbuffered: every write goes out at once, and fails at once.
+        let mut u = broken(Buffering::None);
+        assert!(u.write_checked(b"x").is_err());
+        assert!(u.write_checked(b"").is_ok());
     }
 
     #[test]

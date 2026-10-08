@@ -851,6 +851,17 @@ impl FileSystem for DevFs {
         }
     }
 
+    /// The nodes whose write never reads what it is given, as Linux's
+    /// `drivers/char/mem.c` has them: `null` and `zero` take any count
+    /// (`write_null`), `full` is always full (`write_full`, `ENOSPC`).
+    fn write_without_data(&mut self, path: &Path) -> Option<KernelResult<()>> {
+        match strip_root(path).ok()? {
+            "null" | "zero" => Some(Ok(())),
+            "full" => Some(Err(KernelError::DiskFull)),
+            _ => None,
+        }
+    }
+
     fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         let rel = strip_root(path)?;
         if self.socket(rel).is_some() {

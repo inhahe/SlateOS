@@ -681,6 +681,22 @@ pub trait FileSystem: Send {
         self.write_file(path, &contents)
     }
 
+    /// What a write to `path` answers without reading the bytes it is given,
+    /// for a file whose write never reads them: a sink that takes any count
+    /// (`Some(Ok(()))` -- Linux's `write_null`, behind `/dev/null` and
+    /// `/dev/zero`) or always refuses (`Some(Err(_))` -- `/dev/full`'s
+    /// `ENOSPC`). `None`, the default, for a file whose write reads what it
+    /// is given.
+    ///
+    /// Asked when a caller's buffer cannot be read: Linux reaches such a
+    /// file's write before any copy, so a NULL buffer is the count written,
+    /// not `EFAULT` (lane D's
+    /// `requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`).
+    fn write_without_data(&mut self, path: &Path) -> Option<KernelResult<()>> {
+        let _ = path;
+        None
+    }
+
     /// Pre-allocate space for a file without writing data.
     ///
     /// Ensures that at least `size` bytes are allocated for the file.
@@ -4326,6 +4342,18 @@ impl Vfs {
         check_path_access(path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().read_at(&relative, offset, len)
+    }
+
+    /// What a write through the **already-resolved** `path` answers without
+    /// reading the bytes, when its file never reads them
+    /// ([`FileSystem::write_without_data`]: `/dev/null` and `/dev/zero` take
+    /// any count, `/dev/full` refuses); `None` for every other file, and for
+    /// a path that no longer resolves (the write's own error is then the
+    /// answer).
+    #[must_use]
+    pub fn write_without_data_resolved(path: impl AsRef<Path>) -> Option<KernelResult<()>> {
+        let (fs, _id, _opts, relative) = resolve_mount(path.as_ref()).ok()?;
+        fs.lock().write_without_data(&relative)
     }
 
     /// Write bytes at a specific offset within a file.

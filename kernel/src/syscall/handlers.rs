@@ -2349,6 +2349,223 @@ where
     crate::mm::user::with_user_out_buf(ptr, cap.min(call_max), usize::MAX, fill)
 }
 
+// ---------------------------------------------------------------------------
+// A buffer that cannot be used
+// ---------------------------------------------------------------------------
+//
+// Linux makes every check a read or a write has before it copies, and faults
+// only at the copy: a NULL, unmapped or read-only buffer is `EFAULT` only where
+// bytes would have moved, and then a pipe or a socket keeps its bytes and a
+// file's offset stays. So such a read at the end of a file is 0, on an empty
+// non-blocking pipe `EAGAIN`, on a directory `EISDIR`, on a handle open the
+// other way `EBADF`; `/dev/null` takes such a write. Until 2026-10-07 the
+// handlers refused the buffer first -- a NULL one as `InvalidArgument` -- and
+// the C library put `EFAULT` in front of them (lane D's
+// `requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`).
+// The handlers below ask whether the buffer is usable before they take or
+// give anything, and when it is not, ask the object instead.
+
+/// Whether the part of a user output buffer one call could fill can take
+/// bytes. See the section note.
+fn out_buffer_usable(ptr: u64, cap: usize, call_max: usize) -> bool {
+    crate::mm::user::validate_user_write(ptr, cap.min(call_max)).is_ok()
+}
+
+/// Whether the part of a user input buffer one call could take can be read.
+/// See the section note.
+fn in_buffer_usable(ptr: u64, len: usize, call_max: usize) -> bool {
+    crate::mm::user::validate_user_read(ptr, len.min(call_max)).is_ok()
+}
+
+/// A read's answer for a buffer that cannot take its bytes, from the object's
+/// probe: bytes there, `InvalidAddress` (`EFAULT`), none taken; end of file,
+/// 0; the probe's own error (`WouldBlock`, `TimedOut`, `Interrupted`, the
+/// object's refusal) as it is.
+fn unusable_read_answer(probe: KernelResult<bool>) -> SyscallResult {
+    match probe {
+        Ok(true) => SyscallResult::err(KernelError::InvalidAddress),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// A write's answer for a buffer that cannot be read, from the object's
+/// probe: room, `InvalidAddress` (`EFAULT`), nothing written; else the
+/// probe's own error (`ChannelClosed` for a reader gone, `WouldBlock`, ...).
+fn unusable_write_answer(probe: KernelResult<()>) -> SyscallResult {
+    match probe {
+        Ok(()) => SyscallResult::err(KernelError::InvalidAddress),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// A transfer's count, or its error.
+fn count_or_err(r: KernelResult<usize>) -> SyscallResult {
+    match r {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => SyscallResult::ok(n as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// The body of the three pipe writes; `patience` says which.
+///
+/// Linux's `pipe_write`, in its order: a handle that is not a write end is
+/// refused; a write of nothing is 0 ("null write succeeds"); a range past
+/// user space is `InvalidAddress`. A buffer that cannot be read is answered
+/// by the pipe: a reader gone `ChannelClosed` (`EPIPE`), full the wait the
+/// call allows, room `InvalidAddress` with nothing written.
+fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if handle.end() != pipe::PipeEnd::Write {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    let (buf, len) = (args.arg1, args.arg2 as usize);
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
+    }
+    if !in_buffer_usable(buf, len, PIPE_CALL_MAX) {
+        return unusable_write_answer(pipe::probe_write(handle, patience));
+    }
+    // Bounce the payload into the kernel before calling `pipe::write`, which
+    // blocks.  Handing the callee a slice over user memory would be wrong
+    // twice over: the supervisor access happens outside any STAC window once
+    // SMAP is on, and — SMAP or not — another thread in the same process can
+    // unmap or remap the range while this one sleeps on the pipe, turning the
+    // slice into a dangling pointer.  Copying first makes both impossible.
+    // (Non-blocking calls are bounced too: `try_write` still touches the
+    // buffer from supervisor mode, which SMAP forbids outside a STAC window.)
+    let data = match read_call_buffer(buf, len, PIPE_CALL_MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    count_or_err(match patience {
+        pipe::Patience::Forever => pipe::write(handle, &data),
+        pipe::Patience::Never => pipe::try_write(handle, &data),
+        pipe::Patience::Upto(ns) => pipe::write_timeout(handle, &data, ns),
+    })
+}
+
+/// The body of the three pipe reads; `patience` says which.
+///
+/// Linux's `pipe_read`, in its order: a handle that is not a read end is
+/// refused; a read of nothing is 0 ("null read succeeds"); a range past user
+/// space is `InvalidAddress`. A buffer that cannot take the bytes is answered
+/// by the pipe: end of file 0, empty the wait the call allows (`WouldBlock`,
+/// `TimedOut`, a park), bytes there `InvalidAddress` -- and they stay for the
+/// next read.
+fn pipe_read_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if handle.end() != pipe::PipeEnd::Read {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    let (buf, cap) = (args.arg1, args.arg2 as usize);
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, cap) {
+        return SyscallResult::err(e);
+    }
+    if !out_buffer_usable(buf, cap, PIPE_CALL_MAX) {
+        return unusable_read_answer(pipe::probe_read(handle, patience));
+    }
+    // A pipe read may block, so it fills a kernel-side buffer that is copied
+    // out only after it returns.  See `pipe_write_common` for why a user slice
+    // must never cross a blocking call.
+    count_or_err(with_call_out_buf(
+        buf,
+        cap,
+        PIPE_CALL_MAX,
+        |b| match patience {
+            pipe::Patience::Forever => pipe::read(handle, b),
+            pipe::Patience::Never => pipe::try_read(handle, b),
+            pipe::Patience::Upto(ns) => pipe::read_timeout(handle, b, ns),
+        },
+    ))
+}
+
+/// The body of the three socketpair sends; `patience` says which.
+///
+/// Linux's `unix_stream_sendmsg`: a send of nothing is 0 unless it can never
+/// be received (`ChannelClosed`, `EPIPE`); a range past user space is
+/// `InvalidAddress`; a buffer that cannot be read is answered by the socket
+/// -- `ChannelClosed`, full the wait the call allows, room `InvalidAddress`
+/// with nothing sent.
+fn socketpair_send_common(args: &SyscallArgs, patience: stream_socket::Patience) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    let (buf, len) = (args.arg1, args.arg2 as usize);
+    if len == 0 {
+        return match stream_socket::probe_send(handle, stream_socket::Patience::Never) {
+            Err(e @ (KernelError::ChannelClosed | KernelError::InvalidHandle)) => {
+                SyscallResult::err(e)
+            }
+            _ => SyscallResult::ok(0),
+        };
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
+    }
+    if !in_buffer_usable(buf, len, SOCKETPAIR_CALL_MAX) {
+        return unusable_write_answer(stream_socket::probe_send(handle, patience));
+    }
+    // `stream_socket::send` blocks when the peer's buffer is full; see
+    // `pipe_write_common` for why the payload is copied in first.
+    let data = match read_call_buffer(buf, len, SOCKETPAIR_CALL_MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    count_or_err(match patience {
+        stream_socket::Patience::Forever => stream_socket::send(handle, &data),
+        stream_socket::Patience::Never => stream_socket::try_send(handle, &data),
+        stream_socket::Patience::Upto(ns) => stream_socket::send_timeout(handle, &data, ns),
+    })
+}
+
+/// The body of the three socketpair receives; `patience` says which.
+///
+/// Linux's `unix_stream_read_generic`: a receive of nothing is 0; a range
+/// past user space is `InvalidAddress`; a buffer that cannot take the bytes
+/// is answered by the socket -- end of file 0, empty the wait the call
+/// allows, bytes there `InvalidAddress`, and they stay for the next receive.
+fn socketpair_recv_common(args: &SyscallArgs, patience: stream_socket::Patience) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    let (buf, cap) = (args.arg1, args.arg2 as usize);
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, cap) {
+        return SyscallResult::err(e);
+    }
+    if !out_buffer_usable(buf, cap, SOCKETPAIR_CALL_MAX) {
+        return unusable_read_answer(stream_socket::probe_recv(handle, patience));
+    }
+    count_or_err(with_call_out_buf(
+        buf,
+        cap,
+        SOCKETPAIR_CALL_MAX,
+        |b| match patience {
+            stream_socket::Patience::Forever => stream_socket::recv(handle, b),
+            stream_socket::Patience::Never => stream_socket::try_recv(handle, b),
+            stream_socket::Patience::Upto(ns) => stream_socket::recv_timeout(handle, b, ns),
+        },
+    ))
+}
+
 /// `SYS_PIPE_WRITE` — write bytes to a pipe (blocking).
 ///
 /// `arg0`: write-end pipe handle.
@@ -2357,35 +2574,7 @@ where
 ///
 /// Returns: number of bytes written.
 pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // Bounce the payload into the kernel before calling `pipe::write`, which
-    // blocks.  Handing the callee a slice over user memory would be wrong
-    // twice over: the supervisor access happens outside any STAC window once
-    // SMAP is on, and — SMAP or not — another thread in the same process can
-    // unmap or remap the range while this one sleeps on the pipe, turning the
-    // slice into a dangling pointer.  Copying first makes both impossible.
-    let data = match read_call_buffer(args.arg1, len, PIPE_CALL_MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match pipe::write(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let written = n as i64;
-            SyscallResult::ok(written)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_write_common(args, pipe::Patience::Forever)
 }
 
 /// `SYS_PIPE_READ` — read bytes from a pipe (blocking).
@@ -2396,86 +2585,21 @@ pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of bytes read (0 = EOF).
 pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // `pipe::read` blocks, so it fills a kernel-side buffer that is copied out
-    // only after it returns.  See `sys_pipe_write` for why a user slice must
-    // never cross a blocking call.
-    match with_call_out_buf(args.arg1, buf_cap, PIPE_CALL_MAX, |buf| {
-        pipe::read(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let read_bytes = n as i64;
-            SyscallResult::ok(read_bytes)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_read_common(args, pipe::Patience::Forever)
 }
 
 /// `SYS_PIPE_TRY_WRITE` — non-blocking write to a pipe.
 ///
 /// Same as `SYS_PIPE_WRITE` but returns `WouldBlock` if buffer is full.
 pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // Non-blocking, but bounced anyway: `try_write` still touches the buffer
-    // from supervisor mode, which SMAP forbids outside a STAC window.
-    let data = match read_call_buffer(args.arg1, len, PIPE_CALL_MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match pipe::try_write(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let written = n as i64;
-            SyscallResult::ok(written)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_write_common(args, pipe::Patience::Never)
 }
 
 /// `SYS_PIPE_TRY_READ` — non-blocking read from a pipe.
 ///
 /// Same as `SYS_PIPE_READ` but returns `WouldBlock` if empty.
 pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match with_call_out_buf(args.arg1, buf_cap, PIPE_CALL_MAX, |buf| {
-        pipe::try_read(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let read_bytes = n as i64;
-            SyscallResult::ok(read_bytes)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_read_common(args, pipe::Patience::Never)
 }
 
 /// `SYS_PIPE_CLOSE` — close a pipe handle.
@@ -2529,27 +2653,7 @@ pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
 pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let buf_cap = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match with_call_out_buf(args.arg1, buf_cap, PIPE_CALL_MAX, |buf| {
-        pipe::read_timeout(handle, buf, timeout_ns)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let read_bytes = n as i64;
-            SyscallResult::ok(read_bytes)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_read_common(args, pipe::Patience::Upto(args.arg3))
 }
 
 /// `SYS_PIPE_WRITE_TIMEOUT` — write to a pipe with a deadline.
@@ -2561,30 +2665,7 @@ pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: bytes written, `TimedOut` if deadline expires.
 pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let data_len = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && data_len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    let data = match read_call_buffer(args.arg1, data_len, PIPE_CALL_MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match pipe::write_timeout(handle, &data, timeout_ns) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let written = n as i64;
-            SyscallResult::ok(written)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_write_common(args, pipe::Patience::Upto(args.arg3))
 }
 
 /// `SYS_PIPE_PEEK` — copy buffered bytes out of a pipe without consuming them.
@@ -2663,106 +2744,22 @@ pub fn sys_socketpair_create(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_SOCKETPAIR_SEND` — send bytes on an endpoint (blocking).
 pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // `stream_socket::send` blocks when the peer's buffer is full; see
-    // `sys_pipe_write` for why the payload is copied in first.
-    let data = match read_call_buffer(args.arg1, len, SOCKETPAIR_CALL_MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match stream_socket::send(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let sent = n as i64;
-            SyscallResult::ok(sent)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_send_common(args, stream_socket::Patience::Forever)
 }
 
 /// `SYS_SOCKETPAIR_RECV` — receive bytes from an endpoint (blocking).
 pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match with_call_out_buf(args.arg1, buf_cap, SOCKETPAIR_CALL_MAX, |buf| {
-        stream_socket::recv(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let recvd = n as i64;
-            SyscallResult::ok(recvd)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_recv_common(args, stream_socket::Patience::Forever)
 }
 
 /// `SYS_SOCKETPAIR_TRY_SEND` — non-blocking send.
 pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    let data = match read_call_buffer(args.arg1, len, SOCKETPAIR_CALL_MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match stream_socket::try_send(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let sent = n as i64;
-            SyscallResult::ok(sent)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_send_common(args, stream_socket::Patience::Never)
 }
 
 /// `SYS_SOCKETPAIR_TRY_RECV` — non-blocking receive.
 pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match with_call_out_buf(args.arg1, buf_cap, SOCKETPAIR_CALL_MAX, |buf| {
-        stream_socket::try_recv(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let recvd = n as i64;
-            SyscallResult::ok(recvd)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_recv_common(args, stream_socket::Patience::Never)
 }
 
 /// `SYS_SOCKETPAIR_CLOSE` — close an endpoint handle.
@@ -2780,55 +2777,12 @@ pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_SOCKETPAIR_SEND_TIMEOUT` — send with a deadline.
 pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let len = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    let data = match read_call_buffer(args.arg1, len, SOCKETPAIR_CALL_MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match stream_socket::send_timeout(handle, &data, timeout_ns) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let sent = n as i64;
-            SyscallResult::ok(sent)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_send_common(args, stream_socket::Patience::Upto(args.arg3))
 }
 
 /// `SYS_SOCKETPAIR_RECV_TIMEOUT` — receive with a deadline.
 pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
-        return SyscallResult::err(e);
-    }
-    let buf_cap = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match with_call_out_buf(args.arg1, buf_cap, SOCKETPAIR_CALL_MAX, |buf| {
-        stream_socket::recv_timeout(handle, buf, timeout_ns)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let recvd = n as i64;
-            SyscallResult::ok(recvd)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_recv_common(args, stream_socket::Patience::Upto(args.arg3))
 }
 
 /// `SYS_SOCKETPAIR_POLL` — query endpoint readiness.
@@ -6542,8 +6496,11 @@ fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallRes
         Err(e) => return SyscallResult::err(e),
     };
     let len = args.arg2 as usize;
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    // Nothing to type is 0, as a terminal write of nothing is; a buffer that
+    // cannot be read is `InvalidAddress` from the copy below (Linux's
+    // `iterate_tty_write` faults at its copy, before the line discipline).
+    if len == 0 {
+        return SyscallResult::ok(0);
     }
     // Copied in first, on both paths. The blocking one obviously needs it — a
     // `&[u8]` over a user pointer held across a park can be unmapped by a
@@ -6601,8 +6558,22 @@ fn pty_master_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResu
         Err(e) => return SyscallResult::err(e),
     };
     let cap = args.arg2 as usize;
-    if args.arg1 == 0 && cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    // A buffer that cannot take the output: answered by the terminal, nothing
+    // taken -- output there `InvalidAddress`, the slave gone `IoError` (its
+    // hangup), none yet `WouldBlock` for a non-blocking read. A blocking read
+    // with nothing to read fails at once rather than after output arrives
+    // (Linux waits, then faults, and loses that output).
+    if cap > 0 && !out_buffer_usable(args.arg1, cap, PTY_READ_CALL_MAX) {
+        let err = if crate::tty::pty::readable_bytes(handle) > 0 {
+            KernelError::InvalidAddress
+        } else if crate::tty::pty::readable(handle) {
+            KernelError::IoError
+        } else if non_blocking {
+            KernelError::WouldBlock
+        } else {
+            KernelError::InvalidAddress
+        };
+        return SyscallResult::err(err);
     }
     let result = with_call_out_buf(args.arg1, cap, PTY_READ_CALL_MAX, |buf| {
         if non_blocking {
@@ -6686,12 +6657,20 @@ fn pty_slave_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResul
     if cap == 0 {
         return SyscallResult::ok(0);
     }
-    if args.arg1 == 0 && cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
     let want = cap.min(crate::tty::MAX_CANON);
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, want) {
-        return SyscallResult::err(e);
+    // A buffer that cannot take the input: answered by the terminal, nothing
+    // taken -- a terminal gone is end of file, none ready `WouldBlock` for a
+    // non-blocking read, input ready `InvalidAddress`. A blocking read with
+    // nothing ready fails at once rather than after a line is typed (Linux
+    // waits, then faults, and loses the line).
+    if crate::mm::user::validate_user_write(args.arg1, want).is_err() {
+        if !crate::tty::exists(tty) {
+            return SyscallResult::ok(0);
+        }
+        if non_blocking && !crate::tty::input_ready(tty) {
+            return SyscallResult::err(KernelError::WouldBlock);
+        }
+        return SyscallResult::err(KernelError::InvalidAddress);
     }
 
     let mut kbuf = [0u8; crate::tty::MAX_CANON];
@@ -11273,7 +11252,10 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
 /// very nearly two copies, and a `TOSTOP` rule added to only one of them is the
 /// same mistake `tty_set_termios_from_user` was factored out to prevent.
 fn tty_write_from_user(tty: crate::tty::TtyId, ptr: u64, len: usize) -> SyscallResult {
-    if ptr == 0 || len == 0 {
+    // Nothing to write is 0. A NULL buffer with a length is `InvalidAddress`
+    // from the copy below, as Linux's `iterate_tty_write` faults at its copy;
+    // until 2026-10-07 it was 0, as though written.
+    if len == 0 {
         return SyscallResult::ok(0);
     }
 
@@ -12949,7 +12931,7 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
 /// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`, class 3). 1 MiB keeps the
 /// per-call VFS overhead negligible next to the data while bounding the
 /// kernel's share.
-const FILE_CALL_CHUNK: usize = 1024 * 1024;
+pub(crate) const FILE_CALL_CHUNK: usize = 1024 * 1024;
 
 /// A fallibly allocated bounce buffer of `min(len, FILE_CALL_CHUNK)` bytes.
 fn file_bounce(len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
@@ -13098,36 +13080,46 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    let buf_cap = args.arg2 as usize;
+    fs_read_common(handle, None, args.arg1, args.arg2 as usize)
+}
 
-    // POSIX/Linux: a zero-length read returns 0 with no other effect.  It does
-    // not touch the buffer (so the pointer is *not* validated — `read(fd, NULL,
-    // 0)` is legal and returns 0) and does not advance the file offset.  We must
-    // return 0 here rather than EINVAL: tcc's `full_read` reads exactly `count`
-    // bytes and then issues a *terminal* `read(fd, buf, 0)`, expecting 0 to
-    // signal completion.  Returning EINVAL made that terminal read look like a
-    // failure, so `tcc_object_type` saw a short ehdr read and rejected every
-    // relocatable object as "unrecognized file type" (Path-Z hosted compile).
-    if buf_cap == 0 {
+/// The body of `SYS_FS_READ` (`at` none: the handle's offset, which moves)
+/// and `SYS_FS_PREAD` (`at`: that offset, the handle's untouched).
+///
+/// Linux's `vfs_read`, in its order: the handle's own checks -- a directory
+/// is `IsADirectory`, a handle not open for reading `InvalidHandle`
+/// (`EBADF`), whatever the count -- then a range past user space,
+/// `InvalidAddress`; then a read of nothing is 0. A buffer that cannot take
+/// the bytes is answered by the file: 0 at or past its end (or for
+/// `/dev/null`), else `InvalidAddress`, the offset unmoved
+/// ([`crate::fs::handle::read_precheck`]).
+///
+/// A zero-length read is 0 with no other effect once the handle has passed
+/// its checks: it does not touch the buffer (`read(fd, NULL, 0)` is legal)
+/// and does not move the offset. tcc's `full_read` ends with exactly such a
+/// read and takes 0 as completion; when this returned `EINVAL` it rejected
+/// every relocatable object as "unrecognized file type" (Path-Z hosted
+/// compile).
+fn fs_read_common(handle: u64, at: Option<u64>, buf: u64, len: usize) -> SyscallResult {
+    if let Err(e) = crate::fs::handle::read_precheck(handle, at, 0) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
+    }
+    if len == 0 {
         return SyscallResult::ok(0);
     }
-    if args.arg1 == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    if !out_buffer_usable(buf, len, FILE_CALL_CHUNK) {
+        return unusable_read_answer(crate::fs::handle::read_precheck(handle, at, len));
     }
-
     // Read through a bounded kernel bounce buffer, then copy out: raw user
     // pointers stay out of the VFS, and the kernel's copy is at most
     // `FILE_CALL_CHUNK` however large the request (`stream_user_read`).
-    match stream_user_read(args.arg1, buf_cap, |chunk| {
-        crate::fs::handle::read(handle, chunk)
-    }) {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    count_or_err(match at {
+        None => stream_user_read(buf, len, |chunk| crate::fs::handle::read(handle, chunk)),
+        Some(offset) => fs_pread(handle, offset, buf, len),
+    })
 }
 
 /// `SYS_FS_WRITE` — write to a file handle at the current offset.
@@ -13136,32 +13128,50 @@ pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    let data_len = args.arg2 as usize;
+    fs_write_common(handle, None, args.arg1, args.arg2 as usize)
+}
 
-    if args.arg1 == 0 && data_len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+/// The body of `SYS_FS_WRITE` (`at` none: at the handle's offset, or its
+/// end for `APPEND`) and `SYS_FS_PWRITE` (`at`: there, the handle's offset
+/// untouched).
+///
+/// Linux's `vfs_write`, in its order: the handle's checks -- a directory,
+/// or a handle not open for writing (`InvalidHandle`, `EBADF`) -- then a
+/// range past user space, `InvalidAddress`. A zero-length write still asks
+/// the handle, so an unwritable or wrong one says so (Linux's
+/// `write(fd, buf, 0)` on a read-only descriptor is `EBADF`, not 0). A
+/// buffer that cannot be read is answered by the file: a sink that never
+/// reads what it is given takes the count (`/dev/null`, `/dev/zero`) or
+/// refuses (`/dev/full`), any other file is `InvalidAddress`, unchanged
+/// ([`crate::fs::handle::write_precheck`]).
+///
+/// The VFS write path takes locks and can sleep on the block layer, so the
+/// payload is copied in first (see `pipe_write_common`) -- a bounded chunk at
+/// a time (`stream_user_write`).
+fn fs_write_common(handle: u64, at: Option<u64>, buf: u64, len: usize) -> SyscallResult {
+    if len == 0 {
+        return count_or_err(match at {
+            None => crate::fs::handle::write(handle, &[]),
+            Some(offset) => crate::fs::handle::write_at(handle, offset, &[]),
+        });
     }
-
-    // The VFS write path takes locks and can sleep on the block layer, so the
-    // payload is copied in first (see `sys_pipe_write`) -- a bounded chunk at
-    // a time (`stream_user_write`). A zero-length write still asks the
-    // handle, so an unwritable or wrong one says so: Linux's
-    // `write(fd, buf, 0)` on a read-only fd is EBADF, not 0.
-    let written = if data_len == 0 {
-        crate::fs::handle::write(handle, &[])
-    } else {
-        stream_user_write(args.arg1, data_len, |chunk| {
-            crate::fs::handle::write(handle, chunk)
-        })
+    let sink = match crate::fs::handle::write_precheck(handle, len) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
     };
-    match written {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => SyscallResult::err(e),
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
     }
+    if !in_buffer_usable(buf, len, FILE_CALL_CHUNK) {
+        return match sink {
+            Some(n) => count_or_err(Ok(n)),
+            None => SyscallResult::err(KernelError::InvalidAddress),
+        };
+    }
+    count_or_err(match at {
+        None => stream_user_write(buf, len, |chunk| crate::fs::handle::write(handle, chunk)),
+        Some(offset) => fs_pwrite(handle, offset, buf, len),
+    })
 }
 
 /// `SYS_FS_PREAD` — read from a file handle at an explicit offset; the
@@ -13171,22 +13181,11 @@ pub fn sys_fs_pread(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    let len = args.arg2 as usize;
-    // As `SYS_FS_READ`: a zero-length read is 0, pointer unexamined.
-    if len == 0 {
-        return SyscallResult::ok(0);
-    }
-    if args.arg1 == 0 || i64::try_from(args.arg3).is_err() {
+    // A negative offset first, as Linux's `ksys_pread64`.
+    if i64::try_from(args.arg3).is_err() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    match fs_pread(handle, args.arg3, args.arg1, len) {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    fs_read_common(handle, Some(args.arg3), args.arg1, args.arg2 as usize)
 }
 
 /// `SYS_FS_PWRITE` — write to a file handle at an explicit offset; the
@@ -13196,25 +13195,11 @@ pub fn sys_fs_pwrite(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    let len = args.arg2 as usize;
-    if (args.arg1 == 0 && len > 0) || i64::try_from(args.arg3).is_err() {
+    // A negative offset first, as Linux's `ksys_pwrite64`.
+    if i64::try_from(args.arg3).is_err() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    // As `SYS_FS_WRITE`: a zero-length write still asks the handle, so a
-    // read-only or wrong one says so.
-    let written = if len == 0 {
-        crate::fs::handle::write_at(handle, args.arg3, &[])
-    } else {
-        fs_pwrite(handle, args.arg3, args.arg1, len)
-    };
-    match written {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    fs_write_common(handle, Some(args.arg3), args.arg1, args.arg2 as usize)
 }
 
 /// Read `len` bytes of file `handle` from `offset` into user memory at

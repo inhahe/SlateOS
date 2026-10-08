@@ -23260,6 +23260,96 @@ pub fn self_test_linux_mlock() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of reads and writes whose buffer cannot be used:
+/// [`elf::build_linux_null_buffer_test_elf`] checks that a NULL buffer is
+/// `EFAULT` only where bytes would have moved, nothing consumed -- a file at
+/// its end reads 0, mid-file `EFAULT` with the offset unmoved; a handle open
+/// the other way is `EBADF` and a directory `EISDIR`; `/dev/null` takes the
+/// write; an empty non-blocking pipe or unix socket is `EAGAIN`, one with
+/// bytes `EFAULT` and the bytes still there, one with no writer 0; a pipe
+/// with no reader `EPIPE`. Exits `0x2A` on success; the same program passes
+/// on Linux 6.6.
+pub fn self_test_linux_null_buffer() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux NULL-buffer I/O (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_null_buffer_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-null-buffer"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-null-buffer",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: NULL-buffer spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: NULL-buffer I/O (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "ignoring SIGPIPE failed",
+            Some(0x31) => "the scratch file in /tmp could not be made",
+            Some(0x32) => "a NULL read mid-file was not EFAULT, or moved the offset",
+            Some(0x33) => "a NULL read at the end of a file was not 0",
+            Some(0x34) => "a NULL write to a file was not EFAULT, or changed it",
+            Some(0x35) => "a read through a write-only handle was not EBADF",
+            Some(0x36) => "a write through a read-only handle was not EBADF",
+            Some(0x37) => "a read of a directory was not EISDIR (for every count)",
+            Some(0x38) => "/dev/null did not read 0 and take a NULL write",
+            Some(0x39) => "a NULL read of /dev/zero was not EFAULT",
+            Some(0x3A) => "a NULL read of an empty non-blocking pipe was not EAGAIN",
+            Some(0x3B | 0x3C) => "a NULL read of a pipe with bytes was not EFAULT, or took them",
+            Some(0x3D) => "a NULL write to a pipe was not EFAULT, or wrote",
+            Some(0x3E) => "a NULL read of a pipe with no writer was not 0",
+            Some(0x3F) => "a NULL write to a pipe with no reader was not EPIPE",
+            Some(0x40..=0x43) => "a unix stream socket did not answer a NULL read as Linux does",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: NULL-buffer I/O (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux NULL-buffer I/O (ring 3: files mid-file and at the end, the wrong \
+         direction, directories, /dev/null and /dev/zero, pipes and unix sockets empty, with \
+         bytes, with no writer or reader): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

@@ -158,8 +158,9 @@ impl PipeEnd {
 // have several tasks parked on it at once: `dup()` and process spawn hand the
 // same end to multiple processes, and `wait_readable` (the `tee` primitive)
 // parks on the read end without consuming, alongside a real reader.
+pub use super::waiters::Patience;
 use super::waiters::{
-    WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
+    Deadline, WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
 use crate::sched::task::TaskId;
 
@@ -342,28 +343,47 @@ pub fn create() -> (PipeHandle, PipeHandle) {
     (read_handle, write_handle)
 }
 
-/// Write bytes to a pipe (blocking).
+/// What a pipe read does with the bytes it finds.
+pub enum ReadInto<'a> {
+    /// Takes them into this buffer.
+    Buffer(&'a mut [u8]),
+    /// Only says whether there are any (`Ok(1)`), taking none: what a read
+    /// whose buffer cannot take them answers before its copy. Linux's
+    /// `pipe_read` copies page by page and stops at the first fault, the
+    /// bytes it could not copy kept for the next read.
+    Probe,
+}
+
+/// What a pipe write does with the room it finds.
+pub enum WriteFrom<'a> {
+    /// Puts these bytes there.
+    Data(&'a [u8]),
+    /// Only says whether there is room (`Ok(1)`), writing nothing: what a
+    /// write whose buffer cannot be read answers before its copy.
+    Probe,
+}
+
+/// The one body of [`fn@write`], [`try_write`], [`write_timeout`] and
+/// [`probe_write`]: they differ only in how long they wait for room
+/// ([`Patience`]) and in what they put there.
 ///
-/// Writes as many bytes as possible into the pipe's buffer.  If the
-/// buffer is full, blocks the calling task until space is available
-/// (the reader reads some data).
-///
-/// # Returns
-///
-/// - `Ok(n)` — wrote `n` bytes (always > 0 on success).
-/// - `Err(ChannelClosed)` — the read end is closed (broken pipe).
-/// - `Err(InvalidArgument)` — `data` is empty.
-/// - `Err(InvalidHandle)` — handle is a read handle, not a write handle.
-pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
+/// A reader gone is `ChannelClosed` first, whatever the room. With room, the
+/// bytes go in -- as many as fit -- and readers are woken; without, the wait
+/// `patience` allows: `WouldBlock`, `TimedOut`, or a park that a deliverable
+/// signal ends with `Interrupted`.
+fn write_with(handle: PipeHandle, from: &WriteFrom<'_>, patience: Patience) -> KernelResult<usize> {
     if handle.end() != PipeEnd::Write {
         return Err(KernelError::InvalidHandle);
     }
-    if data.is_empty() {
+    if let WriteFrom::Data(data) = from
+        && data.is_empty()
+    {
         return Err(KernelError::InvalidArgument);
     }
 
     let pid = current_user_pid();
     let task = sched::current_task_id();
+    let mut deadline = Deadline::new();
 
     loop {
         {
@@ -377,32 +397,48 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
             // entry), and every path below either returns or re-registers.
             pipe.writer_waiters.remove(task);
 
-            // Check if reader has closed.
+            // A reader gone is a broken pipe, before anything else.
             if pipe.read_closed {
                 return Err(KernelError::ChannelClosed);
             }
 
-            // Try to write some bytes.
-            let written = pipe.write_bytes(data);
-            if written > 0 {
-                // Wake readers blocked waiting for data.
-                let pipe_id = handle.pipe_id();
-                let readers = pipe.reader_waiters.take_all();
-                drop(table);
+            match from {
+                WriteFrom::Data(data) => {
+                    let written = pipe.write_bytes(data);
+                    if written > 0 {
+                        // Wake readers blocked waiting for data.
+                        let pipe_id = handle.pipe_id();
+                        let readers = pipe.reader_waiters.take_all();
+                        drop(table);
 
-                wake_all(readers);
-                crate::ktrace::record(
-                    crate::ktrace::Category::Ipc,
-                    crate::ktrace::event::PIPE_WRITE,
-                    pipe_id,
-                    written as u64,
-                );
-                super::stats::pipe_write(written as u64);
-                return Ok(written);
+                        wake_all(readers);
+                        if patience == Patience::Forever {
+                            crate::ktrace::record(
+                                crate::ktrace::Category::Ipc,
+                                crate::ktrace::event::PIPE_WRITE,
+                                pipe_id,
+                                written as u64,
+                            );
+                        }
+                        super::stats::pipe_write(written as u64);
+                        return Ok(written);
+                    }
+                }
+                WriteFrom::Probe => {
+                    if pipe.writable() > 0 {
+                        return Ok(1);
+                    }
+                }
             }
 
-            // Buffer is full.  Before parking, honour a deliverable signal —
-            // otherwise a blocked writer could never be interrupted.
+            // Full: no wait, a timeout, or a park.
+            if let Some(e) = deadline.ends_now(patience, task) {
+                return Err(e);
+            }
+
+            // Before parking, honour a deliverable signal -- otherwise a
+            // blocked writer could never be interrupted. A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
             if deliverable_signal_pending(pid) {
                 return Err(KernelError::Interrupted);
             }
@@ -411,17 +447,33 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
             pipe.writer_waiters.insert(task);
         }
 
-        // Block (interruptibly for user processes).  The reader wakes us when it
-        // drains data; a signal wakes us via the registered signal-waiter.
+        // Block (interruptibly for user processes). The reader wakes us when
+        // it drains data; a signal wakes us via the registered signal-waiter,
+        // a deadline by its timer.
         super::stats::pipe_write_block();
         park_interruptible(
             pid,
             task,
             crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
         );
-
-        // Re-check on wake (loop back to top).
     }
+}
+
+/// Write bytes to a pipe (blocking).
+///
+/// Writes as many bytes as possible into the pipe's buffer.  If the
+/// buffer is full, blocks the calling task until space is available
+/// (the reader reads some data).
+///
+/// # Returns
+///
+/// - `Ok(n)` — wrote `n` bytes (always > 0 on success).
+/// - `Err(ChannelClosed)` — the read end is closed (broken pipe).
+/// - `Err(InvalidArgument)` — `data` is empty.
+/// - `Err(InvalidHandle)` — handle is a read handle, not a write handle.
+/// - `Err(Interrupted)` — a deliverable signal arrived while it waited.
+pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
+    write_with(handle, &WriteFrom::Data(data), Patience::Forever)
 }
 
 /// Write bytes to a pipe (non-blocking).
@@ -433,40 +485,106 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
 /// - `Err(ChannelClosed)` — the read end is closed.
 /// - `Err(InvalidHandle)` — not a write handle.
 pub fn try_write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Write {
+    write_with(handle, &WriteFrom::Data(data), Patience::Never)
+}
+
+/// The one body of [`read`], [`try_read`], [`read_timeout`],
+/// [`wait_readable`] and [`probe_read`]: they differ only in how long they
+/// wait for bytes ([`Patience`]) and in what they do with them.
+///
+/// Bytes there are taken (or, probing, reported) and writers woken; none
+/// and no writer is end of file, `Ok(0)`; none with a writer, the wait
+/// `patience` allows: `WouldBlock`, `TimedOut`, or a park that a deliverable
+/// signal ends with `Interrupted`.
+fn read_with(
+    handle: PipeHandle,
+    into: &mut ReadInto<'_>,
+    patience: Patience,
+) -> KernelResult<usize> {
+    if handle.end() != PipeEnd::Read {
         return Err(KernelError::InvalidHandle);
     }
-    if data.is_empty() {
+    if let ReadInto::Buffer(buf) = into
+        && buf.is_empty()
+    {
         return Err(KernelError::InvalidArgument);
     }
 
-    let wake_readers;
-    let result;
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let mut deadline = Deadline::new();
 
-    {
-        let mut table = PIPES.lock();
-        let pipe = table
-            .get_mut(&handle.pipe_id())
-            .ok_or(KernelError::InvalidHandle)?;
+    loop {
+        {
+            let mut table = PIPES.lock();
+            let pipe = table
+                .get_mut(&handle.pipe_id())
+                .ok_or(KernelError::InvalidHandle)?;
 
-        if pipe.read_closed {
-            return Err(KernelError::ChannelClosed);
+            // Deregister first: a signal or timer wake leaves our entry in
+            // place, and every path below either returns or re-registers.
+            pipe.reader_waiters.remove(task);
+
+            match into {
+                ReadInto::Buffer(buf) => {
+                    let n = pipe.read_bytes(buf);
+                    if n > 0 {
+                        // Wake writers blocked waiting for space.
+                        let pipe_id = handle.pipe_id();
+                        let writers = pipe.writer_waiters.take_all();
+                        drop(table);
+
+                        wake_all(writers);
+                        if patience == Patience::Forever {
+                            crate::ktrace::record(
+                                crate::ktrace::Category::Ipc,
+                                crate::ktrace::event::PIPE_READ,
+                                pipe_id,
+                                n as u64,
+                            );
+                        }
+                        super::stats::pipe_read(n as u64);
+                        return Ok(n);
+                    }
+                }
+                ReadInto::Probe => {
+                    if pipe.readable() > 0 {
+                        return Ok(1);
+                    }
+                }
+            }
+
+            // No data.  If writer is closed, return EOF.
+            if pipe.write_closed {
+                return Ok(0);
+            }
+
+            // Buffer empty, writer still open: no wait, a timeout, or a park.
+            if let Some(e) = deadline.ends_now(patience, task) {
+                return Err(e);
+            }
+
+            // Honour a deliverable signal before parking (otherwise a
+            // blocked reader is uninterruptible). A timed wait maps the
+            // interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                return Err(KernelError::Interrupted);
+            }
+
+            // Block.
+            pipe.reader_waiters.insert(task);
         }
 
-        let written = pipe.write_bytes(data);
-        if written == 0 {
-            return Err(KernelError::WouldBlock);
-        }
-
-        wake_readers = pipe.reader_waiters.take_all();
-        result = Ok(written);
+        // Block (interruptibly for user processes).  The writer wakes us when it
+        // writes data; a signal wakes us via the registered signal-waiter, a
+        // deadline by its timer.
+        super::stats::pipe_read_block();
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
     }
-
-    wake_all(wake_readers);
-    if let Ok(n) = result {
-        super::stats::pipe_write(n as u64);
-    }
-    result
 }
 
 /// Read bytes from a pipe (blocking).
@@ -481,71 +599,9 @@ pub fn try_write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
 /// - `Ok(0)` — the write end is closed and no data remains (EOF).
 /// - `Err(InvalidArgument)` — `buf` is empty.
 /// - `Err(InvalidHandle)` — handle is a write handle, not a read handle.
+/// - `Err(Interrupted)` — a deliverable signal arrived while it waited.
 pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Read {
-        return Err(KernelError::InvalidHandle);
-    }
-    if buf.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-
-    loop {
-        {
-            let mut table = PIPES.lock();
-            let pipe = table
-                .get_mut(&handle.pipe_id())
-                .ok_or(KernelError::InvalidHandle)?;
-
-            // Deregister first: a signal or timer wake leaves our entry in
-            // place, and every path below either returns or re-registers.
-            pipe.reader_waiters.remove(task);
-
-            // Try to read some bytes.
-            let n = pipe.read_bytes(buf);
-            if n > 0 {
-                // Wake writers blocked waiting for space.
-                let pipe_id = handle.pipe_id();
-                let writers = pipe.writer_waiters.take_all();
-                drop(table);
-
-                wake_all(writers);
-                crate::ktrace::record(
-                    crate::ktrace::Category::Ipc,
-                    crate::ktrace::event::PIPE_READ,
-                    pipe_id,
-                    n as u64,
-                );
-                super::stats::pipe_read(n as u64);
-                return Ok(n);
-            }
-
-            // No data.  If writer is closed, return EOF.
-            if pipe.write_closed {
-                return Ok(0);
-            }
-
-            // Buffer empty, writer still open.  Honour a deliverable signal
-            // before parking (otherwise a blocked reader is uninterruptible).
-            if deliverable_signal_pending(pid) {
-                return Err(KernelError::Interrupted);
-            }
-
-            // Block.
-            pipe.reader_waiters.insert(task);
-        }
-
-        // Block (interruptibly for user processes).  The writer wakes us when it
-        // writes data; a signal wakes us via the registered signal-waiter.
-        super::stats::pipe_read_block();
-        park_interruptible(
-            pid,
-            task,
-            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
-        );
-    }
+    read_with(handle, &mut ReadInto::Buffer(buf), Patience::Forever)
 }
 
 /// Read bytes from a pipe (non-blocking).
@@ -557,40 +613,7 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
 /// - `Err(WouldBlock)` — pipe is empty but writer is still open.
 /// - `Err(InvalidHandle)` — not a read handle.
 pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Read {
-        return Err(KernelError::InvalidHandle);
-    }
-    if buf.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    let mut wake_writers = Vec::new();
-    let result;
-
-    {
-        let mut table = PIPES.lock();
-        let pipe = table
-            .get_mut(&handle.pipe_id())
-            .ok_or(KernelError::InvalidHandle)?;
-
-        let n = pipe.read_bytes(buf);
-        if n > 0 {
-            wake_writers = pipe.writer_waiters.take_all();
-            result = Ok(n);
-        } else if pipe.write_closed {
-            result = Ok(0);
-        } else {
-            result = Err(KernelError::WouldBlock);
-        }
-    }
-
-    wake_all(wake_writers);
-    if let Ok(n) = result {
-        if n > 0 {
-            super::stats::pipe_read(n as u64);
-        }
-    }
-    result
+    read_with(handle, &mut ReadInto::Buffer(buf), Patience::Never)
 }
 
 /// Peek at buffered pipe data WITHOUT consuming it.
@@ -634,42 +657,36 @@ pub fn peek_at(handle: PipeHandle, offset: u64, buf: &mut [u8]) -> KernelResult<
 /// - `Ok(true)` — data is now available to read.
 /// - `Ok(false)` — the write end is closed and no data remains (EOF).
 /// - `Err(InvalidHandle)` — handle is a write handle, or the pipe is gone.
+/// - `Err(Interrupted)` — a deliverable signal arrived while it waited.
 pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
-    if handle.end() != PipeEnd::Read {
-        return Err(KernelError::InvalidHandle);
-    }
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-    loop {
-        {
-            let mut table = PIPES.lock();
-            let pipe = table
-                .get_mut(&handle.pipe_id())
-                .ok_or(KernelError::InvalidHandle)?;
-            // Deregister first — every path below returns or re-registers.
-            pipe.reader_waiters.remove(task);
+    probe_read(handle, Patience::Forever)
+}
 
-            if pipe.len > 0 {
-                return Ok(true);
-            }
-            if pipe.write_closed {
-                return Ok(false);
-            }
-            // Empty, writer still open.  Honour a deliverable signal before
-            // parking.
-            if deliverable_signal_pending(pid) {
-                return Err(KernelError::Interrupted);
-            }
-            // Register and block.
-            pipe.reader_waiters.insert(task);
-        }
-        super::stats::pipe_read_block();
-        park_interruptible(
-            pid,
-            task,
-            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
-        );
-    }
+/// Whether a read of the pipe would deliver bytes, waiting for them as long
+/// as `patience` allows, taking none: what [`read`] (`Forever`),
+/// [`try_read`] (`Never`) and [`read_timeout`] (`Upto`) would do, short of
+/// moving a byte. `Ok(true)`: bytes are there. `Ok(false)`: end of file. Its
+/// errors are theirs.
+///
+/// # Errors
+///
+/// As [`read_timeout`] and [`try_read`]: `WouldBlock`, `TimedOut`,
+/// `Interrupted`, `InvalidHandle`.
+pub fn probe_read(handle: PipeHandle, patience: Patience) -> KernelResult<bool> {
+    read_with(handle, &mut ReadInto::Probe, patience).map(|n| n > 0)
+}
+
+/// Whether a write to the pipe would find room, waiting for it as long as
+/// `patience` allows, writing nothing: what [`fn@write`], [`try_write`] and
+/// [`write_timeout`] would do, short of moving a byte. `Ok(())`: there is
+/// room. Its errors are theirs -- `ChannelClosed` above all, a reader gone.
+///
+/// # Errors
+///
+/// As [`write_timeout`] and [`try_write`]: `ChannelClosed`, `WouldBlock`,
+/// `TimedOut`, `Interrupted`, `InvalidHandle`.
+pub fn probe_write(handle: PipeHandle, patience: Patience) -> KernelResult<()> {
+    write_with(handle, &WriteFrom::Probe, patience).map(|_| ())
 }
 
 /// Read bytes from a pipe with a timeout (nanoseconds).
@@ -689,104 +706,11 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
 /// - `Err(TimedOut)` — no data arrived within the deadline.
 /// - `Err(InvalidHandle)` — not a read handle or pipe doesn't exist.
 pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Read {
-        return Err(KernelError::InvalidHandle);
-    }
-    if buf.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    // Fast path: try without blocking.
-    {
-        let mut table = PIPES.lock();
-        let pipe = table
-            .get_mut(&handle.pipe_id())
-            .ok_or(KernelError::InvalidHandle)?;
-
-        let n = pipe.read_bytes(buf);
-        if n > 0 {
-            let writers = pipe.writer_waiters.take_all();
-            drop(table);
-            wake_all(writers);
-            super::stats::pipe_read(n as u64);
-            return Ok(n);
-        }
-
-        if pipe.write_closed {
-            return Ok(0);
-        }
-    }
-
-    // Non-blocking mode.
-    if timeout_ns == 0 {
-        return Err(KernelError::TimedOut);
-    }
-
-    // Schedule a timer to wake us at the deadline.
-    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
-
-    fn timeout_wake(tid: u64) {
-        if !sched::try_wake(tid) {
-            sched::defer_wake(tid);
-        }
-    }
-
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
-
-    // Block loop.
-    loop {
-        {
-            let mut table = PIPES.lock();
-            let pipe = table.get_mut(&handle.pipe_id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
-
-            // Deregister first — every path below returns or re-registers.
-            // The timer wake in particular does not clear our entry.
-            pipe.reader_waiters.remove(task);
-
-            let n = pipe.read_bytes(buf);
-            if n > 0 {
-                let writers = pipe.writer_waiters.take_all();
-                crate::hrtimer::cancel(timer_handle);
-                drop(table);
-                wake_all(writers);
-                super::stats::pipe_read(n as u64);
-                return Ok(n);
-            }
-
-            if pipe.write_closed {
-                crate::hrtimer::cancel(timer_handle);
-                return Ok(0);
-            }
-
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
-            }
-
-            // Honour a deliverable signal before parking.  A timed wait maps
-            // the interruption to EINTR (no restart) at the syscall layer.
-            if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::Interrupted);
-            }
-
-            // Register as waiter.
-            pipe.reader_waiters.insert(task);
-        }
-
-        super::stats::pipe_read_block();
-        park_interruptible(
-            pid,
-            task,
-            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
-        );
-    }
+    read_with(
+        handle,
+        &mut ReadInto::Buffer(buf),
+        Patience::Upto(timeout_ns),
+    )
 }
 
 /// Write bytes to a pipe with a timeout (nanoseconds).
@@ -804,104 +728,7 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
 /// - `Err(ChannelClosed)` — reader closed.
 /// - `Err(InvalidHandle)` — not a write handle.
 pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> KernelResult<usize> {
-    if handle.end() != PipeEnd::Write {
-        return Err(KernelError::InvalidHandle);
-    }
-    if data.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    // Fast path: try without blocking.
-    {
-        let mut table = PIPES.lock();
-        let pipe = table
-            .get_mut(&handle.pipe_id())
-            .ok_or(KernelError::InvalidHandle)?;
-
-        if pipe.read_closed {
-            return Err(KernelError::ChannelClosed);
-        }
-
-        let written = pipe.write_bytes(data);
-        if written > 0 {
-            let readers = pipe.reader_waiters.take_all();
-            drop(table);
-            wake_all(readers);
-            super::stats::pipe_write(written as u64);
-            return Ok(written);
-        }
-    }
-
-    // Non-blocking mode.
-    if timeout_ns == 0 {
-        return Err(KernelError::TimedOut);
-    }
-
-    // Schedule a timer to wake us at the deadline.
-    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
-
-    fn timeout_wake(tid: u64) {
-        if !sched::try_wake(tid) {
-            sched::defer_wake(tid);
-        }
-    }
-
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
-
-    // Block loop.
-    loop {
-        {
-            let mut table = PIPES.lock();
-            let pipe = table.get_mut(&handle.pipe_id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
-
-            // Deregister first — every path below returns or re-registers.
-            // The timer wake in particular does not clear our entry.
-            pipe.writer_waiters.remove(task);
-
-            if pipe.read_closed {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
-            }
-
-            let written = pipe.write_bytes(data);
-            if written > 0 {
-                let readers = pipe.reader_waiters.take_all();
-                crate::hrtimer::cancel(timer_handle);
-                drop(table);
-                wake_all(readers);
-                super::stats::pipe_write(written as u64);
-                return Ok(written);
-            }
-
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
-            }
-
-            // Honour a deliverable signal before parking.  A timed wait maps
-            // the interruption to EINTR (no restart) at the syscall layer.
-            if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::Interrupted);
-            }
-
-            // Register as waiter.
-            pipe.writer_waiters.insert(task);
-        }
-
-        super::stats::pipe_write_block();
-        park_interruptible(
-            pid,
-            task,
-            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
-        );
-    }
+    write_with(handle, &WriteFrom::Data(data), Patience::Upto(timeout_ns))
 }
 
 /// Duplicate a pipe handle reference.

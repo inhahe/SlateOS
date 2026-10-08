@@ -933,7 +933,7 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
         }
 
         if !file.flags.is_readable() {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::InvalidHandle);
         }
 
         (file.object.clone(), file.path.clone(), file.offset)
@@ -956,6 +956,91 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
     advance_offset(handle, start, copy_len as u64);
 
     Ok(copy_len)
+}
+
+/// What a read of up to `len` bytes through `handle` -- at its offset, or at
+/// `at` (`pread`) -- answers before it copies anything: the question a read
+/// whose buffer cannot take the bytes (NULL, unmapped, read-only), or that
+/// asks for none, is answered by. Linux's `vfs_read` makes its checks first
+/// and faults only at the copy, so such a read is:
+///
+/// - `IsADirectory` for a directory, whatever the count -- `0` included;
+/// - `InvalidHandle` (`EBADF`) for a handle not open for reading;
+/// - otherwise `Ok(true)` when the read would deliver a byte (the copy, which
+///   faults, is next: `EFAULT`, the offset unmoved), `Ok(false)` when it
+///   would deliver none -- at or past the end of the file, `/dev/null` -- or
+///   when `len` is 0.
+///
+/// Nothing is consumed and the offset does not move: the question is a read
+/// of one byte at the offset that the handle does not see (files, devices
+/// and generated files here all read at an offset without side effects that
+/// matter; there are no named pipes, whose read would consume).
+///
+/// # Errors
+///
+/// As above, and the filesystem's own for the one-byte read.
+pub fn read_precheck(handle: u64, at: Option<u64>, len: usize) -> KernelResult<bool> {
+    let (object, path, offset) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_readable() {
+            return Err(KernelError::InvalidHandle);
+        }
+        (
+            file.object.clone(),
+            file.path.clone(),
+            at.unwrap_or(file.offset),
+        )
+    };
+    if len == 0 {
+        return Ok(false);
+    }
+    // With the table lock released: see `advance_offset`.
+    let byte = match &object {
+        Some(obj) => crate::fs::Vfs::object_read(obj, &path, offset, 1)?,
+        None => crate::fs::Vfs::read_at_resolved(&path, offset, 1)?,
+    };
+    Ok(!byte.is_empty())
+}
+
+/// What a write of `len` bytes through `handle` answers before it reads
+/// them: the question a write whose buffer cannot be read is answered by.
+/// Linux's `vfs_write` makes its checks first, then the file's write runs,
+/// and most of those fault at their copy; a few never read the bytes at all.
+/// So such a write is:
+///
+/// - `IsADirectory` for a directory; `InvalidHandle` (`EBADF`) for a handle
+///   not open for writing;
+/// - for a file whose write never reads what it is given
+///   ([`crate::fs::vfs::FileSystem::write_without_data`]): `Ok(Some(len))`
+///   for a sink (`/dev/null`, `/dev/zero`), or its refusal (`/dev/full`'s
+///   `DiskFull`);
+/// - `Ok(None)` for every other file: the copy, which faults, is next
+///   (`EFAULT`, the file unchanged).
+///
+/// # Errors
+///
+/// As above.
+pub fn write_precheck(handle: u64, len: usize) -> KernelResult<Option<usize>> {
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_writable() {
+            return Err(KernelError::InvalidHandle);
+        }
+        file.path.clone()
+    };
+    match crate::fs::Vfs::write_without_data_resolved(&path) {
+        Some(Ok(())) => Ok(Some(len)),
+        Some(Err(e)) => Err(e),
+        None => Ok(None),
+    }
 }
 
 /// Move an open handle's cursor to `start + delta`, but never backwards.
@@ -1008,8 +1093,8 @@ fn advance_offset(handle: u64, start: u64, delta: u64) {
 /// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
 /// - [`KernelError::IsADirectory`] — `handle` is a directory handle
 ///   (which doesn't support byte-oriented writes).
-/// - [`KernelError::PermissionDenied`] — handle was not opened for
-///   writing.
+/// - [`KernelError::InvalidHandle`] — handle was not opened for writing
+///   (`EBADF`, as Linux's `vfs_write` answers).
 pub fn peek_write_offset(handle: u64) -> KernelResult<u64> {
     let (object, path, offset, append) = {
         let table = OPEN_FILES.lock();
@@ -1018,7 +1103,7 @@ pub fn peek_write_offset(handle: u64) -> KernelResult<u64> {
             return Err(KernelError::IsADirectory);
         }
         if !file.flags.is_writable() {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::InvalidHandle);
         }
         (
             file.object.clone(),
@@ -1073,7 +1158,7 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
         }
 
         if !file.flags.is_writable() {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::InvalidHandle);
         }
 
         (
@@ -1126,9 +1211,8 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
-/// - [`KernelError::PermissionDenied`] — handle was not opened for
-///   reading.
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table, or was
+///   not opened for reading (`EBADF`, as Linux's `vfs_read` answers).
 /// - VFS errors propagated unchanged.
 pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
     // Snapshot, then release: see `advance_offset` for why the table lock
@@ -1141,7 +1225,7 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
             return Err(KernelError::IsADirectory);
         }
         if !file.flags.is_readable() {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::InvalidHandle);
         }
         if buf.is_empty() {
             return Ok(0);
@@ -1175,7 +1259,7 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
 ///
 /// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
 /// - [`KernelError::IsADirectory`] — `handle` refers to a directory.
-/// - [`KernelError::PermissionDenied`] — handle was not opened for reading.
+/// - [`KernelError::InvalidHandle`] — handle was not opened for reading.
 /// - VFS errors propagated unchanged.
 pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
     let (object, path) = {
@@ -1185,7 +1269,7 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
             return Err(KernelError::IsADirectory);
         }
         if !file.flags.is_readable() {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::InvalidHandle);
         }
         (file.object.clone(), file.path.clone())
     };
@@ -1217,9 +1301,8 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
-/// - [`KernelError::PermissionDenied`] — handle was not opened for
-///   writing.
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table, or was
+///   not opened for writing (`EBADF`, as Linux's `vfs_write` answers).
 /// - VFS errors propagated unchanged.
 pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
     // Snapshot, then release: see `advance_offset` for why the table lock
@@ -1231,7 +1314,7 @@ pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
             return Err(KernelError::IsADirectory);
         }
         if !file.flags.is_writable() {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::InvalidHandle);
         }
         if data.is_empty() {
             return Ok(0);

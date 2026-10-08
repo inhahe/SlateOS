@@ -4664,10 +4664,23 @@ fn dispatch_memfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
     };
+    let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+    // A buffer that cannot take the bytes: 0 at or past the end, else EFAULT,
+    // the offset unmoved -- Linux's shmem read faults only at its copy
+    // (requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md).
+    if crate::mm::user::check_user_span(buf, cap_usize).is_ok()
+        && crate::mm::user::validate_user_write(buf, cap_usize.min(handlers::FILE_CALL_CHUNK))
+            .is_err()
+    {
+        return match (crate::ipc::memfd::offset(h), crate::ipc::memfd::size(h)) {
+            (Ok(at), Ok(size)) if at >= size => SyscallResult::ok(0),
+            (Ok(_), Ok(_)) => linux_err(errno::EFAULT),
+            _ => linux_err(errno::EBADF),
+        };
+    }
     // Streamed a bounded chunk at a time (`handlers::stream_user_read`), each
     // chunk's destination checked before it is read, so the shared offset
     // advances only by what reached the caller.
-    let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
     match handlers::stream_user_read(buf, cap_usize, |chunk| crate::ipc::memfd::read(h, chunk)) {
         #[allow(clippy::cast_possible_wrap)]
         Ok(n) => SyscallResult::ok(n as i64),
@@ -40584,10 +40597,32 @@ fn unix_recv(
         None => return linux_err(errno::EBADF),
     };
     let room = usize::try_from(cap).unwrap_or(usize::MAX).min(limit);
-    if room > 0
-        && let Err(e) = crate::mm::user::validate_user_write(buf, room)
-    {
-        return linux_err(linux_errno_for(e));
+    if room > 0 && crate::mm::user::validate_user_write(buf, room).is_err() {
+        // A buffer that cannot take the bytes: answered by the socket, as
+        // Linux's receive faults only at its copy -- a peek of one byte, so
+        // nothing is taken: bytes there EFAULT (and still there), end of file
+        // 0, nothing yet EAGAIN or a wait (requests/d-a-a-null-buffer-is-
+        // refused-before-the-read-is-looked-at.md). A range past user space
+        // is EFAULT before anything, Linux's `access_ok`.
+        if let Err(e) = crate::mm::user::check_user_span(buf, room) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut one = [0u8; 1];
+        return match unix_socket::recv(h, &mut one, unix_nonblocking(entry, flags), true) {
+            Ok(got) => {
+                if got.rights.is_some() {
+                    // A peek's copy of the descriptors riding on the bytes.
+                    drop(got.rights);
+                    crate::ipc::passed::drain();
+                }
+                if got.len > 0 {
+                    linux_err(errno::EFAULT)
+                } else {
+                    SyscallResult::ok(0)
+                }
+            }
+            Err(e) => unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Receive),
+        };
     }
     let mut kbuf = match crate::mm::user::alloc_zeroed_vec(room) {
         Ok(v) => v,
@@ -75204,11 +75239,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::MLOCK, &a).value != -i64::from(errno::EINVAL) {
+            if dispatch_linux(nr::MLOCK, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
                 serial_println!("[syscall/linux]   FAIL: mlock(end-wrap) not EINVAL");
                 return Err(KernelError::InternalError);
             }
-            if dispatch_linux(nr::MUNLOCK, &a).value != -i64::from(errno::EINVAL) {
+            if dispatch_linux(nr::MUNLOCK, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
                 serial_println!("[syscall/linux]   FAIL: munlock(end-wrap) not EINVAL");
                 return Err(KernelError::InternalError);
             }

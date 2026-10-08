@@ -38,6 +38,7 @@
 
 use alloc::vec::Vec;
 
+use crate::error::KernelError;
 use crate::sched::{self, task::TaskId};
 
 /// The set of tasks parked on one end of a blocking IPC object.
@@ -178,4 +179,80 @@ pub fn park_interruptible(pid: u64, task: TaskId, wait: crate::wchan::Wait) {
     }
     sched::block_current_on(wait);
     crate::proc::signal::deregister_signalfd_waiter(pid, task);
+}
+
+// ---------------------------------------------------------------------------
+// How long a call waits
+// ---------------------------------------------------------------------------
+
+/// How long a blocking IPC call may wait for its object: the one difference
+/// between a call, its `try_` form and its `_timeout` form, so the three can
+/// share one body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Patience {
+    /// Not at all: the caller is told `WouldBlock` (a `try_` call).
+    Never,
+    /// Until the object is ready, or a deliverable signal (`Interrupted`).
+    Forever,
+    /// Up to this many nanoseconds (`TimedOut`); 0 answers `TimedOut` at once.
+    Upto(u64),
+}
+
+/// The deadline of a [`Patience::Upto`] wait: armed on the first park -- a
+/// timer that wakes the waiter at it -- and cancelled when the wait ends,
+/// whichever way it ends (`Drop`).
+pub struct Deadline {
+    /// When the wait ends, and the timer that wakes the waiter then.
+    armed: Option<(u64, crate::hrtimer::HrTimerHandle)>,
+}
+
+impl Deadline {
+    /// A deadline not yet armed.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { armed: None }
+    }
+
+    /// Whether a wait of `patience` must end now rather than park `task`:
+    /// `WouldBlock` for [`Patience::Never`], `TimedOut` for an
+    /// [`Patience::Upto`] of 0 or one whose deadline has passed, `None` to
+    /// park -- arming the timer the first time it is asked.
+    pub fn ends_now(&mut self, patience: Patience, task: TaskId) -> Option<KernelError> {
+        /// The timer's callback: wake the waiter at its deadline.
+        fn wake_at_deadline(task: u64) {
+            if !sched::try_wake(task) {
+                sched::defer_wake(task);
+            }
+        }
+        match patience {
+            Patience::Never => Some(KernelError::WouldBlock),
+            Patience::Forever => None,
+            Patience::Upto(0) => Some(KernelError::TimedOut),
+            Patience::Upto(ns) => match self.armed {
+                None => {
+                    let at = crate::hrtimer::now_ns().saturating_add(ns);
+                    let timer = crate::hrtimer::schedule_ns(ns, wake_at_deadline, task);
+                    self.armed = Some((at, timer));
+                    None
+                }
+                Some((at, _)) => (crate::hrtimer::now_ns() >= at).then_some(KernelError::TimedOut),
+            },
+        }
+    }
+}
+
+impl Default for Deadline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        if let Some((_, timer)) = self.armed.take() {
+            // Already fired or already gone: nothing left to cancel, which is
+            // the outcome wanted either way.
+            let _ = crate::hrtimer::cancel(timer);
+        }
+    }
 }

@@ -3532,6 +3532,14 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_mlock(),
     );
 
+    // Reads and writes whose buffer cannot be used: EFAULT only where bytes
+    // would have moved, nothing consumed, every other answer first.
+    selftest::dispatch_debug(
+        "Linux NULL-buffer I/O (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_null_buffer(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

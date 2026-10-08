@@ -530,7 +530,7 @@ STDIN='x\n'; xfail_case 'our --version names SlateOS' --version
 # an empty stdin and called it a success. `guard_std_fds!` and `stdfd::restore`
 # undo that, and `tee` now reads descriptor 0 itself (`stdfd::RawStdin`) rather
 # than through `io::stdin()`, which turns `EBADF` into end of input. See
-# `known-issues/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
+# `known-issues-resolved/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
 STDIN_CLOSED=1; run_case out
 STDIN_CLOSED=1; run_case -a out
 

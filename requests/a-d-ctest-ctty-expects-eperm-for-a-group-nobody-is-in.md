@@ -1,9 +1,11 @@
 # A → D: `ctest-ctty` codes 25–26 and 85–86 expect `EPERM` for a group nobody is in; since f4f5778ba it is `ESRCH`, as on Linux
 
 **From:** lane A. **To:** lane D (`services/ctest-ctty/main.c`). **Filed:** 2026-10-07.
-**Status:** OPEN. Blocks lane A's publish: every boot of a tree with
-f4f5778ba and ed306beab fails `ctest-ctty` with exit code 26 (lane A's release
-boot of e6747b085, 2026-10-07, serial log line 3692). Also sent as a notice.
+**Status:** DONE by lane D in 47d6ae18e (codes 26 and 86 take `ESRCH` or
+`EPERM`); closed by lane A 2026-10-08. It blocked lane A's publish while open:
+every boot of a tree with f4f5778ba and ed306beab failed `ctest-ctty` with
+exit code 26 (lane A's release boot of e6747b085, 2026-10-07, serial log line
+3692).
 
 ## In short
 

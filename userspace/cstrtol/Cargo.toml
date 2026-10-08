@@ -1,0 +1,13 @@
+[package]
+name = "cstrtol"
+version = "0.1.0"
+edition = "2024"
+description = "C's strtol, strtoul and strtoull over bytes, in the C locale: prefixes, signs and overflow as glibc parses them"
+
+# No dependencies, and no I/O: a pure function of its bytes, so safe under
+# design-decisions section 768 (a Rust rlib must not become a second libc), as
+# `charwidth` and `quoting` are.
+[dependencies]
+
+[lints]
+workspace = true

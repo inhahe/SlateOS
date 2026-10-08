@@ -806,6 +806,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cstrtol"
+version = "0.1.0"
+
+[[package]]
 name = "ctags"
 version = "0.1.0"
 dependencies = [
@@ -2036,6 +2040,7 @@ version = "0.1.0"
 dependencies = [
  "charwidth",
  "cprintf",
+ "cstrtol",
  "ere",
  "errmsg",
  "localtime",

@@ -5527,10 +5527,13 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 /// Chosen number 1071, next free slot after 1070.
 pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
-/// Set the system's host name: `hostname_set(ptr, len) -> 0`.
+/// Set the host name: `hostname_set(ptr, len) -> 0`.
 ///
 /// The kernel primitive behind POSIX `sethostname`. `ptr`/`len` name a UTF-8
-/// byte string in the caller's address space; `len` 0 clears the name.
+/// byte string in the caller's address space; `len` 0 clears the name. The
+/// name is the caller's UTS namespace's (`crate::utsns`): the system's in the
+/// root namespace, a private one's after [`SYS_NAMESPACE_UNSHARE`] or in a
+/// container.
 ///
 /// **Why this exists, which is the part worth reading.** Until 2026-09-10 our
 /// libc's `sethostname` wrote a `static mut` in the *calling program's own*
@@ -5565,7 +5568,8 @@ pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 /// Chosen number 1072, next free slot after 1071.
 pub const SYS_HOSTNAME_SET: u64 = 1072;
 
-/// Set the system's NIS/YP domain name: `domainname_set(ptr, len) -> 0`.
+/// Set the NIS/YP domain name, the caller's UTS namespace's as for the host
+/// name: `domainname_set(ptr, len) -> 0`.
 ///
 /// The kernel primitive behind POSIX `setdomainname`. Same arguments, same
 /// capability and the same errors as [`SYS_HOSTNAME_SET`]; see that constant
@@ -7002,6 +7006,66 @@ pub const SET_IDS_GROUP: u64 = 4;
 /// ids Linux shows only in `/proc/<pid>/status`). Returns 0;
 /// `InvalidAddress` for a buffer that cannot be written.
 pub const SYS_PROCESS_GET_IDS: u64 = 1160;
+
+/// `SYS_NAMESPACE_UNSHARE` (1161) -- the caller's process into new
+/// namespaces, one of each kind `arg0` names by its Linux `CLONE_NEW*` bit,
+/// each a copy of the one it leaves: the native `unshare(2)`
+/// (`crate::nsfs`). Built so far: `CLONE_NEWUTS` (`0x0400_0000`), the host
+/// and domain names (`crate::utsns`). `arg0` 0 changes nothing and answers
+/// 0, as `unshare(0)`. The whole process moves, every thread
+/// (design-decisions 1554).
+///
+/// `PermissionDenied` without a `Namespace` capability with `WRITE` -- the
+/// right [`SYS_NS_CREATE`] and [`SYS_NS_ATTACH`] ask for; as for every
+/// native call, no authority comes from a user id of 0. `NotSupported` for
+/// any bit but a built kind's, `ResourceExhausted` past the limit on
+/// namespaces.
+pub const SYS_NAMESPACE_UNSHARE: u64 = 1161;
+
+/// `SYS_NAMESPACE_OPEN` (1162) -- a handle on the namespace a
+/// `/proc/<pid>/ns/<kind>` path names (`arg0` the path, `arg1` its length;
+/// absolute, `self` for the caller): what Linux's `open` of that link gives,
+/// for a native program, whose open of it would follow the link's text to
+/// nothing. The handle holds the namespace, alive with nobody in it, until
+/// [`SYS_NAMESPACE_CLOSE`] or exit; a fork's child holds it too. Each open
+/// is its own hold.
+///
+/// Returns the handle. `InvalidArgument` for a path that names no namespace
+/// link (the caller then opens it as it would any path); `NotFound` when the
+/// process is gone or a zombie; `PermissionDenied` when the caller may not
+/// inspect it (Linux's `PTRACE_MODE_READ` check).
+pub const SYS_NAMESPACE_OPEN: u64 = 1162;
+
+/// `SYS_NAMESPACE_ENTER` (1163) -- the caller's process into the namespace
+/// handle `arg0` holds (from [`SYS_NAMESPACE_OPEN`], held by the caller): the
+/// native `setns(2)` with a namespace's descriptor. `arg1` 0 takes it
+/// whatever its kind; otherwise it must be the kind's `CLONE_NEW*` bit.
+///
+/// `InvalidHandle` for a handle the caller does not hold; `InvalidArgument`
+/// for a kind that is not the handle's; `PermissionDenied` without a
+/// `Namespace` capability with `WRITE`.
+pub const SYS_NAMESPACE_ENTER: u64 = 1163;
+
+/// `SYS_NAMESPACE_ENTER_PROCESS` (1164) -- the caller's process into the
+/// namespaces of process `arg0` that `arg1` names by their `CLONE_NEW*`
+/// bits: the native `setns(2)` with a pidfd. `InvalidArgument` for no bit,
+/// `NotSupported` for a kind not built; `NoSuchProcess` for a process that
+/// is gone or a zombie; `PermissionDenied` if the caller may not inspect it
+/// or holds no `Namespace` capability with `WRITE`.
+pub const SYS_NAMESPACE_ENTER_PROCESS: u64 = 1164;
+
+/// `SYS_NAMESPACE_CLOSE` (1165) -- give back namespace handle `arg0` (one
+/// hold); the namespace goes with its last holder. `InvalidHandle` for a
+/// handle the caller does not hold.
+pub const SYS_NAMESPACE_CLOSE: u64 = 1165;
+
+/// `SYS_NAMESPACE_INFO` (1166) -- what `fstat` and `NS_GET_NSTYPE` say of
+/// namespace handle `arg0`: three `u64`s at `arg1` -- the kind's `CLONE_NEW*`
+/// bit, the inode number its `/proc/<pid>/ns` link shows (the `N` of
+/// `uts:[N]`), and nsfs's device number (`st_dev`'s minor, under major 0).
+/// Returns 0; `InvalidHandle` for a handle the caller does not hold,
+/// `InvalidAddress` for a buffer that cannot be written.
+pub const SYS_NAMESPACE_INFO: u64 = 1166;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

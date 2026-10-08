@@ -1293,6 +1293,55 @@ def _progress_harness(body):
         drop_fixture(tmp)
 
 
+def _death_harness(cmdline, serial_text):
+    """Run the real `kernel_is_dead` on a serial log holding `serial_text`,
+    the kernel's command line `cmdline`: "DEAD" or "ALIVE", `None` on a hang.
+    """
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "serial.txt"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(serial_text)
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -uo pipefail\n"
+                f"KERNEL_CMDLINE={_sq(cmdline)}\n"
+                + extract_shell_function("keep_going_boot") + "\n\n"
+                + extract_shell_function("kernel_is_dead") + "\n\n"
+                + "if kernel_is_dead serial.txt; then echo DEAD; else echo ALIVE; fi\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the death check")
+        return None if proc is None else proc.stdout.strip()
+    finally:
+        drop_fixture(tmp)
+
+
+def test_a_kernel_fault_is_a_death_even_when_the_boot_keeps_going():
+    """Under `selftest.keep_going=1` a self-test's FATAL is carried past and an
+    exception's is not.
+
+    Lane A's debug boot 13 (2026-10-08) halted on "FATAL: Unrecoverable kernel
+    page fault. Halting." and the harness, which under keep_going looked only
+    for panic lines, waited out the rest of its 2400 s QEMU timeout on a dead
+    kernel.
+    """
+    keep = "sched.boot_deadline_ms=2400000 selftest.keep_going=1"
+    plain = "sched.boot_deadline_ms=2400000"
+    selftest = ("FATAL: Capability system self-test failed: permission denied (-400)\n"
+                "[selftest] selftest.keep_going: carrying on past Capability system\n")
+    fault = ("EXCEPTION: Page Fault (#PF) at 0xffffffff82415684, address=0x1, error=0x0\n"
+             "FATAL: Unrecoverable kernel page fault. Halting.\n")
+    for label, cmdline, text, want in [
+        ("keep_going: a self-test's FATAL is carried past", keep, selftest, "ALIVE"),
+        ("keep_going: an unrecoverable fault after one is a death", keep,
+         selftest + fault, "DEAD"),
+        ("keep_going: a panic is a death", keep, "!!! KERNEL PANIC !!!\n", "DEAD"),
+        ("keep_going: a log with nothing fatal is alive", keep, "[boot] up\n", "ALIVE"),
+        ("without keep_going: a self-test's FATAL is a death", plain, selftest, "DEAD"),
+    ]:
+        check(label, _death_harness(cmdline, text), want)
+
+
 def _append_steps(steps):
     """Shell that appends each `(elapsed, text)` to serial.txt and scans it.
 

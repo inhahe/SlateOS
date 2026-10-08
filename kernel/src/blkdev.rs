@@ -251,12 +251,14 @@ pub fn last_io_tick() -> u64 {
     LAST_IO_TICK.load(Ordering::Relaxed)
 }
 
-/// Block I/O statistics.
+/// Block I/O operation counts across every device: the liveness watchdog's
+/// evidence of forward progress (`sched::kernel_progress_count`). The time of
+/// the last one is [`last_io_tick`]; per-device counts, sectors and times are
+/// [`device_stats`].
 #[derive(Debug, Clone, Copy)]
 pub struct IoStats {
     pub total_reads: u64,
     pub total_writes: u64,
-    pub last_io_tick: u64,
 }
 
 /// Get block I/O statistics.
@@ -265,7 +267,6 @@ pub fn io_stats() -> IoStats {
     IoStats {
         total_reads: TOTAL_READS.load(Ordering::Relaxed),
         total_writes: TOTAL_WRITES.load(Ordering::Relaxed),
-        last_io_tick: LAST_IO_TICK.load(Ordering::Relaxed),
     }
 }
 
@@ -273,10 +274,168 @@ pub fn io_stats() -> IoStats {
 // Device registry
 // ---------------------------------------------------------------------------
 
+/// What one device has done since it was registered -- the requests each
+/// caller of [`with_device`] made of it, counted on the way through
+/// ([`Accounted`]): Linux's per-disk statistics, `/proc/diskstats`' fields.
+/// Sectors are 512-byte ones whatever the device, as Linux counts them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceStats {
+    /// Read requests completed.
+    pub reads: u64,
+    /// Sectors they read.
+    pub read_sectors: u64,
+    /// Nanoseconds they took.
+    pub read_ns: u64,
+    /// The longest one, in nanoseconds.
+    pub read_max_ns: u64,
+    /// How many of them the driver failed.
+    pub read_errors: u64,
+    /// Write requests completed.
+    pub writes: u64,
+    /// Sectors they wrote.
+    pub write_sectors: u64,
+    /// Nanoseconds they took.
+    pub write_ns: u64,
+    /// The longest one, in nanoseconds.
+    pub write_max_ns: u64,
+    /// How many of them the driver failed.
+    pub write_errors: u64,
+    /// Discard requests completed.
+    pub discards: u64,
+    /// Sectors they discarded.
+    pub discard_sectors: u64,
+    /// Nanoseconds they took.
+    pub discard_ns: u64,
+    /// When the first request of any kind began (`hrtimer::now_ns`); 0
+    /// until there has been one.
+    pub first_io_ns: u64,
+    /// When the last request of any kind began; 0 until there has been one.
+    pub last_io_ns: u64,
+}
+
+impl DeviceStats {
+    /// Nanoseconds the device had a request in progress: every request's
+    /// time, as one runs at a time -- the registry is held across each --
+    /// and so also Linux's weighted time in queue.
+    #[must_use]
+    pub const fn busy_ns(&self) -> u64 {
+        self.read_ns
+            .saturating_add(self.write_ns)
+            .saturating_add(self.discard_ns)
+    }
+}
+
+/// Which way a request [`Accounted`] counts went.
+#[derive(Clone, Copy)]
+enum Direction {
+    Read,
+    Write,
+    Discard,
+}
+
+/// A registered device seen through its statistics: each request a caller
+/// of [`with_device`] or [`try_with_device`] makes is passed to the driver
+/// and counted -- one request, its sectors and its time -- whatever it
+/// answers, as Linux counts a completed request whether it failed or not.
+struct Accounted<'a> {
+    device: &'a mut dyn BlockDevice,
+    stats: &'a mut DeviceStats,
+}
+
+impl Accounted<'_> {
+    /// Count one request of `sectors` that began at `start`
+    /// (`crate::hrtimer::now_ns`) and answered `result`.
+    fn count(&mut self, way: Direction, sectors: u64, start: u64, result: &KernelResult<()>) {
+        let took = crate::hrtimer::now_ns().saturating_sub(start);
+        let s = &mut *self.stats;
+        if s.first_io_ns == 0 {
+            s.first_io_ns = start;
+        }
+        s.last_io_ns = start;
+        let failed = u64::from(result.is_err());
+        match way {
+            Direction::Read => {
+                s.reads = s.reads.saturating_add(1);
+                s.read_sectors = s.read_sectors.saturating_add(sectors);
+                s.read_ns = s.read_ns.saturating_add(took);
+                s.read_max_ns = s.read_max_ns.max(took);
+                s.read_errors = s.read_errors.saturating_add(failed);
+            }
+            Direction::Write => {
+                s.writes = s.writes.saturating_add(1);
+                s.write_sectors = s.write_sectors.saturating_add(sectors);
+                s.write_ns = s.write_ns.saturating_add(took);
+                s.write_max_ns = s.write_max_ns.max(took);
+                s.write_errors = s.write_errors.saturating_add(failed);
+            }
+            Direction::Discard => {
+                s.discards = s.discards.saturating_add(1);
+                s.discard_sectors = s.discard_sectors.saturating_add(sectors);
+                s.discard_ns = s.discard_ns.saturating_add(took);
+            }
+        }
+    }
+}
+
+impl BlockDevice for Accounted<'_> {
+    fn info(&self) -> BlockDeviceInfo {
+        self.device.info()
+    }
+
+    fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
+        let start = crate::hrtimer::now_ns();
+        let r = self.device.read_sector(lba, buf);
+        self.count(Direction::Read, 1, start, &r);
+        r
+    }
+
+    fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
+        let start = crate::hrtimer::now_ns();
+        let r = self.device.write_sector(lba, buf);
+        self.count(Direction::Write, 1, start, &r);
+        r
+    }
+
+    fn read_sectors(&mut self, start_lba: u64, count: u32, buf: &mut [u8]) -> KernelResult<()> {
+        let start = crate::hrtimer::now_ns();
+        let r = self.device.read_sectors(start_lba, count, buf);
+        self.count(Direction::Read, u64::from(count), start, &r);
+        r
+    }
+
+    fn write_sectors(&mut self, start_lba: u64, count: u32, buf: &[u8]) -> KernelResult<()> {
+        let start = crate::hrtimer::now_ns();
+        let r = self.device.write_sectors(start_lba, count, buf);
+        self.count(Direction::Write, u64::from(count), start, &r);
+        r
+    }
+
+    fn supports_discard(&self) -> bool {
+        self.device.supports_discard()
+    }
+
+    fn discard(&mut self, start_lba: u64, count: u64) -> KernelResult<()> {
+        let start = crate::hrtimer::now_ns();
+        let r = self.device.discard(start_lba, count);
+        // Only a discard the device takes is one; a refusal of the call
+        // itself (`NotSupported`) moved nothing.
+        if !matches!(r, Err(KernelError::NotSupported)) {
+            self.count(Direction::Discard, count, start, &r);
+        }
+        r
+    }
+
+    fn pci_address(&self) -> Option<crate::pci::PciAddress> {
+        self.device.pci_address()
+    }
+}
+
 /// A registered block device with its name.
 struct RegisteredDevice {
     name: String,
     device: Box<dyn BlockDevice>,
+    /// What callers have asked of it since it was registered ([`Accounted`]).
+    stats: DeviceStats,
     /// Device metadata, snapshotted at registration time.
     ///
     /// Captured once via [`BlockDevice::info`] (which needs `&self`) so
@@ -326,6 +485,7 @@ pub fn register(name: &str, device: Box<dyn BlockDevice>) {
     registry.push(RegisteredDevice {
         name: String::from(name),
         device,
+        stats: DeviceStats::default(),
         info,
     });
 }
@@ -357,10 +517,24 @@ where
     let mut registry = REGISTRY.lock();
     for entry in registry.iter_mut() {
         if entry.name == name {
-            return Some(f(entry.device.as_mut()));
+            return Some(f(&mut Accounted {
+                device: entry.device.as_mut(),
+                stats: &mut entry.stats,
+            }));
         }
     }
     None
+}
+
+/// Every registered device's metadata and what it has done since it was
+/// registered: `/proc/diskstats`, in registration order.
+#[must_use]
+pub fn device_stats() -> Vec<(BlockDeviceInfo, DeviceStats)> {
+    let registry = REGISTRY.lock();
+    registry
+        .iter()
+        .map(|entry| (entry.info.clone(), entry.stats))
+        .collect()
 }
 
 /// Like [`with_device`], but never blocks on the registry lock.
@@ -390,7 +564,10 @@ where
     };
     for entry in registry.iter_mut() {
         if entry.name == name {
-            return Ok(Some(f(entry.device.as_mut())));
+            return Ok(Some(f(&mut Accounted {
+                device: entry.device.as_mut(),
+                stats: &mut entry.stats,
+            })));
         }
     }
     Ok(None)

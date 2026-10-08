@@ -164,6 +164,14 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 // handle reaching this path was still open at exit.
                 let _ = crate::fs::handle::close(handle_raw);
             }
+            ResourceType::Namespace => {
+                // A handle on a namespace (`crate::nsfs`) -- the only
+                // `Namespace` entries a process's list holds; the authority to
+                // make and attach namespaces is a capability, gone with the
+                // capability table. One hold fewer; the namespace ends with
+                // its last holder.
+                crate::nsfs::release(handle_raw);
+            }
             ResourceType::Service => {
                 // A service listener the process registered: unregistering
                 // frees the name for a restart and closes the connections
@@ -185,7 +193,7 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw,
             // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice,
             // CapBroker) or
-            // managed by other subsystems (Socket, Namespace).
+            // managed by other subsystems (Socket).
             //
             // BlockDevice is a token and not a handle because an open of
             // `/dev/vda` is an ordinary VFS open and registers an ordinary
@@ -214,8 +222,7 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::PrivilegedPort
             | ResourceType::ResourceLimit
             | ResourceType::BlockDevice
-            | ResourceType::CapBroker
-            | ResourceType::Namespace => {}
+            | ResourceType::CapBroker => {}
         }
     }
 }

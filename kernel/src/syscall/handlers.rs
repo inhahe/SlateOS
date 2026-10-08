@@ -7402,6 +7402,202 @@ pub fn sys_process_get_ids(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Namespaces as Linux has them, for native programs (1161-1166)
+// ---------------------------------------------------------------------------
+
+/// The calling process, for the namespace calls: `NoSuchProcess` for a
+/// kernel task, which is in no namespace to leave.
+fn namespace_caller() -> Result<crate::proc::pcb::ProcessId, KernelError> {
+    crate::proc::thread::owner_process(sched::current_task_id())
+        .filter(|&pid| pid != 0)
+        .ok_or(KernelError::NoSuchProcess)
+}
+
+/// The native authority to make and enter namespaces: a `Namespace`
+/// capability with `WRITE`, as `SYS_NS_CREATE` and `SYS_NS_ATTACH` ask.
+fn require_namespace_authority() -> Result<(), KernelError> {
+    require_cap_type(
+        crate::cap::ResourceType::Namespace,
+        crate::cap::Rights::WRITE,
+    )
+}
+
+/// `SYS_NAMESPACE_UNSHARE` -- see
+/// [`SYS_NAMESPACE_UNSHARE`](super::number::SYS_NAMESPACE_UNSHARE).
+pub fn sys_namespace_unshare(args: &SyscallArgs) -> SyscallResult {
+    let kinds = args.arg0;
+    if kinds == 0 {
+        return SyscallResult::ok(0);
+    }
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if let Err(e) = require_namespace_authority() {
+        return SyscallResult::err(e);
+    }
+    if kinds & !crate::nsfs::known_clone_flags() != 0 {
+        return SyscallResult::err(KernelError::NotSupported);
+    }
+    for &kind in crate::nsfs::KINDS {
+        if kinds & kind.clone_flag() != 0
+            && let Err(e) = crate::nsfs::unshare(pid, kind)
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NAMESPACE_OPEN` -- see
+/// [`SYS_NAMESPACE_OPEN`](super::number::SYS_NAMESPACE_OPEN).
+pub fn sys_namespace_open(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (kind, id) = match crate::fs::procfs::namespace_at(path.as_bytes()) {
+        None => return SyscallResult::err(KernelError::InvalidArgument),
+        Some(Err(e)) => return SyscallResult::err(e),
+        Some(Ok(found)) => found,
+    };
+    let raw = crate::nsfs::encode(kind, id);
+    if !crate::nsfs::retain(raw) {
+        // Gone since the link was read: its last holder let it go.
+        return SyscallResult::err(KernelError::NotFound);
+    }
+    crate::proc::pcb::register_ipc_handle(pid, crate::cap::ResourceType::Namespace, raw);
+    #[allow(clippy::cast_possible_wrap)] // the kind's tag is in bits 56..63, below the sign
+    SyscallResult::ok(raw as i64)
+}
+
+/// The kind and namespace of handle `raw`, if the caller holds it.
+fn held_namespace(
+    pid: crate::proc::pcb::ProcessId,
+    raw: u64,
+) -> Result<(crate::nsfs::NsKind, u64), KernelError> {
+    if !crate::proc::pcb::owns_ipc_handle(pid, crate::cap::ResourceType::Namespace, raw) {
+        return Err(KernelError::InvalidHandle);
+    }
+    crate::nsfs::decode(raw).ok_or(KernelError::InvalidHandle)
+}
+
+/// `SYS_NAMESPACE_ENTER` -- see
+/// [`SYS_NAMESPACE_ENTER`](super::number::SYS_NAMESPACE_ENTER).
+pub fn sys_namespace_enter(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (kind, id) = match held_namespace(pid, args.arg0) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 != 0 && args.arg1 != kind.clone_flag() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = require_namespace_authority() {
+        return SyscallResult::err(e);
+    }
+    match crate::nsfs::enter(pid, kind, id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NAMESPACE_ENTER_PROCESS` -- see
+/// [`SYS_NAMESPACE_ENTER_PROCESS`](super::number::SYS_NAMESPACE_ENTER_PROCESS).
+pub fn sys_namespace_enter_process(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+    let (target, kinds) = (args.arg0, args.arg1);
+    if kinds == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if kinds & !crate::nsfs::known_clone_flags() != 0 {
+        return SyscallResult::err(KernelError::NotSupported);
+    }
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if pcb::state(target).is_none_or(|s| s == pcb::ProcessState::Zombie) {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    if !pcb::may_inspect(Some(pid), Some(target)) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    if let Err(e) = require_namespace_authority() {
+        return SyscallResult::err(e);
+    }
+    for &kind in crate::nsfs::KINDS {
+        if kinds & kind.clone_flag() == 0 {
+            continue;
+        }
+        let Some(id) = crate::nsfs::of_process(kind, target) else {
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        };
+        if let Err(e) = crate::nsfs::enter(pid, kind, id) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NAMESPACE_CLOSE` -- see
+/// [`SYS_NAMESPACE_CLOSE`](super::number::SYS_NAMESPACE_CLOSE).
+pub fn sys_namespace_close(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // The record and the hold it stands for go together, once.
+    if !crate::proc::pcb::take_ipc_handle(pid, crate::cap::ResourceType::Namespace, args.arg0) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    crate::nsfs::release(args.arg0);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NAMESPACE_INFO` -- see
+/// [`SYS_NAMESPACE_INFO`](super::number::SYS_NAMESPACE_INFO).
+pub fn sys_namespace_info(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (kind, id) = match held_namespace(pid, args.arg0) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut out = [0u8; 24];
+    let words = [
+        kind.clone_flag(),
+        crate::nsfs::inum(kind, id),
+        u64::from(crate::nsfs::dev()),
+    ];
+    for (dst, byte) in out
+        .iter_mut()
+        .zip(words.iter().flat_map(|w| w.to_ne_bytes()))
+    {
+        *dst = byte;
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, out.len()) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: 24 bytes at `arg1`, validated writable just above;
+    // `copy_to_user` re-checks the range and brackets the store with
+    // STAC/CLAC.
+    match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `u32` "leave this field unchanged" sentinel for
 /// [`sys_process_set_credentials`], matching POSIX's `(uid_t)-1`.
 ///
@@ -8155,7 +8351,8 @@ pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
     name_set_gated(
         args,
         crate::cap::Rights::SET_HOSTNAME,
-        crate::fs::nameservice::set_hostname,
+        // The caller's UTS namespace's: the system's only in the root.
+        crate::utsns::set_hostname_here,
     )
 }
 
@@ -8167,7 +8364,7 @@ pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
     name_set_gated(
         args,
         crate::cap::Rights::SET_HOSTNAME,
-        crate::fs::nameservice::set_domain,
+        crate::utsns::set_domainname_here,
     )
 }
 
@@ -14201,29 +14398,10 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let result = match fstype {
-        "ext4" => crate::fs::ext4::mount(source, target),
-        "tmpfs" | "memfs" | "ramfs" => crate::fs::memfs::mount(target),
-        "iso9660" | "iso" | "cd9660" => crate::fs::iso9660::mount(source, target),
-        // Both are read-only drivers, so a caller that passes MS_RDONLY gets
-        // what it asked for and one that does not gets it anyway; the mount
-        // succeeds either way and writes fail per-operation.
-        "ntfs" | "ntfs3" => crate::fs::ntfs::mount(source, target),
-        "btrfs" => crate::fs::btrfs::mount(source, target),
-        "f2fs" => crate::fs::f2fs::mount(source, target),
-        "zfs" => crate::fs::zfs::mount(source, target),
-        "devfs" | "dev" => crate::fs::devfs::mount(target),
-        "proc" | "procfs" => crate::fs::procfs::mount(target),
-        "sysfs" | "sys" => crate::fs::sysfs::mount(target),
-        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => {
-            match crate::fs::fat::FatFs::mount(source) {
-                Ok(fs) => crate::fs::Vfs::mount(target, alloc::boxed::Box::new(fs)),
-                Err(e) => Err(e),
-            }
-        }
-        // Unknown filesystem type.
-        _ => Err(KernelError::NotSupported),
-    };
+    // The types and their drivers are `fs::new_filesystem`'s, shared with
+    // the Linux `mount(2)`; an unknown type is `NotSupported`.
+    let result =
+        crate::fs::new_filesystem(fstype, source).and_then(|fs| crate::fs::Vfs::mount(target, fs));
 
     match result {
         Ok(()) => SyscallResult::ok(0),

@@ -611,9 +611,15 @@ check_identity_rungs() {
 # selftest.keep_going: carrying on past ..." next -- so it is not a death, and
 # stopping there would throw away the rest of the list the mode exists to
 # collect. rq33 (2026-10-02) was stopped 93 s into QEMU, two failures in, for
-# exactly that. Only a panic is a death then; the FATAL lines still fail the
-# boot at the end (`check_selftest_failures` when the marker is reached, the
-# post-loop check when it is not).
+# exactly that. A panic is a death then, and so is a FATAL that is not a
+# self-test's -- "FATAL: Unrecoverable kernel page fault. Halting." is the
+# exception handler stopping the kernel, which nothing carries on past. Lane
+# A's debug boot 13 (2026-10-08) halted on one at about 1500 s of QEMU and the
+# harness, which looked only for panic lines, waited out the rest of its
+# 2400 s timeout on a dead kernel. A self-test's FATAL says `self-test failed`
+# (`selftest::report`); the FATAL lines still fail the boot at the end
+# (`check_selftest_failures` when the marker is reached, the post-loop check
+# when it is not).
 keep_going_boot() {
     case " ${KERNEL_CMDLINE:-} " in
         *" selftest.keep_going=1 "*) return 0 ;;
@@ -624,7 +630,10 @@ kernel_is_dead() {
     local file="$1"
     [ -f "$file" ] || return 1
     if keep_going_boot; then
-        grep -aEq '^(!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+        grep -aEq '^(!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null && return 0
+        # A FATAL that is not a self-test's: any line of the first grep's that
+        # the second does not drop.
+        grep -a '^FATAL:' "$file" 2>/dev/null | grep -avq 'self-test failed'
     else
         grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
     fi

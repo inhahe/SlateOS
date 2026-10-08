@@ -2077,19 +2077,8 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
         return Err(errno::EINVAL);
     }
 
-    // Reject any namespace clone.  Linux's clone3 honours these but
-    // we have no namespace subsystem.
-    const NAMESPACE_BITS: u64 = clone_flags::CLONE_NEWNS
-        | clone_flags::CLONE_NEWCGROUP
-        | clone_flags::CLONE_NEWUTS
-        | clone_flags::CLONE_NEWIPC
-        | clone_flags::CLONE_NEWUSER
-        | clone_flags::CLONE_NEWPID
-        | clone_flags::CLONE_NEWNET
-        | clone_flags::CLONE_NEWTIME;
-    if flags_user & NAMESPACE_BITS != 0 {
-        return Err(errno::EINVAL);
-    }
+    // Namespaces: as clone(2) judges them (`clone_namespaces`).
+    clone_namespaces(flags_user)?;
 
     // Translate stack base + size to clone(2)'s "stack top" register.
     // clone(2) wants the value of the new RSP at child entry; on x86_64
@@ -2852,6 +2841,76 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
 /// The frame is still needed so the new task can inherit the parent's
 /// register state — both `thread_clone::clone_thread` and
 /// `fork::fork_process` read it for the child's saved-context image.
+/// Whether the caller may make a namespace or enter one -- what Linux asks
+/// `CAP_SYS_ADMIN` for. Here an effective user id of 0 (`proc::setid`'s Linux
+/// authority), or the native authority to make and attach namespaces: a
+/// `Namespace` capability with `WRITE` (`SYS_NS_CREATE`, `SYS_NS_ATTACH`).
+/// A kernel task may.
+fn caller_may_change_namespaces() -> bool {
+    caller_pid().is_none_or(|pid| {
+        pcb::get_credentials(pid).is_some_and(|c| c.uid == 0)
+            || pcb::has_capability_type(
+                pid,
+                crate::cap::ResourceType::Namespace,
+                crate::cap::Rights::WRITE,
+            )
+    })
+}
+
+/// The namespace bits of a `clone`, `clone3` or `unshare` flag word, judged
+/// as Linux judges them on a kernel built with only the kinds this one has
+/// (`crate::nsfs::KINDS`): `CLONE_NEWUSER` is `EINVAL` before anything, as
+/// without `CONFIG_USER_NS`; any other needs a caller that may change
+/// namespaces ([`caller_may_change_namespaces`], `EPERM`); and then a kind
+/// not built is `EINVAL`, as without its `CONFIG_*_NS` -- the order of
+/// Linux's `copy_namespaces` and `unshare_nsproxy_namespaces`, which ask for
+/// `CAP_SYS_ADMIN` before making anything. `Ok` with the bits of the kinds
+/// to make.
+fn namespace_request(flags: u64) -> Result<u64, i32> {
+    const ALL: u64 = clone_flags::CLONE_NEWNS
+        | clone_flags::CLONE_NEWUTS
+        | clone_flags::CLONE_NEWIPC
+        | clone_flags::CLONE_NEWUSER
+        | clone_flags::CLONE_NEWPID
+        | clone_flags::CLONE_NEWNET
+        | clone_flags::CLONE_NEWCGROUP
+        | clone_flags::CLONE_NEWTIME;
+    if flags & clone_flags::CLONE_NEWUSER != 0 {
+        return Err(errno::EINVAL);
+    }
+    let asked = flags & ALL;
+    if asked == 0 {
+        return Ok(0);
+    }
+    if !caller_may_change_namespaces() {
+        return Err(errno::EPERM);
+    }
+    if asked & !crate::nsfs::known_clone_flags() != 0 {
+        return Err(errno::EINVAL);
+    }
+    Ok(asked)
+}
+
+/// The namespace bits of a `clone` or `clone3` flag word ([`namespace_request`]):
+/// what this kernel can make, for whom, for a new process (`proc::fork`
+/// makes them). A thread shares its process's namespaces here, where Linux
+/// lets it have its own (and refuses `CLONE_NEWNS` with the `CLONE_FS` a
+/// thread shares), so a thread asking for one is `EINVAL`. Until 2026-10-08
+/// `clone(2)` took every namespace bit but `CLONE_NEWNS` and made nothing, so
+/// a program believed itself isolated and was not. `Err(errno)`.
+fn clone_namespaces(flags: u64) -> Result<(), i32> {
+    // A new mount namespace and a filesystem context shared with the parent
+    // contradict each other: Linux's `copy_process` refuses the pair first.
+    if flags & clone_flags::CLONE_NEWNS != 0 && flags & clone_flags::CLONE_FS != 0 {
+        return Err(errno::EINVAL);
+    }
+    let kinds = namespace_request(flags)?;
+    if kinds != 0 && flags & clone_flags::CLONE_THREAD != 0 {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
+}
+
 fn linux_clone_inner(
     flags: u64,
     child_stack: u64,
@@ -2861,6 +2920,11 @@ fn linux_clone_inner(
     frame: &mut crate::syscall::entry::SyscallFrame,
 ) -> i64 {
     use crate::proc::{thread, thread_clone};
+
+    // (0) Namespaces: CLONE_NEWUTS for a new process, nothing else yet.
+    if let Err(errno) = clone_namespaces(flags) {
+        return linux_err(errno).value;
+    }
 
     // (1) Thread-creation path: requires CLONE_VM | CLONE_THREAD AND
     //     a non-zero child_stack.  glibc's pthread_create wrapper
@@ -2872,11 +2936,11 @@ fn linux_clone_inner(
         // CLONE_VFORK on a thread-creation clone is nonsensical — the
         // new "child" shares the address space, so blocking the
         // parent until the child execs/exits is meaningless.  Reject
-        // unambiguously.  CLONE_PARENT / CLONE_NEWNS need
-        // infrastructure (PID reparenting, mount namespaces) we don't
-        // have yet. (CLONE_PTRACE is honoured: `ptrace::attach_new`.)
-        const UNSUPPORTED_BITS: u64 =
-            clone_flags::CLONE_VFORK | clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS;
+        // unambiguously.  CLONE_PARENT needs infrastructure (PID
+        // reparenting) we don't have yet. (CLONE_PTRACE is honoured:
+        // `ptrace::attach_new`; CLONE_NEWNS, as every namespace, is
+        // refused for a thread by `clone_namespaces` before this.)
+        const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK | clone_flags::CLONE_PARENT;
         if (flags & UNSUPPORTED_BITS) != 0 {
             return -i64::from(errno::ENOSYS);
         }
@@ -3013,10 +3077,10 @@ fn linux_clone_inner(
         return -i64::from(errno::ENOSYS);
     }
 
-    // CLONE_PARENT / CLONE_NEWNS need infrastructure we don't have (PID
-    // reparenting, mount namespaces) — reject up-front. (CLONE_PTRACE is
-    // honoured: `ptrace::attach_new`.)
-    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_PARENT | clone_flags::CLONE_NEWNS;
+    // CLONE_PARENT needs infrastructure we don't have (PID reparenting) —
+    // reject up-front. (CLONE_PTRACE is honoured: `ptrace::attach_new`;
+    // CLONE_NEWNS gives the child a mount namespace, `proc::fork`.)
+    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_PARENT;
     if flags & UNSUPPORTED_BITS != 0 {
         return -i64::from(errno::ENOSYS);
     }
@@ -3239,7 +3303,7 @@ fn linux_exec_common(
     argv_user: u64,
     envp_user: u64,
 ) -> i64 {
-    let rc = linux_exec_common_inner(frame, filename, argv_user, envp_user);
+    let rc = linux_exec_common_inner(frame, ExecSource::Path(filename), argv_user, envp_user);
     if rc < 0 {
         crate::serial_println!(
             "[exec] execve({:?}) FAILED -> errno {} -- see known-issues \
@@ -3251,9 +3315,39 @@ fn linux_exec_common(
     rc
 }
 
+/// What an exec loads: a file, by the name the caller gave (`execve`,
+/// `execveat`), or an image already read with the name `/proc/<pid>/exe`
+/// gives it (a memfd's, by `fexecve`).
+enum ExecSource<'a> {
+    /// A file, read from the VFS before the old image goes.
+    Path(&'a Path),
+    /// The bytes, and the exe link's text.
+    Image {
+        data: alloc::vec::Vec<u8>,
+        exe: alloc::vec::Vec<u8>,
+    },
+}
+
+/// [`linux_exec_common`] for an image already read: `fexecve` of a memfd,
+/// whose bytes are the program and which has no name to load by.
+fn linux_exec_image(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    data: alloc::vec::Vec<u8>,
+    exe: alloc::vec::Vec<u8>,
+    argv_user: u64,
+    envp_user: u64,
+) -> i64 {
+    let shown = Path::new(exe.as_slice()).to_path_buf();
+    let rc = linux_exec_common_inner(frame, ExecSource::Image { data, exe }, argv_user, envp_user);
+    if rc < 0 {
+        crate::serial_println!("[exec] fexecve({:?}) FAILED -> errno {}", shown, -rc);
+    }
+    rc
+}
+
 fn linux_exec_common_inner(
     frame: &mut crate::syscall::entry::SyscallFrame,
-    filename: &Path,
+    source: ExecSource<'_>,
     argv_user: u64,
     envp_user: u64,
 ) -> i64 {
@@ -3291,6 +3385,13 @@ fn linux_exec_common_inner(
         }
         argv_bufs.push(s);
     }
+    // No arguments at all -- a NULL argv, or an empty one -- gets an empty
+    // `argv[0]`, as Linux has given one since 5.18 (`do_execveat_common`):
+    // a program may take argv[0] as there.
+    if argv_bufs.is_empty() {
+        total_bytes = total_bytes.saturating_add(1);
+        argv_bufs.push(alloc::vec::Vec::new());
+    }
     let mut envp_bufs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
         alloc::vec::Vec::with_capacity(envp_ptrs.len());
     for p in envp_ptrs {
@@ -3306,9 +3407,21 @@ fn linux_exec_common_inner(
     }
 
     // ---- 5. Read file from VFS BEFORE tearing down old AS. ----
-    let elf_data = match crate::fs::vfs::Vfs::read_file(filename) {
-        Ok(d) => d,
-        Err(e) => return -i64::from(linux_errno_for(e)),
+    let (elf_data, exe_path) = match source {
+        ExecSource::Path(filename) => {
+            let data = match crate::fs::vfs::Vfs::read_file(filename) {
+                Ok(d) => d,
+                Err(e) => return -i64::from(linux_errno_for(e)),
+            };
+            // Resolve the executable's absolute path for /proc/<pid>/exe.
+            // We canonicalise the caller's filename against the process cwd
+            // so a relative execve still yields an absolute exe link.
+            // Best-effort: on failure we pass None and the link reports
+            // NotFound.
+            let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+            (data, canonicalize_path(&cwd, filename.as_bytes()).ok())
+        }
+        ExecSource::Image { data, exe } => (data, Some(exe)),
     };
 
     // ---- 6. Build &[&[u8]] views for exec_process. ----
@@ -3316,15 +3429,6 @@ fn linux_exec_common_inner(
         argv_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
     let envp_slices: alloc::vec::Vec<&[u8]> =
         envp_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
-
-    // Resolve the executable's absolute path for /proc/<pid>/exe.  We
-    // canonicalise the caller's filename against the process cwd so a
-    // relative execve still yields an absolute exe link.  Best-effort:
-    // on failure we pass None and the link reports NotFound.
-    let exe_path: Option<alloc::vec::Vec<u8>> = {
-        let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
-        canonicalize_path(&cwd, filename.as_bytes()).ok()
-    };
 
     // ---- 7. Exec.  After this point the old AS is gone on success. ----
     match exec_process(
@@ -3430,6 +3534,23 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
             Ok(e) => e,
             Err(sr) => return sr.value,
         };
+        if entry.kind == HandleKind::MemFd {
+            // A memfd: its bytes are the program, and it has no name to load
+            // by. `/proc/<pid>/exe` names it as Linux's does. It was
+            // `EACCES` until 2026-10-08, which no Linux program expects of
+            // a memfd created executable (runc and systemd exec from one).
+            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+            let data = match crate::ipc::memfd::contents(h) {
+                Ok(d) => d,
+                Err(e) => return -i64::from(linux_errno_for(e)),
+            };
+            let mut exe = b"/memfd:".to_vec();
+            // The name is only the link's text: a memfd closed by another
+            // thread since its bytes were read leaves `/memfd: (deleted)`.
+            exe.extend_from_slice(&crate::ipc::memfd::name(h).unwrap_or_default());
+            exe.extend_from_slice(b" (deleted)");
+            return linux_exec_image(frame, data, exe, argv_user, envp_user);
+        }
         if entry.kind != HandleKind::File {
             return -i64::from(errno::EACCES);
         }
@@ -4301,6 +4422,19 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::unix_socket::close(unix_handle(&entry));
             SyscallResult::ok(0)
         }
+        HandleKind::Namespace => {
+            // Deregister, then give this process's hold on the namespace
+            // back; it ends with its last holder, process or handle.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Namespace,
+                    entry.raw_handle,
+                );
+            }
+            crate::nsfs::release(entry.raw_handle);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -4397,7 +4531,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         | HandleKind::Inotify
         | HandleKind::AlsaControl
         | HandleKind::Evdev
-        | HandleKind::DrmCard => linux_err(errno::EINVAL),
+        | HandleKind::DrmCard
+        | HandleKind::Namespace => linux_err(errno::EINVAL),
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
         // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
         HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
@@ -4932,7 +5067,9 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
         // The ALSA control device is ioctl-only: read(2) → EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl | HandleKind::Namespace => {
+            linux_err(errno::EINVAL)
+        }
         // A DRM card fd delivers queued KMS events (flip-complete) via read(2).
         HandleKind::DrmCard => dispatch_drm_card_read(&entry, buf, cap),
         HandleKind::Evdev => dispatch_evdev_read(&entry, buf, cap),
@@ -6012,7 +6149,8 @@ fn fcntl_flock_apply(
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => {
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => {
             return linux_err(errno::EBADF);
         }
     };
@@ -6144,7 +6282,8 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -6565,6 +6704,18 @@ fn open_common(
             }
             return reopen_own_fd(pid, fd, flags);
         }
+        // A namespace's link, `/proc/<pid>/ns/<kind>`: Linux's open follows
+        // it to the namespace itself (`crate::nsfs`), a handle `setns` takes.
+        // Where VFS resolution would follow its text, `uts:[N]`, to nothing.
+        if let Some(found) = crate::fs::procfs::namespace_at(canon.as_slice()) {
+            if no_symlinks {
+                return linux_err(errno::ELOOP);
+            }
+            return match found {
+                Ok((kind, id)) => open_namespace(pid, kind, id, flags),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
     }
 
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
@@ -6726,6 +6877,60 @@ fn open_fifo_fd(
                 // is the caller's.
                 let _ = close_handle(entry);
             }
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// Open namespace `id` of `kind` for process `pid` -- an `open` of its
+/// `/proc/<pid>/ns` link -- and give it a descriptor that holds the namespace
+/// (`crate::nsfs`).
+///
+/// As Linux's nsfs file: the link exists, so `O_CREAT | O_EXCL` is `EEXIST`;
+/// it is a link, which `O_NOFOLLOW` refuses to follow (`ELOOP`); it is no
+/// directory (`ENOTDIR` for `O_DIRECTORY`). Any access mode is taken, as
+/// this kernel enforces no mode bits (design-decisions 31); a write is
+/// `EINVAL`, as on Linux.
+///
+/// One hold per process per namespace, shared by every descriptor the
+/// process has on it, as for every object here: the open takes one, and gives
+/// it back if the process held the namespace already --
+/// `pcb::linux_fd_install_passed` decides that and installs in one step, so a
+/// concurrent close of the process's last descriptor for it cannot leave the
+/// new one holding nothing.
+fn open_namespace(pid: u64, kind: crate::nsfs::NsKind, id: u64, flags: u32) -> SyscallResult {
+    if flags & oflags::O_CREAT != 0 && flags & oflags::O_EXCL != 0 {
+        return linux_err(errno::EEXIST);
+    }
+    if flags & oflags::O_NOFOLLOW != 0 {
+        return linux_err(errno::ELOOP);
+    }
+    if flags & oflags::O_DIRECTORY != 0 {
+        return linux_err(errno::ENOTDIR);
+    }
+    let raw = crate::nsfs::encode(kind, id);
+    if !crate::nsfs::retain(raw) {
+        // Gone since the link was read: its last holder let it go.
+        return linux_err(errno::ENOENT);
+    }
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let mut entry = FdEntry::namespace(raw, fd_flags);
+    entry.status_flags = flags & (oflags::O_ACCMODE | oflags::O_NONBLOCK);
+    match pcb::linux_fd_install_passed(pid, entry) {
+        Ok((fd, held)) => {
+            if held {
+                // The process holds the namespace already, and one hold per
+                // object is all it keeps.
+                crate::nsfs::release(raw);
+            }
+            SyscallResult::ok(i64::from(fd))
+        }
+        Err(e) => {
+            crate::nsfs::release(raw);
             linux_err(linux_errno_for(e))
         }
     }
@@ -10876,11 +11081,45 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                     crate::proc::linux_fd::HandleKind::Evdev => {
                         return evdev_ioctl(&entry, request, args.arg2);
                     }
+                    crate::proc::linux_fd::HandleKind::Namespace => {
+                        return namespace_ioctl(&entry, request);
+                    }
                     _ => {}
                 }
             }
             linux_err(errno::ENOTTY)
         }
+    }
+}
+
+/// The `NS_GET_*` requests (`<linux/nsfs.h>`, magic `0xb7`) on a namespace's
+/// descriptor (`crate::nsfs`), as Linux's `ns_ioctl` answers them:
+///
+/// | request | answer |
+/// |---|---|
+/// | `NS_GET_NSTYPE` | the kind's `CLONE_NEW*` bit |
+/// | `NS_GET_PARENT` | `EINVAL`: a UTS namespace has no parent, it is not nested |
+/// | `NS_GET_OWNER_UID` | `EINVAL`: only a user namespace has an owner |
+/// | `NS_GET_USERNS` | `EPERM`: no user namespace can be named by a handle yet |
+/// | anything else | `ENOTTY` |
+///
+/// `NS_GET_USERNS` is where Linux gives a descriptor for the user namespace
+/// owning this one, and `EPERM` its answer when that lies outside what the
+/// caller may see: the honest one while this kernel has no user namespace a
+/// handle can name.
+fn namespace_ioctl(entry: &FdEntry, request: u32) -> SyscallResult {
+    const NS_GET_USERNS: u32 = 0xb701;
+    const NS_GET_PARENT: u32 = 0xb702;
+    const NS_GET_NSTYPE: u32 = 0xb703;
+    const NS_GET_OWNER_UID: u32 = 0xb704;
+    let Some((kind, _)) = crate::nsfs::decode(entry.raw_handle) else {
+        return linux_err(errno::ENOTTY);
+    };
+    match request {
+        NS_GET_NSTYPE => SyscallResult::ok(i64::try_from(kind.clone_flag()).unwrap_or(0)),
+        NS_GET_PARENT | NS_GET_OWNER_UID => linux_err(errno::EINVAL),
+        NS_GET_USERNS => linux_err(errno::EPERM),
+        _ => linux_err(errno::ENOTTY),
     }
 }
 
@@ -18305,7 +18544,8 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::EINVAL),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::EINVAL),
     }
 }
 
@@ -18511,7 +18751,7 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     // setdomainname has had this shape since the original landing;
     // sethostname is brought into sister alignment here.
     if len == 0 {
-        if let Err(e) = crate::fs::nameservice::set_hostname("") {
+        if let Err(e) = crate::utsns::set_hostname_here("") {
             return linux_err(linux_errno_for(e));
         }
         return SyscallResult::ok(0);
@@ -18532,7 +18772,8 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    if let Err(e) = crate::fs::nameservice::set_hostname(name) {
+    // The caller's UTS namespace's, which is the system's only in the root.
+    if let Err(e) = crate::utsns::set_hostname_here(name) {
         return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
@@ -18593,7 +18834,7 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
 
     // setdomainname(NULL, 0) is "clear the domain" — Linux accepts.
     if len == 0 {
-        if let Err(e) = crate::fs::nameservice::set_domain("") {
+        if let Err(e) = crate::utsns::set_domainname_here("") {
             return linux_err(linux_errno_for(e));
         }
         return SyscallResult::ok(0);
@@ -18611,7 +18852,7 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return linux_err(errno::EINVAL),
     };
 
-    if let Err(e) = crate::fs::nameservice::set_domain(name) {
+    if let Err(e) = crate::utsns::set_domainname_here(name) {
         return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
@@ -19186,7 +19427,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => return linux_err(errno::EINVAL),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -21324,6 +21566,20 @@ fn rdev_for_fd(entry: &crate::proc::linux_fd::FdEntry) -> crate::fs::devnum::Dev
     }
 }
 
+/// The device number (`st_dev`'s minor, under major 0) and inode number of a
+/// namespace's descriptor: nsfs's own device ([`crate::nsfs::dev`]) and the
+/// number its `/proc/<pid>/ns` link shows ([`crate::nsfs::inum`]), so `stat`
+/// of the link, `fstat` of an opened one and the link's text agree, as
+/// `lsns` and `ip netns identify` compare them. `None` for any other
+/// descriptor.
+fn nsfs_identity(entry: &crate::proc::linux_fd::FdEntry) -> Option<(u32, u64)> {
+    if entry.kind != HandleKind::Namespace {
+        return None;
+    }
+    let (kind, id) = crate::nsfs::decode(entry.raw_handle)?;
+    Some((crate::nsfs::dev(), crate::nsfs::inum(kind, id)))
+}
+
 /// Fill a 144-byte struct stat for the given Linux fd-table entry.
 fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::FdEntry) {
     use crate::proc::linux_fd::HandleKind;
@@ -21403,10 +21659,15 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         HandleKind::Channel | HandleKind::ServiceListener | HandleKind::UnixSocket => {
             (S_IFSOCK | 0o777, 4096)
         }
+        // A namespace: a regular file, read-only, as Linux's nsfs inode.
+        HandleKind::Namespace => (S_IFREG | 0o444, 4096),
     };
 
-    // Inode: use the raw_handle as a stable-ish identity.
-    let st_ino: u64 = entry.raw_handle;
+    // Inode: use the raw_handle as a stable-ish identity -- but a namespace's
+    // is the number its link shows, on nsfs's own device (`nsfs_identity`).
+    let (st_dev, st_ino) = nsfs_identity(entry).map_or((0, entry.raw_handle), |(dev, ino)| {
+        (crate::fs::vfs::linux_dev_t(dev), ino)
+    });
     // For memfd, surface the live data length as st_size so callers
     // (notably libraries that ftruncate+stat-loop to size a mapping)
     // observe the resize they just performed.  Other kinds report 0.
@@ -21435,7 +21696,7 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         buf[off..off + 4].copy_from_slice(&bytes);
     }
 
-    put_u64(buf, 0, 0); // st_dev
+    put_u64(buf, 0, st_dev); // st_dev
     put_u64(buf, 8, st_ino); // st_ino
     put_u64(buf, 16, 1); // st_nlink
     put_u32(buf, 24, mode); // st_mode
@@ -21548,11 +21809,22 @@ fn stat_path_common(path_ptr: u64, statbuf_ptr: u64, follow: bool) -> SyscallRes
 /// So `stat("/dev/stdin")` reports what descriptor 0 holds, as `fstat(0)`
 /// does: `[ -p /dev/stdin ]` asks about the pipe the shell connected, not
 /// devfs's console node (lane B's request, alongside [`reopen_own_fd`]).
+///
+/// A namespace's link, `/proc/<pid>/ns/<kind>`, is the namespace the same
+/// way: the entry a descriptor opened on it would have, so `stat` of the link
+/// and `fstat` of the descriptor agree (`nsfs_identity`), as `lsns` and
+/// `ip netns identify` compare them. Only read, so it holds nothing.
 fn own_fd_stat_target(path: &[u8], follow: bool) -> Option<Result<FdEntry, SyscallResult>> {
     if !follow {
         return None;
     }
     let pid = caller_pid()?;
+    if let Some(found) = crate::fs::procfs::namespace_at(path) {
+        return Some(match found {
+            Ok((kind, id)) => Ok(FdEntry::namespace(crate::nsfs::encode(kind, id), 0)),
+            Err(e) => Err(linux_err(linux_errno_for(e))),
+        });
+    }
     let fd = own_fd_name(path, pid)?;
     Some(pcb::linux_fd_lookup(pid, fd).ok_or_else(|| linux_err(errno::ENOENT)))
 }
@@ -21835,8 +22107,12 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         HandleKind::Channel | HandleKind::ServiceListener | HandleKind::UnixSocket => {
             ((S_IFSOCK | 0o777) as u16, 4096)
         }
+        // A namespace: a regular file, read-only, as Linux's nsfs inode.
+        HandleKind::Namespace => ((S_IFREG | 0o444) as u16, 4096),
     };
-    let st_ino: u64 = entry.raw_handle;
+    // A namespace's inode and device are nsfs's (`nsfs_identity`).
+    let identity = nsfs_identity(entry);
+    let st_ino: u64 = identity.map_or(entry.raw_handle, |(_, ino)| ino);
     // Surface the live memfd data length so stx_size reflects what callers
     // (notably libraries that ftruncate+stat-loop) just wrote.
     let st_size: u64 = match entry.kind {
@@ -21897,6 +22173,11 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
     let rdev = rdev_for_fd(entry);
     put_u32(buf, 128, rdev.major); // stx_rdev_major
     put_u32(buf, 132, rdev.minor); // stx_rdev_minor
+    // A namespace lives on nsfs's device; stx_dev_major is 0, as for every
+    // anonymous device.
+    if let Some((dev, _)) = identity {
+        put_u32(buf, 140, dev); // stx_dev_minor
+    }
     // Remaining fields (dev/mnt_id/dio/subvol/atomic/spare3) stay zero --
     // these objects live on no filesystem.
 }
@@ -23579,7 +23860,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::EINVAL),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::EINVAL),
     }
 }
 
@@ -30205,14 +30487,39 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
     if flags == 0 {
         return SyscallResult::ok(0);
     }
-    linux_err(errno::EPERM)
+    // The sharing flags -- a private file table, filesystem context or
+    // System V undo list for one thread -- are not built: EPERM, as before.
+    const SHARING: u64 = 0x400 | 0x200 | 0x40000 | 0x10000 | 0x800 | 0x100;
+    if flags & SHARING != 0 {
+        return linux_err(errno::EPERM);
+    }
+    // The namespaces (`namespace_request`): the caller into a new one of each
+    // kind asked for, a copy of the one it leaves. Every thread of the
+    // process goes with it: here namespaces are the process's, where Linux's
+    // are the thread's (design-decisions 1554).
+    let kinds = match namespace_request(flags) {
+        Ok(kinds) => kinds,
+        Err(e) => return linux_err(e),
+    };
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    for &kind in crate::nsfs::KINDS {
+        if kinds & kind.clone_flag() != 0
+            && let Err(e) = crate::nsfs::unshare(pid, kind)
+        {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(0)
 }
 
-/// `setns(fd, nstype)`.
+/// `setns(fd, nstype)`: the caller's process into a namespace.
 ///
-/// Linux's `kernel/nsproxy.c::SYSCALL_DEFINE2(setns)` accepts an `fd`
-/// referring to either a `/proc/PID/ns/*` namespace file or a pidfd,
-/// and validates `nstype` against the namespace-type mask:
+/// Linux's `kernel/nsproxy.c::SYSCALL_DEFINE2(setns)` takes an `fd` that is
+/// either a namespace's descriptor -- `/proc/<pid>/ns/<kind>` opened
+/// (`crate::nsfs`) -- or a pidfd, and checks `nstype` against the
+/// namespace-type mask:
 ///
 ///   * `CLONE_NEWNS`     = 0x0002_0000
 ///   * `CLONE_NEWCGROUP` = 0x0200_0000
@@ -30223,25 +30530,17 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
 ///   * `CLONE_NEWNET`    = 0x4000_0000
 ///   * `CLONE_NEWTIME`   = 0x0000_0080
 ///
-/// Validation differs per fd kind:
-///   * `proc_ns_file` path: `nstype == 0` is accepted (matches any
-///     type); non-zero must exactly equal the file's `ns->ops->type`.
-///   * pidfd path: `check_setns_flags` requires `nstype != 0` AND
-///     `nstype & ~CLONE_NEWNS_FLAGS == 0`.
+/// Any bit outside the mask is `EINVAL` on both paths, before the descriptor
+/// is looked at. Then by the descriptor's kind:
+///   * a namespace's: `nstype` 0 takes it whatever its kind; a non-zero one
+///     must be its kind's bit ([`setns_namespace`]);
+///   * a pidfd: `nstype` names which of the process's namespaces to enter,
+///     at least one ([`setns_process`]);
+///   * anything else: `EINVAL`.
 ///
-/// We can't distinguish the two fd kinds in kernel context (no real
-/// fds exist), but **both paths uniformly reject** any bit outside the
-/// `CLONE_NEWNS_FLAGS` mask.  Pre-batch we skipped nstype validation
-/// entirely, so a probe passing `nstype = 0xDEAD_BEEF` saw EPERM
-/// instead of the EINVAL Linux returns.  Mirror the mask check ahead
-/// of the terminal EPERM so feature-detection sees the same shape.
-///
-/// `nstype == 0` is left to flow through to EPERM: it's accepted on
-/// the proc_ns_file path and rejected on the pidfd path, and we have
-/// no way to choose between them.  Linux's behaviour for an
-/// unprivileged caller is EPERM on either path (the ns_capable check
-/// runs after the flag check on the pidfd path but before any work on
-/// the proc_ns_file path), so EPERM is the truthful answer.
+/// A kernel task -- where the boot's fidelity probes call this -- is in no
+/// namespace to leave: `EPERM` after the mask check, the answer every caller
+/// had before a namespace could be entered.
 fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     // Union of CLONE_NEW* namespace bits.  Any nstype bit outside this
     // mask is rejected by both setns code paths in Linux.
@@ -30264,9 +30563,7 @@ fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     // visible to the kernel function body.  Pre-batch we masked
     // args.arg1 raw, so a probe with `nstype = 0x1_0002_0000` (high
     // bit 32 + CLONE_NEWNS) returned EINVAL where Linux truncates to
-    // 0x20000 (CLONE_NEWNS) and falls through to the resource-failure
-    // arm (EPERM in our model since the namespace fd plumbing is not
-    // implemented).
+    // 0x20000 (CLONE_NEWNS) and goes on to the descriptor.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let nstype_i32 = args.arg1 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -30274,180 +30571,360 @@ fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     if nstype & !CLONE_NEWNS_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::EPERM)
+    // A kernel task is in no namespace to leave: the boot's fidelity probes
+    // run here, and have always been told EPERM.
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EPERM);
+    };
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return linux_err(errno::EBADF);
+    };
+    match entry.kind {
+        HandleKind::Namespace => setns_namespace(pid, entry.raw_handle, nstype),
+        HandleKind::PidFd => setns_process(pid, entry.raw_handle, nstype),
+        // Neither a namespace nor a process: Linux's EINVAL.
+        _ => linux_err(errno::EINVAL),
+    }
 }
 
-/// `mount(source, target, fstype, mountflags, data)`.
+/// `setns` with a handle on a namespace (`crate::nsfs`): the caller's process
+/// into it. `nstype` 0 takes the namespace whatever its kind; another must be
+/// its kind's `CLONE_NEW*` bit (`EINVAL` otherwise). `EPERM` for a caller
+/// that may not ([`caller_may_change_namespaces`]) -- even into the namespace
+/// it is already in, as Linux's `utsns_install` asks the same question
+/// either way.
+///
+/// The whole process moves, every thread: namespaces are a process's here,
+/// where Linux's are a thread's (design-decisions 1554).
+fn setns_namespace(pid: u64, raw: u64, nstype: u64) -> SyscallResult {
+    let Some((kind, id)) = crate::nsfs::decode(raw) else {
+        return linux_err(errno::EINVAL);
+    };
+    if nstype != 0 && nstype != kind.clone_flag() {
+        return linux_err(errno::EINVAL);
+    }
+    if !caller_may_change_namespaces() {
+        return linux_err(errno::EPERM);
+    }
+    enter_namespace(pid, kind, id)
+}
+
+/// `setns` with a pidfd: the caller's process into the namespaces `nstype`
+/// names of the process the pidfd refers to -- Linux 5.8's form. `nstype`
+/// must name at least one, and only kinds this kernel has (`EINVAL`), as
+/// `clone` refuses to make the rest (`clone_namespaces`); the process must
+/// still be running (`ESRCH`, a zombie included, which has left its
+/// namespaces), one the caller may inspect (`EPERM`, Linux's
+/// `PTRACE_MODE_READ` check), and the caller must be one that may change
+/// namespaces (`EPERM`).
+fn setns_process(pid: u64, target: u64, nstype: u64) -> SyscallResult {
+    use crate::nsfs::KINDS;
+    if nstype == 0 || nstype & !crate::nsfs::known_clone_flags() != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if pcb::state(target).is_none_or(|s| s == pcb::ProcessState::Zombie) {
+        return linux_err(errno::ESRCH);
+    }
+    if !pcb::may_inspect(Some(pid), Some(target)) {
+        return linux_err(errno::EPERM);
+    }
+    if !caller_may_change_namespaces() {
+        return linux_err(errno::EPERM);
+    }
+    for &kind in KINDS.iter().filter(|kind| nstype & kind.clone_flag() != 0) {
+        let Some(id) = crate::nsfs::of_process(kind, target) else {
+            return linux_err(errno::ESRCH);
+        };
+        let r = enter_namespace(pid, kind, id);
+        if r.value < 0 {
+            return r;
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// Put process `pid` in namespace `id` of `kind`, holding it: `ESRCH` if the
+/// namespace went with its last holder meanwhile (a handle closed by another
+/// thread, the process the pidfd names leaving it).
+fn enter_namespace(pid: u64, kind: crate::nsfs::NsKind, id: u64) -> SyscallResult {
+    match crate::nsfs::enter(pid, kind, id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::NotFound) => linux_err(errno::ESRCH),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// The `mount(2)` flags this kernel reads (`<linux/mount.h>`).
+mod mount_flags {
+    pub const MS_RDONLY: u64 = 1;
+    pub const MS_NOSUID: u64 = 2;
+    pub const MS_NOEXEC: u64 = 8;
+    pub const MS_REMOUNT: u64 = 32;
+    pub const MS_NOATIME: u64 = 1024;
+    pub const MS_NODIRATIME: u64 = 2048;
+    pub const MS_BIND: u64 = 4096;
+    pub const MS_MOVE: u64 = 8192;
+    pub const MS_REC: u64 = 16384;
+    pub const MS_SILENT: u64 = 32768;
+    pub const MS_UNBINDABLE: u64 = 1 << 17;
+    pub const MS_PRIVATE: u64 = 1 << 18;
+    pub const MS_SLAVE: u64 = 1 << 19;
+    pub const MS_SHARED: u64 = 1 << 20;
+    pub const MS_RELATIME: u64 = 1 << 21;
+    pub const MS_STRICTATIME: u64 = 1 << 24;
+    pub const MS_NOUSER: u64 = 1 << 31;
+    /// The old magic number some callers still put in the top half.
+    pub const MS_MGC_MSK: u64 = 0xffff_0000;
+    pub const MS_MGC_VAL: u64 = 0xc0ed_0000;
+    /// The propagation types: exactly one of them names a change of type.
+    pub const PROPAGATION: u64 = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
+    /// The atime flags: a remount naming none keeps the mount's.
+    pub const ATIME: u64 = MS_NOATIME | MS_NODIRATIME | MS_RELATIME | MS_STRICTATIME;
+}
+
+/// Whether the caller may mount and unmount -- Linux's `may_mount`,
+/// `CAP_SYS_ADMIN`; here root's authority, an effective uid of 0, as the
+/// native `SYS_FS_MOUNT` asks. A kernel task is refused: it mounts through
+/// `fs::Vfs`, never through this table, and the boot's fidelity probes call
+/// these handlers from one to see an unprivileged caller's answers.
+fn caller_may_mount() -> bool {
+    caller_pid().is_some_and(|pid| pcb::get_credentials(pid).is_some_and(|c| c.uid == 0))
+}
+
+/// A `mount(2)` string argument as `copy_mount_string` copies it: `None`
+/// for NULL, the bytes otherwise; `EFAULT` for one that cannot be read.
+fn optional_mount_string(ptr: u64) -> Result<Option<alloc::vec::Vec<u8>>, SyscallResult> {
+    if ptr == 0 {
+        return Ok(None);
+    }
+    read_user_cstr(ptr, 4095).map(Some).map_err(linux_err)
+}
+
+/// The mount point a `mount(2)` or `umount2(2)` names: the caller's path,
+/// through its container root and its symbolic links (the last one too
+/// when `follow`), as a host path that exists. `EFAULT`, `ENOENT`,
+/// `ENOTDIR`, `ELOOP` and the rest as the lookup answers.
+fn mount_point(path_ptr: u64, follow: bool) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let guest = resolve_at_path(AT_FDCWD, path_ptr)?;
+    let host = if follow {
+        crate::fs::Vfs::resolve_path(&guest)
+    } else {
+        crate::fs::Vfs::resolve_path_no_follow(&guest)
+    };
+    let host = host.map_err(|e| linux_err(linux_errno_for(e)))?;
+    crate::fs::Vfs::stat_resolved(&host).map_err(|e| linux_err(linux_errno_for(e)))?;
+    Ok(host)
+}
+
+/// The `source` a bind or a move names, looked up as `do_loopback` and
+/// `do_move_mount_old` look it up -- through the caller's working directory
+/// and container root, following links: `EINVAL` for none or an empty one,
+/// then the lookup's own answers (`ENOENT`, `ENOTDIR`, `ELOOP`...). A host
+/// path that exists.
+fn mount_source(source: Option<&[u8]>) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let Some(bytes) = source.filter(|b| !b.is_empty()) else {
+        return Err(linux_err(errno::EINVAL));
+    };
+    let guest = resolve_caller_path_bytes(bytes)?;
+    let host = crate::fs::Vfs::resolve_path(&guest).map_err(|e| linux_err(linux_errno_for(e)))?;
+    crate::fs::Vfs::stat_resolved(&host).map_err(|e| linux_err(linux_errno_for(e)))?;
+    Ok(host)
+}
+
+/// `mount(source, target, fstype, flags, data)` -- Linux's `mount(2)`, in
+/// 6.6's order: the strings are copied (`EFAULT`); the mount point is looked
+/// up, following links (`EFAULT`, `ENOENT`, `ENOTDIR`...); `MS_NOUSER` is
+/// `EINVAL`; then the caller must have root's authority (`EPERM`,
+/// [`caller_may_mount`]); then by the flags:
+///
+/// | flags | what happens |
+/// |---|---|
+/// | `MS_REMOUNT \| MS_BIND` | the mount at the target takes `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC`, `MS_NOATIME` as given, and nothing else does -- how a bind mount is made read-only (`fs::Vfs::remount_bind`); `EINVAL` if the target is not a mount's root |
+/// | `MS_REMOUNT` | the same, and the filesystem becomes read-only or writable through every mount of it (`fs::Vfs::remount`) |
+/// | `MS_BIND` (with `MS_REC` or not) | `source`'s subtree mounted at the target too, with the mounts beneath it under `MS_REC` (`fs::Vfs::bind_mount`): `EINVAL` for no source or one on an unbindable mount, `ENOENT` for one that does not exist, `ENOTDIR` for a directory over a non-directory or the reverse |
+/// | `MS_PRIVATE`, `MS_SLAVE`, `MS_UNBINDABLE` (with `MS_REC` or not) | the mount at the target -- and the mounts beneath it under `MS_REC` -- made bindable again, left as it was, or made unbindable (`fs::Vfs::set_propagation`); `EINVAL` if the target is not a mount's root or more than one type is named |
+/// | `MS_SHARED` | `EINVAL`: mounts here never propagate, and saying one does would be false |
+/// | `MS_MOVE` | the mount at `source`, with every mount beneath it, moved to the target (`fs::Vfs::move_mount`): `EINVAL` for no source, one that is not a mount's root, `/`, or a directory and a non-directory; `ELOOP` for a target inside what moves |
+/// | none of these | a new mount of `fstype` (`fs::new_filesystem`) over the device `source`: `EINVAL` with no type, `ENODEV` for a type this kernel has no driver for, `ENOTDIR` for a target that is not a directory |
+///
+/// `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC` and `MS_NOATIME` are the mount's
+/// options -- a remount naming no atime flag keeps the mount's, as Linux's
+/// does; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken and
+/// change nothing, and the `data` options are not read (known-issues
+/// A-LINUX-MOUNT-GAPS). A new mount, a bind or a move onto a mount point
+/// goes on top of what is there, which it covers until it goes, as Linux
+/// stacks them (`fs::Vfs::mount_on_top`); refused with `EBUSY` until
+/// 2026-10-08.
+///
+/// Until 2026-10-08 this answered `EPERM` to every caller, root included,
+/// and checked the privilege before looking the mount point up, as kernels
+/// before 5.x did: Linux 6.6 answers `EFAULT` for a NULL target and `ENOENT`
+/// for a missing one first (checked against it, unprivileged).
 fn sys_mount(args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE5(mount) — verbatim):
-    //
-    //   SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
-    //                   char __user *, type, unsigned long, flags, void __user *, data)
-    //   {
-    //       int ret;
-    //       char *kernel_type;
-    //       char *kernel_dev;
-    //       void *options;
-    //
-    //       kernel_type = copy_mount_string(type);              // (1) EFAULT on type
-    //       ret = PTR_ERR(kernel_type);
-    //       if (IS_ERR(kernel_type))
-    //           goto out_type;
-    //
-    //       kernel_dev = copy_mount_string(dev_name);           // (2) EFAULT on dev_name
-    //       ret = PTR_ERR(kernel_dev);
-    //       if (IS_ERR(kernel_dev))
-    //           goto out_dev;
-    //
-    //       options = copy_mount_options(data);                 // (3) EFAULT on data
-    //       ret = PTR_ERR(options);
-    //       if (IS_ERR(options))
-    //           goto out_data;
-    //
-    //       ret = do_mount(kernel_dev, dir_name, kernel_type,   // (4)+(5) inside do_mount
-    //                      flags, options);
-    //       ...
-    //   }
-    //
-    //   // fs/namespace.c::copy_mount_string:
-    //   //   return data ? strndup_user(data, PATH_MAX) : NULL;
-    //   //   (NULL input is silently accepted as "no string"; bad
-    //   //    pointer → -EFAULT via strndup_user.)
-    //
-    //   // do_mount → path_mount → may_mount → EPERM (4),
-    //   //   then user_path_at_empty(dir_name) → EFAULT/ENOENT (5).
-    //
-    // Pre-batch divergences:
-    //
-    //   * mount(NULL,NULL,NULL,0,NULL)
-    //       Linux: -EPERM   (gates 1-3 accept NULL via copy_mount_string's
-    //                        NULL-passthrough; do_mount's may_mount fires)
-    //       Pre:   -EFAULT  (we EFAULTed dir_name == NULL upfront)
-    //
-    //   * mount(valid,NULL,valid,0,NULL)
-    //       Linux: -EPERM
-    //       Pre:   -EFAULT  (same dir_name NULL gate)
-    //
-    //   * mount(valid,valid,NULL,0,NULL)
-    //       Linux: -EPERM   (NULL type accepted, NULL data accepted)
-    //       Pre:   -EPERM   (same answer — pre-batch matched here)
-    //
-    // Container runtimes (runc, podman, bwrap) probe mount support by
-    // attempting `mount(NULL, "/", NULL, MS_BIND, NULL)` inside their
-    // sandbox.  Linux's -EPERM is the documented "you lack CAP_SYS_ADMIN
-    // in this namespace" answer; the runtime uses it to decide to drop
-    // the mount or re-exec with elevated privileges.  -EFAULT instead
-    // makes the runtime retry with alternate path arguments that can
-    // never satisfy may_mount(), looping on a phantom buffer-validity
-    // error.
-    //
-    // Architectural directive: we have no per-namespace user-ns model
-    // and no caller can hold CAP_SYS_ADMIN.  may_mount() always trips
-    // for our kernel context.  Validate type (arg2), dev_name (arg0),
-    // data (arg4) per the copy_mount_string / copy_mount_options
-    // pre-do_mount block; defer the dir_name check (arg1) entirely
-    // because Linux defers it behind may_mount and our may_mount
-    // always fails.  NULL pointers for any of type/dev/data are
-    // silently accepted (matching copy_mount_string's NULL-passthrough).
-    //
-    // Gate 1: copy_mount_string(type) — arg2.
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
-        }
+    use crate::fs::Vfs;
+    use crate::fs::vfs::Propagation;
+    use mount_flags::{
+        ATIME, MS_BIND, MS_MGC_MSK, MS_MGC_VAL, MS_MOVE, MS_NOATIME, MS_NOEXEC, MS_NOSUID,
+        MS_NOUSER, MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, MS_SILENT, MS_SLAVE, MS_STRICTATIME,
+        MS_UNBINDABLE, PROPAGATION,
+    };
+    // (1)-(3): copy_mount_string(type), copy_mount_string(dev_name),
+    // copy_mount_options(data). The options are not read; a pointer to
+    // them must still be readable.
+    let fstype = match optional_mount_string(args.arg2) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let source = match optional_mount_string(args.arg0) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    if args.arg4 != 0
+        && let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1)
+    {
+        return linux_err(linux_errno_for(e));
     }
-    // Gate 2: copy_mount_string(dev_name) — arg0.
-    if args.arg0 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-            return linux_err(linux_errno_for(e));
-        }
+    // (4): do_mount's user_path_at(dir_name, LOOKUP_FOLLOW).
+    let target = match mount_point(args.arg1, true) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    // (5): path_mount -- the magic number dropped, MS_NOUSER refused, then
+    // may_mount.
+    let mut flags = args.arg3;
+    if flags & MS_MGC_MSK == MS_MGC_VAL {
+        flags &= !MS_MGC_MSK;
     }
-    // Gate 3: copy_mount_options(data) — arg4.
-    if args.arg4 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1) {
-            return linux_err(linux_errno_for(e));
-        }
+    if flags & MS_NOUSER != 0 {
+        return linux_err(errno::EINVAL);
     }
-    // Gate 4: do_mount → may_mount() — always -EPERM in our kernel
-    // context (no CAP_SYS_ADMIN holder).  Gate 5 (dir_name path lookup)
-    // is unreachable.
-    linux_err(errno::EPERM)
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    let mut options = crate::fs::vfs::MountOptions {
+        read_only: flags & MS_RDONLY != 0,
+        // MS_STRICTATIME takes MS_NOATIME back, as path_mount clears it.
+        noatime: flags & MS_NOATIME != 0 && flags & MS_STRICTATIME == 0,
+        noexec: flags & MS_NOEXEC != 0,
+        nosuid: flags & MS_NOSUID != 0,
+    };
+    let done = if flags & MS_REMOUNT != 0 {
+        // do_reconfigure_mnt (with MS_BIND) and do_remount both ask for a
+        // mount's root.
+        if !Vfs::is_mount_point(&target) {
+            return linux_err(errno::EINVAL);
+        }
+        // "The default atime for remount is preservation" (path_mount).
+        if flags & ATIME == 0
+            && let Ok(now) = Vfs::mount_options(&target)
+        {
+            options.noatime = now.noatime;
+        }
+        if flags & MS_BIND != 0 {
+            Vfs::remount_bind(&target, options)
+        } else {
+            Vfs::remount(&target, options)
+        }
+    } else if flags & MS_BIND != 0 {
+        // do_loopback: the source looked up, following links.
+        let source = match mount_source(source.as_deref()) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+        Vfs::bind_mount(&source, &target, flags & MS_REC != 0)
+    } else if flags & PROPAGATION != 0 {
+        let kind = flags & PROPAGATION;
+        if kind & kind.wrapping_sub(1) != 0 || flags & !(PROPAGATION | MS_REC | MS_SILENT) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if !Vfs::is_mount_point(&target) {
+            return linux_err(errno::EINVAL);
+        }
+        let kind = match kind {
+            MS_PRIVATE => Propagation::Private,
+            MS_SLAVE => Propagation::Slave,
+            MS_UNBINDABLE => Propagation::Unbindable,
+            // MS_SHARED, the one type left: nothing here propagates.
+            _ => return linux_err(errno::EINVAL),
+        };
+        Vfs::set_propagation(&target, kind, flags & MS_REC != 0)
+    } else if flags & MS_MOVE != 0 {
+        // do_move_mount_old: the source looked up, following links, and it
+        // must be a mount's root.
+        let source = match mount_source(source.as_deref()) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+        if !Vfs::is_mount_point(&source) {
+            return linux_err(errno::EINVAL);
+        }
+        Vfs::move_mount(&source, &target)
+    } else {
+        // do_new_mount.
+        let Some(fstype) = fstype else {
+            return linux_err(errno::EINVAL);
+        };
+        let Ok(fstype) = core::str::from_utf8(&fstype) else {
+            return linux_err(errno::ENODEV);
+        };
+        let source = source.unwrap_or_default();
+        let Ok(source) = core::str::from_utf8(&source) else {
+            // No device has a name that is not UTF-8.
+            return linux_err(errno::ENOENT);
+        };
+        match Vfs::stat_resolved(&target) {
+            Ok(entry) if entry.entry_type != crate::fs::EntryType::Directory => {
+                return linux_err(errno::ENOTDIR);
+            }
+            _ => {}
+        }
+        match crate::fs::new_filesystem(fstype, source) {
+            Ok(fs) => Vfs::mount_on_top(&target, fs, options),
+            Err(KernelError::NotSupported) => return linux_err(errno::ENODEV),
+            Err(e) => Err(e),
+        }
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::AlreadyExists) => linux_err(errno::EBUSY),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
-/// `umount2(target, flags)`.
+/// `umount2(target, flags)` -- Linux's, in 6.6's order (`ksys_umount`,
+/// `path_umount`): flags outside `MNT_FORCE | MNT_DETACH | MNT_EXPIRE |
+/// UMOUNT_NOFOLLOW` are `EINVAL`; the target is looked up, following its
+/// last link unless `UMOUNT_NOFOLLOW` (`EFAULT`, `ENOENT`...); the caller
+/// must have root's authority (`EPERM`, [`caller_may_mount`]); the target
+/// must be a mount's root (`EINVAL`). Then:
 ///
-/// Linux ABI: `int umount2(const char *target, int flags)`.
+/// - `MNT_DETACH`: a lazy unmount -- the mount and every mount beneath it
+///   leave the table at once, and each filesystem goes when the last file
+///   held on it does (`fs::Vfs::unmount_detach`).
+/// - `MNT_EXPIRE` (`EINVAL` with `MNT_FORCE` or `MNT_DETACH`): the first
+///   call marks the mount and answers `EAGAIN`, a later one with no file held
+///   through it since unmounts it (`fs::Vfs::unmount_expire`).
+/// - otherwise (`MNT_FORCE` too, which aborts nothing here): unmounted, or
+///   `EBUSY` while a file is held on it or a mount sits beneath it.
 ///
-/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE2(umount), v6.x):
+/// `/` names the mount stacked on the root, if one is -- the old root that
+/// `pivot_root(".", ".")` leaves there, which runc and bubblewrap unmount
+/// next by the working directory they gave it. With none, `/` is `EBUSY`.
+/// (Linux remounts a process's root read-only and answers 0 there; making
+/// the system's root read-only on request was judged worse than refusing.)
 ///
-///   SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
-///   {
-///       struct path path;
-///       struct mount *mnt;
-///       int retval;
-///       int lookup_flags = LOOKUP_MOUNTPOINT;
-///       bool user_request = !(current->flags & PF_KTHREAD);
-///
-///       if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE |
-///                     UMOUNT_NOFOLLOW))
-///           return -EINVAL;                  // (1) flag mask
-///
-///       if (!may_mount())
-///           return -EPERM;                   // (2) CAP_SYS_ADMIN
-///
-///       if (!user_request)
-///           lookup_flags |= LOOKUP_NO_EVAL;
-///       if (!(flags & UMOUNT_NOFOLLOW))
-///           lookup_flags |= LOOKUP_FOLLOW;
-///       retval = user_path_at(AT_FDCWD, name, lookup_flags, &path);
-///       if (retval)                          // (3) EFAULT / ENOENT
-///           goto out;
-///       ...
-///   }
-///
-///   static inline bool may_mount(void) {
-///       return ns_capable(current->nsproxy->mnt_ns->user_ns,
-///                         CAP_SYS_ADMIN);
-///   }
-///
-/// SYSCALL_DEFINE2(umount, ..., int, flags) narrows the second
-/// parameter to (int) on entry; the mask check runs at 32-bit width.
-/// Batches 308-317 fixed the truncation issue.  This batch (463)
-/// fixes the *gate order* between the flag mask and the name pointer:
-///
-/// Pre-batch we ran:
-///   * flags & !VALID_FLAGS                  -> EINVAL  (matches Linux)
-///   * args.arg0 == 0                        -> EFAULT  (WRONG — Linux
-///     runs gate 2
-///     first)
-///   * validate_user_read(args.arg0, 1)      -> EFAULT  (WRONG)
-///   * then EPERM.
-///
-/// Concrete divergences from a userspace probe (with flags valid):
-///   * umount2(NULL, 0)        Linux: EPERM.  Pre-batch: EFAULT.
-///   * umount2(0xDEAD, 0)      Linux: EPERM.  Pre-batch: EFAULT.
-///   * umount2(NULL, 0x10)     Linux: EINVAL. Pre-batch: EINVAL.  ✓
-///
-/// Why this matters: the same CAP-probe pattern as batches 343/462.
-/// Unprivileged container-runtime helpers and sandbox teardown code
-/// (runc/podman/bwrap) probe whether they hold CAP_SYS_ADMIN by
-/// attempting a benign cleanup like `umount2(NULL, MNT_DETACH)` and
-/// inspecting errno: EPERM → "we are unprivileged, fall back to a
-/// privileged helper"; EFAULT → "the caller passed garbage, retry
-/// with a different pointer".  Pre-batch we lied to that probe by
-/// reporting EFAULT and sending the runtime down a futile retry
-/// path.  Translator-only fix: drop the upfront pointer-shape
-/// validation and rely on gate 2 (may_mount) returning EPERM
-/// unconditionally in our kernel context (no CAP_SYS_ADMIN holder),
-/// which makes gate 3 (user_path_at on name) unreachable for any
-/// caller — exactly matching Linux's observable behaviour for the
-/// unprivileged case.
+/// Until 2026-10-08 this answered `EPERM` to every caller after the flags,
+/// before looking the target up, as kernels before 5.9 did; 6.6 answers
+/// `EFAULT` for a NULL target and `ENOENT` for a missing one first (checked
+/// against it, unprivileged).
 fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
-    // MNT_FORCE=1, MNT_DETACH=2, MNT_EXPIRE=4, UMOUNT_NOFOLLOW=8.
-    const VALID_FLAGS: u32 = 1 | 2 | 4 | 8;
-    // Gate 1: flag mask at int (32-bit) width — SYSCALL_DEFINE2's
-    // `int flags` narrows the second arg on entry.  High-half garbage
-    // from the AMD64 syscall ABI must be stripped (batches 308-317).
+    const MNT_FORCE: u32 = 1;
+    const MNT_DETACH: u32 = 2;
+    const MNT_EXPIRE: u32 = 4;
+    const UMOUNT_NOFOLLOW: u32 = 8;
+    const VALID_FLAGS: u32 = MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW;
+    // `int flags`: the low 32 bits only (high-half register garbage is not
+    // the caller's).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg1 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -30455,57 +30932,85 @@ fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Gate 2: may_mount() / CAP_SYS_ADMIN.  Our kernel context has no
-    // CAP_SYS_ADMIN holder so this always returns EPERM, making
-    // gate 3 (user_path_at on name) unreachable.  No pointer-shape
-    // validation here — Linux does none until gate 3.
-    linux_err(errno::EPERM)
+    let target = match mount_point(args.arg0, flags & UMOUNT_NOFOLLOW == 0) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    if !crate::fs::Vfs::is_mount_point(&target) {
+        return linux_err(errno::EINVAL);
+    }
+    if target.as_path() == crate::fs::path::Path::new("/") && !crate::fs::Vfs::has_mount_on_root() {
+        return linux_err(errno::EBUSY);
+    }
+    let done = if flags & MNT_EXPIRE != 0 {
+        if flags & (MNT_FORCE | MNT_DETACH) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        crate::fs::Vfs::unmount_expire(&target)
+    } else if flags & MNT_DETACH != 0 {
+        crate::fs::Vfs::unmount_detach(&target)
+    } else {
+        crate::fs::Vfs::unmount(&target)
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
-/// `pivot_root(new_root, put_old)`.
-fn sys_pivot_root(_args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE2(pivot_root)):
-    //
-    //   SYSCALL_DEFINE2(pivot_root, const char __user *, new_root,
-    //                   const char __user *, put_old)
-    //   {
-    //       ...
-    //       if (!may_mount())                  // (1) CAP_SYS_ADMIN
-    //           return -EPERM;
-    //
-    //       error = user_path_at(AT_FDCWD, new_root,
-    //                            LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &new);
-    //       if (error)
-    //           goto out0;                      // (2) EFAULT / ENOENT
-    //       ...
-    //   }
-    //
-    //   static inline bool may_mount(void) {
-    //       return ns_capable(current->nsproxy->mnt_ns->user_ns,
-    //                         CAP_SYS_ADMIN);
-    //   }
-    //
-    // Linux validates CAP_SYS_ADMIN BEFORE any pointer touch.  Pre-
-    // batch we ran:
-    //   * args.arg0 == 0 || args.arg1 == 0 -> EFAULT
-    //   * validate_user_read(args.arg0, 1)  -> EFAULT on bad range
-    //   * validate_user_read(args.arg1, 1)  -> EFAULT on bad range
-    //   * then EPERM.
-    //
-    // Two concrete divergences from a userspace probe:
-    //   * pivot_root(NULL, NULL)   — Linux: EPERM.  Pre-batch: EFAULT.
-    //   * pivot_root(NULL, valid)  — Linux: EPERM.  Pre-batch: EFAULT.
-    //
-    // Same errno-selection consequence as the module syscalls: tools
-    // that probe whether they have CAP_SYS_ADMIN by attempting a
-    // namespace pivot (some sandbox-setup code does this) need EPERM
-    // to decide "abort, the caller is unprivileged" rather than EFAULT
-    // "the pointer was bad, maybe retry with a different one".
-    //
-    // Architectural directive: we do not yet have a per-mount-namespace
-    // user-ns model and no caller can hold CAP_SYS_ADMIN.  Linux's
-    // gate-1 always trips.  Return EPERM unconditionally.
-    linux_err(errno::EPERM)
+/// A `pivot_root(2)` argument, looked up as `user_path_at(LOOKUP_FOLLOW |
+/// LOOKUP_DIRECTORY)` looks it up: through the caller's working directory
+/// and container root, following links (`EFAULT`, `ENOENT`, `ELOOP`...), and
+/// `ENOTDIR` for one that is not a directory. A host path.
+fn pivot_root_dir(path_ptr: u64) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let host = mount_point(path_ptr, true)?;
+    match crate::fs::Vfs::stat_resolved(&host) {
+        Ok(e) if e.entry_type == crate::fs::EntryType::Directory => Ok(host),
+        Ok(_) => Err(linux_err(errno::ENOTDIR)),
+        Err(e) => Err(linux_err(linux_errno_for(e))),
+    }
+}
+
+/// `pivot_root(new_root, put_old)` -- Linux's, in 6.6's order: root's
+/// authority first, before either pointer is read (`EPERM`,
+/// [`caller_may_mount`] -- sandbox code probes for the privilege this way and
+/// needs `EPERM`, not `EFAULT`, for a NULL argument); then both looked up
+/// ([`pivot_root_dir`]); then `fs::Vfs::pivot_root_tree`: `EBUSY` for a
+/// `new_root` or `put_old` on the root's own mount (`new_root` is `/`, or
+/// under no mount of its own), `EINVAL` for a `new_root` that is not a mount
+/// point or a `put_old` not at or under it. The mount at `new_root` becomes
+/// the root and the old root goes to `put_old` with every mount on it;
+/// `pivot_root(".", ".")` stacks the old root on the new one, for
+/// `umount2(".", MNT_DETACH)` to take.
+///
+/// A caller with a root of its own (`chroot`) is `EINVAL`, as Linux answers
+/// one whose root is not a mount's root.
+///
+/// Until 2026-10-08 this answered `EPERM` to every caller, root included.
+fn sys_pivot_root(args: &SyscallArgs) -> SyscallResult {
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    let new_root = match pivot_root_dir(args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let put_old = match pivot_root_dir(args.arg1) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if caller_pid().is_some_and(|pid| matches!(pcb::get_root_dir(pid), Some(Some(_)))) {
+        return linux_err(errno::EINVAL);
+    }
+    match crate::fs::Vfs::pivot_root_tree(&new_root, &put_old) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::DeviceBusy) => linux_err(errno::EBUSY),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `swapon(path, swapflags)`.
@@ -32181,6 +32686,11 @@ pub(crate) fn revents_for_handle(
             }
             r
         }
+        // A namespace's file has no readiness of its own: always ready, as
+        // Linux answers (`DEFAULT_POLLMASK`) for a file with no `poll`.
+        HandleKind::Namespace => {
+            poll_bits::POLLIN | poll_bits::POLLRDNORM | poll_bits::POLLOUT | poll_bits::POLLWRNORM
+        }
     }
 }
 
@@ -33278,9 +33788,11 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
     // Gate 4: file_can_poll(tf) -> EPERM if the target does not support
     // poll.  Regular files (File, MemFd) have no .poll in Linux, so
     // epoll rejects them with EPERM — userspace relies on this to fall
-    // back to thread-pool I/O for regular files.
+    // back to thread-pool I/O for regular files.  Nor has a namespace's.
     match target_entry.kind {
-        HandleKind::File | HandleKind::MemFd => return linux_err(errno::EPERM),
+        HandleKind::File | HandleKind::MemFd | HandleKind::Namespace => {
+            return linux_err(errno::EPERM);
+        }
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -36166,6 +36678,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Channel => 15,
         HandleKind::ServiceListener => 16,
         HandleKind::UnixSocket => 17,
+        HandleKind::Namespace => 18,
     }
 }
 
@@ -36741,7 +37254,8 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 | HandleKind::Socket
                 | HandleKind::Channel
                 | HandleKind::ServiceListener
-                | HandleKind::UnixSocket => {
+                | HandleKind::UnixSocket
+                | HandleKind::Namespace => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -45841,7 +46355,8 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -45913,7 +46428,8 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47787,7 +48303,8 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47833,7 +48350,8 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47910,7 +48428,8 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47969,7 +48488,8 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Socket
         | HandleKind::Channel
         | HandleKind::ServiceListener
-        | HandleKind::UnixSocket => linux_err(errno::ESPIPE),
+        | HandleKind::UnixSocket
+        | HandleKind::Namespace => linux_err(errno::ESPIPE),
     }
 }
 
@@ -49673,18 +50193,15 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // domainname via `setdomainname("", 0)`, the corresponding
     // field is emitted as zero bytes (empty C string), exactly
     // as Linux's `newuname` would.
-    // A process inside a container with a `--hostname` override (a per-process
-    // UTS hostname) sees that name; otherwise it falls back to the global
-    // system hostname.  This models a per-container UTS namespace.
-    let task_id = crate::sched::current_task_id();
-    let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-    let nodename = crate::ipc::namespace::hostname_for(process_id)
-        .unwrap_or_else(crate::fs::nameservice::get_hostname);
+    // The caller's UTS namespace's names (`crate::utsns`): the system's in
+    // the root, a container's or an `unshare`d copy's otherwise.
+    let uts = crate::utsns::of_current();
+    let nodename = crate::utsns::hostname(uts).unwrap_or_default();
     fill(&mut buf, 1, nodename.as_bytes());
     fill(&mut buf, 2, crate::uname::RELEASE.as_bytes()); // release
     fill(&mut buf, 3, crate::uname::VERSION.as_bytes()); // version
     fill(&mut buf, 4, crate::uname::MACHINE.as_bytes()); // machine
-    let domain = crate::fs::nameservice::get_domain();
+    let domain = crate::utsns::domainname(uts).unwrap_or_default();
     fill(&mut buf, 5, domain.as_bytes());
 
     // SAFETY: copy_to_user validates the user range.
@@ -58607,11 +59124,12 @@ fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
 
 /// TD4 extraction: clone() CLONE_VFORK/CLONE_PARENT routing self-test.
 ///
-/// Proves CLONE_VFORK and CLONE_PTRACE no longer return -ENOSYS up-front
-/// (the one degenerates to plain fork, the other is honoured by
-/// `ptrace::attach_new`; both reach fork::fork_process, which yields -ESRCH
-/// in the self-test context), while CLONE_PARENT / CLONE_NEWNS still reject
-/// with -ENOSYS (PID reparenting / namespace infrastructure is missing).
+/// Proves CLONE_VFORK, CLONE_PTRACE and CLONE_NEWNS no longer return
+/// -ENOSYS up-front (the first degenerates to plain fork, the second is
+/// honoured by `ptrace::attach_new`, the third gives the child a mount
+/// namespace; all reach fork::fork_process, which yields -ESRCH in the
+/// self-test context), while CLONE_PARENT still rejects with -ENOSYS (PID
+/// reparenting is missing).
 /// Self-contained — references only module-level items. See
 /// [`self_test_errno_mapping`] for the TD4 rationale.
 #[inline(never)]
@@ -58642,6 +59160,7 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
     for (name, bit) in &[
         ("CLONE_VFORK", clone_flags::CLONE_VFORK),
         ("CLONE_PTRACE", clone_flags::CLONE_PTRACE),
+        ("CLONE_NEWNS", clone_flags::CLONE_NEWNS),
     ] {
         f.arg0 = clone_flags::SIGCHLD | *bit;
         match dispatch_linux_with_frame(&mut f) {
@@ -58659,21 +59178,16 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
         }
     }
 
-    for (name, bit) in &[
-        ("CLONE_PARENT", clone_flags::CLONE_PARENT),
-        ("CLONE_NEWNS", clone_flags::CLONE_NEWNS),
-    ] {
-        f.arg0 = clone_flags::SIGCHLD | *bit;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ENOSYS) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone({}) → {:?} (expected -ENOSYS)",
-                    name,
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
+    // CLONE_PARENT still has no reparenting behind it.
+    f.arg0 = clone_flags::SIGCHLD | clone_flags::CLONE_PARENT;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == linux_err(errno::ENOSYS).value => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone(CLONE_PARENT) → {:?} (expected -ENOSYS)",
+                other
+            );
+            return Err(KernelError::InternalError);
         }
     }
     Ok(())
@@ -63134,6 +63648,80 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 .expect("uid 0 fork exempt from NPROC");
                 pcb::destroy(root_child);
                 pcb::destroy(root_parent);
+
+                // The count and the exemption are the *real* user's, as
+                // Linux's `copy_process` reads them. Each check below would
+                // come out the other way if the effective id were read, as it
+                // was until 2026-10-08.
+                let ids = |ruid: u32, euid: u32| {
+                    let mut c = pcb::ProcessCredentials::new(ruid, ruid);
+                    c.uid = euid;
+                    c.suid = euid;
+                    c.fsuid = euid;
+                    c
+                };
+                let real = pcb::create("rlimit-nproc-test-real", 0);
+                let other = pcb::create("rlimit-nproc-test-other", 0);
+                let stranger1 = pcb::create("rlimit-nproc-test-stranger1", 0);
+                let stranger2 = pcb::create("rlimit-nproc-test-stranger2", 0);
+                let nproc = |n: u64| {
+                    pcb::set_rlimit(
+                        real,
+                        6,
+                        n,
+                        pcb::RLIM_INFINITY,
+                        pcb::LimitAuthority::Unprivileged,
+                    )
+                };
+                let fork =
+                    || pcb::fork_create(real, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new());
+                // A step that cannot be set up fails its check: each result
+                // carries the set-up's error rather than the fork's.
+                //
+                // 1. One of user 1000's whose effective id is 2000 counts:
+                //    `real` and `other` are two, so a third is over a limit
+                //    of 2. (By effective id there is one.)
+                let crowded = pcb::set_credentials(real, ids(1000, 1000))
+                    .and_then(|()| pcb::set_credentials(other, ids(1000, 2000)))
+                    .and_then(|()| nproc(2))
+                    .and_then(|()| fork());
+                // 2. Two of user 2000's whose effective id is 1000 do not:
+                //    still two of 1000's, so a third fits a limit of 3. (By
+                //    effective id there are three, and a fourth would not.)
+                let roomy = pcb::set_credentials(stranger1, ids(2000, 1000))
+                    .and_then(|()| pcb::set_credentials(stranger2, ids(2000, 1000)))
+                    .and_then(|()| nproc(3))
+                    .and_then(|()| fork());
+                // 3. Root's authority, an effective id of 0, is exempt.
+                let authority = pcb::set_credentials(real, ids(1000, 0))
+                    .and_then(|()| nproc(0))
+                    .and_then(|()| fork());
+                // 4. So is the root user, a real id of 0, whatever its
+                //    effective id. (By effective id it is one of 1000's.)
+                let root_user = pcb::set_credentials(real, ids(0, 1000))
+                    .and_then(|()| nproc(0))
+                    .and_then(|()| fork());
+                let verdict = (
+                    matches!(crowded, Err(KernelError::WouldBlock)),
+                    roomy.is_ok(),
+                    authority.is_ok(),
+                    root_user.is_ok(),
+                );
+                for child in [crowded, roomy, authority, root_user].into_iter().flatten() {
+                    pcb::destroy(child);
+                }
+                for pid in [real, other, stranger1, stranger2] {
+                    pcb::destroy(pid);
+                }
+                if verdict != (true, true, true, true) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: NPROC by real uid: (another effective id of \
+                         the same real user counted, another real user's not counted, an \
+                         effective 0 exempt, a real 0 exempt) = {:?}",
+                        verdict
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
 
             // RLIMIT_AS accounting via pcb::linux_as_charge /
@@ -84963,281 +85551,119 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!("[syscall/linux]   setns int nstype truncation: OK");
 
-            // Batch 462: Linux gate order — copy_mount_string accepts NULL
-            // for type/dev_name/data, and do_mount's may_mount check fires
-            // before dir_name is resolved.  Pre-batch we EFAULTed dir_name
-            // (arg1) == NULL upfront; Linux defers that to gate 5 and
-            // surfaces EPERM at gate 4 first.  All four mount probes below
-            // must now surface EPERM in kernel context (may_mount unprivileged).
-            // (a) mount(NULL,NULL,NULL,0,NULL) — was EFAULT pre-batch.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mount(all NULL) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            // (b) mount(dev=NULL, target, type=NULL, flags=0, data=NULL)
-            //     — matches pre-batch answer, regression-tests the reorder.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mount(target only) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            // (c) mount(dev=valid, target=NULL, type=valid, flags=0,
-            //          data=valid) — was EFAULT pre-batch (dir_name NULL gate).
-            //     Now: copy_mount_string for type/dev/data passes (they're
-            //     all valid), do_mount runs, may_mount fires → EPERM.
+            // mount(2) and umount2(2) in Linux 6.6's order, from a kernel task,
+            // which is never granted root's authority through this table: the
+            // target is looked up before the privilege is asked about, so a
+            // NULL or unreadable target is EFAULT and an empty one ENOENT --
+            // 6.6's answers to an unprivileged caller, checked against it.
+            // A bad umount2 flag is EINVAL before anything, at int width: the
+            // high half of the register is not the caller's. Until 2026-10-08
+            // all but the flag probes answered EPERM, the order of kernels
+            // before 5.9.
             let stack_buf = [0u8; 16];
             let stack_ptr = stack_buf.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: stack_ptr,
-                arg1: 0,
-                arg2: stack_ptr,
-                arg3: 0,
-                arg4: stack_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount(dir_name=NULL, others valid) not EPERM"
-                );
-                return Err(KernelError::InternalError);
+            let probes = [
+                ("mount(all NULL)", nr::MOUNT, [0, 0, 0, 0, 0], errno::EFAULT),
+                (
+                    "mount(target unreadable)",
+                    nr::MOUNT,
+                    [0, 0x1000, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "mount(target NULL, the rest readable)",
+                    nr::MOUNT,
+                    [stack_ptr, 0, stack_ptr, 0, stack_ptr],
+                    errno::EFAULT,
+                ),
+                (
+                    "mount(target empty)",
+                    nr::MOUNT,
+                    [stack_ptr, stack_ptr, stack_ptr, 0, stack_ptr],
+                    errno::ENOENT,
+                ),
+                (
+                    "umount2(bad flag)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x8000_0000, 0, 0, 0],
+                    errno::EINVAL,
+                ),
+                (
+                    "umount2(unreadable, 0)",
+                    nr::UMOUNT2,
+                    [0x1000, 0, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half|MNT_FORCE)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_0001, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half|every flag)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_000F, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half only)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_0000, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half|bad flag)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_0010, 0, 0, 0],
+                    errno::EINVAL,
+                ),
+                (
+                    "umount2(NULL, 0)",
+                    nr::UMOUNT2,
+                    [0, 0, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(0xDEADBEEF, 0)",
+                    nr::UMOUNT2,
+                    [0xDEAD_BEEF, 0, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(NULL, MNT_DETACH)",
+                    nr::UMOUNT2,
+                    [0, 2, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(NULL, 0x10)",
+                    nr::UMOUNT2,
+                    [0, 0x10, 0, 0, 0],
+                    errno::EINVAL,
+                ),
+            ];
+            for (what, call, args, want) in probes {
+                let a = SyscallArgs {
+                    arg0: args[0],
+                    arg1: args[1],
+                    arg2: args[2],
+                    arg3: args[3],
+                    arg4: args[4],
+                    arg5: 0,
+                };
+                let got = dispatch_linux(call, &a).value;
+                if got != linux_err(want).value {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: {} -> {} (expected -{})",
+                        what,
+                        got,
+                        want
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
-            // (d) mount(everything valid) — terminal EPERM.
-            let a = SyscallArgs {
-                arg0: stack_ptr,
-                arg1: stack_ptr,
-                arg2: stack_ptr,
-                arg3: 0,
-                arg4: stack_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mount(all valid) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   mount Linux gate ladder (EPERM regardless of dir_name): OK"
-            );
-            // umount2(target, bad flag) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x8000_0000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::UMOUNT2, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: umount2(bad flag) not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // umount2(target, 0) -> EPERM.
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::UMOUNT2, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: umount2 not EPERM");
-                return Err(KernelError::InternalError);
-            }
-
-            // Batch 317: umount2 int truncation — high-half register
-            // garbage must be stripped before the flags mask check.
-            //
-            // Linux signature: `int umount2(const char *target, int flags)`.
-            // flags is C int → low 32 bits only.  Pre-batch we held flags
-            // as u64 and ran the mask check at 64-bit width, so high-half
-            // garbage returned spurious EINVAL where Linux returns EPERM
-            // (no CAP_SYS_ADMIN in kernel context after path validation).
-            //
-            // (a) umount2(0x1000, 0x1_0000_0001) → EPERM
-            //     (high|MNT_FORCE; truncates to 1, mask passes, path
-            //     validated, EPERM terminal).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_0001,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high|MNT_FORCE) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            // (b) umount2(0x1000, 0x1_0000_000F) → EPERM
-            //     (high|all-valid 0xF; truncates to 0xF, mask passes,
-            //     EPERM).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_000F,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high|all-valid) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            // (c) umount2(0x1000, 0x1_0000_0000) → EPERM
-            //     (high-half only, low half zero; truncates to 0, mask
-            //     passes, EPERM).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_0000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high-half-zero) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            // (d) umount2(0x1000, 0x1_0000_0010) → EINVAL
-            //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
-            //     outside MNT_FORCE|MNT_DETACH|MNT_EXPIRE|UMOUNT_NOFOLLOW;
-            //     verifies mask gate still rejects invalid bits after the
-            //     high half is stripped).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_0010,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high|bad-low) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            serial_println!("[syscall/linux]   umount2 int truncation (high-half ignored): OK");
-
-            // Batch 463: umount2 gate-order EPERM-first when target pointer
-            // is invalid.  Linux's SYSCALL_DEFINE2(umount) runs the flag
-            // mask, then may_mount() (CAP_SYS_ADMIN), then user_path_at on
-            // the name pointer.  Pre-batch we ran an upfront EFAULT gate on
-            // a NULL target and on a target that failed validate_user_read,
-            // so unprivileged probes saw EFAULT where Linux returns EPERM.
-            // Same CAP-probe pattern as batches 343 (pivot_root/swapoff)
-            // and 462 (mount).
-            //
-            // (a) umount2(NULL, 0) — pre-batch EFAULT; Linux EPERM.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(NULL,0) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (b) umount2(0xDEAD_BEEF, 0) — pre-batch EFAULT (kernel-side
-            //     validate_user_read in user context would reject this
-            //     bogus address; Linux defers all pointer touches until
-            //     after may_mount, so an unprivileged caller sees EPERM).
-            let a = SyscallArgs {
-                arg0: 0xDEAD_BEEF,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(0xDEADBEEF,0) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (c) umount2(NULL, MNT_DETACH) — runc/podman CAP-probe shape.
-            //     Pre-batch EFAULT; Linux EPERM.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 2,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(NULL,MNT_DETACH) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (d) umount2(NULL, 0x10) — bad-flag wins over EPERM (gate 1
-            //     runs before gate 2; this regression-checks that the mask
-            //     check is still first after the EFAULT removal).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x10,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(NULL,0x10) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   umount2 Linux gate ladder (EPERM regardless of target): OK"
-            );
+            serial_println!("[syscall/linux]   mount and umount2 gate order (Linux 6.6): OK");
 
             // Batch 343: pivot_root / swapoff gate-order EPERM-first.
             // Linux's pivot_root opens with may_mount() (CAP_SYS_ADMIN)

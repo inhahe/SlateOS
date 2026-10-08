@@ -149,6 +149,7 @@ mod mouse;
 mod msi;
 mod net;
 mod netns;
+mod nsfs;
 mod numa;
 mod nvme;
 mod oci;
@@ -197,6 +198,7 @@ mod udriver;
 mod uname;
 mod unicode;
 mod userns;
+mod utsns;
 mod virtio;
 mod vmguest;
 mod volume;
@@ -3675,6 +3677,42 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_setid(),
     );
+    // UTS namespaces and the handles on them: unshare, setns by handle and by
+    // pidfd, clone(CLONE_NEWUTS), /proc/<pid>/ns (crate::utsns, crate::nsfs).
+    selftest::dispatch_debug(
+        "Linux UTS namespaces (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_uts_namespaces(),
+    );
+    // mount(2) and umount2(2) for root: new mounts, remounts, propagation,
+    // busy, lazy and expiring unmounts (fs::Vfs, fs::new_filesystem).
+    selftest::dispatch_debug(
+        "Linux mount and umount2 (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mount(),
+    );
+    // Mount namespaces: unshare, clone and setns with CLONE_NEWNS, a table
+    // of one's own (fs::mntns).
+    selftest::dispatch_debug(
+        "Linux mount namespaces (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mount_namespaces(),
+    );
+    // Bind and move mounts: MS_BIND (with MS_REC), bind remounts,
+    // unbindable mounts, MS_MOVE (fs::Vfs::bind_mount and the rest).
+    selftest::dispatch_debug(
+        "Linux bind and move mounts (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_bind_mounts(),
+    );
+    // Stacked mounts and pivot_root(2): a mount on a mount point, a mount
+    // covering what is beneath, pivot_root (fs::Vfs::mount_on_top,
+    // pivot_root_tree).
+    selftest::dispatch_debug(
+        "Linux stacked mounts and pivot_root (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_stacked_mounts(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).
@@ -3682,6 +3720,13 @@ extern "C" fn kernel_main() -> ! {
         "native capability broker (ring 3)",
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_native_cap_broker(),
+    );
+    // The namespace calls for native programs, SYS_NAMESPACE_* (crate::nsfs):
+    // with the Namespace right and without it.
+    selftest::dispatch_debug(
+        "native namespace calls (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_namespaces(),
     );
 
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
@@ -3942,6 +3987,14 @@ extern "C" fn kernel_main() -> ! {
         "VFS append atomicity (two concurrent appenders)",
         selftest::Severity::Diagnostic,
         || fs::vfs::self_test_append_is_atomic(),
+    );
+    // The mount tree: covered and stacked mounts, the root's stack
+    // (design-decisions 1557), on tables made for the test.
+    // RAN-IF: "[vfs] Running mount tree self-test..."
+    selftest::dispatch_debug(
+        "VFS mount tree (covered and stacked mounts)",
+        selftest::Severity::Diagnostic,
+        || fs::vfs::self_test_mount_tree(),
     );
     // The pivot the boot makes to put the system image at `/` before init
     // (design-decisions §1513), tried on a tree under /tmp.
@@ -4955,16 +5008,9 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Irqstat", selftest::Severity::Diagnostic, || {
                 fs::irqstat::self_test()
             });
-            // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
-            // latency, queue depth, merges); like its siblings the self-test now builds
-            // fixtures via the real register/record_read/record_write/record_discard/
-            // record_flush/record_merge API and resets the table afterward (leaving no
-            // fabricated rows), so it is safe at boot and gives the module automated
-            // coverage it previously lacked (it was only reachable via the
-            // `diskstat test` kshell subcommand).
-            selftest::dispatch_debug("Diskstat", selftest::Severity::Diagnostic, || {
-                fs::diskstat::self_test()
-            });
+            // (fs::diskstat, which backed /proc/diskstat with a table nothing fed,
+            // went on 2026-10-08: /proc/diskstat is a view of fs::diskio's
+            // projection of the block layer's own counts, tested as "Diskio".)
             // acpistat backs /proc/acpistat (ACPI event counts, GPE firings, S-state
             // suspend/resume); like its siblings the self-test now builds fixtures via
             // the real register_gpe/record_event/record_gpe/set_s_state API and resets
@@ -6219,9 +6265,10 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Power", selftest::Severity::Diagnostic, || {
                 fs::power::self_test()
             });
-            // Mount namespace self-test.
+            // Mount namespaces: a copy of the table, a private mount, freed
+            // with the last hold (fs::mntns).
             selftest::dispatch_debug("Mount namespace", selftest::Severity::Diagnostic, || {
-                fs::mount_ns::self_test()
+                fs::mntns::self_test()
             });
             // The byte-oriented path lexer, which the VFS is being converted onto.
             // If `Path::components` or `Path::starts_with` is wrong then every
@@ -6439,6 +6486,10 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Diskencrypt", selftest::Severity::Diagnostic, || {
                 fs::diskencrypt::self_test()
             });
+            // diskio projects the block layer's per-device counts (blkdev's
+            // Accounted wrapper) for /proc/diskio, /proc/diskstat and the
+            // shell: its test registers a scratch RAM disk, does I/O through
+            // the registry and checks the view, then unregisters it.
             selftest::dispatch_debug("Diskio", selftest::Severity::Diagnostic, || {
                 fs::diskio::self_test()
             });
@@ -8084,6 +8135,15 @@ extern "C" fn kernel_main() -> ! {
     userns::init();
     selftest::dispatch_debug("Userns", selftest::Severity::Integrity, || {
         userns::self_test()
+    });
+
+    // UTS namespaces: the host and domain names each process sees; and the
+    // handles on namespaces that /proc/<pid>/ns gives and setns takes.
+    selftest::dispatch_debug("UTS namespaces", selftest::Severity::Integrity, || {
+        utsns::self_test()
+    });
+    selftest::dispatch_debug("Namespace handles", selftest::Severity::Integrity, || {
+        nsfs::self_test()
     });
 
     // Step 22e⅞++++p8: Network namespace subsystem init + self-test.

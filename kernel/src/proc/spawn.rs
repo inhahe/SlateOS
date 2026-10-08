@@ -1890,6 +1890,11 @@ fn spawn_process_inner(
         pcb::destroy(pid);
         return Err(e);
     }
+    // And in its parent's UTS namespace, as a fork's child is.
+    if options.parent != 0 {
+        pcb::inherit_uts_ns(options.parent, pid);
+        crate::fs::mntns::inherit(options.parent, pid);
+    }
 
     // Step 5d: Apply fd inheritance map.
     //
@@ -24213,6 +24218,635 @@ pub fn self_test_linux_setid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of UTS namespaces and the handles on them through the Linux
+/// ABI: [`elf::build_linux_uts_namespaces_test_elf`] (`build/nstest.c`), run
+/// as root. `/proc/self/ns/uts` is a link whose descriptor `stat`, `fstat`
+/// and `NS_GET_NSTYPE` describe alike; `unshare(CLONE_NEWUTS)` gives the
+/// process a host name of its own; a fork child shares its namespace and
+/// leaves it with `setns`; `setns` moves between two handles' namespaces;
+/// `clone(CLONE_NEWUTS)` makes one for the child; `setns` takes a pidfd; a
+/// process that gave up root is refused all of it; the system's names are
+/// untouched at the end (`crate::utsns`, `crate::nsfs`).
+pub fn self_test_linux_uts_namespaces() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux UTS namespaces (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_uts_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-utsns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens `/proc` files: `sys_fs_open` wants a wildcard File capability.
+    // Nothing else: its right to make and enter namespaces is root's, an
+    // effective user id of 0, which its child gives up.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-utsns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
+    let before = crate::utsns::count();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: UTS namespaces spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x32) => {
+                "a fork child was not in its parent's namespace, or setns did not take it to \
+                 the system's names"
+            }
+            Some(0x33..=0x35) => {
+                "clone(CLONE_NEWUTS) did not give the child a namespace of its own"
+            }
+            Some(0x36..=0x38) => "the pidfd test's child could not make a namespace and name it",
+            Some(0x39..=0x3d) => {
+                "a process that gave up root made or entered a namespace, or set its host name"
+            }
+            Some(0x3e) => "a process that gave up root could not open its own namespace",
+            Some(0x40 | 0x41) => "uname, or /proc/self/ns/uts's link text (uts:[N]), failed",
+            Some(0x42..=0x45) => {
+                "/proc/self/ns/uts did not open, or stat, fstat and lstat of it disagree with \
+                 Linux's"
+            }
+            Some(0x46 | 0x47) => "O_NOFOLLOW opened the link, or a read of the handle did not fail",
+            Some(0x48 | 0x49) => "NS_GET_NSTYPE or NS_GET_PARENT answered wrongly",
+            Some(0x4a | 0x4b) => "/proc/self/fd or /proc/self/ns did not name the namespace",
+            Some(0x4c..=0x4f) => "unshare(CLONE_NEWUTS) did not give a host name of its own",
+            Some(0x50 | 0x51) => "the fork child's setns moved its parent, or did not end 0x2B",
+            Some(0x52 | 0x53) => "setns did not move between the two handles' namespaces",
+            Some(0x54..=0x56) => {
+                "setns took a mismatched kind, or something that is not an open namespace handle"
+            }
+            Some(0x57 | 0x58) => "the clone(CLONE_NEWUTS) child did not end 0x2C, or renamed us",
+            Some(0x59..=0x5f) => "setns with a pidfd did not take its process's namespace",
+            Some(0x60) => "setns with the pidfd of a reaped process was not ESRCH",
+            Some(0x61 | 0x62) => "a namespace did not outlive its creator while still in use",
+            Some(0x63) => "the child that gave up root did not end 0x2D",
+            Some(0x64) => "back in the first namespace, the system's names were not as they were",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Nothing it made outlives it, and the system's name is as it was.
+    if crate::utsns::count() != before || crate::utsns::hostname(crate::utsns::ROOT_UTS) != system {
+        serial_println!(
+            "[spawn]   FAIL: UTS namespaces (ring 3) — {} namespaces outlived the program, or \
+             the system's host name changed",
+            crate::utsns::count().saturating_sub(before)
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux UTS namespaces (ring 3: /proc/self/ns/uts, unshare and sethostname, \
+         setns by handle and by pidfd, clone(CLONE_NEWUTS), refused without root, every \
+         namespace freed): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `mount(2)` and `umount2(2)` through the Linux ABI:
+/// [`elf::build_linux_mount_test_elf`] (`build/mounttest.c`), run as root in a
+/// directory of its own under `/tmp`. A tmpfs mounted there, listed in
+/// `/proc/self/mounts`, remounted read-only and back; propagation changes on a
+/// mount and refused elsewhere; `EBUSY` while a file is open, then unmounted;
+/// a lazy unmount that leaves an open file working; `MNT_EXPIRE`; the
+/// refusals; `EPERM` without root.
+pub fn self_test_linux_mount() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mount and umount2 (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mount_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mount"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability, as every ring-3
+    // fixture that does is given. Its right to mount is root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mount",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mount and umount2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => "a process that gave up root could mount or unmount",
+            Some(0x40) => "its directory under /tmp could not be made",
+            Some(0x41..=0x43) => "a tmpfs did not mount, hold a file, or show in /proc/self/mounts",
+            Some(0x44..=0x47) => {
+                "a remount read-only did not refuse a file, or back did not take one"
+            }
+            Some(0x48..=0x4b) => {
+                "MS_PRIVATE on a mount was refused, or a propagation change or remount of a \
+                 directory that is no mount was taken"
+            }
+            Some(0x4c..=0x4f) => {
+                "umount2 did not refuse while a file was open (EBUSY), or did not unmount after"
+            }
+            Some(0x50..=0x54) => {
+                "a lazy unmount did not take the mount away at once, or broke the open file"
+            }
+            Some(0x55..=0x58) => "MNT_EXPIRE did not answer EAGAIN, then unmount",
+            Some(0x59..=0x5d) => "ENODEV, EINVAL or ENOENT was not answered where Linux does",
+            Some(0x5e..=0x61) => "the unprivileged child's test did not run or end 0x2B",
+            Some(0x62) => "its directory could not be removed: something stayed mounted on it",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Nothing it mounted is left behind.
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- {} mounts before, {} after",
+            mounts_before,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mount and umount2 (ring 3: a tmpfs mounted and listed, remounted \
+         read-only and back, propagation, EBUSY then unmounted, a lazy unmount, MNT_EXPIRE, the \
+         refusals, EPERM without root): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of mount namespaces through the Linux ABI:
+/// [`elf::build_linux_mount_namespaces_test_elf`] (`build/mntnstest.c`), run
+/// as root. `/proc/self/ns/mnt` as a handle; `unshare(CLONE_NEWNS)` and the
+/// private remount of `/`; a tmpfs of its own that a fork child shares until
+/// it `setns`'s out (and is put at `/`); `setns` out and back;
+/// `clone(CLONE_NEWNS)`; `EPERM` without root (`crate::fs::mntns`).
+pub fn self_test_linux_mount_namespaces() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mount namespaces (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mount_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mntns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make namespaces are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mntns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mount namespaces spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => {
+                "a fork child did not share its parent's mount namespace, or setns did not take \
+                 it out of it and put it at /"
+            }
+            Some(0x34 | 0x35) => "clone(CLONE_NEWNS) did not give the child a namespace and mount",
+            Some(0x36 | 0x37) => "a process that gave up root could unshare a mount namespace",
+            Some(0x40 | 0x41) => "/proc/self/ns/mnt did not open to a handle NS_GET_NSTYPE knows",
+            Some(0x42) => "its directory under /tmp could not be made",
+            Some(0x43..=0x46) => {
+                "unshare(CLONE_NEWNS) did not give a namespace of its own, or the private \
+                 remount of / was refused"
+            }
+            Some(0x47 | 0x48) => "a tmpfs in the new namespace did not mount or hold a file",
+            Some(0x49 | 0x4a) => "the fork child did not end 0x2B, or its setns moved its parent",
+            Some(0x4b | 0x4c) => "setns did not take it out of its namespace and back",
+            Some(0x4d..=0x50) => {
+                "the clone(CLONE_NEWNS) child's mount was seen by its parent, or CLONE_FS with \
+                 CLONE_NEWNS was taken"
+            }
+            Some(0x51) => "the unprivileged child did not end 0x2D",
+            Some(0x52..=0x54) => {
+                "its mount did not come off, or it could not go home and remove its directory"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Every namespace it made went with it, and the system's table is as it
+    // was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: mount namespaces (ring 3) -- {} namespaces and {} system mounts \
+             before, {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mount namespaces (ring 3: /proc/self/ns/mnt, unshare and a private /, a \
+         mount of its own, setns out and back, clone(CLONE_NEWNS), refused without root, every \
+         namespace freed): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of bind and move mounts through the Linux ABI:
+/// [`elf::build_linux_bind_mounts_test_elf`] (`build/bindtest.c`), run as
+/// root, in a mount namespace of its own. A directory and a file bound
+/// elsewhere, the same files through both paths and mountinfo's root field;
+/// `EBUSY` for the mount point and `EXDEV` between the two mounts; a bind
+/// remount read-only with the source writable, and a remount of the
+/// filesystem through every mount of it; `MS_REC`; unbindable mounts;
+/// `MS_MOVE`; `EPERM` without root (`crate::fs::Vfs::bind_mount`,
+/// `move_mount`, `remount_bind`, `set_propagation`).
+pub fn self_test_linux_bind_mounts() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux bind and move mounts (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_bind_mounts_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-bind"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make a namespace are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-bind",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: bind mounts spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => "a process that gave up root could bind a mount",
+            Some(0x40..=0x45) => {
+                "it could not make a namespace of its own, a tmpfs, or the directories and file \
+                 it works in"
+            }
+            Some(0x46..=0x49) => {
+                "a directory bound elsewhere did not show the same files, or a file made through \
+                 the bind was not in its source"
+            }
+            Some(0x4a) => "mountinfo's root field did not name the bound subtree",
+            Some(0x4b | 0x4c) => "the bind's mount point could be removed or renamed (not EBUSY)",
+            Some(0x4d | 0x4e) => {
+                "a rename or link between a bind and its source was taken (not EXDEV)"
+            }
+            Some(0x4f | 0x50) => "a rename inside the bind failed",
+            Some(0x51..=0x55) => {
+                "a bind remount did not make the bind alone read-only and back, or mountinfo did \
+                 not say the mount is ro and the filesystem rw"
+            }
+            Some(0x56..=0x59) => {
+                "a remount of the filesystem through the bind did not make it read-only through \
+                 every mount of it, and back"
+            }
+            Some(0x5a | 0x5b) => "the bind did not come off, or its source went with it",
+            Some(0x80 | 0x81) => {
+                "a file held open through a bind did not keep it (EBUSY), or it did not come off \
+                 once closed"
+            }
+            Some(0x82..=0x84) => {
+                "a bind did not outlive the unmount of its source, or the source would not come \
+                 off while bound elsewhere"
+            }
+            Some(0x5c..=0x5f) => "a file bound over a file did not show its source, or come off",
+            Some(0x60 | 0x61) => {
+                "a directory over a file, or a file over a directory, was not ENOTDIR"
+            }
+            Some(0x62..=0x64) => {
+                "no source, an empty one or a missing one was not EINVAL, EINVAL, ENOENT"
+            }
+            Some(0x65..=0x6c) => {
+                "MS_REC did not bind the mount beneath, or a bind without it did, or the \
+                 umount with one beneath was not EBUSY, or MNT_DETACH did not take both"
+            }
+            Some(0x6d..=0x74) => {
+                "an unbindable mount could be bound, was not left out of a recursive bind, was \
+                 not listed so, or MS_PRIVATE did not take it back"
+            }
+            Some(0x75..=0x7b) => {
+                "MS_MOVE did not move a mount with its files, or a move into itself was not \
+                 ELOOP, or one of a mount's subdirectory was not EINVAL"
+            }
+            Some(0x7c) => "the unprivileged child did not end 0x2B",
+            Some(0x7d | 0x7e) => {
+                "its tmpfs did not come off, or its directory could not be removed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Its namespace went with it, and the system's table is as it was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: bind mounts (ring 3) -- {} namespaces and {} system mounts before, \
+             {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux bind and move mounts (ring 3: a directory and a file bound, the same \
+         files, mountinfo's root, EBUSY and EXDEV, read-only binds and filesystems, MS_REC, \
+         unbindable, MS_MOVE, EPERM without root): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of stacked mounts and `pivot_root(2)` through the Linux ABI:
+/// [`elf::build_linux_stacked_mounts_test_elf`] (`build/stacktest.c`), run as
+/// root, in a mount namespace of its own. A mount on a mount point covering
+/// the one below, with that one's ID as its parent; a mount covering what was
+/// beneath its directory first; a move and a bind on top; a recursive bind
+/// of a directory onto itself; `pivot_root`'s refusals, `pivot_root(new,
+/// new/old)` and `pivot_root(".", ".")` as runc does it
+/// (`crate::fs::Vfs::mount_on_top`, `pivot_root_tree`).
+pub fn self_test_linux_stacked_mounts() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!(
+        "[spawn] Running Linux stacked mounts and pivot_root (ring 3) integration test..."
+    );
+
+    let exe_elf = elf::build_linux_stacked_mounts_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-stack"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability. Its rights to
+    // mount and to make namespaces are root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-stack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let namespaces_before = crate::fs::mntns::list().len();
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: stacked mounts spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "a process that gave up root was not refused pivot_root with EPERM"
+            }
+            Some(0x32..=0x37) => {
+                "pivot_root(new, new/old) did not make the new root / with the working directory \
+                 on it, the old root and its mounts under /old, or a lazy unmount of /old"
+            }
+            Some(0x38..=0x3d) => {
+                "pivot_root(\".\", \".\") as runc does it did not leave the new root alone at / \
+                 once umount2(\".\", MNT_DETACH) took the old one"
+            }
+            Some(0x40..=0x42) => "it could not make a namespace and a tmpfs of its own",
+            Some(0x43..=0x49) => {
+                "a mount on a mount point did not go on top, cover the one below, name it as \
+                 its parent in mountinfo, or uncover it when it went"
+            }
+            Some(0x4a..=0x4d) => {
+                "a mount on a directory did not cover the mount beneath it, or unmounting it was \
+                 refused for it, or it did not come back"
+            }
+            Some(0x4e..=0x56) => "a move or a bind onto a mount point did not go on top",
+            Some(0x57..=0x5e) => {
+                "a recursive bind of a directory onto itself was refused, did not copy the mount \
+                 beneath, or did not come off with MNT_DETACH alone"
+            }
+            Some(0x5f..=0x64) => {
+                "pivot_root's refusals (EBUSY for /, EINVAL, ENOTDIR, ENOENT) were not Linux's"
+            }
+            Some(0x65) => "the unprivileged child did not end 0x2B",
+            Some(0x66 | 0x67) => {
+                "the pivot_root(new, new/old) child did not end 0x2C, or its parent's namespace \
+                 changed"
+            }
+            Some(0x68 | 0x69) => {
+                "the pivot_root(\".\", \".\") child did not end 0x2D, or its parent's namespace \
+                 changed"
+            }
+            Some(0x6a | 0x6b) => {
+                "its tmpfs did not come off, or its directory could not be removed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Every namespace it made went with it, and the system's table is as it
+    // was.
+    let namespaces_after = crate::fs::mntns::list().len();
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if namespaces_after != namespaces_before || mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: stacked mounts (ring 3) -- {} namespaces and {} system mounts \
+             before, {} and {} after",
+            namespaces_before,
+            mounts_before,
+            namespaces_after,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux stacked mounts and pivot_root (ring 3: on top of a mount point and \
+         covering what was beneath, a move and a bind on top, a directory bound onto itself, \
+         pivot_root's refusals, pivot_root(new, new/old) and pivot_root(\".\", \".\")): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of named pipes through the Linux ABI:
 /// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
 /// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a
@@ -24514,10 +25148,14 @@ pub fn self_test_linux_stopped_signals() -> KernelResult<()> {
 /// Ring-3 test of ignored signals dropped as they are sent, through the Linux
 /// ABI: [`elf::build_linux_ignored_at_send_test_elf`] (`build/sigdfltest.c`).
 /// A program with a `SIGUSR1` handler -- so a trampoline is registered -- is
-/// not woken from a sleep by a child's `SIGCHLD`, a `SIGWINCH` or an ignored
-/// `SIGURG`; a blocked `SIGCHLD` is kept, and discarded once unblocked at its
-/// default; a `SIGUSR1` does wake it (`signal::classify`,
-/// `syscall::linux::post_linux_sigchld`).
+/// not woken from a sleep by a child's `SIGCHLD`; a blocked `SIGCHLD` is
+/// kept, and discarded once unblocked at its default; a child that inherited
+/// the handler sleeps on through a `SIGWINCH` or an ignored `SIGURG` from its
+/// parent, and a `SIGUSR1` does wake it (`signal::classify`,
+/// `syscall::linux::post_linux_sigchld`). The parent signals the child --
+/// every 100 ms, so a child scheduled late still has some arrive during its
+/// sleep -- because a process may signal only what it started
+/// (design-decisions 1503).
 pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 120_000_000_000;
@@ -24570,14 +25208,20 @@ pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
         let what = match exit_code {
             Some(0x30 | 0x31) => "rt_sigaction or rt_sigpending failed",
             Some(0x32 | 0x33) => "fork or wait4 failed",
+            Some(0x34 | 0x35) => "pipe2, or reading the child's ready byte, failed",
+            Some(0x36) => "the parent's kill of its sleeping child failed",
+            Some(0x37) => "a child sent a signal every 100 ms was still asleep after 10 s",
             Some(0x40) => "a child's exit (SIGCHLD at its default) cut a sleep short",
             Some(0x41) => "a child's exit left SIGCHLD pending at its default",
             Some(0x42 | 0x44) => "rt_sigprocmask failed",
             Some(0x43) => "a blocked SIGCHLD was not kept pending",
             Some(0x45) => "an unblocked SIGCHLD at its default was not discarded",
-            Some(0x46) => "a SIGWINCH at its default cut a sleep short",
-            Some(0x47) => "a SIGURG set to SIG_IGN cut a sleep short",
-            Some(0x48) => "a SIGUSR1 with a handler did not cut a sleep short with EINTR",
+            Some(0x46) => "a SIGWINCH at its default cut the child's sleep short",
+            Some(0x47) => "a SIGURG set to SIG_IGN cut the child's sleep short",
+            Some(0x48) => {
+                "a SIGUSR1 with an inherited handler did not cut the child's sleep short with \
+                 EINTR"
+            }
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };
@@ -24721,11 +25365,17 @@ pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
     let exe_elf = elf::build_linux_cpu_timers_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-timers"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // `RLIMIT_RTTIME` (step 8) needs a real-time thread: its child takes
+    // SCHED_FIFO, which a root program has by CAP_SYS_NICE on Linux and here
+    // by `IO_REALTIME` on a Thread capability (`priority::may_set_scheduler`).
+    // It had none, and the first boot to reach the step (a fast diagnostic
+    // boot of lane-a-wip, 2026-10-08) failed there with 0x81.
+    let capabilities = [(ResourceType::Thread, 0u64, Rights::IO_REALTIME)];
     let options = SpawnOptions {
         name: "spawn-test-linux-cpu-timers",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &capabilities,
         fd_map: &[],
         argv,
         envp,
@@ -25381,6 +26031,143 @@ pub fn self_test_native_cap_broker() -> KernelResult<()> {
          and listing, its own request refused, allow grants, deny, what cannot be asked for, \
          a timed-out wait and a cancel, unregistration): OK"
     );
+    Ok(())
+}
+
+/// Native ring-3 test of the namespace calls, `SYS_NAMESPACE_*` 1161-1166:
+/// [`elf::build_native_namespaces_test_elf`] (`build/nsnative.c`), run twice.
+/// Holding `(Namespace, WRITE)`, `(Process, SET_HOSTNAME)` and `(File,
+/// READ)`, it opens `/proc/self/ns/uts` to a handle, unshares a UTS
+/// namespace and names it, moves between two handles' namespaces, leaves a
+/// fork child to move alone, enters a child's namespace by its pid, and
+/// closes a handle exactly once (exit 0x2A). Holding `(File, READ)` alone, it
+/// may open and describe its namespace but neither unshare nor enter one
+/// (exit 0x2C). Either way, no namespace it made outlives it and the
+/// system's host name is as it was (`crate::nsfs`).
+pub fn self_test_native_namespaces() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+
+    serial_println!("[spawn] Running native namespace calls (ring 3) integration test...");
+    let with = [
+        (ResourceType::Namespace, 0u64, Rights::WRITE),
+        (ResourceType::Process, 0u64, Rights::SET_HOSTNAME),
+        (ResourceType::File, 0u64, Rights::READ),
+    ];
+    let without = [(ResourceType::File, 0u64, Rights::READ)];
+    run_native_namespaces(&with, 0x2A, "with the namespace right")?;
+    run_native_namespaces(&without, 0x2C, "without it")?;
+    serial_println!(
+        "[spawn]   native namespace calls (ring 3: a handle on /proc/self/ns/uts and its info, \
+         unshare and a host name of its own, enter by handle and by pid, a fork child moving \
+         alone, a handle closed once, refused without the Namespace right): OK"
+    );
+    Ok(())
+}
+
+/// One run of [`self_test_native_namespaces`]'s program, holding `caps`,
+/// which must end `pass`.
+fn run_native_namespaces(
+    caps: &[(crate::cap::ResourceType, u64, crate::cap::Rights)],
+    pass: i32,
+    which: &str,
+) -> KernelResult<()> {
+    const DEADLINE_NS: u64 = 60_000_000_000;
+    let exe_elf = elf::build_native_namespaces_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-native-ns"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-native-ns",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let system = crate::utsns::hostname(crate::utsns::ROOT_UTS);
+    let before = crate::utsns::count();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: native namespace calls ({}) spawn returned {:?}",
+                which,
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- not a zombie after 60 s, got {:?}",
+            which,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(pass) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "the fork child could not enter the first namespace by its inherited handle"
+            }
+            Some(0x32) => "the pid test's child could not unshare",
+            Some(0x40 | 0x41) => {
+                "/proc/self/ns/uts did not open to a handle SYS_NAMESPACE_INFO describes"
+            }
+            Some(0x42 | 0x43) => {
+                "a path that names no namespace, or a process that is not there, was not refused"
+            }
+            Some(0x44) => "info on a handle not held was not InvalidHandle",
+            Some(0x45..=0x47) => "unshare or enter worked without the Namespace right",
+            Some(0x48) => "the handle did not close",
+            Some(0x49) => "the host name could not be read",
+            Some(0x4a) => "unsharing a kind not built was not NotSupported",
+            Some(0x4b..=0x4d) => "unshare did not give a new namespace with a host name of its own",
+            Some(0x4e | 0x4f) => "enter took a mismatched kind or a handle not held",
+            Some(0x50 | 0x51) => "enter did not move between the two handles' namespaces",
+            Some(0x52 | 0x53) => "the fork child did not end 0x2B, or moved its parent",
+            Some(0x54..=0x57) => "enter by pid did not take the child's namespace",
+            Some(0x58 | 0x59) => "the pid test's child could not be ended",
+            Some(0x5a) => "enter by the pid of a reaped process was not NoSuchProcess",
+            Some(0x5b..=0x5d) => "a handle did not close exactly once",
+            Some(0x5e | 0x5f) => "back in the first namespace, the system's name was not as it was",
+            Some(0x2A) => {
+                "it ran the privileged half, so it held the Namespace right it was not given"
+            }
+            Some(0x2C) => "it ran the unprivileged half, so it did not hold the right it was given",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- exit {:?}: {}",
+            which,
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    if crate::utsns::count() != before || crate::utsns::hostname(crate::utsns::ROOT_UTS) != system {
+        serial_println!(
+            "[spawn]   FAIL: native namespace calls ({}) -- {} namespaces outlived the program, \
+             or the system's host name changed",
+            which,
+            crate::utsns::count().saturating_sub(before)
+        );
+        return Err(KernelError::InternalError);
+    }
     Ok(())
 }
 
@@ -28685,21 +29472,50 @@ pub fn self_test_callmax_abi() -> KernelResult<()> {
     // loaded host.  Bounded, so a regression that blocks -- `0x55` without
     // the span check reads an empty pipe forever -- fails rather than wedging
     // the boot.
-    let deadline = crate::hrtimer::now_ns().saturating_add(5_000_000_000); // 5 s
-    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
-        && crate::hrtimer::now_ns() < deadline
-    {
+    //
+    // What fails is a probe that has *waited* -- blocked, the regression's
+    // shape -- for 5 s, judged by its task's scheduler state rather than by
+    // the clock alone. A probe still running when 5 s are up is only slow
+    // (TCG with another lane compiling beside it); it gets up to 120 s, and
+    // still fails then. The process's own state says nothing here: it reads
+    // `Running` while its only thread is blocked, which is how debug boot 13
+    // of lane-a (2026-10-08) reported a probe blocked in a 2 GiB blocking
+    // `pipe_write` -- whole since that morning's e0ed7bd41 -- as one still
+    // running; the probe writes with `pipe_try_write` now.
+    const BLOCKED_NS: u64 = 5_000_000_000;
+    const RUNNING_NS: u64 = 120_000_000_000;
+    let start = crate::hrtimer::now_ns();
+    let mut blocked_since: Option<u64> = None;
+    let verdict = loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break None;
+        }
+        let now = crate::hrtimer::now_ns();
+        let task = crate::sched::task_state(result.task_id);
+        if task == Some(crate::sched::task::TaskState::Blocked) {
+            let since = *blocked_since.get_or_insert(now);
+            if now.saturating_sub(since) >= BLOCKED_NS {
+                break Some("blocked for 5 s");
+            }
+        } else {
+            blocked_since = None;
+        }
+        if now.saturating_sub(start) >= RUNNING_NS {
+            break Some("still not done after 120 s");
+        }
         crate::sched::yield_now();
-    }
+    };
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    if state != Some(pcb::ProcessState::Zombie) {
+    if let Some(why) = verdict {
         serial_println!(
-            "[spawn]   FAIL: per-call copy bound (ring 3) — probe did not exit within 5s \
-             (state {:?}); a blocked 0x55 means the span check is gone",
-            state
+            "[spawn]   FAIL: per-call copy bound (ring 3) — probe did not exit: {} \
+             (state {:?}, task {:?}); a blocked 0x55 means the span check is gone",
+            why,
+            state,
+            crate::sched::task_state(result.task_id)
         );
         // Forced down, as the other runners here do, so a blocked probe
         // cannot outlive its test.

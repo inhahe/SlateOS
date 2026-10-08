@@ -1282,13 +1282,17 @@
 ## added (asserts 'Node 0, zone' prefix, all per-order columns parse as ints, and
 ## no stray non-zone trailing lines).  boot-test PASSED; serial shows
 ## '/buddyinfo: Linux frag_show layout OK (11 columns)'.
-## NOTE: the OTHER standard-Linux /proc files still in custom native format
-## (/proc/interrupts, /proc/diskstats) are NOT cleanly convertible: real Linux
-## /proc/interrupts needs per-IRQ-line counters and /proc/diskstats needs the 20
-## per-device IO fields (reads/writes completed, sectors, ms) — we track neither
-## (only aggregate irq_count and aggregate blkdev reads/writes).  Converting them
-## would mean emitting mostly-zero columns, which is worse than the current honest
-## custom format; defer until per-IRQ and per-device accounting exist.
+## NOTE: the OTHER standard-Linux /proc file still in custom native format
+## (/proc/interrupts) is NOT cleanly convertible: real Linux /proc/interrupts
+## needs per-IRQ-line counters, which we do not track (only aggregate
+## irq_count).  Converting it would mean emitting mostly-zero columns; defer
+## until per-IRQ accounting exists.
+## DONE (2026-10-08, lane A): /proc/diskstats is Linux 6.6's layout, from real
+## per-device accounting -- blkdev::DeviceStats, counted on the way through
+## with_device/try_with_device (requests, 512-byte sectors and ns for reads,
+## writes and discards).  Lane B's procps vmstat request showed what the
+## deferral cost: not zeros but `vmstat -d`, `-D` and `-p` refusing to start
+## on the native header line.
 ## NOTE: /proc/meminfo, /proc/cpuinfo AND /proc/vmstat
 ## are INTENTIONALLY native-format; converting THOSE to Linux layout is a
 ## separate design decision, not a bug — leave them unless the user asks.
@@ -1299,11 +1303,17 @@
 ## bytes, and (b) several of our counters (zero-pool, zram internals, kswapd
 ## cycles) have no honest Linux equivalent.  Honest native names beat misleading
 ## Linux-named numbers, so it stays native like meminfo/cpuinfo.
+## EXCEPT (2026-10-08, lane A, lane B's procps request): four Linux keys sit
+## beside the native ones because procps' vmstat reads its si/so/bi/bo columns
+## from them -- pgpgin/pgpgout (KiB to and from block devices, Linux's unit
+## despite the name) and pswpin/pswpout (pages, which vmstat converts with
+## sysconf(_SC_PAGESIZE), so our 16 KiB page is the right unit).  Nothing
+## native was renamed or removed.
 ## STATUS: the cleanly-convertible standard-Linux /proc files are now ALL done
-## (stat, uptime, loadavg, buddyinfo; <pid>/io added 2026-06-11 with real PCB
-## counters — see DONE entry below).  The remainder are either blocked on new
-## accounting infra (interrupts, diskstats, <pid>/auxv) or intentionally
-## native (meminfo, cpuinfo, vmstat).  No further small in-thread procfs work.
+## (stat, uptime, loadavg, buddyinfo, diskstats; <pid>/io added 2026-06-11 with
+## real PCB counters — see DONE entry below).  The remainder are either blocked
+## on new accounting infra (interrupts, <pid>/auxv) or intentionally native
+## (meminfo, cpuinfo, vmstat).  No further small in-thread procfs work.
 
 ## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
 ## Linux always prints `Mems_allowed:`/`Mems_allowed_list:` (the NUMA memory
@@ -59215,3 +59225,34 @@ unvalidated parts; everything before them (stages 1-5.4 + quiesce helpers +
 the syscall gate) is self-tested and boot-checked. Do NOT wire `powerctl reload`
 to a kexec on `main`, and do NOT leave `sys_power_reload` calling `execute` on a
 published commit, until the kexec-mode boot (5c) passes.
+
+**UPDATE 2026-10-08 (lane A): 5a and 5b are built and the self-reload WORKS in
+QEMU** -- a kernel booted with `selftest.skip=1 kexec.selftest=1` reloads
+itself, and the second kernel boots to BOOT_OK with its command line
+(lane-a-wip, fast boots kexec4/5 of that day). The plan above was wrong in
+places, each found by a boot; the code (`kernel/src/kexec.rs`) is now the
+reference, and its comments say why:
+  - The trampoline switches to the NEW tables FIRST, then clears CR4.PGE/PCIDE/
+    CET (flushing the old kernel's GLOBAL image mappings), then takes the new
+    stack, then copies -- not copy-first under the old tables (the destination
+    is not checked against the old kernel's page-table frames).
+  - Every handoff frame (tables, arena, staging, control region) is allocated
+    BELOW the destination (`handoff_frame_zeroed`, `alloc_order_constrained`):
+    the first boot was refused by the after-the-fact collision check.
+  - The old kernel's direct map is no-execute: NX is cleared on the control
+    region's path before the jump (`allow_execution_at`).
+  - `find_request_sites` takes the first marker window in a WRITABLE segment:
+    the "last start marker" was kexec.rs's own `.rodata` constants, so no
+    request was patched ("Limine did not answer the HHDM request").
+  - The new direct map covers only Limine's types (usable, bootloader-
+    reclaimable, executable-and-modules), not 0..top-of-RAM: the restarted
+    kernel could not map the APIC/IOAPIC uncached over write-back huge pages.
+  - The command line is passed (a kernel-file response with no file), minus
+    `kexec.selftest=1`.
+**Still open, in order:** (1) a `boot-test.sh` kexec flag that boots
+`selftest.skip=1 kexec.selftest=1` and requires a second banner then BOOT_OK
+(5c's harness half; today only `/tmp/fastboot.sh`-style QEMU runs check it);
+(2) the framebuffer response (known-issues `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`);
+(3) SMP -- validated only on one CPU; the APs are INIT'd and the new kernel
+must restart them; (4) only then wire `sys_power_reload` (still `NotSupported`)
+and answer lane C's `requests/c-ab-a-restart-that-keeps-the-computer-on.md`.

@@ -67,6 +67,7 @@ pub mod clock;
 pub mod conf;
 pub mod crypt;
 pub mod epoll;
+pub mod glob;
 pub mod inotify;
 pub mod lock;
 pub mod netdb;

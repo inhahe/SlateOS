@@ -64,56 +64,58 @@ use super::number::{
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
     SYS_MEMBARRIER, SYS_MEMORY_ADVISE, SYS_MEMORY_LOCK, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE,
-    SYS_MMAP, SYS_MMAP_FILE, SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE,
-    SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO,
-    SYS_NET_RAW_CLOSE, SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX,
-    SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY,
-    SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND,
-    SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE,
-    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
-    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
-    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER,
-    SYS_POWER_RELOAD, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO,
-    SYS_PROCESS_DUMPABLE, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
-    SYS_PROCESS_GET_IDS, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_GET_PHDR, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID,
-    SYS_PROCESS_GETGROUPS, SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL,
-    SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
-    SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_IDS,
-    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTRACE,
-    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
-    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
-    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
-    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
-    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_RSEQ,
-    SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
-    SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
-    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
-    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
-    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
-    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
-    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_EXIT_SELF, SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING,
-    SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED,
-    SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
-    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
-    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
-    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
-    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
-    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
-    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
-    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT,
-    SYS_THREAD_RESUME, SYS_THREAD_SCHEDULER, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND,
-    SYS_TIMER_CANCEL, SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP,
-    SYS_TTY_GET_TERMIOS, SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS,
-    SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT,
-    SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6,
-    SYS_UDP_RECV, SYS_UDP_RECV6, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND,
-    SYS_UDP_SEND6, SYS_UDP_SET_OPTION, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_MMAP, SYS_MMAP_FILE, SYS_MPROTECT, SYS_MUNMAP, SYS_NAMESPACE_CLOSE, SYS_NAMESPACE_ENTER,
+    SYS_NAMESPACE_ENTER_PROCESS, SYS_NAMESPACE_INFO, SYS_NAMESPACE_OPEN, SYS_NAMESPACE_UNSHARE,
+    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
+    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
+    SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
+    SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH,
+    SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
+    SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
+    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
+    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
+    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER, SYS_POWER_RELOAD,
+    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_DUMPABLE,
+    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_IDS,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR,
+    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_GETGROUPS,
+    SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
+    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE,
+    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_IDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID,
+    SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN,
+    SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK,
+    SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTRACE, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
+    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
+    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
+    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_RSEQ, SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE,
+    SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_EXIT_SELF,
+    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
+    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
+    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
+    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
+    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
+    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
+    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
+    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
+    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
+    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
+    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
+    SYS_THREAD_SCHEDULER, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
+    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
+    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6, SYS_UDP_RECV, SYS_UDP_RECV6,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_UDP_SEND6, SYS_UDP_SET_OPTION,
+    SYS_WAIT_MULTIPLE, SYS_YIELD,
 };
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
@@ -798,6 +800,14 @@ const fn build_v1_table() -> SyscallTable {
     // Real, effective, saved and filesystem ids, for native programs.
     handlers[SYS_PROCESS_SET_IDS as usize] = Some(handlers::sys_process_set_ids);
     handlers[SYS_PROCESS_GET_IDS as usize] = Some(handlers::sys_process_get_ids);
+    // Namespaces as Linux has them -- unshare, /proc/<pid>/ns handles, setns
+    // -- for native programs (crate::nsfs).
+    handlers[SYS_NAMESPACE_UNSHARE as usize] = Some(handlers::sys_namespace_unshare);
+    handlers[SYS_NAMESPACE_OPEN as usize] = Some(handlers::sys_namespace_open);
+    handlers[SYS_NAMESPACE_ENTER as usize] = Some(handlers::sys_namespace_enter);
+    handlers[SYS_NAMESPACE_ENTER_PROCESS as usize] = Some(handlers::sys_namespace_enter_process);
+    handlers[SYS_NAMESPACE_CLOSE as usize] = Some(handlers::sys_namespace_close);
+    handlers[SYS_NAMESPACE_INFO as usize] = Some(handlers::sys_namespace_info);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -9190,12 +9200,14 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     // nothing -- which is what the first version of this did, passing a whole
     // boot while proving neither syscall existed.
     //
-    // `which != ITIMER_REAL` is rejected before the pid lookup, so this reaches
-    // the handler either way. It separates three outcomes a caller must be able
-    // to tell apart: `NoSuchSyscall` means the number is not registered at all,
-    // `InvalidArgument` means a registered handler ran and refused the
-    // argument, and success would mean the handler accepted a CPU-time request
-    // for a wall-clock timer.
+    // A `which` past ITIMER_PROF is rejected before the pid lookup, so this
+    // reaches the handler either way. It separates the outcomes a caller must
+    // be able to tell apart: `NoSuchSyscall` means the number is not
+    // registered at all, `InvalidArgument` means a registered handler ran and
+    // refused the argument. (ITIMER_VIRTUAL, 1, was the refused one until the
+    // CPU-time timers, design-decisions 1550, made it a timer of its own; this
+    // asked for its refusal until 2026-10-08, the first boot that reached it
+    // after.)
     let bad_which = SyscallResult::err(KernelError::InvalidArgument).value;
     let no_such = SyscallResult::err(KernelError::NoSuchSyscall).value;
     for (nr, name) in [
@@ -9205,7 +9217,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         let r = dispatch(
             nr,
             &SyscallArgs {
-                arg0: 1, // ITIMER_VIRTUAL
+                arg0: 3, // past ITIMER_PROF
                 arg1: 0,
                 arg2: 0,
                 arg3: 0,
@@ -9223,7 +9235,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         }
         if r.value != bad_which {
             serial_println!(
-                "[syscall]   FAIL: {} ({}) returned {} for ITIMER_VIRTUAL, expected InvalidArgument ({}). Accepting it would arm a wall-clock timer for a CPU-time request",
+                "[syscall]   FAIL: {} ({}) returned {} for which 3, expected InvalidArgument ({}): there is no fourth interval timer",
                 name,
                 nr,
                 r.value,
@@ -9246,36 +9258,40 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         // PASS printed above it.
         //
         // itimer's order is the REVERSE of setgroups' and chroot's, and asserting it
-        // is how that stays true. `sys_itimer_set` refuses `which != ITIMER_REAL`
-        // BEFORE the caller lookup, which the ITIMER_VIRTUAL case above covers. So
-        // this passes a VALID which (ITIMER_REAL = 0) and requires NoSuchProcess --
-        // the only way to reach the caller lookup, and the half the skip never ran.
+        // is how that stays true. `sys_itimer_set` refuses a `which` past
+        // ITIMER_PROF BEFORE the caller lookup, which the case above covers. So
+        // this passes VALID ones -- ITIMER_REAL (0), and ITIMER_VIRTUAL (1), a
+        // CPU-time timer -- and requires NoSuchProcess: the only way to reach the
+        // caller lookup, and the half the skip never ran.
         //
         // The divergence is defensible: setgroups withholds which COUNTS are
         // acceptable, and `which` is three public constants. But it is a divergence,
         // so it is pinned rather than assumed.
-        let probe = dispatch(
-            SYS_ITIMER_SET,
-            &SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            },
-        );
-        if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
-            serial_println!(
-                "[syscall]   FAIL: {} with no owning process returned {}, expected NoSuchProcess ({})",
+        for which in [0, 1] {
+            let probe = dispatch(
                 SYS_ITIMER_SET,
-                probe.value,
-                SyscallResult::err(KernelError::NoSuchProcess).value
+                &SyscallArgs {
+                    arg0: which,
+                    arg1: 0,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
             );
-            return Err(KernelError::InternalError);
+            if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+                serial_println!(
+                    "[syscall]   FAIL: {} (which {}) with no owning process returned {}, expected NoSuchProcess ({})",
+                    SYS_ITIMER_SET,
+                    which,
+                    probe.value,
+                    SyscallResult::err(KernelError::NoSuchProcess).value
+                );
+                return Err(KernelError::InternalError);
+            }
         }
         serial_println!(
-            "[syscall]   itimer (1069/1070): OK -- ITIMER_VIRTUAL refused, and a caller with no process is refused after the which check (the reverse of setgroups' order, pinned deliberately)"
+            "[syscall]   itimer (1069/1070): OK -- a which past ITIMER_PROF refused, and a caller with no process is refused after the which check, for the wall-clock and a CPU-time timer alike (the reverse of setgroups' order, pinned deliberately)"
         );
         return Ok(());
     }
@@ -9298,17 +9314,21 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         )
     };
 
-    // Look before touching: refuse to clobber a timer this test does not own.
-    let existing = call(SYS_ITIMER_GET, 0, 0, 0);
-    if existing.value != 0 || existing.value2 != 0 {
-        serial_println!(
-            "[syscall]   Dispatch itimer: SKIP (a timer is already armed on this \
-             process: {} ns remaining, interval {}) — refusing to clobber state \
-             this test does not own",
-            existing.value,
-            existing.value2
-        );
-        return Ok(());
+    // Look before touching: refuse to clobber a timer this test does not own --
+    // the wall-clock one or ITIMER_VIRTUAL, the two it arms.
+    for which in [0, 1] {
+        let existing = call(SYS_ITIMER_GET, which, 0, 0);
+        if existing.value != 0 || existing.value2 != 0 {
+            serial_println!(
+                "[syscall]   Dispatch itimer: SKIP (timer {} is already armed on this \
+                 process: {} ns remaining, interval {}) — refusing to clobber state \
+                 this test does not own",
+                which,
+                existing.value,
+                existing.value2
+            );
+            return Ok(());
+        }
     }
 
     // Take every reading first, disarm unconditionally, judge afterwards.
@@ -9316,7 +9336,12 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     let read = call(SYS_ITIMER_GET, 0, 0, 0);
     let disarmed = call(SYS_ITIMER_SET, 0, 0, 0);
     let after = call(SYS_ITIMER_GET, 0, 0, 0);
-    let virt = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+    // ITIMER_VIRTUAL: an hour of the process's user-mode CPU time, which this
+    // test cannot use up before it disarms it.
+    let v_armed = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+    let v_read = call(SYS_ITIMER_GET, 1, 0, 0);
+    let v_disarmed = call(SYS_ITIMER_SET, 1, 0, 0);
+    let v_after = call(SYS_ITIMER_GET, 1, 0, 0);
 
     let hour = i64::try_from(ONE_HOUR_NS).unwrap_or(i64::MAX);
 
@@ -9363,18 +9388,31 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if virt.value >= 0 {
+    if v_armed.value != 0
+        || v_armed.value2 != 0
+        || v_read.value <= 0
+        || v_read.value > hour
+        || v_disarmed.value <= 0
+        || v_after.value != 0
+        || v_after.value2 != 0
+    {
         serial_println!(
-            "[syscall]   FAIL: ITIMER_VIRTUAL returned {}, expected an error — \
-             accepting it would arm a wall-clock timer for a CPU-time request",
-            virt.value
+            "[syscall]   FAIL: ITIMER_VIRTUAL: set ({}, {}), get {}, disarm {}, then \
+             ({}, {}); expected (0, 0), a positive value no greater than the hour, \
+             the remainder, and (0, 0)",
+            v_armed.value,
+            v_armed.value2,
+            v_read.value,
+            v_disarmed.value,
+            v_after.value,
+            v_after.value2
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[syscall]   itimer (1069/1070: arm, read back armed, disarm reports the \
-         remainder, ITIMER_VIRTUAL refused): OK"
+         remainder, for ITIMER_REAL and ITIMER_VIRTUAL): OK"
     );
     Ok(())
 }

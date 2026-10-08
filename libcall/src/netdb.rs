@@ -5,7 +5,8 @@
 //! utility is told what every C program on the same system is told -- the
 //! hosts file and DNS in the library's order, the interfaces the library
 //! lists. `hostname -f`, `-i`, `-a`, `-I` and `-A` are each one of these
-//! calls in net-tools' `hostname.c`, and are each one here.
+//! calls in net-tools' `hostname.c`, and are each one here; so is the name
+//! `last -d` gives a login's address ([`ipv4_name_info`]).
 //!
 //! Nothing allocates: this crate is `no_std` without `alloc`. A lookup's
 //! results stay in the library's own list, freed when the owning value drops
@@ -151,10 +152,12 @@ fn name_info(sa: *const Sockaddr, salen: u32, flags: i32, hostlen: usize) -> Res
     // At most `NI_MAXHOST`, a small constant; the cast cannot truncate.
     #[allow(clippy::cast_possible_truncation)]
     let hostlen = hostlen.min(NI_MAXHOST) as u32;
-    // SAFETY: `sa` points at a socket address of `salen` bytes that the
-    // library itself produced and still owns for the duration of the call;
-    // `host` is our buffer of `hostlen` bytes, which the library writes at
-    // most that many of, NUL included; no service is asked for.
+    // SAFETY: `sa` points at a socket address of `salen` bytes that stays
+    // live for the duration of the call -- one the library itself produced
+    // and still owns, or one of ours on the caller's stack, laid out and
+    // aligned as the library's own; `host` is our buffer of `hostlen` bytes,
+    // which the library writes at most that many of, NUL included; no
+    // service is asked for.
     let rc = unsafe {
         sys::getnameinfo(
             sa,
@@ -171,6 +174,81 @@ fn name_info(sa: *const Sockaddr, salen: u32, flags: i32, hostlen: usize) -> Res
     }
     text.len = text.buf.iter().position(|&b| b == 0).unwrap_or(NI_MAXHOST);
     Ok(text)
+}
+
+/// `struct sockaddr_in`, aligned as C aligns it for its `in_addr`.
+#[repr(C, align(4))]
+struct SockaddrIn {
+    sin_family: u16,
+    sin_port: u16,
+    sin_addr: [u8; 4],
+    sin_zero: [u8; 8],
+}
+
+/// `struct sockaddr_in6`.
+#[repr(C)]
+struct SockaddrIn6 {
+    sin6_family: u16,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
+}
+
+/// `getnameinfo` on an IPv4 address -- a `sockaddr_in` holding `addr`'s four
+/// bytes as they are, port 0 -- with `flags`, into a buffer of `hostlen` bytes
+/// (at most [`NI_MAXHOST`]): the address's name, or with [`NI_NUMERICHOST`]
+/// its dotted quad.
+///
+/// What `last -d` and `-i` ask about the address in a wtmp record.
+///
+/// # Errors
+///
+/// The `EAI_*` code it returned. Off Unix, always [`EAI_NONAME`]: there is no
+/// library to ask.
+pub fn ipv4_name_info(addr: [u8; 4], flags: i32, hostlen: usize) -> Result<HostText, i32> {
+    let sin = SockaddrIn {
+        sin_family: u16::try_from(AF_INET).unwrap_or_default(),
+        sin_port: 0,
+        sin_addr: addr,
+        sin_zero: [0; 8],
+    };
+    #[cfg(unix)]
+    {
+        // `size_of::<SockaddrIn>()`, which the tests hold to the C library's.
+        name_info((&raw const sin).cast::<Sockaddr>(), 16, flags, hostlen)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (sin, flags, hostlen);
+        Err(EAI_NONAME)
+    }
+}
+
+/// [`ipv4_name_info`] for an IPv6 address: a `sockaddr_in6` holding `addr`,
+/// every other field zero.
+///
+/// # Errors
+///
+/// As [`ipv4_name_info`].
+pub fn ipv6_name_info(addr: [u8; 16], flags: i32, hostlen: usize) -> Result<HostText, i32> {
+    let sin6 = SockaddrIn6 {
+        sin6_family: u16::try_from(AF_INET6).unwrap_or_default(),
+        sin6_port: 0,
+        sin6_flowinfo: 0,
+        sin6_addr: addr,
+        sin6_scope_id: 0,
+    };
+    #[cfg(unix)]
+    {
+        // `size_of::<SockaddrIn6>()`, which the tests hold to the C library's.
+        name_info((&raw const sin6).cast::<Sockaddr>(), 28, flags, hostlen)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (sin6, flags, hostlen);
+        Err(EAI_NONAME)
+    }
 }
 
 /// `gai_strerror(code)`: the library's words for a lookup failure.
@@ -603,6 +681,57 @@ mod tests {
             offset_of!(p::Hostent, h_aliases)
         );
         assert_eq!(size_of::<Sockaddr>(), size_of::<p::Sockaddr>());
+        // The two lengths `ipv4_name_info` and `ipv6_name_info` pass.
+        assert_eq!(size_of::<SockaddrIn>(), size_of::<p::SockaddrIn>());
+        assert_eq!(size_of::<SockaddrIn>(), 16);
+        assert_eq!(
+            offset_of!(SockaddrIn, sin_addr),
+            offset_of!(p::SockaddrIn, sin_addr)
+        );
+        assert_eq!(
+            core::mem::align_of::<SockaddrIn>(),
+            core::mem::align_of::<p::SockaddrIn>()
+        );
+        assert_eq!(size_of::<SockaddrIn6>(), size_of::<p::SockaddrIn6>());
+        assert_eq!(size_of::<SockaddrIn6>(), 28);
+        assert_eq!(
+            offset_of!(SockaddrIn6, sin6_addr),
+            offset_of!(p::SockaddrIn6, sin6_addr)
+        );
+        assert_eq!(
+            offset_of!(SockaddrIn6, sin6_scope_id),
+            offset_of!(p::SockaddrIn6, sin6_scope_id)
+        );
+    }
+
+    /// The numeric forms need no resolver: the library writes them from the
+    /// address alone.
+    #[cfg(unix)]
+    #[test]
+    fn an_address_is_named_numerically_by_the_library() {
+        let v4 = ipv4_name_info([192, 0, 2, 7], NI_NUMERICHOST, NI_MAXHOST);
+        assert_eq!(v4.map(|t| t.as_bytes() == b"192.0.2.7"), Ok(true));
+        let doc = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let v6 = ipv6_name_info(doc, NI_NUMERICHOST, NI_MAXHOST);
+        assert_eq!(v6.map(|t| t.as_bytes() == b"2001:db8::1"), Ok(true));
+        // Too little room for the answer is the library's `EAI_OVERFLOW`.
+        assert_eq!(
+            ipv4_name_info([192, 0, 2, 7], NI_NUMERICHOST, 4).map(|_| ()),
+            Err(-12)
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn an_address_has_no_library_to_name_it_on_the_host() {
+        assert_eq!(
+            ipv4_name_info([127, 0, 0, 1], NI_NUMERICHOST, NI_MAXHOST).map(|_| ()),
+            Err(EAI_NONAME)
+        );
+        assert_eq!(
+            ipv6_name_info([0; 16], NI_NUMERICHOST, NI_MAXHOST).map(|_| ()),
+            Err(EAI_NONAME)
+        );
     }
 
     #[test]

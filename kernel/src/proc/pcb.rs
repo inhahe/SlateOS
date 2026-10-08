@@ -1322,6 +1322,10 @@ pub struct Process {
     /// file reads end-of-file, as Linux's (which holds the `mm` it opened)
     /// does (`fs::procfs`, [`note_exec`]).
     pub exec_gen: u64,
+    /// The UTS namespace the process is in (`crate::utsns`): the host and
+    /// domain names it sees and sets. Holds one reference on it, given up
+    /// when the record goes (`finish_process`); inherited by fork and spawn.
+    pub uts_ns: crate::utsns::UtsNsId,
 
     // --- Per-process page-fault accounting (minflt/majflt) ---
     //
@@ -1608,6 +1612,7 @@ impl Process {
             child_stime_ns: 0,
             prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
             exec_gen: 0,
+            uts_ns: crate::utsns::ROOT_UTS,
             acct_min_flt: 0,
             acct_maj_flt: 0,
             child_min_flt: 0,
@@ -1808,6 +1813,7 @@ pub fn fork_create(
         mmap_commit_policy,
         parent_pgid,
         parent_sid,
+        uts_ns,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1906,31 +1912,33 @@ pub fn fork_create(
             // its own (unless it later calls setpgid/setsid).
             parent.pgid,
             parent.sid,
+            parent.uts_ns,
         )
     };
 
-    // Enforce RLIMIT_NPROC (resource index 6): per-uid count of live
-    // processes owned by `credentials.uid` must remain below the
-    // soft limit, else fork returns EAGAIN.  Linux exempts processes
-    // with CAP_SYS_RESOURCE / CAP_SYS_ADMIN; we don't have those caps
-    // wired up yet, so we exempt uid 0 (root) by convention — it's
-    // the same effective behaviour for the systems we run.
+    // Enforce RLIMIT_NPROC (resource index 6) as Linux's `copy_process`
+    // does: the processes whose *real* user id is the child's -- its
+    // parent's -- must stay within the soft limit, else fork returns
+    // EAGAIN. Exempt, as on Linux, the root user (a real id of 0,
+    // `INIT_USER`) and a caller with CAP_SYS_RESOURCE or CAP_SYS_ADMIN,
+    // which here is root's authority: an effective id of 0
+    // (`proc::setid`). Until 2026-10-08 the count and the exemption both
+    // read the effective id, so a `seteuid` moved a process's fork budget
+    // to another user's, and root with an effective id of 1000 was held to
+    // user 1000's limit.
     //
     // RLIM_INFINITY skips the check.  This runs against the just-
     // snapshotted parent rlimits and credentials; we already hold
     // the PROCESS_TABLE lock so the count is consistent with the
     // limit decision.
     let nproc_soft = rlimits[6].0;
-    if credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
-        let target_uid = credentials.uid;
+    if credentials.ruid != 0 && credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
+        let target_uid = credentials.ruid;
         let mut count: u64 = 0;
         for p in table.values() {
-            // Count only live processes (not Zombie/Exited): a zombie
-            // still occupies a PID slot until reaped, but Linux
-            // includes them in RLIMIT_NPROC since they still hold the
-            // uid quota.  We follow Linux and count all non-finalised
-            // processes regardless of state.
-            if p.credentials.uid == target_uid {
+            // Every process not yet reaped counts, zombies included: Linux
+            // gives a user's count back only when the process is released.
+            if p.credentials.ruid == target_uid {
                 count = count.saturating_add(1);
             }
         }
@@ -2158,6 +2166,9 @@ pub fn fork_create(
         child_stime_ns: 0,
         prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
         exec_gen: 0,
+        // The parent's UTS namespace, held once more below
+        // (`clone(CLONE_NEWUTS)` moves the child to a new one afterwards).
+        uts_ns,
         // Page-fault accounting also resets on fork.
         acct_min_flt: 0,
         acct_maj_flt: 0,
@@ -2181,7 +2192,14 @@ pub fn fork_create(
 
     table.insert(pid, child);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
+    // The child's hold on its UTS namespace. Under the process table, which
+    // `utsns` never takes: the order is one way only.
+    crate::utsns::retain(uts_ns);
     drop(table);
+    // Its parent's mount namespace (`crate::fs::mntns`, leaf locks only).
+    // The child has no thread yet, so nothing resolves a path for it before
+    // this. `clone(CLONE_NEWNS)` moves it to a copy afterwards.
+    crate::fs::mntns::inherit(parent_pid, pid);
 
     // Bump the backing-file reference for each file-backed VMA the child
     // inherited.  Done with the process-table lock released — the open-file
@@ -3224,11 +3242,28 @@ const _: () = assert!(rlimit_defaults_are_ordered());
 
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource`.
 ///
+/// `RLIMIT_CPU`'s and `RLIMIT_RTTIME`'s soft limit read as far as a
+/// `SIGXCPU` has raised it, which the table records a moment later
+/// ([`crate::proc::cputimer::effective_limit`]): a `SIGXCPU` handler that
+/// asks is told the raised limit, as on Linux.
+///
 /// Returns `None` if `pid` is unknown or `resource >= NUM_RLIMITS`.
 /// Callers in kernel context (no live PCB) should use
 /// [`DEFAULT_RLIMITS`] directly rather than going through this lookup.
 #[must_use]
 pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
+    let stored = get_rlimit_stored(pid, resource)?;
+    // With the process table let go: the CPU-time limits take their own lock.
+    Some(crate::proc::cputimer::effective_limit(
+        pid, resource, stored,
+    ))
+}
+
+/// [`get_rlimit`] as the process table holds it, without a raise the
+/// CPU-time limits have made and not yet written back: for those limits'
+/// own bookkeeping (`crate::proc::cputimer`).
+#[must_use]
+pub fn get_rlimit_stored(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
     if resource >= NUM_RLIMITS {
         return None;
     }
@@ -3362,6 +3397,38 @@ pub fn set_rlimit(
     // against the limits it reads from the process's CPU account.
     if resource == crate::proc::cputimer::RLIMIT_RTTIME {
         crate::proc::cputimer::rlimit_rttime_changed(pid);
+    }
+    Ok(())
+}
+
+/// Raise `pid`'s soft limit for `resource` to `new_cur`, as a `SIGXCPU`
+/// does: Linux's `check_thread_timers` and `check_process_timers` write
+/// `rlim_cur` directly, past none of [`set_rlimit`]'s checks -- so
+/// `RLIMIT_RTTIME`'s, which moves a second at a time in microseconds, passes
+/// a hard limit less than a second above it (100 ms soft and 300 ms hard read
+/// 1.1 s and 300 ms after the first `SIGXCPU`, and the hard limit's `SIGKILL`
+/// still comes at 300 ms). Only upward: a raise that arrives after a later
+/// one, or after the process set the limit itself, changes nothing. The
+/// enforcement already has the new threshold (`crate::proc::cputimer`), so
+/// nothing is re-armed.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a `resource` past the table, `NoSuchProcess` for a
+/// `pid` that is gone.
+pub fn raise_soft_rlimit(pid: ProcessId, resource: u32, new_cur: u64) -> KernelResult<()> {
+    if resource >= NUM_RLIMITS {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let limit = proc
+        .rlimits
+        .get_mut(resource as usize)
+        .ok_or(KernelError::InvalidArgument)?;
+    let (cur, max) = *limit;
+    if cur != RLIM_INFINITY && new_cur > cur {
+        *limit = (new_cur, max);
     }
     Ok(())
 }
@@ -5536,6 +5603,11 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     let ipc_handles = core::mem::take(&mut proc.ipc_handles);
     let killed_on_cpu = core::mem::take(&mut proc.killed_on_cpu);
     let pml4_phys = proc.pml4_phys;
+    // Its hold on its UTS namespace, which goes with the last.
+    crate::utsns::release(proc.uts_ns);
+    // And on its mount namespace (`crate::fs::mntns`), whose table goes with
+    // the last: no process-table lock is held here.
+    crate::fs::mntns::process_gone(pid);
     // The rest of the record holds nothing that needs a lock to release.
     drop(proc);
     destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);
@@ -8184,6 +8256,30 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
     }
 }
 
+/// Take one `(resource_type, handle_raw)` record out of `pid`'s list, saying
+/// whether there was one: a close that must give back exactly the hold the
+/// record stands for, and none when there is no record -- two threads closing
+/// one handle at once give it back once. (`deregister_ipc_handle` answers
+/// nothing, so a caller cannot tell.)
+#[must_use]
+pub fn take_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    match proc
+        .ipc_handles
+        .iter()
+        .position(|&(rt, h)| rt == resource_type && h == handle_raw)
+    {
+        Some(pos) => {
+            proc.ipc_handles.swap_remove(pos);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Does `pid` hold this exact `(resource_type, handle_raw)`?
 ///
 /// Most IPC handle values in this kernel are treated as self-authorising — the
@@ -9102,6 +9198,49 @@ pub fn cap_entries(pid: ProcessId) -> Option<Vec<crate::cap::table::CapEntry>> {
     table.get(&pid).map(|p| p.cap_table.valid_entries())
 }
 
+/// The UTS namespace process `pid` is in, or `None` if there is no such
+/// process.
+#[must_use]
+pub fn uts_ns(pid: ProcessId) -> Option<crate::utsns::UtsNsId> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.uts_ns)
+}
+
+/// Put process `pid` in UTS namespace `id`, handing it the caller's hold on
+/// `id` and giving up its hold on the one it leaves -- `unshare`, `setns`,
+/// `clone(CLONE_NEWUTS)`, a container's `--hostname`. Without such a
+/// process the caller's hold is given up instead.
+///
+/// # Errors
+///
+/// `NoSuchProcess`.
+pub fn set_uts_ns(pid: ProcessId, id: crate::utsns::UtsNsId) -> KernelResult<()> {
+    let old = {
+        let mut table = PROCESS_TABLE.lock();
+        match table.get_mut(&pid) {
+            Some(p) => core::mem::replace(&mut p.uts_ns, id),
+            None => {
+                drop(table);
+                crate::utsns::release(id);
+                return Err(KernelError::NoSuchProcess);
+            }
+        }
+    };
+    crate::utsns::release(old);
+    Ok(())
+}
+
+/// Spawn: `child` goes in `parent`'s UTS namespace, as a fork's child does.
+/// A no-op when either is not there.
+pub fn inherit_uts_ns(parent: ProcessId, child: ProcessId) {
+    let Some(id) = uts_ns(parent) else {
+        return;
+    };
+    if crate::utsns::retain(id) {
+        // A child gone meanwhile: `set_uts_ns` gives the hold back itself.
+        let _ = set_uts_ns(child, id);
+    }
+}
+
 /// Get the credentials for a process.
 pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
     let table = PROCESS_TABLE.lock();
@@ -9720,7 +9859,57 @@ fn test_rlimits() -> KernelResult<()> {
         return fail("the RLIMIT_NICE round trip did not read back");
     }
 
-    // (10) An unknown pid is NoSuchProcess, not a panic and not a silent
+    // (10) A SIGXCPU's raise (`raise_soft_rlimit`) is Linux's write of
+    //      `rlim_cur`: past the hard limit when that is where it lands,
+    //      only ever upward, never off an infinite limit -- and a setrlimit
+    //      still may not put the soft limit above the hard one.
+    let rttime = crate::proc::cputimer::RLIMIT_RTTIME;
+    if let Err(e) = set_rlimit(pid, rttime, 100_000, 300_000, LimitAuthority::Unprivileged) {
+        destroy(pid);
+        serial_println!("[proc]   (RLIMIT_RTTIME 100 ms / 300 ms gave {:?})", e);
+        return fail("RLIMIT_RTTIME 100 ms soft, 300 ms hard was refused");
+    }
+    if raise_soft_rlimit(pid, rttime, 1_100_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((1_100_000, 300_000))
+    {
+        destroy(pid);
+        return fail("a SIGXCPU's raise of RLIMIT_RTTIME did not pass the hard limit");
+    }
+    if raise_soft_rlimit(pid, rttime, 500_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((1_100_000, 300_000))
+    {
+        destroy(pid);
+        return fail("a late raise moved RLIMIT_RTTIME's soft limit down");
+    }
+    if set_rlimit(pid, rttime, 400_000, 300_000, LimitAuthority::Unprivileged)
+        != Err(KernelError::InvalidArgument)
+    {
+        destroy(pid);
+        return fail("setrlimit put a soft limit above the hard one");
+    }
+    if let Err(e) = set_rlimit(
+        pid,
+        rttime,
+        RLIM_INFINITY,
+        RLIM_INFINITY,
+        LimitAuthority::MayRaiseHardLimit,
+    ) {
+        destroy(pid);
+        serial_println!("[proc]   (RLIMIT_RTTIME back to infinity gave {:?})", e);
+        return fail("RLIMIT_RTTIME could not be put back to infinity");
+    }
+    if raise_soft_rlimit(pid, rttime, 1_100_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((RLIM_INFINITY, RLIM_INFINITY))
+    {
+        destroy(pid);
+        return fail("a raise replaced an infinite soft limit");
+    }
+    if raise_soft_rlimit(pid, NUM_RLIMITS, 1) != Err(KernelError::InvalidArgument) {
+        destroy(pid);
+        return fail("raise_soft_rlimit accepted a resource >= NUM_RLIMITS");
+    }
+
+    // (11) An unknown pid is NoSuchProcess, not a panic and not a silent
     //      success.  Checked after the argument gates, matching `set_rlimit`'s
     //      documented order.
     destroy(pid);
@@ -9732,8 +9921,14 @@ fn test_rlimits() -> KernelResult<()> {
     if get_rlimit(pid, RLIMIT_NOFILE).is_some() {
         return fail("get_rlimit answered for a destroyed pid");
     }
+    if raise_soft_rlimit(pid, RLIMIT_NOFILE, 1) != Err(KernelError::NoSuchProcess) {
+        return fail("raise_soft_rlimit on a destroyed pid did not report NoSuchProcess");
+    }
 
-    serial_println!("[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute): OK");
+    serial_println!(
+        "[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute, a SIGXCPU's raise \
+         passes the hard limit): OK"
+    );
     Ok(())
 }
 

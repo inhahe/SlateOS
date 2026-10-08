@@ -147,9 +147,9 @@ memdiag
 memfs
 mime
 mmtune
+mntns
 mobilelink
 monitors
-mount_ns
 mousegestures
 mousesettings
 multiclip

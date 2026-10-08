@@ -102,6 +102,18 @@ NATIVE_ARM = re.compile(
 LINUX_ARM = re.compile(r"nr::([A-Z0-9_]+)\s*=>\s*([a-z0-9_:]+)\s*\(")
 
 CRATE_CALL = re.compile(r"\bcrate::([a-z0-9_]+(?:::[a-z0-9_]+)+)\s*\(")
+# A function named as a value -- `name_set_gated(args, right,
+# crate::utsns::set_hostname_here)` hands the native handler's whole job to the
+# function it names. All-lowercase segments, so a type, a variant or a constant
+# (`crate::cap::ResourceType::Namespace`, `crate::utsns::ROOT_UTS`) is not
+# one; not followed by `(` (a call, counted above), `::` (a longer path) or `!`
+# (a macro). Until 2026-10-08 this was invisible, and `utsns` read as reached
+# by the Linux table alone while `SYS_HOSTNAME_SET` set its names.
+CRATE_FN_REF = re.compile(r"\bcrate::([a-z0-9_]+(?:::[a-z0-9_]+)+)\b(?!\s*[(:!])")
+# A `use` declaration, anywhere, and a `//` comment to its line's end --
+# removed before looking for function values.
+USE_STMT = re.compile(r"\buse\s+[^;{}]*(?:\{[^}]*\})?[^;{}]*;")
+LINE_COMMENT = re.compile(r"//[^\n]*")
 QUAL_CALL = re.compile(r"\b([a-z][a-z0-9_]*(?:::[a-z0-9_]+)+)\s*\(")
 USE_SIMPLE = re.compile(r"^\s*(?:pub\s+)?use\s+crate::([a-z0-9_:]+);", re.M)
 USE_GROUP = re.compile(r"^\s*(?:pub\s+)?use\s+crate::([a-z0-9_:]+)::\{([^}]*)\};", re.M)
@@ -244,7 +256,11 @@ def modules_reached(
     """
     body = bodies.get(entry, "")
     out: set[str] = set()
-    for path in CRATE_CALL.findall(body):
+    # A `use crate::net::socket;` inside a body, or a comment's
+    # [`crate::net::socket`], names a module, not a function value: without
+    # this, the module's parent (`net`) read as reached.
+    refs = CRATE_FN_REF.findall(USE_STMT.sub("", LINE_COMMENT.sub("", body)))
+    for path in CRATE_CALL.findall(body) + refs:
         parts = path.split("::")
         if parts[0] not in NOT_A_CAPABILITY:
             out.add("::".join(parts[:-1]))
@@ -328,6 +344,27 @@ def self_test(repo: pathlib.Path) -> int:
             print(
                 f"selftest FAIL: use_aliases resolves {name!r} to "
                 f"{aliases.get(name)!r}, not {want!r}",
+                file=sys.stderr,
+            )
+            failures += 1
+
+    # A function passed as a value reaches its module as a call does; a type,
+    # a variant, a constant or a macro named by path does not.
+    for body, want in (
+        ("{ name_set_gated(args, right, crate::utsns::set_hostname_here) }", {"utsns"}),
+        ("{ f(crate::fs::nameservice::get_hostname, x) }", {"fs::nameservice"}),
+        ("{ let t = crate::cap::ResourceType::Namespace; }", set()),
+        ("{ let r = crate::utsns::ROOT_UTS; }", set()),
+        ('{ crate::serial_println!("x"); }', set()),
+        ("{ use crate::net::socket; let h = 3; }", set()),
+        ("{ use crate::ipc::{eventfd, pipe}; let h = 3; }", set()),
+        ("{\n    // a UDP socket ([`crate::net::socket`]).\n    let h = 3;\n}", set()),
+    ):
+        got = modules_reached("h", {"h": body}, {})
+        if got != want:
+            print(
+                f"selftest FAIL: modules_reached({body!r}) is {sorted(got)}, not "
+                f"{sorted(want)}",
                 file=sys.stderr,
             )
             failures += 1

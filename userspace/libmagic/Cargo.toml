@@ -12,10 +12,13 @@ cprintf = { path = "../cprintf" }
 ere = { path = "../ere" }
 # strerror(3)'s wording for an I/O error.
 errmsg = { path = "../errmsg" }
-# wcwidth and the printable test, for what an answer may print unescaped.
-charwidth = { path = "../charwidth" }
+# `iswprint`: what an answer may print unescaped, by the tree's one rule.
+quoting = { path = "../quoting" }
 # The local time zone, for `ldate` rules and Windows times.
 localtime = { path = "../localtime" }
+# C's strtol, strtoul and strtoull at base 0, which the magic database's
+# numbers are read with -- this crate's `cstd` until 2026-10-08.
+cstrtol = { path = "../cstrtol" }
 
 [lints]
 workspace = true

@@ -539,23 +539,48 @@ pub struct RequestSites {
 }
 
 /// Find `needle` (consecutive little-endian `u64` words) at an 8-byte-aligned
-/// offset within `image[from..to]`, returning the offset of the last match
-/// (Limine honours the *last* start marker, if an image carries several).
-fn find_last_aligned(image: &[u8], needle: &[u64], from: usize, to: usize) -> Option<usize> {
+/// offset within `image[from..to]` for which `allowed(offset, length)` holds,
+/// returning the offset of the first such match.
+fn find_first_aligned(
+    image: &[u8],
+    needle: &[u64],
+    from: usize,
+    to: usize,
+    allowed: impl Fn(usize, usize) -> bool,
+) -> Option<usize> {
     let span = needle.len().checked_mul(8)?;
     let limit = to.min(image.len());
-    let mut found = None;
     let mut off = from.checked_next_multiple_of(8)?;
     while let Some(end) = off.checked_add(span) {
         if end > limit {
             break;
         }
-        if words_match(image, off, needle) {
-            found = Some(off);
+        if words_match(image, off, needle) && allowed(off, span) {
+            return Some(off);
         }
         off = off.checked_add(8)?;
     }
-    found
+    None
+}
+
+/// The file ranges, `[start, end)`, of `image`'s writable loadable segments
+/// -- where a bootloader can write a request's response, so where requests
+/// are -- or none if `image` is not an ELF this module parses (a hand-built
+/// test image), which leaves the whole image eligible.
+fn writable_file_ranges(image: &[u8]) -> alloc::vec::Vec<(usize, usize)> {
+    let Ok(parsed) = parse_kernel_elf(image) else {
+        return alloc::vec::Vec::new();
+    };
+    parsed
+        .segments()
+        .iter()
+        .filter(|s| s.writable)
+        .filter_map(|s| {
+            let start = usize::try_from(s.file_offset).ok()?;
+            let end = start.checked_add(usize::try_from(s.filesz).ok()?)?;
+            Some((start, end))
+        })
+        .collect()
 }
 
 /// Whether `image` at `off` holds `needle`'s words, little-endian.
@@ -575,21 +600,46 @@ fn words_match(image: &[u8], off: usize, needle: &[u64]) -> bool {
 /// Locate the base-revision tag and the kernel's Limine requests within a
 /// loaded image.
 ///
-/// The search is bounded to the window between the last requests-start marker
-/// and the first requests-end marker after it, as the protocol specifies
+/// The search is bounded to the window between the requests-start marker and
+/// the first requests-end marker after it, as the protocol specifies
 /// (base-revision tags included). An image with no markers is scanned whole, so
 /// a hand-built or older image is still handled. Each request and the tag are
 /// identified by their magic at an 8-byte-aligned offset.
+///
+/// Only a writable loadable segment holds requests -- the bootloader writes
+/// their responses there -- so markers and requests anywhere else are not the
+/// image's own: a loader carries the same words as constants in `.rodata`, and
+/// this one does (`REQUESTS_START_MARKER` and its siblings below). Until
+/// 2026-10-08 this took the *last* start marker and the *last* end marker in
+/// the whole file, which in a SlateOS kernel are those constants -- `.rodata`
+/// comes after `.requests` -- so the window held no request and nothing was
+/// patched: the first self-reload to reach the new kernel stopped at "Limine
+/// did not answer the HHDM request".
 #[must_use]
 pub fn find_request_sites(image: &[u8]) -> RequestSites {
-    // Bound the scan to the marker window. `find_last_aligned` gives the last
-    // start marker; the end marker is the first one after it.
-    let start = find_last_aligned(image, &REQUESTS_START_MARKER, 0, image.len());
+    let writable = writable_file_ranges(image);
+    let in_writable = |off: usize, len: usize| {
+        writable.is_empty()
+            || off.checked_add(len).is_some_and(|end| {
+                writable
+                    .iter()
+                    .any(|&(start, stop)| off >= start && end <= stop)
+            })
+    };
+    // Bound the scan to the marker window: the first start marker in a
+    // writable segment, and the first end marker after it.
+    let start = find_first_aligned(image, &REQUESTS_START_MARKER, 0, image.len(), in_writable);
     let scan_from = start.map_or(0, |s| {
         s.saturating_add(REQUESTS_START_MARKER.len().saturating_mul(8))
     });
-    let scan_to = find_last_aligned(image, &REQUESTS_END_MARKER, scan_from, image.len())
-        .unwrap_or(image.len());
+    let scan_to = find_first_aligned(
+        image,
+        &REQUESTS_END_MARKER,
+        scan_from,
+        image.len(),
+        in_writable,
+    )
+    .unwrap_or(image.len());
 
     let mut sites = RequestSites::default();
     let mut off = scan_from & !7usize;
@@ -597,7 +647,9 @@ pub fn find_request_sites(image: &[u8]) -> RequestSites {
         if end > scan_to {
             break;
         }
-        if words_match(image, off, &BASE_REVISION_MAGIC) {
+        if !in_writable(off, 16) {
+            // Not where a request can be (an unmarked image scanned whole).
+        } else if words_match(image, off, &BASE_REVISION_MAGIC) {
             sites.base_revision = Some(off);
         } else if words_match(image, off, &COMMON_MAGIC) {
             // A request: its feature id is the next two words.
@@ -778,6 +830,58 @@ pub fn build_memmap_response(
     Some(ptr)
 }
 
+/// Build the kernel-file response carrying the command line `cmdline`, and no
+/// file: the `LimineFile` (`crate::limine::LimineFile`) it points to has the
+/// line, NUL-terminated, an empty path, and a null address and zero size.
+/// Returns the response's HHDM pointer.
+///
+/// The command line is what the new kernel reads from this response
+/// (`boot::kernel_cmdline`): the options it was started with -- its
+/// self-test switches, its boot deadline, whatever a restart passes on.
+/// Without the response it boots with none. The file itself is not carried:
+/// it would need a contiguous run the size of the image kept alive across
+/// the jump, and a restarted kernel uses it only to name the functions in a
+/// backtrace and to restart itself again from its own image
+/// (`kexec::reload_self`) -- a caller of `power.reload` hands its image in.
+/// So `boot::kernel_file_address` answers `None` in a restarted kernel.
+///
+/// The line stops at its first NUL, if it has one, as Limine's does.
+pub fn build_kernel_file_response(arena: &mut HandoffArena<'_>, cmdline: &[u8]) -> Option<u64> {
+    use crate::limine::{KernelFileResponse, LimineFile};
+    let line = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+
+    // The line and the (empty) path, each NUL-terminated.
+    let (line_off, line_ptr) = arena.reserve(line.len().checked_add(1)?, 1)?;
+    arena.put(line_off, line)?;
+    let (_, path_ptr) = arena.reserve(1, 1)?;
+
+    // The file: everything zero (revision 0, no address, no size, no media)
+    // but the two strings.
+    let (file_off, file_ptr) = arena.reserve(
+        core::mem::size_of::<LimineFile>(),
+        core::mem::align_of::<LimineFile>(),
+    )?;
+    arena.put(
+        file_off.checked_add(core::mem::offset_of!(LimineFile, path))?,
+        &path_ptr.to_le_bytes(),
+    )?;
+    arena.put(
+        file_off.checked_add(core::mem::offset_of!(LimineFile, cmdline))?,
+        &line_ptr.to_le_bytes(),
+    )?;
+
+    // The response: revision 0, then the file.
+    let (resp_off, resp_ptr) = arena.reserve(
+        core::mem::size_of::<KernelFileResponse>(),
+        core::mem::align_of::<KernelFileResponse>(),
+    )?;
+    arena.put(
+        resp_off.checked_add(core::mem::offset_of!(KernelFileResponse, kernel_file))?,
+        &file_ptr.to_le_bytes(),
+    )?;
+    Some(resp_ptr)
+}
+
 // ---------------------------------------------------------------------------
 // Handoff page tables
 // ---------------------------------------------------------------------------
@@ -822,10 +926,40 @@ impl HandoffTables {
     }
 }
 
+/// A zeroed frame for the handoff, wholly below physical `below` -- the image
+/// destination's base.
+///
+/// Every frame the handoff builds in -- page tables, responses, the staged
+/// image, the trampoline's control region -- comes from here, so none can lie
+/// in the destination the trampoline copies the image into: a collision is
+/// impossible by construction rather than refused after the fact. Until
+/// 2026-10-08 they came from wherever the allocator liked, and the first
+/// self-reload boot (`kexec.selftest=1`) was refused with `InvalidArgument`
+/// by the after-the-fact check: the allocator hands out high memory as well
+/// as low, and the destination is at the top of the highest region.
+fn handoff_frame_zeroed(below: u64) -> KernelResult<PhysFrame> {
+    let f = frame::alloc_order_constrained(0, below)?;
+    // SAFETY: `f` was just allocated and is ours alone; nothing maps it yet.
+    if let Err(e) = unsafe { frame::zero_frame(f) } {
+        // SAFETY: as above; it was never handed out.
+        let _ = unsafe { frame::free_order(f, 0) };
+        return Err(e);
+    }
+    Ok(f)
+}
+
+/// The frames a set of handoff page tables is built in: each allocated below
+/// `below` ([`handoff_frame_zeroed`]) and recorded in `list`, so an abandoned
+/// handoff can free them.
+struct TableFrames<'a> {
+    list: &'a mut alloc::vec::Vec<PhysFrame>,
+    below: u64,
+}
+
 /// Allocate a zeroed frame for a page table, recording it for cleanup.
-fn alloc_table(frames: &mut alloc::vec::Vec<PhysFrame>) -> KernelResult<u64> {
-    let f = frame::alloc_frame_zeroed()?;
-    frames.push(f);
+fn alloc_table(frames: &mut TableFrames<'_>) -> KernelResult<u64> {
+    let f = handoff_frame_zeroed(frames.below)?;
+    frames.list.push(f);
     Ok(f.addr())
 }
 
@@ -867,7 +1001,7 @@ unsafe fn next_table(
     table_phys: u64,
     index: usize,
     hhdm: u64,
-    frames: &mut alloc::vec::Vec<PhysFrame>,
+    frames: &mut TableFrames<'_>,
 ) -> KernelResult<u64> {
     // SAFETY: caller's contract on table_phys/hhdm/index.
     let existing = unsafe { read_entry(table_phys, index, hhdm) };
@@ -896,7 +1030,7 @@ unsafe fn map_4k(
     phys: u64,
     flags: PageFlags,
     hhdm: u64,
-    frames: &mut alloc::vec::Vec<PhysFrame>,
+    frames: &mut TableFrames<'_>,
 ) -> KernelResult<()> {
     let va = VirtAddr::new(virt);
     // SAFETY: caller's contract; each level is created or descended in turn.
@@ -926,7 +1060,7 @@ unsafe fn map_huge(
     flags: PageFlags,
     one_gib: bool,
     hhdm: u64,
-    frames: &mut alloc::vec::Vec<PhysFrame>,
+    frames: &mut TableFrames<'_>,
 ) -> KernelResult<()> {
     let va = VirtAddr::new(virt);
     let leaf_flags = flags | PageFlags::PRESENT | PageFlags::HUGE_PAGE;
@@ -953,32 +1087,111 @@ unsafe fn map_huge(
     Ok(())
 }
 
+/// The physical ranges the new kernel's direct map (HHDM) covers: what Limine
+/// maps under base revision 3 -- the memory-map entries of type usable,
+/// bootloader-reclaimable and executable-and-modules -- each widened to whole
+/// 4 KiB pages, sorted, adjacent ones merged.
+///
+/// Nothing else: not the MMIO holes, not reserved, ACPI or bad memory. The
+/// kernel maps device registers itself, uncached, at their HHDM addresses
+/// (`apic`, `ioapic`: "no existing mapping conflicts because Limine didn't
+/// map this region"), and reaches ACPI tables with `map_4k_if_absent`; a
+/// direct map that already covered those addresses with write-back huge pages
+/// refused the first and served the device registers cached. That is what the
+/// first self-reload to boot through did (2026-10-08: "[apic] WARNING: Failed
+/// to map APIC MMIO", "[ioapic] WARNING: MMIO map failed"), when the handoff
+/// mapped everything from 0 to the top of RAM.
+///
+/// The framebuffer's entry is left out until the handoff answers the
+/// framebuffer request (known-issues `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`):
+/// Limine maps it write-combining, and nothing reads it without the response.
+#[must_use]
+pub fn direct_map_ranges(memory_map: &[&MemmapEntry]) -> alloc::vec::Vec<PhysRange> {
+    let mut ranges: alloc::vec::Vec<PhysRange> = memory_map
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.type_,
+                memmap_type::USABLE
+                    | memmap_type::BOOTLOADER_RECLAIMABLE
+                    | memmap_type::EXECUTABLE_AND_MODULES
+            )
+        })
+        .filter_map(|e| {
+            let start = align_down(e.base, SIZE_4K);
+            let end = align_up(e.base.checked_add(e.length)?, SIZE_4K)?;
+            (start < end).then_some(PhysRange { start, end })
+        })
+        .collect();
+    ranges.sort_unstable_by_key(|r| r.start);
+    let mut merged: alloc::vec::Vec<PhysRange> = alloc::vec::Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    merged
+}
+
+/// Direct-map `range` at `hhdm`: 1 GiB pages (where the CPU has them) and
+/// 2 MiB pages over the aligned blocks it covers whole, 4 KiB pages at its
+/// edges -- so the map covers the range and nothing beside it.
+///
+/// # Safety
+///
+/// As [`map_4k`]; the ranges mapped into one table must not overlap.
+unsafe fn map_direct(
+    pml4: u64,
+    range: PhysRange,
+    one_gib: bool,
+    hhdm: u64,
+    frames: &mut TableFrames<'_>,
+) -> KernelResult<()> {
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE;
+    let mut p = range.start;
+    while p < range.end {
+        let virt = hhdm.checked_add(p).ok_or(KernelError::InvalidArgument)?;
+        let fits = |size: u64| {
+            p.is_multiple_of(size) && p.checked_add(size).is_some_and(|e| e <= range.end)
+        };
+        let step = if one_gib && fits(SIZE_1G) {
+            // SAFETY: the caller's contract; a whole aligned 1 GiB of the range.
+            unsafe { map_huge(pml4, virt, p, flags, true, hhdm, frames)? };
+            SIZE_1G
+        } else if fits(SIZE_2M) {
+            // SAFETY: as above, 2 MiB.
+            unsafe { map_huge(pml4, virt, p, flags, false, hhdm, frames)? };
+            SIZE_2M
+        } else {
+            // SAFETY: as above, one 4 KiB page.
+            unsafe { map_4k(pml4, virt, p, flags, hhdm, frames)? };
+            SIZE_4K
+        };
+        p = p.checked_add(step).ok_or(KernelError::InvalidArgument)?;
+    }
+    Ok(())
+}
+
 /// Populate a fresh PML4 with the handoff mappings, returning its physical
 /// address. On any error the caller frees `frames`.
 fn try_build_tables(
-    frames: &mut alloc::vec::Vec<PhysFrame>,
+    frames: &mut TableFrames<'_>,
     parsed: &ParsedKernel,
     dest_base: u64,
     hhdm: u64,
-    max_phys: u64,
+    direct_map: &[PhysRange],
 ) -> KernelResult<u64> {
     let pml4 = alloc_table(frames)?;
 
-    // The higher-half direct map: all physical RAM up to `max_phys`, with the
-    // largest page the CPU supports, writable and executable as Limine leaves it.
+    // The higher-half direct map: the ranges Limine would map
+    // (`direct_map_ranges`), with the largest pages they allow, writable and
+    // executable as Limine leaves them.
     let one_gib = crate::cpu::features().is_some_and(|f| f.page_1g);
-    let step = if one_gib { SIZE_1G } else { SIZE_2M };
-    let limit = max_phys
-        .checked_next_multiple_of(step)
-        .ok_or(KernelError::InvalidArgument)?;
-    let hhdm_flags = PageFlags::PRESENT | PageFlags::WRITABLE;
-    let mut p = 0u64;
-    while p < limit {
-        let virt = hhdm.checked_add(p).ok_or(KernelError::InvalidArgument)?;
+    for &range in direct_map {
         // SAFETY: pml4 and its descendants are freshly allocated tables this
-        // module owns, all reachable through `hhdm`.
-        unsafe { map_huge(pml4, virt, p, hhdm_flags, one_gib, hhdm, frames)? };
-        p = p.checked_add(step).ok_or(KernelError::InvalidArgument)?;
+        // module owns, all reachable through `hhdm`; the ranges are disjoint.
+        unsafe { map_direct(pml4, range, one_gib, hhdm, frames)? };
     }
 
     // The new image: 4 KiB pages at its linked addresses, each segment with its
@@ -1018,8 +1231,9 @@ fn try_build_tables(
 ///
 /// `dest_base` is where the handoff places the image (physically contiguous),
 /// `hhdm` the direct-map offset to reproduce (the running kernel's own, so one
-/// trampoline address is valid in both tables), and `max_phys` the top of
-/// physical RAM to direct-map. On failure every frame allocated so far is freed.
+/// trampoline address is valid in both tables), and `direct_map` the disjoint
+/// physical ranges to direct-map ([`direct_map_ranges`]). On failure every
+/// frame allocated so far is freed.
 ///
 /// # Errors
 ///
@@ -1029,10 +1243,20 @@ pub fn build_handoff_tables(
     parsed: &ParsedKernel,
     dest_base: u64,
     hhdm: u64,
-    max_phys: u64,
+    direct_map: &[PhysRange],
 ) -> KernelResult<HandoffTables> {
     let mut frames: alloc::vec::Vec<PhysFrame> = alloc::vec::Vec::new();
-    match try_build_tables(&mut frames, parsed, dest_base, hhdm, max_phys) {
+    let built = try_build_tables(
+        &mut TableFrames {
+            list: &mut frames,
+            below: dest_base,
+        },
+        parsed,
+        dest_base,
+        hhdm,
+        direct_map,
+    );
+    match built {
         Ok(pml4_phys) => Ok(HandoffTables { pml4_phys, frames }),
         Err(e) => {
             for f in frames.drain(..) {
@@ -1201,7 +1425,7 @@ fn stage_segments(
         let mut done: u64 = 0;
         while done < seg.memsz {
             let chunk = FRAME_U64.min(seg.memsz.saturating_sub(done));
-            let f = frame::alloc_frame_zeroed()?;
+            let f = handoff_frame_zeroed(dest_base)?;
             source_frames.push(f);
 
             // Copy the file-backed portion of this chunk; the rest stays zero.
@@ -1427,25 +1651,6 @@ pub fn patch_requests(
 // Orchestration: preparing the whole handoff
 // ---------------------------------------------------------------------------
 
-/// The top of the physical memory the kernel manages (usable, bootloader- and
-/// ACPI-reclaimable), to size the handoff's direct map. Reserved and MMIO
-/// regions above it the new kernel maps on demand, as it does from boot.
-#[must_use]
-pub fn top_of_managed_ram(memory_map: &[&MemmapEntry]) -> u64 {
-    let mut top = 0u64;
-    for e in memory_map {
-        if matches!(
-            e.type_,
-            memmap_type::USABLE
-                | memmap_type::BOOTLOADER_RECLAIMABLE
-                | memmap_type::ACPI_RECLAIMABLE
-        ) {
-            top = top.max(e.base.saturating_add(e.length));
-        }
-    }
-    top
-}
-
 /// The physical range a single frame occupies.
 fn frame_range(f: PhysFrame) -> PhysRange {
     PhysRange {
@@ -1506,8 +1711,10 @@ impl PreparedHandoff {
 ///
 /// The memory-map response carries the adjusted map: the destination as
 /// `EXECUTABLE_AND_MODULES`, and the page-table and arena frames as
-/// `BOOTLOADER_RECLAIMABLE` (the regions the new kernel keeps). Framebuffer and
-/// kernel-file responses are not built (see [`prepare_handoff`]).
+/// `BOOTLOADER_RECLAIMABLE` (the regions the new kernel keeps). A kernel-file
+/// response is built when there is a `cmdline` to pass on, carrying only it
+/// ([`build_kernel_file_response`]); the framebuffer response is not built (see
+/// [`prepare_handoff`]).
 #[allow(clippy::too_many_arguments)] // the response inputs, gathered once
 fn build_all_responses(
     arena_phys: u64,
@@ -1518,6 +1725,7 @@ fn build_all_responses(
     tables: &HandoffTables,
     arena_all_frames: &[PhysFrame],
     rsdp_address: Option<u64>,
+    cmdline: Option<&[u8]>,
 ) -> KernelResult<ResponseAddrs> {
     let span = parsed.image_span().ok_or(KernelError::InvalidArgument)?;
     let dest_end = dest_base
@@ -1560,6 +1768,12 @@ fn build_all_responses(
         Some(addr) => Some(build_rsdp_response(&mut arena, addr).ok_or(KernelError::OutOfMemory)?),
         None => None,
     };
+    let kernel_file_ptr = match cmdline {
+        Some(line) => {
+            Some(build_kernel_file_response(&mut arena, line).ok_or(KernelError::OutOfMemory)?)
+        }
+        None => None,
+    };
 
     Ok(ResponseAddrs {
         memmap: Some(mm_ptr),
@@ -1567,7 +1781,7 @@ fn build_all_responses(
         framebuffer: None,
         rsdp: rsdp_ptr,
         executable_address: Some(ea_ptr),
-        kernel_file: None,
+        kernel_file: kernel_file_ptr,
     })
 }
 
@@ -1577,10 +1791,13 @@ fn build_all_responses(
 /// needs; nothing is quiesced and no jump is made.
 ///
 /// `rsdp_address` is the running kernel's RSDP (physical under base revision 3),
-/// passed through so the new kernel finds ACPI. Framebuffer and kernel-file
-/// responses are not built: the new kernel treats their absence as "not
-/// provided" and boots serial-only, without a command line or symbols --
-/// acceptable for a restart (todo.txt notes completing them).
+/// passed through so the new kernel finds ACPI. `cmdline`, when given, is the
+/// new kernel's command line, carried by a kernel-file response with no file
+/// ([`build_kernel_file_response`]); without it the new kernel boots with none.
+/// The framebuffer response is not built: the new kernel treats its absence as
+/// "not provided" and boots serial-only, without a display -- the remaining
+/// gap for a full-fidelity restart (todo.txt kexec, known-issues
+/// `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`).
 ///
 /// On any failure every frame allocated so far is freed.
 ///
@@ -1594,14 +1811,33 @@ pub fn prepare_handoff(
     image: &[u8],
     memory_map: &[&MemmapEntry],
     hhdm: u64,
-    max_phys: u64,
     rsdp_address: Option<u64>,
+    cmdline: Option<&[u8]>,
 ) -> KernelResult<PreparedHandoff> {
-    let parsed = parse_kernel_elf(image).map_err(KexecError::as_kernel_error)?;
-    let span = parsed.image_span().ok_or(KernelError::InvalidArgument)?;
-    let dest_base = plan_destination_high(memory_map, span).map_err(KexecError::as_kernel_error)?;
+    let parsed = parse_kernel_elf(image).map_err(|e| {
+        crate::serial_println!("[kexec] the image is not a kernel this can load: {:?}", e);
+        e.as_kernel_error()
+    })?;
+    let span = parsed
+        .image_span()
+        .ok_or_else(|| refused("the image's span", KernelError::InvalidArgument))?;
+    let dest_base = plan_destination_high(memory_map, span).map_err(|e| {
+        crate::serial_println!(
+            "[kexec] no destination for {:#x} bytes of image: {:?}",
+            span,
+            e
+        );
+        e.as_kernel_error()
+    })?;
+    crate::serial_println!(
+        "[kexec] image {:#x} bytes, entry {:#x}, to physical {:#x}",
+        span,
+        parsed.entry,
+        dest_base
+    );
 
-    let tables = build_handoff_tables(&parsed, dest_base, hhdm, max_phys)?;
+    let tables = build_handoff_tables(&parsed, dest_base, hhdm, &direct_map_ranges(memory_map))
+        .map_err(|e| refused("the page tables", e))?;
 
     match prepare_after_tables(
         image,
@@ -1611,6 +1847,7 @@ pub fn prepare_handoff(
         dest_base,
         span,
         rsdp_address,
+        cmdline,
         &tables,
     ) {
         Ok((staged, arena_frames)) => Ok(PreparedHandoff {
@@ -1640,9 +1877,11 @@ fn prepare_after_tables(
     dest_base: u64,
     span: u64,
     rsdp_address: Option<u64>,
+    cmdline: Option<&[u8]>,
     tables: &HandoffTables,
 ) -> KernelResult<(StagedImage, alloc::vec::Vec<PhysFrame>)> {
-    let arena_frame = frame::alloc_frame_zeroed()?;
+    let arena_frame =
+        handoff_frame_zeroed(dest_base).map_err(|e| refused("the response arena", e))?;
     let arena_frames = alloc::vec![arena_frame];
 
     // Build the responses, then patch them into a copy of the image and stage it.
@@ -1656,11 +1895,12 @@ fn prepare_after_tables(
         tables,
         &arena_frames,
         rsdp_address,
+        cmdline,
     ) {
         Ok(r) => r,
         Err(e) => {
             free_frames(&arena_frames);
-            return Err(e);
+            return Err(refused("the Limine responses", e));
         }
     };
 
@@ -1668,30 +1908,39 @@ fn prepare_after_tables(
     let sites = find_request_sites(&patched);
     if let Err(e) = patch_requests(&mut patched, &sites, &responses) {
         free_frames(&arena_frames);
-        return Err(e);
+        return Err(refused("patching the requests", e));
     }
 
     let staged = match stage_image(&patched, parsed, dest_base, hhdm) {
         Ok(s) => s,
         Err(e) => {
             free_frames(&arena_frames);
-            return Err(e);
+            return Err(refused("staging the image", e));
         }
     };
 
     // The destination must not overlap any handoff frame, or the trampoline's
-    // copy into it would clobber a structure the new kernel still needs.
+    // copy into it would clobber a structure the new kernel still needs. Every
+    // one was allocated below `dest_base` (`handoff_frame_zeroed`), so this
+    // cannot fire; it stays as the check of that.
     let dest = PhysRange {
         start: dest_base,
         end: dest_base.saturating_add(span),
     };
-    let collides = tables
+    let collision = tables
         .frames
         .iter()
         .chain(staged.source_frames.iter())
         .chain(arena_frames.iter())
-        .any(|f| frame_range(*f).overlaps(dest));
-    if collides {
+        .find(|f| frame_range(**f).overlaps(dest))
+        .copied();
+    if let Some(f) = collision {
+        crate::serial_println!(
+            "[kexec] handoff frame {:#x} lies in the destination {:#x}..{:#x}",
+            f.addr(),
+            dest.start,
+            dest.end
+        );
         // SAFETY: nothing uses the staged frames; freeing on this error is safe.
         unsafe { staged.free() };
         free_frames(&arena_frames);
@@ -1699,6 +1948,13 @@ fn prepare_after_tables(
     }
 
     Ok((staged, arena_frames))
+}
+
+/// Say on the serial line which step of a handoff failed, and pass the error
+/// on: a refused restart is otherwise only a code, and the steps share them.
+fn refused(step: &str, e: KernelError) -> KernelError {
+    crate::serial_println!("[kexec] {} failed: {:?}", step, e);
+    e
 }
 
 /// Free a set of frames, ignoring errors (used only on handoff error paths).
@@ -1777,20 +2033,54 @@ pub unsafe fn quiesce() {
 
 // The handoff trampoline: a position-independent, pure-64-bit blob run from a
 // control frame's HHDM alias (valid in both the old and new page tables, which
-// share the HHDM offset). It copies the staged image to its contiguous
-// destination, loads a fresh GDT and an empty IDT, switches to the new page
-// tables, sets a fresh stack, zeroes the general registers and jumps to the new
-// kernel's entry -- the state Limine hands a kernel. `rdi` points at a parameter
-// block (the offsets below). CR0/CR4/EFER/PAT are left as the running kernel has
-// them: all valid long-mode state the new kernel re-initialises as it would from
-// a Limine boot, and keeping EFER.NXE set is what makes the handoff tables' NX
-// bits legal. See `todo.txt` (kexec 5a) and design-decisions §1536.
+// share the HHDM offset). It switches to the new page tables, flushes every TLB
+// entry, takes a fresh stack, copies the staged image to its contiguous
+// destination, loads a fresh GDT and an empty IDT, zeroes the general registers
+// and jumps to the new kernel's entry -- the state Limine hands a kernel. `rdi`
+// points at a parameter block (the offsets below).
+//
+// The order is the point:
+//
+// - **The new tables come first.** The copy writes the destination, which is
+//   checked against every handoff frame (the new tables, the staged source, the
+//   responses, this control region) but not against the *old* kernel's page
+//   tables -- frames of its own the old kernel allocated wherever it liked. A
+//   copy run under the old tables could overwrite the very entries translating
+//   it. Under the new ones it cannot: they are handoff frames, and they map the
+//   HHDM at the same offset, so this blob, its parameters and the copy list stay
+//   where they are.
+// - **Then CR4: PGE, PCIDE and CET off.** The running kernel maps its own image
+//   GLOBAL (`mm::protect`), and a CR3 write keeps global translations: without
+//   this the new kernel, linked at the same addresses, would fetch and store
+//   through the old kernel's frames until each stale entry happened to be
+//   evicted. Clearing PGE (and PCIDE, if set) invalidates every TLB entry of every
+//   PCID, globals included, as Linux's `relocate_kernel` does by setting CR4 to a
+//   known state. CET off too, so no supervisor IBT or shadow-stack check meets an
+//   entry point that was not built for it; the new kernel turns on what it uses.
+//   CR0, EFER and PAT stay as they are -- valid long-mode state the new kernel
+//   re-initialises as from a Limine boot, and EFER.NXE kept is what makes the
+//   handoff tables' NX bits legal.
+// - **Then the stack**, before anything pushes: the old one is mapped by the old
+//   tables only. The far return below and Limine's 0 return address use this one.
+//
+// See `todo.txt` (kexec 5a) and design-decisions §1536.
 global_asm!(
     ".global kexec_trampoline_start",
     "kexec_trampoline_start:",
     "cld",
     "mov r15, rdi",          // r15 = params
     "mov r14, [r15 + 0x10]", // r14 = hhdm
+    // The new page tables (see above).
+    "mov rax, [r15 + 0x18]", // new_cr3
+    "mov cr3, rax",
+    // CR4 to a known state: PGE (bit 7), PCIDE (17) and CET (23) off, which
+    // flushes every TLB entry, global ones included.
+    "mov rax, cr4",
+    "mov rcx, 0xFFFFFFFFFF7DFF7F",
+    "and rax, rcx",
+    "mov cr4, rax",
+    // The fresh stack, from here on.
+    "mov rsp, [r15 + 0x28]",
     // Copy the staged image: for each CopyOp{src_phys, dst_phys, len}.
     "mov r13, [r15 + 0x00]", // r13 = copy_count
     "mov r12, [r15 + 0x08]", // r12 = copy_list (HHDM)
@@ -1824,11 +2114,8 @@ global_asm!(
     "push rax",
     "retfq",
     "4:",
-    // Switch to the new page tables (the blob keeps running via the HHDM, which
-    // the new tables also map at the same offset).
-    "mov rax, [r15 + 0x18]", // new_cr3
-    "mov cr3, rax",
-    // Fresh stack with Limine's 0 return address.
+    // Limine's 0 return address on the fresh stack, whose top the far return
+    // left as it found it.
     "mov rsp, [r15 + 0x28]",
     "sub rsp, 8",
     "mov qword ptr [rsp], 0",
@@ -1966,12 +2253,15 @@ impl PreparedHandoff {
         let needed = stack_bottom.saturating_add(STACK_SIZE);
 
         let order = order_for(needed);
-        let region = match frame::alloc_order(order) {
+        // Below the destination, as every handoff frame is
+        // (`handoff_frame_zeroed`): the copy into it must not reach the
+        // trampoline running it.
+        let region = match frame::alloc_order_constrained(order, self.dest_base) {
             Ok(f) => f,
             Err(e) => {
                 // SAFETY: nothing quiesced.
                 unsafe { self.free() };
-                return e;
+                return refused("the trampoline's control region", e);
             }
         };
         let region_phys = region.addr();
@@ -2011,7 +2301,10 @@ impl PreparedHandoff {
                 let _ = frame::free_order(region, order);
                 self.free();
             }
-            return KernelError::InvalidArgument;
+            return refused(
+                "placing the control region clear of the destination",
+                KernelError::InvalidArgument,
+            );
         }
 
         // Fill the control region.
@@ -2066,6 +2359,25 @@ impl PreparedHandoff {
         let params_hhdm = region_virt.wrapping_add(params_off as u64);
         let blob_hhdm = region_virt;
 
+        // The running kernel maps the direct map no-execute; the trampoline
+        // runs from it until -- and after -- the switch to the new tables,
+        // which map it executable. Every page the blob covers is let execute
+        // here, while a failure can still back out.
+        let mut page = blob_hhdm & !(SIZE_4K - 1);
+        while page < blob_hhdm.wrapping_add(blob_len as u64) {
+            // SAFETY: the direct map's entries for the control region, which
+            // this function owns; only this CPU will execute it.
+            if let Err(e) = unsafe { allow_execution_at(page) } {
+                // SAFETY: nothing quiesced; free the region and the handoff.
+                unsafe {
+                    let _ = frame::free_order(region, order);
+                    self.free();
+                }
+                return refused("letting the trampoline execute", e);
+            }
+            page = page.wrapping_add(SIZE_4K);
+        }
+
         // Point of no return: stop the machine, then jump. The handoff's frames
         // (tables, staged image, responses) and this control region become the
         // new kernel's; nothing here is freed.
@@ -2084,13 +2396,74 @@ impl PreparedHandoff {
     }
 }
 
+/// Clear NX for the 4 KiB page holding `virt` in the running page tables, at
+/// every level from the PML4 entry down to the leaf -- a 1 GiB, 2 MiB or 4 KiB
+/// entry -- and flush that translation from this CPU's TLB.
+///
+/// The trampoline runs from the control region's direct-map (HHDM) alias,
+/// which the new tables map executable, as Limine leaves the direct map, but
+/// which the running kernel maps no-execute: the first self-reload boot to
+/// reach the jump (2026-10-08) faulted on the trampoline's first instruction
+/// (`#PF` at the control region, error 0x11 -- an instruction fetch from a
+/// present page). Letting the dying kernel's tables execute the pages the jump
+/// needs is the smaller of the two ways round that; the other is a second
+/// executable mapping at an address valid in both tables. When the leaf is a
+/// huge page the whole 2 MiB or 1 GiB of the direct map it covers becomes
+/// executable, for the moments the old kernel has left.
+///
+/// # Safety
+///
+/// Only on the way out, from [`PreparedHandoff::execute`]: the page is one the
+/// handoff owns, about to be jumped to on this CPU, and the old kernel is
+/// committed to ending.
+unsafe fn allow_execution_at(virt: u64) -> KernelResult<()> {
+    use crate::mm::page_table;
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let v = VirtAddr::new(virt);
+    let nx = PageFlags::NO_EXECUTE.bits();
+    let mut table = page_table::cr3_to_pml4(page_table::read_cr3());
+    let indices = [v.pml4_index(), v.pdpt_index(), v.pd_index(), v.pt_index()];
+    for (level, &index) in indices.iter().enumerate() {
+        // SAFETY: `table` is the active PML4, or the table a present,
+        // non-huge entry above it names; `index` comes from a `VirtAddr`, so
+        // it is below 512, and the HHDM maps every table.
+        let entry = unsafe { page_table::read_entry(table, index, hhdm) };
+        if !entry.is_present() {
+            return Err(KernelError::InvalidAddress);
+        }
+        if entry.raw() & nx != 0 {
+            // SAFETY: as above; only the NX bit changes, so the entry still
+            // maps what it mapped (the caller's contract covers the rest).
+            unsafe {
+                page_table::write_entry(
+                    table,
+                    index,
+                    PageTableEntry::from_raw(entry.raw() & !nx),
+                    hhdm,
+                );
+            }
+        }
+        // The PTE, or a huge PDPT or PD entry, is the leaf.
+        if level == 3 || (level > 0 && entry.is_huge()) {
+            break;
+        }
+        table = entry.phys_addr();
+    }
+    // SAFETY: `invlpg` is always valid in ring 0.
+    unsafe { page_table::invlpg(virt) };
+    Ok(())
+}
+
 /// Reload the running kernel into itself: the boot-test kexec mode's trigger.
 ///
 /// Gathers the running kernel's own ELF (the file Limine loaded) and boot facts,
 /// prepares a handoff, and executes it. On success it does not return (the second
 /// kernel boots); on any pre-jump failure it returns the [`KernelError`]. The
-/// second kernel has no command line (the handoff does not build a kernel-file
-/// response), so it does not re-trigger -- the self-reload happens exactly once.
+/// second kernel is given this one's command line without the
+/// `kexec.selftest=1` that asked for the reload ([`restart_cmdline`]), so it
+/// boots as this one was told to -- skipping the self-tests, say, so the
+/// harness need not wait for them twice -- and does not reload again: the
+/// self-reload happens exactly once.
 ///
 /// Called only from the boot path under the `kexec.selftest=1` command line, to
 /// validate the trampoline (the one part no self-test can exercise). Not reached
@@ -2110,14 +2483,32 @@ pub unsafe fn reload_self() -> KernelError {
         return KernelError::NotSupported;
     };
     let memory_map = crate::boot::memory_map();
-    let max_phys = top_of_managed_ram(memory_map);
     let rsdp = crate::boot::rsdp_address();
-    let prepared = match prepare_handoff(image, memory_map, hhdm, max_phys, rsdp) {
+    let cmdline = restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default());
+    let prepared = match prepare_handoff(image, memory_map, hhdm, rsdp, Some(&cmdline)) {
         Ok(p) => p,
         Err(e) => return e,
     };
     // SAFETY: the bootstrap CPU is committing to the restart (caller's contract).
     unsafe { prepared.execute() }
+}
+
+/// The command line a self-reload passes on: `line`'s words in order, single
+/// spaces between them, without `kexec.selftest=1` -- the word that asked for
+/// the reload, which would ask again.
+#[must_use]
+pub fn restart_cmdline(line: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(line.len());
+    for word in line
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|w| !w.is_empty() && *w != b"kexec.selftest=1")
+    {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(word);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2181,6 +2572,40 @@ pub fn self_test() -> KernelResult<()> {
         parse_kernel_elf(&[0u8; 8]).is_err(),
         "a non-ELF buffer is rejected"
     );
+
+    // ---- the direct map's ranges ----
+    // Limine's types only, widened to 4 KiB, sorted, adjacent ones merged; the
+    // hole, ACPI NVS and the framebuffer left out.
+    {
+        let entry = |base: u64, length: u64, type_: u64| MemmapEntry {
+            base,
+            length,
+            type_,
+        };
+        let fw = [
+            entry(0x40_0000, 0x10_0000, memmap_type::EXECUTABLE_AND_MODULES),
+            entry(0, 0xa_0000, memmap_type::USABLE),
+            entry(0xa_0000, 0x6_0000, memmap_type::RESERVED),
+            entry(0x10_0000, 0x10_0800, memmap_type::USABLE),
+            entry(0x20_0800, 0xf_f800, memmap_type::BOOTLOADER_RECLAIMABLE),
+            entry(0x30_0000, 0x1_0000, memmap_type::ACPI_NVS),
+            entry(0x8000_0000, 0x40_0000, memmap_type::FRAMEBUFFER),
+        ];
+        let refs: alloc::vec::Vec<&MemmapEntry> = fw.iter().collect();
+        let got: alloc::vec::Vec<(u64, u64)> = direct_map_ranges(&refs)
+            .iter()
+            .map(|r| (r.start, r.end))
+            .collect();
+        selftest::check_eq!(
+            got,
+            alloc::vec![
+                (0, 0xa_0000),
+                (0x10_0000, 0x30_0000),
+                (0x40_0000, 0x50_0000)
+            ],
+            "the direct map covers usable, bootloader-reclaimable and executable memory only"
+        );
+    }
 
     // ---- destination planning ----
     let frame = FRAME_U64;
@@ -2310,6 +2735,33 @@ pub fn self_test() -> KernelResult<()> {
             .is_none(),
         "a request past the end marker is out of the window"
     );
+    // A second marker window after the first -- a loader's constants in
+    // `.rodata`, which this module's are in a SlateOS kernel -- is not the
+    // image's: the first one is.
+    let (decoyed, hhdm_at) = build_request_image_with_decoy_after_end();
+    let found = find_request_sites(&decoyed);
+    selftest::check_eq!(
+        found.hhdm,
+        Some(hhdm_at),
+        "the first marker window is the image's"
+    );
+    selftest::check!(
+        found.memmap.is_none() && found.base_revision.is_none(),
+        "a second window after it is not"
+    );
+    // In an ELF, only a writable segment holds requests: a whole window in a
+    // read-only segment, though it comes first, is a loader's constants.
+    let (elf, memmap_at) = build_test_elf_with_requests();
+    let found = find_request_sites(&elf);
+    selftest::check_eq!(
+        found.memmap,
+        Some(memmap_at),
+        "the requests in the writable segment are the image's"
+    );
+    selftest::check!(
+        found.hhdm.is_none() && found.base_revision.is_none(),
+        "a marker window in a read-only segment is passed over"
+    );
 
     // ---- Limine response building ----
     const FAKE_PHYS: u64 = 0x0020_0000;
@@ -2401,10 +2853,23 @@ pub fn self_test() -> KernelResult<()> {
     // Build real tables (needs the frame allocator, so this runs at boot) for the
     // fabricated two-segment image, confirm a few translations, then free them.
     if let Some(real_hhdm) = crate::mm::page_table::hhdm() {
-        const DEST_BASE: u64 = 0x0100_0000; // a frame-aligned stand-in destination
-        // Direct-map a single page's worth of physical RAM: rounds up to one
-        // huge page, keeping the test's table count tiny.
-        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, SIZE_4K).map_err(|e| {
+        // A frame-aligned stand-in destination. At 4 GiB, so the frames the
+        // tables and staging are built in -- all from below it
+        // (`handoff_frame_zeroed`) -- are plentiful at boot.
+        const DEST_BASE: u64 = 0x1_0000_0000;
+        // Direct-map one 4 KiB page at 0 and 4 MiB at 4 MiB: the edge pages,
+        // the 2 MiB pages, and what lies beside them, with a tiny table count.
+        let direct = [
+            PhysRange {
+                start: 0,
+                end: SIZE_4K,
+            },
+            PhysRange {
+                start: 0x40_0000,
+                end: 0x80_0000,
+            },
+        ];
+        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, &direct).map_err(|e| {
             crate::serial_println!("  FAIL: build_handoff_tables: {:?}", e);
             KernelError::InternalError
         })?;
@@ -2464,6 +2929,23 @@ pub fn self_test() -> KernelResult<()> {
         // SAFETY: as above.
         let gap = unsafe { translate(pml4, 0xffff_ffff_9000_0000, real_hhdm) };
         selftest::check!(gap.is_none(), "an unmapped address translates to None");
+
+        // The direct map covers its ranges and nothing beside them: the page
+        // after the one at 0 is not mapped (so an MMIO hole there could still
+        // be mapped uncached by the new kernel), the 4 MiB range is two 2 MiB
+        // pages, and the address after it is not mapped either.
+        // SAFETY: as above, for each.
+        let beside = unsafe { translate(pml4, real_hhdm.wrapping_add(SIZE_4K), real_hhdm) };
+        selftest::check!(beside.is_none(), "the direct map stops at its range's edge");
+        let low_huge = unsafe { translate(pml4, real_hhdm.wrapping_add(0x40_0000), real_hhdm) };
+        let high_huge = unsafe { translate(pml4, real_hhdm.wrapping_add(0x7f_f000), real_hhdm) };
+        selftest::check_eq!(
+            (low_huge.map(|(p, _)| p), high_huge.map(|(p, _)| p)),
+            (Some(0x40_0000), Some(0x60_0000)),
+            "an aligned 4 MiB range is two 2 MiB pages"
+        );
+        let after = unsafe { translate(pml4, real_hhdm.wrapping_add(0x80_0000), real_hhdm) };
+        selftest::check!(after.is_none(), "nothing past the 4 MiB range is mapped");
 
         // SAFETY: these tables were never installed in CR3, so freeing is safe.
         unsafe { tables.free() };
@@ -2567,6 +3049,69 @@ pub fn self_test() -> KernelResult<()> {
         selftest::check_eq!(adjusted.get(i), Some(want), "adjusted map entry");
     }
 
+    // ---- the kernel-file response: a command line and no file (pure) ----
+    {
+        use crate::limine::{KernelFileResponse, LimineFile};
+        let mut kf_staging = alloc::vec![0u8; 512];
+        let kf_ptr = {
+            let mut arena = HandoffArena::new(&mut kf_staging, FAKE_PHYS, FAKE_HHDM);
+            build_kernel_file_response(&mut arena, b"selftest.skip=1 a=b\0ignored")
+                .ok_or(KernelError::InternalError)?
+        };
+        let kf_off = to_off(kf_ptr);
+        selftest::check_eq!(
+            le_u64(&kf_staging, kf_off),
+            Some(0),
+            "kernel-file response revision"
+        );
+        let file_ptr = le_u64(
+            &kf_staging,
+            kf_off.saturating_add(core::mem::offset_of!(KernelFileResponse, kernel_file)),
+        )
+        .ok_or(KernelError::InternalError)?;
+        let file_off = to_off(file_ptr);
+        let field = |off: usize| le_u64(&kf_staging, file_off.saturating_add(off));
+        selftest::check_eq!(
+            field(core::mem::offset_of!(LimineFile, address)),
+            Some(0),
+            "the restart's kernel file has no address"
+        );
+        selftest::check_eq!(
+            field(core::mem::offset_of!(LimineFile, size)),
+            Some(0),
+            "the restart's kernel file has no size"
+        );
+        let line_ptr =
+            field(core::mem::offset_of!(LimineFile, cmdline)).ok_or(KernelError::InternalError)?;
+        let line_off = to_off(line_ptr);
+        let line = kf_staging
+            .get(line_off..)
+            .and_then(|rest| rest.split(|&b| b == 0).next())
+            .unwrap_or_default();
+        selftest::check_eq!(
+            line,
+            b"selftest.skip=1 a=b".as_slice(),
+            "the command line, cut at its NUL, NUL-terminated"
+        );
+        let path_ptr =
+            field(core::mem::offset_of!(LimineFile, path)).ok_or(KernelError::InternalError)?;
+        selftest::check_eq!(
+            kf_staging.get(to_off(path_ptr)).copied(),
+            Some(0),
+            "the restart's kernel file has an empty path, not a null one"
+        );
+    }
+    selftest::check_eq!(
+        restart_cmdline(b"  sched.boot_deadline_ms=9 kexec.selftest=1\tselftest.skip=1 "),
+        b"sched.boot_deadline_ms=9 selftest.skip=1".to_vec(),
+        "a self-reload passes the command line on without kexec.selftest=1"
+    );
+    selftest::check_eq!(
+        restart_cmdline(b"kexec.selftest=10"),
+        b"kexec.selftest=10".to_vec(),
+        "only the exact word is dropped"
+    );
+
     // ---- patching the requests (pure) ----
     let (reqbytes, reqsites) = build_test_request_image();
     let mut img = reqbytes;
@@ -2618,10 +3163,15 @@ pub fn self_test() -> KernelResult<()> {
     // collision check -- then free it. Validates the orchestration without a jump.
     if let Some(real_hhdm) = crate::mm::page_table::hhdm() {
         let fw = crate::boot::memory_map();
-        let max_phys = top_of_managed_ram(fw);
-        if !fw.is_empty() && max_phys > 0 {
+        if !fw.is_empty() {
             let img = build_test_elf();
-            match prepare_handoff(&img, fw, real_hhdm, max_phys, Some(0x000f_e000)) {
+            match prepare_handoff(
+                &img,
+                fw,
+                real_hhdm,
+                Some(0x000f_e000),
+                Some(b"selftest.skip=1"),
+            ) {
                 Ok(prep) => {
                     selftest::check!(!prep.copy_ops().is_empty(), "prepared handoff has copy ops");
                     selftest::check_eq!(prep.entry, TEST_ENTRY, "prepared handoff entry point");
@@ -2812,6 +3362,113 @@ fn build_test_request_image() -> (alloc::vec::Vec<u8>, RequestSites) {
         kernel_file: None,
     };
     (words_to_bytes(&words), want)
+}
+
+/// Build an image whose marker window is followed by a second one -- start
+/// marker, base-revision tag, a memory-map request, end marker -- as a
+/// loader's own `.rodata` constants follow a SlateOS kernel's `.requests`;
+/// and the offset of the first window's HHDM request, the one
+/// [`find_request_sites`] must find.
+// Builds a buffer of known contents; `len * 8` cannot overflow here.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_request_image_with_decoy_after_end() -> (alloc::vec::Vec<u8>, usize) {
+    let mut words: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    words.extend_from_slice(&REQUESTS_START_MARKER);
+    let hhdm_off = words.len() * 8;
+    push_test_request(&mut words, feature_id::HHDM);
+    words.extend_from_slice(&REQUESTS_END_MARKER);
+    // The decoy window.
+    words.extend_from_slice(&REQUESTS_START_MARKER);
+    words.push(BASE_REVISION_MAGIC[0]);
+    words.push(BASE_REVISION_MAGIC[1]);
+    words.push(3);
+    push_test_request(&mut words, feature_id::MEMMAP);
+    words.extend_from_slice(&REQUESTS_END_MARKER);
+    (words_to_bytes(&words), hhdm_off)
+}
+
+/// Build an ELF whose read-only, executable first segment holds a whole marker
+/// window -- start marker, base-revision tag, an HHDM request, end marker --
+/// before its writable second segment holds the real one, with a memory-map
+/// request; and the offset of that request. [`find_request_sites`] must take
+/// the writable segment's: a bootloader writes responses, so requests are
+/// writable, and the read-only window is a loader's constants.
+// Builds a buffer of known contents at offsets fixed by the ELF layout.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects
+)]
+fn build_test_elf_with_requests() -> (alloc::vec::Vec<u8>, usize) {
+    const EHSIZE: usize = 64;
+    const PHENTSIZE: usize = 56;
+    let phoff = EHSIZE;
+    let data_off = EHSIZE + 2 * PHENTSIZE;
+
+    let mut decoy: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    decoy.extend_from_slice(&REQUESTS_START_MARKER);
+    decoy.push(BASE_REVISION_MAGIC[0]);
+    decoy.push(BASE_REVISION_MAGIC[1]);
+    decoy.push(3);
+    push_test_request(&mut decoy, feature_id::HHDM);
+    decoy.extend_from_slice(&REQUESTS_END_MARKER);
+    let decoy = words_to_bytes(&decoy);
+
+    let mut real: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    real.extend_from_slice(&REQUESTS_START_MARKER);
+    let memmap_in_real = real.len() * 8;
+    push_test_request(&mut real, feature_id::MEMMAP);
+    real.extend_from_slice(&REQUESTS_END_MARKER);
+    let real = words_to_bytes(&real);
+
+    let real_off = data_off + decoy.len();
+    let mut buf = alloc::vec![0u8; real_off + real.len()];
+    buf[data_off..real_off].copy_from_slice(&decoy);
+    buf[real_off..].copy_from_slice(&real);
+
+    buf[0..4].copy_from_slice(&ELF_MAGIC);
+    buf[4] = ELFCLASS64;
+    buf[5] = ELFDATA2LSB;
+    buf[6] = 1; // EV_CURRENT
+    buf[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    buf[E_MACHINE_OFF..E_MACHINE_OFF + 2].copy_from_slice(&EM_X86_64.to_le_bytes());
+    buf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+    buf[E_ENTRY_OFF..E_ENTRY_OFF + 8].copy_from_slice(&TEST_ENTRY.to_le_bytes());
+    buf[E_PHOFF_OFF..E_PHOFF_OFF + 8].copy_from_slice(&(phoff as u64).to_le_bytes());
+    buf[52..54].copy_from_slice(&(EHSIZE as u16).to_le_bytes()); // e_ehsize
+    buf[E_PHENTSIZE_OFF..E_PHENTSIZE_OFF + 2].copy_from_slice(&(PHENTSIZE as u16).to_le_bytes());
+    buf[E_PHNUM_OFF..E_PHNUM_OFF + 2].copy_from_slice(&2u16.to_le_bytes());
+
+    let mut write_ph =
+        |at: usize, flags: u32, offset: usize, vaddr: u64, memsz: u64, filesz: usize| {
+            buf[at + P_TYPE_OFF..at + P_TYPE_OFF + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+            buf[at + P_FLAGS_OFF..at + P_FLAGS_OFF + 4].copy_from_slice(&flags.to_le_bytes());
+            buf[at + P_OFFSET_OFF..at + P_OFFSET_OFF + 8]
+                .copy_from_slice(&(offset as u64).to_le_bytes());
+            buf[at + P_VADDR_OFF..at + P_VADDR_OFF + 8].copy_from_slice(&vaddr.to_le_bytes());
+            buf[at + P_FILESZ_OFF..at + P_FILESZ_OFF + 8]
+                .copy_from_slice(&(filesz as u64).to_le_bytes());
+            buf[at + P_MEMSZ_OFF..at + P_MEMSZ_OFF + 8].copy_from_slice(&memsz.to_le_bytes());
+        };
+    // The decoy in R-X (PF_R | PF_X), the real window in RW- (PF_R | PF_W).
+    write_ph(
+        phoff,
+        PF_X | 4,
+        data_off,
+        TEST_VADDR_A,
+        TEST_MEMSZ_A,
+        decoy.len(),
+    );
+    write_ph(
+        phoff + PHENTSIZE,
+        PF_W | 4,
+        real_off,
+        TEST_VADDR_B,
+        TEST_MEMSZ_B,
+        real.len(),
+    );
+
+    (buf, real_off + memmap_in_real)
 }
 
 /// Build an image with a stray request magic *after* the end marker, to prove

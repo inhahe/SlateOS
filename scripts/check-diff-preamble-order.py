@@ -56,7 +56,7 @@ SOURCE = re.compile(r"^(?:\.|source)\s")  # plus a diff-wsl.sh mention; see is_s
 
 # Sourced before the preamble on purpose; see offenders_in(). A name here is a
 # promise that the file's every run after the first is a no-op.
-PRE_PREAMBLE_SOURCES = ("util-linux-source.sh", "procps-ref.sh")
+PRE_PREAMBLE_SOURCES = ("util-linux-source.sh", "util-linux-ref.sh", "procps-ref.sh")
 
 # See the module docstring. A name here is a promise that its second execution
 # is a no-op, not that it is short.
@@ -116,8 +116,9 @@ def offenders_in(text):
         # header says so) and to be no-ops on every pass but one: they return
         # at once unless `uname -s` is Linux, and in WSL they do their work
         # once and then find a marker -- util-linux-source.sh its `.unpacked`,
-        # procps-ref.sh its `.slateos-built` stamp. Their second run is the
-        # no-op this gate asks for, promised by the files themselves.
+        # util-linux-ref.sh and procps-ref.sh their `.slateos-built` stamps.
+        # Their second run is the no-op this gate asks for, promised by the
+        # files themselves.
         if (SOURCE.match(raw.strip()) and in_quote is None
                 and any(name in raw for name in PRE_PREAMBLE_SOURCES)):
             continue

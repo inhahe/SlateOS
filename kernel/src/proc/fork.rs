@@ -416,6 +416,18 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             crate::net::native_socket::dup(id)?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Namespace => {
+            // A handle on a namespace (`crate::nsfs`; the only `Namespace`
+            // entries in this list -- the authority to make and attach
+            // namespaces is in the cloned capability table): the child's
+            // inherited descriptor holds the namespace too, as an inherited
+            // `/proc/<pid>/ns` descriptor does on Linux.
+            if crate::nsfs::retain(id) {
+                Ok(Some((rtype, id)))
+            } else {
+                Err(KernelError::InvalidHandle)
+            }
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::SharedMemory
@@ -454,8 +466,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::PrivilegedPort
         | ResourceType::ResourceLimit
         | ResourceType::BlockDevice
-        | ResourceType::CapBroker
-        | ResourceType::Namespace => Ok(None),
+        | ResourceType::CapBroker => Ok(None),
     }
 }
 
@@ -528,6 +539,8 @@ fn close_one(rtype: ResourceType, id: u64) {
             let _ =
                 crate::net::native_socket::release(id, crate::net::native_socket::Ending::Close);
         }
+        // The hold on a namespace `dup_one` took.
+        ResourceType::Namespace => crate::nsfs::release(id),
         // Nothing was duped for these in `dup_one`.
         _ => {}
     }
@@ -757,6 +770,29 @@ fn fork_process_clone_inner(
     use crate::syscall::linux::clone_flags;
 
     let child_pid = build_fork_child(parent_pid)?;
+
+    // CLONE_NEWNS: the child in a new mount namespace, a copy of the table
+    // it inherited (`crate::fs::mntns`); the clone call has checked the
+    // caller may. Before the child has a thread, so it never resolves a
+    // path in its parent's.
+    if (clone_tid.flags & clone_flags::CLONE_NEWNS) != 0
+        && let Err(e) = crate::fs::mntns::unshare(child_pid)
+    {
+        pcb::destroy(child_pid);
+        return Err(e);
+    }
+
+    // CLONE_NEWUTS: the child in a new UTS namespace, a copy of the one it
+    // inherited (`crate::utsns`); the clone call has checked the caller may.
+    // Before the child has a thread, so it never runs in its parent's.
+    if (clone_tid.flags & clone_flags::CLONE_NEWUTS) != 0 {
+        let from = pcb::uts_ns(child_pid).unwrap_or(crate::utsns::ROOT_UTS);
+        let moved = crate::utsns::create_from(from).and_then(|id| pcb::set_uts_ns(child_pid, id));
+        if let Err(e) = moved {
+            pcb::destroy(child_pid);
+            return Err(e);
+        }
+    }
 
     // CLONE_CLEAR_SIGHAND: the child's caught signals go back to their
     // default action, ignored ones staying ignored (clone(2)) -- the reset an

@@ -22,8 +22,10 @@ unconfined one. `sched::spawn_inner` gives a new task its creator's
 `net_ns` as well as its cgroup, read with a blocking lock (the `try_lock` it
 used could fall back to the root group under contention). Test:
 `namespace::self_test`'s `test_inherit`: a child gets its parent's
-namespace, root, volume, read-only root and hostname, and resolves a path as
-its parent does.
+namespace, root, volume and read-only root, and resolves a path as its
+parent does. The hostname is no longer a pid-keyed table: since the same day
+it is the container's UTS namespace (design-decisions 1554), which a child
+inherits with its process record and the ring-3 UTS test checks.
 
 **Reproduce (main).** `container run --rootfs <dir> <image> /bin/sh -c 'cat
 /etc/hostname'`: the shell's `cat`, a child, reads the host's file.

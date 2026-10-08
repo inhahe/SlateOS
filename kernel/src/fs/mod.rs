@@ -114,7 +114,6 @@ pub mod diskhealth;
 pub mod diskio;
 pub mod diskquota;
 pub mod disksmart;
-pub mod diskstat;
 pub mod display;
 pub mod displayarrange;
 pub mod displaycal;
@@ -236,9 +235,9 @@ pub mod mempress;
 pub mod migstat;
 pub mod mmapstat;
 pub mod mmtune;
+pub mod mntns;
 pub mod mobilelink;
 pub mod monitors;
-pub mod mount_ns;
 pub mod mousegestures;
 pub mod mousesettings;
 pub mod msivec;
@@ -458,3 +457,42 @@ pub use vfs::{
     DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, Vfs, XattrSetMode,
     XattrTarget,
 };
+
+/// A new instance of the filesystem `fstype` names, over the block device
+/// `source` for the types that live on one: what `mount(2)` and the native
+/// `SYS_FS_MOUNT` make before mounting it. One table for both, so the two
+/// cannot come to mean different things by one type name.
+///
+/// `source` is a block device's registered name (`vda`, `sda1`), or that name
+/// under `/dev/`, as a Linux program writes it. Ignored by the types that live
+/// on none (`tmpfs`, `proc`, `sysfs`, `devtmpfs`).
+///
+/// # Errors
+///
+/// `NotSupported` for a type this kernel has no driver for; the driver's own
+/// refusal of the device (`NotFound` for one that is not there).
+pub fn new_filesystem(
+    fstype: &str,
+    source: &str,
+) -> crate::error::KernelResult<alloc::boxed::Box<dyn vfs::FileSystem>> {
+    use alloc::boxed::Box;
+    let device = source.strip_prefix("/dev/").unwrap_or(source);
+    let fs: Box<dyn vfs::FileSystem> = match fstype {
+        "ext4" => Box::new(ext4::vfs_impl::Ext4Fs::open(device)?),
+        "tmpfs" | "memfs" | "ramfs" => Box::new(memfs::MemFs::new()),
+        "iso9660" | "iso" | "cd9660" => Box::new(iso9660::Iso9660Fs::open(device)?),
+        // Read-only drivers: a mount asked for read-write gets one that
+        // refuses each write, as before.
+        "ntfs" | "ntfs3" => Box::new(ntfs::NtfsFs::open(device)?),
+        "btrfs" => Box::new(btrfs::BtrfsFs::open(device)?),
+        "f2fs" => Box::new(f2fs::F2fsFs::open(device)?),
+        "zfs" => Box::new(zfs::ZfsFs::open(device)?),
+        // `devtmpfs` is Linux's name for what devfs is here.
+        "devfs" | "dev" | "devtmpfs" => Box::new(devfs::DevFs::new()),
+        "proc" | "procfs" => Box::new(procfs::ProcFs::new()),
+        "sysfs" | "sys" => Box::new(sysfs::SysFs::new()),
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => Box::new(fat::FatFs::mount(device)?),
+        _ => return Err(crate::error::KernelError::NotSupported),
+    };
+    Ok(fs)
+}

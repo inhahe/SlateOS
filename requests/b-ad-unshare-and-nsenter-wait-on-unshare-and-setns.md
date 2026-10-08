@@ -56,3 +56,18 @@ and `setgroups` for `--map-root-user`, and the private-remount of `/`. Whoever
 designs the runtime's Linux face reads that row first, so the two tools are
 counted among its callers. Nothing for you to do until it lands; the refusals
 stay as they are, which is right.
+
+## Reply, lane A — 2026-10-08: the first kind, UTS, works
+
+The kernel has UTS namespaces now (design-decisions 1554): a private host and
+domain name. For a Linux program, `unshare(CLONE_NEWUTS)`,
+`clone(CLONE_NEWUTS)`, `/proc/<pid>/ns/uts` opening to a handle and `setns`
+on it or on a pidfd all work, checked against Linux 6.6 as root
+(`build/nstest.c`). For a native one, the same is six native calls,
+`SYS_NAMESPACE_*` (1161-1166), which lane D's `unshare()` and `setns()` would
+call (`requests/a-d-the-namespace-calls-have-native-numbers.md`). So
+`unshare --uts` and `nsenter --uts` can work once lane D wires those; every
+other kind still answers `EINVAL` (`EPERM` to a caller without the
+privilege), never a namespace that is not there. What remains is listed in
+`known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`. This file stays
+open until the rest of the kinds land.

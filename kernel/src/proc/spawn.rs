@@ -2195,11 +2195,15 @@ fn spawn_process_inner(
         }
     }
 
-    // Apply the initial user/group identity if one was requested (honors a
-    // container image's `User` config / the Docker `--user`/`-u` flag). The
-    // child's credentials are replaced with a fresh numeric identity (no
-    // supplementary groups). A failure here is logged but never fails the
-    // spawn — the child simply keeps the inherited (root) credentials.
+    // The child's identity. An initial user/group identity, when one was
+    // requested (a container image's `User` config, the Docker `--user`/`-u`
+    // flag -- kernel callers only), replaces the credentials with a fresh
+    // numeric identity (no supplementary groups); a failure there is logged,
+    // and the child keeps root's, which only the kernel asks for. Otherwise a
+    // process's child is its parent's user, as `posix_spawn` -- a fork and an
+    // exec -- leaves it (`pcb::inherit_credentials`), and a spawn whose parent
+    // cannot be read fails rather than start a child as root. A
+    // kernel-spawned child (`parent == 0`) is root.
     if let Some((uid, gid)) = options.uid_gid {
         if let Err(e) = pcb::set_credentials(pid, pcb::ProcessCredentials::new(uid, gid)) {
             serial_println!(
@@ -2208,6 +2212,18 @@ fn spawn_process_inner(
                 e,
             );
         }
+    } else if options.parent != 0
+        && let Err(e) = pcb::inherit_credentials(options.parent, pid)
+    {
+        serial_println!(
+            "[spawn] Process {}: parent {}'s credentials could not be read: {:?} -- spawn \
+             aborted",
+            pid,
+            options.parent,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
     }
 
     // Step 5f: the child's process group, session and signal state -- its
@@ -2480,6 +2496,9 @@ pub fn exec_process(
     // The old address space goes next: a `/proc/<pid>/mem` opened on it reads
     // end-of-file from now on, as Linux's does (`pcb::note_exec`).
     pcb::note_exec(pid);
+    // The saved and filesystem ids become the effective ones, as Linux's exec
+    // sets them (`pcb::exec_credentials`).
+    pcb::exec_credentials(pid);
 
     // Step 3: Tear down the old user address space.
     //
@@ -3556,6 +3575,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_job_and_signals()?;
     test_spawn_child_of_sigchld_ignorer_is_reaped()?;
     test_spawn_with_uid_gid()?;
+    test_spawn_inherits_credentials()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
@@ -24087,6 +24107,99 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of real, effective, saved and filesystem ids through the Linux
+/// ABI: [`elf::build_linux_setid_test_elf`] (`build/setidtest.c`), run as
+/// root. `seteuid(1000)` keeps the real and saved ids 0, shuts root's file,
+/// and `seteuid(0)` brings root back; the saved id alone keeps root within
+/// reach; `setfsuid` moves file access alone and answers the old id; the
+/// group ids move the same way; a child that leaves every id 0 cannot come
+/// back; `setreuid` moves the saved id as Linux's does, and a privileged
+/// `setuid` sets all three (`crate::proc::setid`).
+pub fn self_test_linux_setid() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux user and group ids (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_setid_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-setid"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-setid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: user and group ids spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: user and group ids (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x34) => {
+                "a child that left every user id 0 got root back (or could not leave it)"
+            }
+            Some(0x35) => "an unprivileged setfsuid to an id it holds none of changed something",
+            Some(0x40) => "root could not make its test file",
+            Some(0x41..=0x44) => {
+                "seteuid(1000) as root did not leave the real and saved ids 0 (getresuid, getuid, \
+                 geteuid)"
+            }
+            Some(0x45) => "root's 0600 file opened with the effective id 1000",
+            Some(0x46) => "seteuid to an id the process holds none of was allowed",
+            Some(0x47 | 0x48) => "seteuid(0) did not bring root and its file access back",
+            Some(0x49..=0x4c) => "the saved id alone did not keep root within reach",
+            Some(0x4d..=0x50) => "setfsuid did not move file access alone, or answer the old id",
+            Some(0x51..=0x55) => "the group ids did not move as the user ids do",
+            Some(0x56 | 0x57) => "the child that gave up root did not end 0x2B",
+            Some(0x58..=0x5c) => {
+                "setreuid did not move the saved id as Linux's does, or a privileged setuid did \
+                 not set all three for good"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: user and group ids (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux user and group ids (ring 3: seteuid away and back, the saved id, \
+         setfsuid, group ids, a drop for good, setreuid and setuid): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of named pipes through the Linux ABI:
 /// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
 /// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a
@@ -40365,6 +40478,87 @@ fn test_spawn_with_uid_gid() -> KernelResult<()> {
 
     serial_println!("[spawn]   Spawn with initial uid/gid (explicit + default): OK");
     Ok(())
+}
+
+/// Test: a process's spawned child is its parent's user -- the parent's ids
+/// as an exec leaves them -- and keeps root's rights put aside only while
+/// one of its user ids is 0. Until 2026-10-08 every spawned child was root.
+fn test_spawn_inherits_credentials() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("cred-parent", 0);
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        pcb::grant_capability(parent, ResourceType::SystemClock, 0, Rights::WRITE)?;
+        // Root puts its authority aside: real and saved uid 0, effective
+        // 1000, and group 100 with a supplementary group.
+        let mut aside = pcb::ProcessCredentials::root();
+        aside.uid = 1000;
+        aside.fsuid = 1000;
+        aside.set_all_gids(100);
+        aside.groups = alloc::vec![7];
+        pcb::change_credentials(parent, aside)?;
+        if pcb::suspended_rights(parent) != 1 {
+            return fail("the parent's clock right was not put aside");
+        }
+        let child = spawn_process(&elf_data, &SpawnOptions::new("cred-child").parent(parent))?;
+        spawned.push((child.pid, child.task_id));
+        let mut want = pcb::ProcessCredentials::new(1000, 100);
+        want.ruid = 0;
+        want.groups = alloc::vec![7];
+        let got = pcb::get_credentials(child.pid);
+        if got.as_ref() != Some(&want) {
+            serial_println!("[spawn]   got {:?}, want {:?}", got, want);
+            return fail("the child is not its parent's user, as an exec leaves it");
+        }
+        if pcb::suspended_rights(child.pid) != 1
+            || pcb::has_capability_type(child.pid, ResourceType::SystemClock, Rights::WRITE)
+        {
+            return fail(
+                "the child of a parent with root's rights put aside does not have them aside",
+            );
+        }
+        // Every id 1000: the parent's authority is gone for good, and its
+        // child has no root id and nothing put aside.
+        pcb::change_credentials(parent, pcb::ProcessCredentials::new(1000, 100))?;
+        let user = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("cred-child-user").parent(parent),
+        )?;
+        spawned.push((user.pid, user.task_id));
+        if pcb::get_credentials(user.pid) != Some(pcb::ProcessCredentials::new(1000, 100)) {
+            return fail("a user's child is not that user");
+        }
+        if pcb::suspended_rights(user.pid) != 0
+            || pcb::has_capability_type(user.pid, ResourceType::SystemClock, Rights::WRITE)
+        {
+            return fail("a user's child has root's clock right");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        if pcb::state(pid).is_some() {
+            teardown_fixture(pid, task);
+        }
+    }
+    crate::proc::signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   A spawned child is its parent's user, root's rights aside only while a \
+             user id of its is 0: OK"
+        );
+    }
+    result
 }
 
 /// Test: take_initial_args is one-shot.

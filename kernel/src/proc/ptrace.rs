@@ -2468,7 +2468,8 @@ fn notify_tracer(
     if stop && linux && !crate::syscall::linux::linux_wants_cldstop(tracer) {
         return;
     }
-    let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+    // The tracee's real uid, as Linux's `do_notify_parent_cldstop` gives it.
+    let uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
     let info = crate::proc::signal::SigInfo::child(
         u32::try_from(tid).unwrap_or(u32::MAX),
         uid,

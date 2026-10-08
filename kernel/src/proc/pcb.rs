@@ -97,42 +97,102 @@ pub fn processes_created() -> u64 {
 ///
 /// During early development, all processes run as uid=0 (root).
 /// The user/group model is enforced once a login service exists.
-#[derive(Debug, Clone)]
+///
+/// A process has four user ids and four group ids, as on Linux
+/// (`credentials(7)`): the **real** id says whom it acts for; the
+/// **effective** id decides what it may do -- `uid` and `gid` here, the
+/// fields every permission check has always read; the **saved** set-user-ID
+/// is one it may switch its effective id back to; and the **filesystem** id
+/// decides its file access and owns what it makes -- the effective id, unless
+/// `setfsuid` set it apart. `proc::setid` changes them by Linux's rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessCredentials {
-    /// User ID (0 = root/system).
+    /// Effective user ID (0 = root/system): what permission and authority
+    /// decisions use. Linux's `euid`.
     pub uid: u32,
-    /// Primary group ID.
+    /// Effective group ID. Linux's `egid`.
     pub gid: u32,
     /// Supplementary group IDs.
     pub groups: Vec<u32>,
+    /// Real user ID: whom the process acts for (`getuid`, a signal's
+    /// `si_uid`, per-user limits).
+    pub ruid: u32,
+    /// Saved set-user-ID: an id the effective one may return to without
+    /// privilege -- what lets root `seteuid(1000)` and later `seteuid(0)`.
+    pub suid: u32,
+    /// Filesystem user ID: whose files the process may open, and who owns
+    /// what it makes. Follows the effective id; `setfsuid` sets it apart.
+    pub fsuid: u32,
+    /// Real group ID.
+    pub rgid: u32,
+    /// Saved set-group-ID.
+    pub sgid: u32,
+    /// Filesystem group ID.
+    pub fsgid: u32,
 }
 
 impl ProcessCredentials {
     /// Create default (root) credentials.
     #[must_use]
     pub fn root() -> Self {
-        Self {
-            uid: 0,
-            gid: 0,
-            groups: Vec::new(),
-        }
+        Self::new(0, 0)
     }
 
-    /// Create credentials for a specific user/group.
-    #[allow(dead_code)] // Public API — used when login/user management is implemented.
+    /// Credentials for user `uid` and group `gid`: all four of each.
     #[must_use]
     pub fn new(uid: u32, gid: u32) -> Self {
         Self {
             uid,
             gid,
             groups: Vec::new(),
+            ruid: uid,
+            suid: uid,
+            fsuid: uid,
+            rgid: gid,
+            sgid: gid,
+            fsgid: gid,
         }
     }
 
-    /// Check if this process runs as root.
+    /// Check if this process runs as root (its effective user id is 0).
     #[must_use]
     pub fn is_root(&self) -> bool {
         self.uid == 0
+    }
+
+    /// Whether any of its real, effective and saved user ids is 0: root's
+    /// authority, put aside while the effective id is another, is within
+    /// reach (`change_credentials`).
+    #[must_use]
+    pub fn any_root_uid(&self) -> bool {
+        self.ruid == 0 || self.uid == 0 || self.suid == 0
+    }
+
+    /// Every user id -- real, effective, saved, filesystem -- `uid`: what a
+    /// privileged `setuid` and the native `SYS_PROCESS_SET_CREDENTIALS` do.
+    pub fn set_all_uids(&mut self, uid: u32) {
+        self.ruid = uid;
+        self.uid = uid;
+        self.suid = uid;
+        self.fsuid = uid;
+    }
+
+    /// Every group id `gid`, as [`set_all_uids`](Self::set_all_uids).
+    pub fn set_all_gids(&mut self, gid: u32) {
+        self.rgid = gid;
+        self.gid = gid;
+        self.sgid = gid;
+        self.fsgid = gid;
+    }
+
+    /// What an exec leaves: the saved and filesystem ids become the effective
+    /// ones, as Linux's exec sets them. No set-user-ID bit is honoured here,
+    /// so the effective ids stay as they were.
+    pub fn exec(&mut self) {
+        self.suid = self.uid;
+        self.fsuid = self.uid;
+        self.sgid = self.gid;
+        self.fsgid = self.gid;
     }
 }
 
@@ -2696,9 +2756,17 @@ pub fn inherit_caps_from(parent: ProcessId, child: ProcessId) -> usize {
         // child with most of its parent's authority is strictly better than a
         // process that could not start, and `insert_caps` above already
         // established that precedent for capability transfer over IPC.
+        // What the parent's entry has put aside goes with the copy, as with
+        // a fork's: the child's credentials decide, once they are set
+        // (`inherit_credentials`), whether it is ever given back.
         if proc
             .cap_table
-            .insert(entry.resource_type, entry.resource_id, entry.rights)
+            .insert_with_suspended(
+                entry.resource_type,
+                entry.resource_id,
+                entry.rights,
+                entry.suspended,
+            )
             .is_ok()
         {
             copied = copied.saturating_add(1);
@@ -3900,7 +3968,7 @@ pub fn pids_of_user(uid: u32) -> Vec<ProcessId> {
     let table = PROCESS_TABLE.lock();
     table
         .values()
-        .filter(|p| p.credentials.uid == uid && p.state != ProcessState::Zombie)
+        .filter(|p| p.credentials.ruid == uid && p.state != ProcessState::Zombie)
         .map(|p| p.pid)
         .collect()
 }
@@ -4124,8 +4192,11 @@ pub fn get_dumpable(pid: ProcessId) -> Option<u32> {
 /// may inspect. Otherwise, any of:
 /// - the reader is the target;
 /// - the reader runs as uid 0, as Linux's `CAP_SYS_PTRACE`;
-/// - the reader has the target's uid and gid, and the target is dumpable
-///   (`PR_SET_DUMPABLE` left at 1, `SUID_DUMP_USER`);
+/// - the reader's filesystem uid and gid are each of the target's real,
+///   effective and saved ids, and the target is dumpable (`PR_SET_DUMPABLE`
+///   left at 1, `SUID_DUMP_USER`) -- Linux's `__ptrace_may_access` for
+///   `PTRACE_MODE_FSCREDS`: a target that switched ids is no longer simply
+///   its user's;
 /// - the reader holds a `Process` capability for the target with `READ`.
 #[must_use]
 pub fn may_inspect(reader: Option<ProcessId>, target: Option<ProcessId>) -> bool {
@@ -4141,15 +4212,23 @@ pub fn may_access(reader: Option<ProcessId>, target: Option<ProcessId>, rights: 
     let Some(reader) = reader else {
         return true;
     };
-    let reader_ids = process_uid_gid(reader);
-    let is_root = reader_ids.is_some_and(|(uid, _)| uid == 0);
+    let reader_creds = get_credentials(reader);
+    let is_root = reader_creds
+        .as_ref()
+        .is_some_and(ProcessCredentials::is_root);
     let Some(target) = target else {
         return is_root;
     };
     if reader == target || is_root {
         return true;
     }
-    let same_user = reader_ids.is_some() && process_uid_gid(target) == reader_ids;
+    let same_user = match (reader_creds, get_credentials(target)) {
+        (Some(r), Some(t)) => {
+            [t.ruid, t.uid, t.suid].iter().all(|&id| id == r.fsuid)
+                && [t.rgid, t.gid, t.sgid].iter().all(|&id| id == r.fsgid)
+        }
+        _ => false,
+    };
     if same_user && get_dumpable(target) == Some(1) {
         return true;
     }
@@ -5562,13 +5641,14 @@ fn peek_exit_matching(
 /// process is not reaped, so the UID must be looked up separately.
 #[must_use]
 pub fn process_uid(pid: ProcessId) -> Option<u32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.uid)
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.ruid)
 }
 
-/// Read a process's real UID *and* primary GID together, or `None` if the
-/// PID is unknown.
+/// Read a process's effective UID *and* effective primary GID together, or
+/// `None` if the PID is unknown -- the identity a peer's credentials report
+/// (Linux's `SO_PEERCRED` gives the effective ids).
 ///
-/// One lookup rather than [`process_uid`] plus a second call, because the
+/// One lookup rather than two calls, because the
 /// caller is snapshotting an identity for `SYS_CHANNEL_PEER_CRED` and two
 /// separate reads can straddle a credential change — producing a pair that
 /// describes no state the process was ever in.  A service authorising on a
@@ -5579,6 +5659,17 @@ pub fn process_uid_gid(pid: ProcessId) -> Option<(u32, u32)> {
         .lock()
         .get(&pid)
         .map(|p| (p.credentials.uid, p.credentials.gid))
+}
+
+/// Process `pid`'s filesystem user and group ids -- whom its file accesses
+/// are decided for, and who owns what it makes -- or `None` if there is no
+/// such process.
+#[must_use]
+pub fn process_fs_ids(pid: ProcessId) -> Option<(u32, u32)> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.credentials.fsuid, p.credentials.fsgid))
 }
 
 /// Mark a process as "ready" (fully initialized and accepting requests).
@@ -9028,18 +9119,26 @@ pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> Kerne
     Ok(())
 }
 
-/// A process changes its own identity: as [`set_credentials`], and when the
-/// uid leaves 0 the process also loses root's authority, in the same step
-/// (`cap::rights_without_root`).
+/// A process changes its own identity: as [`set_credentials`], and root's
+/// authority (`cap::rights_without_root`) follows its user ids in the same
+/// step, as Linux's capabilities follow them (`cap_emulate_setxuid`):
+///
+/// - every one of the real, effective and saved ids leaving 0 -- from a
+///   process that had one at 0 -- takes root's authority away for good, what
+///   was put aside included (Linux clears the permitted set);
+/// - the effective id leaving 0 while another stays puts it aside
+///   (`CapTable::suspend`; Linux clears the effective set): the process
+///   cannot use it, but can have it back;
+/// - the effective id returning to 0 gives back what was put aside.
 ///
 /// Every credential-changing syscall comes here -- the native
-/// `SYS_PROCESS_SET_CREDENTIALS` and the Linux `setuid` family alike -- so a
-/// drop of root is one-way whichever ABI asked for it. The identity and the
-/// capability table change under one lock: nothing can observe the new uid
-/// with the old authority.
+/// `SYS_PROCESS_SET_CREDENTIALS`, `SYS_PROCESS_SET_IDS` and the Linux
+/// `setuid` family alike -- so the rule holds whichever ABI asked. The
+/// identity and the capability table change under one lock: nothing can
+/// observe the new ids with the old authority.
 ///
-/// Returns how many capabilities were narrowed or revoked (0 when the uid did
-/// not leave 0).
+/// Returns how many capability entries were narrowed, put aside or given
+/// back.
 ///
 /// # Errors
 ///
@@ -9047,15 +9146,114 @@ pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> Kerne
 pub fn change_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<usize> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    Ok(swap_credentials(proc, credentials))
+}
 
-    let leaves_root = proc.credentials.uid == 0 && credentials.uid != 0;
-    proc.credentials = credentials;
-    if !leaves_root {
-        return Ok(0);
-    }
-    Ok(proc.cap_table.narrow_all(|entry| {
+/// [`change_credentials`], deciding the new credentials under the same lock:
+/// `change` is given the process's credentials and whether it holds the
+/// `SET_CREDENTIALS` right over processes, and answers the credentials to
+/// install -- or a refusal, which leaves everything as it was. Nothing can
+/// change the credentials between the decision and the change, so a
+/// `setuid` racing another in a second thread is decided against what it
+/// replaces (`proc::setid`).
+///
+/// `change` runs under the process table's lock: it must not call back into
+/// this module.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not in the table; whatever
+/// `change` answers.
+pub fn update_credentials(
+    pid: ProcessId,
+    change: impl FnOnce(&ProcessCredentials, bool) -> KernelResult<ProcessCredentials>,
+) -> KernelResult<usize> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let may_set = proc
+        .cap_table
+        .has_capability_type(ResourceType::Process, Rights::SET_CREDENTIALS);
+    let credentials = change(&proc.credentials, may_set)?;
+    Ok(swap_credentials(proc, credentials))
+}
+
+/// Install `credentials` in `proc`, root's authority following the user
+/// ids as [`change_credentials`] describes. Returns how many capability
+/// entries changed.
+fn swap_credentials(proc: &mut Process, credentials: ProcessCredentials) -> usize {
+    let old = core::mem::replace(&mut proc.credentials, credentials);
+    let new = &proc.credentials;
+    let without_root = |entry: &cap::table::CapEntry| {
         cap::rights_without_root(entry.resource_type, entry.resource_id, entry.rights)
-    }))
+    };
+    if old.any_root_uid() && !new.any_root_uid() {
+        // For good: nothing put aside comes back.
+        let narrowed = proc.cap_table.narrow_all(without_root);
+        return narrowed.saturating_add(proc.cap_table.drop_suspended());
+    }
+    if old.uid == 0 && new.uid != 0 {
+        return proc.cap_table.suspend(without_root);
+    }
+    if old.uid != 0 && new.uid == 0 {
+        return proc.cap_table.restore();
+    }
+    0
+}
+
+/// Process `pid` is exec'ing: its saved and filesystem ids become its
+/// effective ones ([`ProcessCredentials::exec`]), and root's authority put
+/// aside goes for good if no user id is 0 after that -- Linux's exec
+/// computes a non-root process's permitted capabilities afresh, from nothing.
+/// A no-op for a process that is not there.
+pub fn exec_credentials(pid: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return;
+    };
+    proc.credentials.exec();
+    if !proc.credentials.any_root_uid() {
+        proc.cap_table.drop_suspended();
+    }
+}
+
+/// Spawn: `child` takes `parent`'s credentials as a fork and an exec would
+/// leave them -- `posix_spawn`'s contract -- with what an exec does to the
+/// saved and filesystem ids ([`ProcessCredentials::exec`]), and, when no user
+/// id of its is 0, without the root rights its inherited capabilities had
+/// put aside.
+///
+/// Until 2026-10-08 a spawned child kept the root credentials every new
+/// process record starts with, whoever its parent was: a program a user
+/// spawned ran as uid 0, past every file's permission bits and free to
+/// `setuid` to anyone.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if either process is not in the table.
+pub fn inherit_credentials(parent: ProcessId, child: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let mut credentials = table
+        .get(&parent)
+        .ok_or(KernelError::NoSuchProcess)?
+        .credentials
+        .clone();
+    credentials.exec();
+    let proc = table.get_mut(&child).ok_or(KernelError::NoSuchProcess)?;
+    if !credentials.any_root_uid() {
+        proc.cap_table.drop_suspended();
+    }
+    proc.credentials = credentials;
+    Ok(())
+}
+
+/// How many of process `pid`'s capability entries have rights put aside
+/// (`CapTable::suspend`): 0 for none, or no such process.
+#[must_use]
+pub fn suspended_rights(pid: ProcessId) -> usize {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map_or(0, |p| p.cap_table.suspended_count())
 }
 
 /// Get the list of thread task IDs for a process.

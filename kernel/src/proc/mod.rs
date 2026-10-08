@@ -46,6 +46,7 @@ pub mod pcb;
 pub mod posix_timer;
 pub mod priority;
 pub mod ptrace;
+pub mod setid;
 pub mod signal;
 pub mod spawn;
 pub mod thread;
@@ -79,6 +80,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[proc] Running POSIX timer self-test...");
     posix_timer::self_test()?;
     cputimer::self_test()?;
+    setid::self_test()?;
     serial_println!("[proc] Running nice-authority self-test...");
     priority::self_test()?;
     serial_println!("[proc] Running fork self-test...");

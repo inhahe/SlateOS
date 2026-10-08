@@ -1092,7 +1092,8 @@ fn tell_parent_of_end(
         // 0 until 2026-10-01, so a handler could not tell an exit from a kill
         // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
         let ended = pcb::exit_info(pid).unwrap_or_else(|| pcb::ExitInfo::exited(0));
-        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+        // The child's real uid, as Linux's `do_notify_parent` reports it.
+        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
         let info = crate::proc::signal::SigInfo::child(
             u32::try_from(pid).unwrap_or(0),
             child_uid,

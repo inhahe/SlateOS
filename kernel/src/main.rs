@@ -3658,6 +3658,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_fifo(),
     );
+    // Real, effective, saved and filesystem ids, moved by Linux's rules,
+    // root's authority following them (crate::proc::setid).
+    selftest::dispatch_debug(
+        "Linux user and group ids (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_setid(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

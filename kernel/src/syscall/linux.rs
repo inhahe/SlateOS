@@ -136,6 +136,7 @@
 use crate::error::KernelError;
 use crate::fs::path::{Path, PathBuf};
 use crate::proc::pcb;
+use crate::proc::setid;
 use crate::syscall::wait;
 
 use super::dispatch::{SyscallArgs, SyscallResult};
@@ -10626,7 +10627,7 @@ fn file_flags_ioctl(pid: u64, fd: i32, request: u32, arg: u64) -> SyscallResult 
     }
     if flags & !(FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
         // Who may not change this file's flags at all is told so first.
-        let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+        let uid = pcb::get_credentials(pid).map_or(0, |c| c.fsuid);
         return match crate::fs::vfs::attribute_change_verdict(uid, meta.uid, attrs, new) {
             Ok(()) => linux_err(errno::EOPNOTSUPP),
             Err(e) => linux_err(linux_errno_for(e)),
@@ -16068,37 +16069,32 @@ fn sys_personality(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::from(current))
 }
 
-/// `getresuid(ruid, euid, suid)` — fetch real/effective/saved user IDs.
-///
-/// We have no uid model yet (everything runs as the implicit root-
-/// equivalent owner of all kernel objects via the capability system),
-/// so we report uid 0 for all three fields.  This matches what a
-/// process started by `init` on a Linux system would see and lets
-/// `geteuid()==0` privilege checks in pre-existing Linux code fire
-/// the way the program expects.
+/// `getresuid(ruid, euid, suid)` -- the caller's real, effective and saved
+/// user ids (0, 0, 0 in kernel context, which has none).
 ///
 /// Errors:
 ///   - `-EFAULT` on a bad user pointer.
 fn sys_getresuid(args: &SyscallArgs) -> SyscallResult {
-    let ruid_ptr = args.arg0;
-    let euid_ptr = args.arg1;
-    let suid_ptr = args.arg2;
-    write_uid32_triple(ruid_ptr, euid_ptr, suid_ptr)
+    let [r, e, s, _] = caller_ids(setid::Which::User);
+    write_uid32_triple(args.arg0, args.arg1, args.arg2, [r, e, s])
 }
 
-/// `getresgid(rgid, egid, sgid)` — fetch real/effective/saved group IDs.
-///
-/// Same model and contract as [`sys_getresuid`]; reports 0 for all
-/// three.
+/// `getresgid(rgid, egid, sgid)` -- [`sys_getresuid`] for the group ids.
 fn sys_getresgid(args: &SyscallArgs) -> SyscallResult {
-    let rgid_ptr = args.arg0;
-    let egid_ptr = args.arg1;
-    let sgid_ptr = args.arg2;
-    write_uid32_triple(rgid_ptr, egid_ptr, sgid_ptr)
+    let [r, e, s, _] = caller_ids(setid::Which::Group);
+    write_uid32_triple(args.arg0, args.arg1, args.arg2, [r, e, s])
 }
 
-/// Helper shared by [`sys_getresuid`] / [`sys_getresgid`]: write three
-/// `uid_t` (Linux x86_64: 32-bit unsigned) zeros to the three user
+/// The caller's four ids of `which` -- real, effective, saved, filesystem --
+/// or all 0 in kernel context or for a process going away.
+fn caller_ids(which: setid::Which) -> [u32; 4] {
+    caller_pid()
+        .and_then(pcb::get_credentials)
+        .map_or([0; 4], |c| setid::ids(&c, which))
+}
+
+/// Helper shared by [`sys_getresuid`] / [`sys_getresgid`]: write the three
+/// `uid_t` (Linux x86_64: 32-bit unsigned) `ids` to the three user
 /// pointers, in `(ruid, euid, suid)` order — matching Linux's gate
 /// order in `kernel/sys.c::SYSCALL_DEFINE3(getresuid, ...)`:
 ///
@@ -16132,9 +16128,9 @@ fn sys_getresgid(args: &SyscallArgs) -> SyscallResult {
 /// `getresuid(NULL, valid, valid)` on Linux faults at `put_user(ruid,
 /// NULL)` before the other two writes are attempted.  Iterate `[a, b, c]`
 /// in declaration order so the first NULL short-circuits with EFAULT.
-fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
-    let zero = [0u8; 4];
-    for &p in &[a, b, c] {
+fn write_uid32_triple(a: u64, b: u64, c: u64, ids: [u32; 3]) -> SyscallResult {
+    for (p, id) in [a, b, c].into_iter().zip(ids) {
+        let bytes = id.to_ne_bytes();
         if p == 0 {
             // Linux: put_user(value, NULL) -> -EFAULT via the access
             // exception table on the faulting store.  Pre-batch we
@@ -16146,8 +16142,8 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         // SAFETY: validate_user_write above confirmed a 4-byte
-        // writable user range; we copy exactly 4 zero bytes.
-        let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), p, 4) };
+        // writable user range; we copy exactly 4 bytes.
+        let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), p, 4) };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
@@ -16974,330 +16970,172 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // Credentials: setuid / setgid family + capabilities
 //
-// We have no UID/GID model — all processes run as the implicit "root"
-// owner of all kernel objects, mediated by the capability system.
-// The Linux credential syscalls all degenerate to silent success
-// (since "set to 0" is always permitted, and we treat every value as
-// "becoming 0" effectively).  Rejecting non-zero values with EPERM
-// would be more truthful, but breaks programs that drop privileges at
-// startup as a defense-in-depth measure: they'd refuse to continue
-// when setuid(nobody) fails.  The friendlier stub accepts the call
-// and quietly keeps the program in its "as if root" state — which is
-// the only state we actually support.
+// Real, effective, saved and filesystem ids, changed by Linux's rules --
+// `crate::proc::setid`, which the native `SYS_PROCESS_SET_IDS` shares -- with
+// root's authority following the user ids (`pcb::change_credentials`):
+// put aside while the effective id is not 0 but another is, back with it,
+// gone when every id has left 0. Until 2026-10-08 a process had one uid, so
+// root's `seteuid(1000)` was permanent and `getresuid` answered 0, 0, 0
+// whatever the ids were (known-issues A-ONE-UID-NO-SAVED-SET-USER-ID).
+//
+// In kernel context -- the boot self-test, with no calling process -- each
+// call is a no-op success: the kernel has no Linux credentials.
 // ---------------------------------------------------------------------------
 
-/// `setuid(uid)` — set the process uid, with Linux-shaped permission
-/// checks against the caller's current credentials.
-///
-/// Linux's real contract is split across real / effective / saved
-/// uids, but our PCB only carries a single `credentials.uid` field
-/// (the `geteuid()` syscall is aliased to `getuid()`).  Within that
-/// single-uid model we still enforce the two error paths that
-/// real Linux callers depend on:
-///
-///   - `EINVAL` if `uid == (uid_t)-1` (`u32::MAX`).  Linux reserves
-///     `INVALID_UID` and rejects setuid attempts targeting it; some
-///     hardening libraries (libcap, systemd-credentials) probe for
-///     this and gate further behavior on the errno.
-///   - `EPERM` if the caller's current uid is not 0 (root) and the
-///     requested uid differs from the current uid.  This is the
-///     "you can't gain privileges" check.  Real Linux additionally
-///     allows transitions to a saved-uid the process inherited via
-///     setuid-bit binary; we don't honour setuid bits so the
-///     simpler rule is correct in our model.
-///
-/// On success the new uid is written to the PCB and the function
-/// returns 0.  A self-uid-to-self-uid call (the common idiom in
-/// startup code that's already at the desired uid) is a no-op
-/// success, even for non-root, matching Linux.
-///
-/// Kernel-context callers (boot self-test, in-kernel helpers with
-/// no `caller_pid()`) treat the call as a no-op success without
-/// touching any PCB — the kernel has no Linux credentials.
+/// A set-id answer, as Linux's call answers it.
+fn setid_result(r: crate::error::KernelResult<()>) -> SyscallResult {
+    match r {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `setuid(uid)` -- `proc::setid::set_id`: a privileged caller (effective
+/// user id 0, or the `SET_CREDENTIALS` right) sets all four user ids,
+/// another only its effective and filesystem ids, to its real or saved id
+/// (`EPERM` otherwise). `EINVAL` for `(uid_t)-1`, as Linux's `INVALID_UID`.
 fn sys_setuid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let requested = args.arg0 as u32;
-    if requested == u32::MAX {
+    let uid = args.arg0 as u32;
+    if uid == setid::KEEP {
         return linux_err(errno::EINVAL);
     }
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        // The caller's PID resolved but the process record is gone
-        // (race with exit).  Linux returns 0 from setuid on the
-        // happy path; matching that silent-success keeps callers in
-        // tear-down from observing a confusing errno.
-        None => return SyscallResult::ok(0),
-    };
-    if requested != creds.uid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if requested == creds.uid {
-        return SyscallResult::ok(0);
-    }
-    creds.uid = requested;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        // The only failure pcb::set_credentials reports today is
-        // NoSuchProcess, which means the PCB vanished between the
-        // get_credentials and set_credentials calls (tear-down
-        // race).  Match the get-side handling above: no errno.
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_id(
+        pid,
+        setid::Which::User,
+        setid::Authority::Linux,
+        uid,
+    ))
 }
 
-/// `setgid(gid)` — set the process gid.  Same shape as
-/// [`sys_setuid`]: `EINVAL` for `gid == (gid_t)-1`, `EPERM` if a
-/// non-root process tries to change to a different gid, no-op
-/// success when `gid` matches the current value.
-///
-/// Kernel-context (no `caller_pid()`) is a no-op success.
+/// `setgid(gid)` -- [`sys_setuid`]'s rule for the group ids; privilege is the
+/// same test (Linux's `CAP_SETGID`).
 fn sys_setgid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let requested = args.arg0 as u32;
-    if requested == u32::MAX {
+    let gid = args.arg0 as u32;
+    if gid == setid::KEEP {
         return linux_err(errno::EINVAL);
     }
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return SyscallResult::ok(0),
-    };
-    // Permission check keys on uid, not gid: Linux only lets root
-    // (uid == 0) change gid arbitrarily, regardless of what gid the
-    // process currently has.  A non-root process can call setgid
-    // with its current gid (no-op success) but not change it.
-    if requested != creds.gid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if requested == creds.gid {
-        return SyscallResult::ok(0);
-    }
-    creds.gid = requested;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_id(
+        pid,
+        setid::Which::Group,
+        setid::Authority::Linux,
+        gid,
+    ))
 }
 
-/// `setreuid(ruid, euid)` — set the real and effective uid.
-///
-/// Linux passes both as `uid_t` (u32) where `(uid_t)-1` means "leave
-/// this one alone".  Our PCB carries a single combined uid (the
-/// `geteuid` syscall is aliased to `getuid`), so we can't honour the
-/// per-component contract literally.  Within that single-uid model
-/// we still:
-///   - apply the requested transition (using [`apply_uid_change`]),
-///   - reject privilege escalation with `EPERM` when the caller is
-///     non-root and the resolved new uid differs from the current uid,
-///   - accept the no-change case (both args `-1`) as a 0-return.
-///
-/// See [`apply_uid_change`] for the selection rule used when both
-/// arguments are non-(-1).
+/// `setreuid(ruid, euid)` -- `proc::setid::set_re_id`; `(uid_t)-1` leaves an
+/// id as it is, and the saved id follows the new effective one when the real
+/// id is given or the effective id becomes other than the old real one.
 fn sys_setreuid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let ruid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let euid = args.arg1 as u32;
-    apply_uid_change(ruid, euid, u32::MAX)
+    let (ruid, euid) = (args.arg0 as u32, args.arg1 as u32);
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    setid_result(setid::set_re_id(
+        pid,
+        setid::Which::User,
+        setid::Authority::Linux,
+        ruid,
+        euid,
+    ))
 }
 
-/// `setregid(rgid, egid)` — set the real and effective gid.  Mirrors
-/// [`sys_setreuid`] but updates `credentials.gid`; the permission gate
-/// still keys on `credentials.uid` (only a root caller may change gid
-/// to a different value, matching Linux's `CAP_SETGID` gating).
+/// `setregid(rgid, egid)` -- [`sys_setreuid`] for the group ids.
 fn sys_setregid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let rgid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let egid = args.arg1 as u32;
-    apply_gid_change(rgid, egid, u32::MAX)
+    let (rgid, egid) = (args.arg0 as u32, args.arg1 as u32);
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    setid_result(setid::set_re_id(
+        pid,
+        setid::Which::Group,
+        setid::Authority::Linux,
+        rgid,
+        egid,
+    ))
 }
 
-/// `setresuid(ruid, euid, suid)` — set the real / effective / saved
-/// uid.  See [`apply_uid_change`] for the selection rule.
-///
-/// We don't track ruid / euid / suid separately, so all three are
-/// folded into the single PCB uid.  Programs that distinguish them
-/// (notably some sudo-style privilege transitions) will not see a
-/// faithful split, but the no-change-with-(-1) sentinel and the
-/// EPERM gating are exact.
+/// `setresuid(ruid, euid, suid)` -- [`apply_uid_change`].
 fn sys_setresuid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let ruid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let euid = args.arg1 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let suid = args.arg2 as u32;
+    let (ruid, euid, suid) = (args.arg0 as u32, args.arg1 as u32, args.arg2 as u32);
     apply_uid_change(ruid, euid, suid)
 }
 
-/// `setresgid(rgid, egid, sgid)` — set the real / effective / saved
-/// gid.  Same shape as [`sys_setresuid`] but updates `credentials.gid`;
-/// the permission gate still keys on `credentials.uid`.
+/// `setresgid(rgid, egid, sgid)` -- [`apply_gid_change`].
 fn sys_setresgid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let rgid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let egid = args.arg1 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let sgid = args.arg2 as u32;
+    let (rgid, egid, sgid) = (args.arg0 as u32, args.arg1 as u32, args.arg2 as u32);
     apply_gid_change(rgid, egid, sgid)
 }
 
-/// Shared implementation for `setreuid` / `setresuid`.
-///
-/// Selects the new uid that the caller wants to install and applies
-/// it to `credentials.uid` via the PCB.  The selection prioritises
-/// `euid` over `ruid` over `suid`, since the effective uid is what
-/// governs access checks in the Linux model and is what our single
-/// PCB uid corresponds to.  An argument of `u32::MAX` is Linux's
-/// `(uid_t)-1` "no change" sentinel and is skipped.  If every
-/// argument is `-1` the call is a no-op success.
-///
-/// Permission gate:
-///   - Caller uid == 0 (root): any target uid accepted.
-///   - Caller uid != 0 with resolved new uid != current: EPERM.
-///   - Caller uid != 0 with resolved new uid == current: 0 (no-op).
-///   - Kernel context (no `caller_pid()`): no-op success.
+/// `setresuid`'s body -- `proc::setid::set_res_id`: `(uid_t)-1` leaves an id
+/// as it is; an unprivileged caller may give each id only a value one of its
+/// real, effective and saved ids holds (`EPERM`). A no-op success in kernel
+/// context.
 fn apply_uid_change(ruid: u32, euid: u32, suid: u32) -> SyscallResult {
-    let new_uid_opt = if euid != u32::MAX {
-        Some(euid)
-    } else if ruid != u32::MAX {
-        Some(ruid)
-    } else if suid != u32::MAX {
-        Some(suid)
-    } else {
-        None
-    };
-    let Some(new_uid) = new_uid_opt else {
-        // All arguments are -1 — Linux treats this as a no-op
-        // success.  Don't bother looking up creds.
-        return SyscallResult::ok(0);
-    };
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return SyscallResult::ok(0),
-    };
-    if new_uid != creds.uid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if new_uid == creds.uid {
-        return SyscallResult::ok(0);
-    }
-    creds.uid = new_uid;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        // PCB vanished mid-call (tear-down race); no errno for that
-        // in Linux's setresuid contract.
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_res_id(
+        pid,
+        setid::Which::User,
+        setid::Authority::Linux,
+        ruid,
+        euid,
+        suid,
+    ))
 }
 
-/// Shared implementation for `setregid` / `setresgid`.  Same shape as
-/// [`apply_uid_change`] but updates `credentials.gid`.  The permission
-/// gate still keys on `credentials.uid` because Linux uses
-/// `CAP_SETGID` (which we approximate via "uid == 0") for arbitrary
-/// gid changes regardless of which gid the caller currently has.
+/// `setresgid`'s body -- [`apply_uid_change`] for the group ids.
 fn apply_gid_change(rgid: u32, egid: u32, sgid: u32) -> SyscallResult {
-    let new_gid_opt = if egid != u32::MAX {
-        Some(egid)
-    } else if rgid != u32::MAX {
-        Some(rgid)
-    } else if sgid != u32::MAX {
-        Some(sgid)
-    } else {
-        None
-    };
-    let Some(new_gid) = new_gid_opt else {
-        return SyscallResult::ok(0);
-    };
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return SyscallResult::ok(0),
-    };
-    if new_gid != creds.gid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if new_gid == creds.gid {
-        return SyscallResult::ok(0);
-    }
-    creds.gid = new_gid;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_res_id(
+        pid,
+        setid::Which::Group,
+        setid::Authority::Linux,
+        rgid,
+        egid,
+        sgid,
+    ))
 }
 
-/// `setfsuid(fsuid)` — set the filesystem uid (used for permission
-/// checks on subsequent FS ops), returning the *previous* fsuid.
-///
-/// Linux's contract is unusual: setfsuid never reports an error — the
-/// return value is always the previous fsuid, even if the change was
-/// rejected (e.g. because the caller lacks permission to change it).
-/// Callers therefore use the round-trip idiom
-///     old = setfsuid(N);
-///     ... privileged FS op ...
-///     setfsuid(old);
-/// and they need `old == previous_fsuid` for restore to be correct.
-///
-/// We don't carry a separate fsuid field — our credentials model has
-/// a single uid that doubles as real/effective/saved/fs.  The
-/// faithful behavior in that model is:
-///   - Report the caller's current `credentials.uid` as the previous
-///     fsuid (since fsuid == uid in our model).
-///   - Do not actually mutate state.  No subsequent FS access checks
-///     would consult an updated fsuid because the VFS has no
-///     permission checks yet.
-///
-/// Round-trip property: `old = setfsuid(N); setfsuid(old);` correctly
-/// restores the caller's view because both calls return the same
-/// constant `credentials.uid`.  Programs that gate on the *return*
-/// value (which is the documented Linux contract) work; programs that
-/// depend on subsequent VFS calls seeing the changed fsuid would fail
-/// — but we have no VFS permission checks, so there is nothing to
-/// observe the divergence.  Tracked in todo.txt.
-///
-/// Kernel context: no caller_pid, no credentials, report 0.
-fn sys_setfsuid(_args: &SyscallArgs) -> SyscallResult {
+/// `setfsuid(fsuid)` -- `proc::setid::set_fs_id`: the filesystem uid --
+/// whose files the process may open, and who owns what it makes -- becomes
+/// `fsuid` if the caller is privileged or holds that id among its four; the
+/// answer is the old filesystem uid either way, never an error, as Linux's.
+/// Callers rely on that for `old = setfsuid(n); ...; setfsuid(old)`. 0 in
+/// kernel context.
+fn sys_setfsuid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let fsuid = args.arg0 as u32;
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    match pcb::get_credentials(pid) {
-        Some(c) =>
-        {
-            #[allow(clippy::cast_lossless)]
-            SyscallResult::ok(i64::from(c.uid))
-        }
-        None => SyscallResult::ok(0),
-    }
+    let old = setid::set_fs_id(pid, setid::Which::User, setid::Authority::Linux, fsuid);
+    SyscallResult::ok(i64::from(old))
 }
 
-/// `setfsgid(fsgid)` — set the filesystem gid, returning the previous
-/// fsgid.  Same shape as [`sys_setfsuid`]: reports the current
-/// `credentials.gid` as the "previous" value, doesn't mutate state.
-fn sys_setfsgid(_args: &SyscallArgs) -> SyscallResult {
+/// `setfsgid(fsgid)` -- [`sys_setfsuid`] for the filesystem gid.
+fn sys_setfsgid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let fsgid = args.arg0 as u32;
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    match pcb::get_credentials(pid) {
-        Some(c) =>
-        {
-            #[allow(clippy::cast_lossless)]
-            SyscallResult::ok(i64::from(c.gid))
-        }
-        None => SyscallResult::ok(0),
-    }
+    let old = setid::set_fs_id(pid, setid::Which::Group, setid::Authority::Linux, fsgid);
+    SyscallResult::ok(i64::from(old))
 }
 
 /// `getgroups(size, list)` — fetch the supplementary group list.
@@ -40096,7 +39934,7 @@ fn take_rights(fds: &[i32]) -> Result<Option<crate::ipc::passed::Bundle>, Syscal
             }
         }
     }
-    let uid = pcb::process_uid_gid(pid).map_or(u32::MAX, |(uid, _)| uid);
+    let uid = pcb::process_uid(pid).unwrap_or(u32::MAX);
     let nofile = pcb::get_rlimit(pid, 7).map_or(u64::MAX, |(cur, _)| cur);
     if refused.is_none() && uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
         refused = Some(linux_err(errno::ETOOMANYREFS));
@@ -49921,36 +49759,24 @@ fn sys_gettimeofday(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `getuid()` — real user id.  Reads the caller's process credentials.
+/// `getuid()` -- the real user id (0 in kernel context).
 fn sys_getuid(_args: &SyscallArgs) -> SyscallResult {
-    let pid = match caller_pid() {
-        Some(p) => p,
-        None => return SyscallResult::ok(0), // kernel task
-    };
-    let uid = pcb::get_credentials(pid).map_or(0, |c| u64::from(c.uid));
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(uid as i64)
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::User)[0]))
 }
 
-/// `getgid()`
+/// `getgid()` -- the real group id.
 fn sys_getgid(_args: &SyscallArgs) -> SyscallResult {
-    let pid = match caller_pid() {
-        Some(p) => p,
-        None => return SyscallResult::ok(0),
-    };
-    let gid = pcb::get_credentials(pid).map_or(0, |c| u64::from(c.gid));
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(gid as i64)
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::Group)[0]))
 }
 
-/// `geteuid()` — currently aliased to `uid` (no euid tracking yet).
-fn sys_geteuid(args: &SyscallArgs) -> SyscallResult {
-    sys_getuid(args)
+/// `geteuid()` -- the effective user id, which permission checks use.
+fn sys_geteuid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::User)[1]))
 }
 
-/// `getegid()` — currently aliased to `gid` (no egid tracking yet).
-fn sys_getegid(args: &SyscallArgs) -> SyscallResult {
-    sys_getgid(args)
+/// `getegid()` -- the effective group id.
+fn sys_getegid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::Group)[1]))
 }
 
 /// `prlimit64(pid, resource, new_limit, old_limit)` — get and/or set
@@ -63140,9 +62966,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             {
                 let parent = pcb::create("rlimit-nproc-test-parent", 0);
                 // Give it a non-root uid so RLIMIT_NPROC actually fires.
-                let mut creds = pcb::ProcessCredentials::root();
-                creds.uid = 1000;
-                creds.gid = 1000;
+                let creds = pcb::ProcessCredentials::new(1000, 1000);
                 pcb::set_credentials(parent, creds).expect("set creds");
                 // NPROC.cur = 1 so the count (just the parent) + 1 = 2 > 1
                 // triggers EAGAIN.
@@ -71312,7 +71136,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Drop to uid 1000 directly via PCB (mirrors what a
                 // root-context setuid(1000) call would do).
                 let mut new_creds = c.clone();
-                new_creds.uid = 1000;
+                new_creds.set_all_uids(1000);
                 pcb::set_credentials(test_pid, new_creds).expect("set creds");
                 let c2 = pcb::get_credentials(test_pid).expect("creds2");
                 if c2.uid != 1000 {
@@ -71335,19 +71159,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Self-uid no-op succeeds even for non-root (verified
                 // by setting uid=1000 again).
                 let mut same = c2.clone();
-                same.uid = 1000;
+                same.set_all_uids(1000);
                 pcb::set_credentials(test_pid, same).expect("self-set");
                 assert_eq!(pcb::get_credentials(test_pid).map(|c| c.uid), Some(1000));
                 pcb::destroy(test_pid);
             }
 
-            // apply_uid_change / apply_gid_change selection rule
-            // (batch 53).  These are exercised at the pure-function
-            // level since the dispatch path runs in kernel context with
-            // no caller_pid, which makes all calls trivially succeed.
-            //
-            // Selection rule: euid wins over ruid wins over suid.
-            // All -1 = no-op success.  Kernel context = no-op success.
+            // apply_uid_change / apply_gid_change in kernel context: a
+            // no-op success whatever the ids, there being no caller_pid
+            // and so no credentials to change. Their rules are tested by
+            // `proc::setid::self_test`, and from ring 3 by
+            // `spawn::self_test_linux_setid`.
             {
                 // All -1: no-op success.
                 if apply_uid_change(u32::MAX, u32::MAX, u32::MAX).value != 0 {
@@ -71412,8 +71234,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
 
             // setfsuid / setfsgid kernel-context: return 0 (no PCB to
-            // read).  Real-process behaviour is "return current uid/gid"
-            // and is covered by the in-PCB test below.
+            // read). A process's -- the old filesystem id answered, the
+            // new one taken only when allowed -- is `proc::setid`'s
+            // self-test's.
             {
                 let a = SyscallArgs {
                     arg0: 0,
@@ -71532,8 +71355,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Seed creds with non-default uid/gid so we can see them
                 // come back from setfsuid/setfsgid.
                 let mut seeded = pcb::get_credentials(test_pid).expect("creds");
-                seeded.uid = 1500;
-                seeded.gid = 2500;
+                seeded.set_all_uids(1500);
+                seeded.set_all_gids(2500);
                 seeded.groups = alloc::vec![10, 20, 30];
                 pcb::set_credentials(test_pid, seeded).expect("seed");
 

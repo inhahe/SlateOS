@@ -2507,7 +2507,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
     let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
     let creds = crate::proc::pcb::get_credentials(proc_id);
-    let (uid, gid) = creds.as_ref().map_or((0, 0), |c| (c.uid, c.gid));
+    let uids = creds.as_ref().map_or([0; 4], |c| {
+        crate::proc::setid::ids(c, crate::proc::setid::Which::User)
+    });
+    let gids = creds.as_ref().map_or([0; 4], |c| {
+        crate::proc::setid::ids(c, crate::proc::setid::Which::Group)
+    });
 
     // Field names and order follow Linux fs/proc/array.c proc_pid_status()
     // closely enough for key-based parsers (ps, htop, glibc, WINE).  Values
@@ -2537,12 +2542,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "PPid:\t{ppid}");
     let tracer = crate::proc::ptrace::tracer_of(task.id).unwrap_or(0);
     let _ = writeln!(s, "TracerPid:\t{tracer}");
-    // Linux prints four credential columns (real, effective, saved-set,
-    // filesystem).  Our credential model holds a single uid/gid, so all four
-    // columns carry the same value — consistent with getuid/geteuid/
-    // getresuid all returning the same id.
-    let _ = writeln!(s, "Uid:\t{uid}\t{uid}\t{uid}\t{uid}");
-    let _ = writeln!(s, "Gid:\t{gid}\t{gid}\t{gid}\t{gid}");
+    // Linux prints four credential columns: real, effective, saved-set,
+    // filesystem.
+    let [ru, eu, su, fu] = uids;
+    let [rg, eg, sg, fg] = gids;
+    let _ = writeln!(s, "Uid:\t{ru}\t{eu}\t{su}\t{fu}");
+    let _ = writeln!(s, "Gid:\t{rg}\t{eg}\t{sg}\t{fg}");
     // Groups: space-separated supplementary GIDs (may be empty).
     s.push_str("Groups:\t");
     if let Some(c) = creds.as_ref() {
@@ -2589,7 +2594,7 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let (sig, caught) = proc_signal_sets(proc_id, task.id);
     // A POSIX timer counts too: Linux charges each timer's preallocated
     // signal against the limit when the timer is created.
-    let queued: u32 = crate::proc::pcb::pids_of_user(uid)
+    let queued: u32 = crate::proc::pcb::pids_of_user(ru)
         .into_iter()
         .map(|pid| {
             let timers = u32::try_from(crate::proc::posix_timer::count(pid)).unwrap_or(u32::MAX);
@@ -3700,7 +3705,8 @@ fn set_pid_oom_score_adj(task_id: u64, data: &[u8]) -> KernelResult<()> {
         return Err(KernelError::PermissionDenied);
     }
     let current = crate::fs::oomkiller::get_score(pid).map_or(0, |s| s.adj);
-    let privileged = writer.is_none_or(|w| crate::proc::pcb::process_uid(w) == Some(0));
+    let privileged = writer
+        .is_none_or(|w| crate::proc::pcb::process_uid_gid(w).is_some_and(|(uid, _)| uid == 0));
     if adj < current && !privileged {
         return Err(KernelError::PermissionDenied);
     }

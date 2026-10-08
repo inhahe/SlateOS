@@ -7326,11 +7326,77 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Write both fields back in a single update so uid and gid change together;
-    // a half-applied identity would otherwise be observable.
-    creds.uid = want_uid;
-    creds.gid = want_gid;
+    // a half-applied identity would otherwise be observable. A change sets
+    // every id of its kind -- real, effective, saved, filesystem -- as a
+    // privileged `setuid` does; this call is for a process giving up or
+    // taking on an identity, `SYS_PROCESS_SET_IDS` for moving between ids.
+    if want_uid != creds.uid {
+        creds.set_all_uids(want_uid);
+    }
+    if want_gid != creds.gid {
+        creds.set_all_gids(want_gid);
+    }
 
     match pcb::change_credentials(pid, creds).map(|_| ()) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_SET_IDS` -- the native setuid family. See
+/// [`SYS_PROCESS_SET_IDS`](super::number::SYS_PROCESS_SET_IDS).
+pub fn sys_process_set_ids(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{SET_IDS_FSUID, SET_IDS_GROUP, SET_IDS_RESUID, SET_IDS_REUID, SET_IDS_UID};
+    use crate::proc::setid::{self, Authority, Which};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let (which, op) = if args.arg0 >= SET_IDS_GROUP {
+        (Which::Group, args.arg0.wrapping_sub(SET_IDS_GROUP))
+    } else {
+        (Which::User, args.arg0)
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let (a, b, c) = (args.arg1 as u32, args.arg2 as u32, args.arg3 as u32);
+    let done = match op {
+        SET_IDS_UID => setid::set_id(pid, which, Authority::Native, a),
+        SET_IDS_REUID => setid::set_re_id(pid, which, Authority::Native, a, b),
+        SET_IDS_RESUID => setid::set_res_id(pid, which, Authority::Native, a, b, c),
+        SET_IDS_FSUID => {
+            let old = setid::set_fs_id(pid, which, Authority::Native, a);
+            return SyscallResult::ok(i64::from(old));
+        }
+        _ => Err(KernelError::InvalidArgument),
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_IDS` -- the caller's eight ids. See
+/// [`SYS_PROCESS_GET_IDS`](super::number::SYS_PROCESS_GET_IDS).
+pub fn sys_process_get_ids(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::setid::{self, Which};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(creds) = crate::proc::pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let mut out = [0u8; 32];
+    let all = setid::ids(&creds, Which::User)
+        .into_iter()
+        .chain(setid::ids(&creds, Which::Group))
+        .flat_map(u32::to_ne_bytes);
+    for (dst, byte) in out.iter_mut().zip(all) {
+        *dst = byte;
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, out.len()) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: 32 bytes at `arg0`, validated writable just above.
+    match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) } {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10294,7 +10360,8 @@ fn notify_parent_of_job_control(
     {
         return;
     }
-    let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+    // The child's real uid, as Linux's `do_notify_parent_cldstop` gives it.
+    let uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
     let info = crate::proc::signal::SigInfo::child(
         u32::try_from(pid).unwrap_or(u32::MAX),
         uid,
@@ -16218,9 +16285,10 @@ fn defer_requester() -> Result<crate::fs::deferred_ops::Requester, KernelError> 
         });
     };
     let creds = crate::proc::pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    // File access is the filesystem ids' (`fs::vfs`), deferred or not.
     Ok(Requester {
-        uid: creds.uid,
-        gid: creds.gid,
+        uid: creds.fsuid,
+        gid: creds.fsgid,
         groups: creds.groups,
     })
 }

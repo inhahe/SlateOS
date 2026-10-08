@@ -79,6 +79,15 @@ pub struct CapEntry {
     pub resource_id: u64,
     /// What operations this capability permits.
     pub rights: Rights,
+    /// Rights put aside, for a while: part of root's authority, while the
+    /// process's effective user id is not 0 but another of its ids is
+    /// ([`CapTable::suspend`], `pcb::change_credentials`) -- Linux's
+    /// permitted capabilities, out of the effective set. They permit nothing
+    /// until [`CapTable::restore`] adds them back to `rights`, and they go
+    /// with the entry: a revocation takes them too, and a handle given away
+    /// or copied carries `rights` alone. An entry with every right put aside
+    /// stays in the table, valid, permitting nothing.
+    pub suspended: Rights,
     /// Whether this entry is still valid (false = revoked).
     pub valid: bool,
 }
@@ -122,6 +131,24 @@ impl CapTable {
         resource_id: u64,
         rights: Rights,
     ) -> KernelResult<CapHandle> {
+        self.insert_with_suspended(resource_type, resource_id, rights, Rights::NONE)
+    }
+
+    /// [`insert`](Self::insert), with `suspended` rights put aside on the new
+    /// entry: a spawned child's copy of a parent's entry whose root rights
+    /// are put aside (`pcb::inherit_caps_from`), as a forked child's table is
+    /// a copy of the parent's.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidArgument` — table is at capacity.
+    pub fn insert_with_suspended(
+        &mut self,
+        resource_type: ResourceType,
+        resource_id: u64,
+        rights: Rights,
+        suspended: Rights,
+    ) -> KernelResult<CapHandle> {
         if self.entries.len() >= MAX_ENTRIES {
             return Err(KernelError::InvalidArgument);
         }
@@ -141,6 +168,7 @@ impl CapTable {
             resource_type,
             resource_id,
             rights,
+            suspended,
             valid: true,
         };
         self.entries.insert(handle_val, entry);
@@ -361,6 +389,74 @@ impl CapTable {
         changed
     }
 
+    /// Put aside, in every valid entry, the rights `keep` does not return for
+    /// it: they stay in the entry, as [`CapEntry::suspended`], and permit
+    /// nothing until [`restore`](Self::restore). An entry left with no rights
+    /// stays in the table, valid -- so a revocation or a resource's
+    /// destruction meanwhile still finds it, and nothing a revocation took
+    /// comes back. Returns how many entries had rights put aside.
+    ///
+    /// Root's authority while the process's effective user id is not 0 but
+    /// another of its ids is (`pcb::change_credentials`).
+    pub fn suspend(&mut self, keep: impl Fn(&CapEntry) -> Rights) -> usize {
+        let mut changed = 0usize;
+        for entry in self.entries.values_mut() {
+            if !entry.valid {
+                continue;
+            }
+            let gone = entry.rights.remove(keep(entry));
+            if gone.is_empty() {
+                continue;
+            }
+            entry.rights = entry.rights.remove(gone);
+            entry.suspended = entry.suspended.union(gone);
+            changed = changed.saturating_add(1);
+        }
+        changed
+    }
+
+    /// Give every valid entry back the rights [`suspend`](Self::suspend) put
+    /// aside in it. Returns how many entries got rights back.
+    pub fn restore(&mut self) -> usize {
+        let mut changed = 0usize;
+        for entry in self.entries.values_mut() {
+            if !entry.valid || entry.suspended.is_empty() {
+                continue;
+            }
+            entry.rights = entry.rights.union(entry.suspended);
+            entry.suspended = Rights::NONE;
+            changed = changed.saturating_add(1);
+        }
+        changed
+    }
+
+    /// Forget every right put aside, for good -- the process's user ids have
+    /// all left 0 -- revoking an entry left with none. Returns how many
+    /// entries lost rights.
+    pub fn drop_suspended(&mut self) -> usize {
+        let mut changed = 0usize;
+        for entry in self.entries.values_mut() {
+            if !entry.valid || entry.suspended.is_empty() {
+                continue;
+            }
+            entry.suspended = Rights::NONE;
+            if entry.rights.is_empty() {
+                entry.valid = false;
+            }
+            changed = changed.saturating_add(1);
+        }
+        changed
+    }
+
+    /// How many valid entries have rights put aside.
+    #[must_use]
+    pub fn suspended_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|e| e.valid && !e.suspended.is_empty())
+            .count()
+    }
+
     /// Revoke all entries referencing a specific resource.
     ///
     /// Called when a kernel object is destroyed (e.g., channel closed).
@@ -384,10 +480,87 @@ impl CapTable {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// [`CapTable::suspend`], [`CapTable::restore`] and
+/// [`CapTable::drop_suspended`]: a right put aside permits nothing and comes
+/// back; an entry left with none stays, valid and useless, and comes back
+/// whole; a revocation meanwhile is final; a copy carries no right put aside;
+/// and dropping what was put aside revokes an entry left with nothing.
+fn test_suspend_restore() -> KernelResult<()> {
+    let fail = |what: &str| {
+        serial_println!("[cap/table]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let both = Rights::READ.union(Rights::SET_CREDENTIALS);
+    // Keep everything but the clock's WRITE and SET_CREDENTIALS anywhere.
+    let keep = |e: &CapEntry| {
+        if e.resource_type == ResourceType::SystemClock {
+            Rights::NONE
+        } else {
+            e.rights.remove(Rights::SET_CREDENTIALS)
+        }
+    };
+    let mut t = CapTable::new();
+    let clock = t.insert(ResourceType::SystemClock, 0, Rights::WRITE)?;
+    let own = t.insert(ResourceType::Process, 7, both)?;
+    let file = t.insert(ResourceType::File, 0, Rights::READ)?;
+    let gone = t.insert(ResourceType::Process, 8, both)?;
+    if t.suspend(keep) != 3 || t.suspended_count() != 3 {
+        return fail("suspend did not put aside rights in the three entries it should");
+    }
+    if t.lookup(clock).is_err() || t.check_rights(clock, Rights::WRITE).is_ok() {
+        return fail("an entry left with nothing left the table, or still permitted");
+    }
+    if t.check_rights(own, Rights::SET_CREDENTIALS).is_ok()
+        || t.check_rights(own, Rights::READ).is_err()
+        || t.check_rights(file, Rights::READ).is_err()
+        || t.has_capability_type(ResourceType::SystemClock, Rights::WRITE)
+    {
+        return fail("suspend put aside the wrong rights");
+    }
+    // A copy made meanwhile carries what may be used, nothing put aside.
+    let copy = t.duplicate(own, Rights::READ)?;
+    // A revocation meanwhile is final.
+    t.revoke(gone);
+    if t.restore() != 2 {
+        return fail("restore did not give back the two entries still valid");
+    }
+    if t.check_rights(clock, Rights::WRITE).is_err()
+        || t.check_rights(own, both).is_err()
+        || t.check_rights(file, Rights::READ).is_err()
+        || t.check_rights(copy, Rights::SET_CREDENTIALS).is_ok()
+    {
+        return fail("restore did not put the rights back where they were");
+    }
+    if t.lookup(gone).is_ok() {
+        return fail("restore undid a revocation");
+    }
+    // For good: what is put aside is dropped, and an entry left with nothing
+    // is revoked.
+    t.suspend(keep);
+    if t.drop_suspended() != 2 || t.suspended_count() != 0 || t.restore() != 0 {
+        return fail("drop_suspended did not forget what was put aside");
+    }
+    if t.lookup(clock).is_ok()
+        || t.check_rights(own, Rights::SET_CREDENTIALS).is_ok()
+        || t.check_rights(own, Rights::READ).is_err()
+    {
+        return fail("drop_suspended left the clock, or took READ");
+    }
+    // A copy of an entry with rights put aside carries them when asked to.
+    let mut u = CapTable::new();
+    let h = u.insert_with_suspended(ResourceType::Process, 9, Rights::READ, both)?;
+    if u.restore() != 1 || u.check_rights(h, both).is_err() {
+        return fail("insert_with_suspended did not put the rights aside");
+    }
+    serial_println!("[cap/table]   suspend, restore and drop_suspended: OK");
+    Ok(())
+}
+
 /// Run capability table self-tests.
 pub fn self_test() -> KernelResult<()> {
     test_insert_and_lookup()?;
     test_rights_check()?;
+    test_suspend_restore()?;
     test_duplicate()?;
     test_revoke()?;
     test_revoke_by_resource()?;

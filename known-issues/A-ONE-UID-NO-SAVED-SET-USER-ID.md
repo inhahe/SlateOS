@@ -1,5 +1,8 @@
 ### A-ONE-UID-NO-SAVED-SET-USER-ID -- 2026-10-01 -- OPEN (lane A)
 
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main
+(design-decisions 1552).
+
 **In short:** a process has one user id. Unix has three: real, effective and
 saved. A program that drops root for a moment, by setting its effective id to
 a user and back to 0 later, cannot do it here: the first switch is
@@ -24,6 +27,16 @@ Linux's capability rule exactly. Root's authority goes only when all three
 uids leave 0. While only the effective id is non-zero it is suspended rather
 than lost, which in this capability model needs a "suspended" state on the
 narrowed entries.
+
+**The fix (lane-a-wip, 2026-10-08).** That, with the filesystem ids too:
+`ProcessCredentials` has real, effective, saved and filesystem user and group
+ids; `proc::setid` applies Linux's rules for the whole `setuid` family, for
+the Linux calls and the new native `SYS_PROCESS_SET_IDS`/`GET_IDS`
+(1159/1160); a capability entry's `suspended` rights hold root's authority
+while only the effective uid is a user's; file access goes by the filesystem
+ids; exec sets the saved ids. Tests: `cap::table`'s suspend/restore/drop,
+`proc::setid::self_test`, and the ring-3 `self_test_linux_setid`
+(build/setidtest.c), which Linux 6.6.87 passes as root twelve runs of twelve.
 
 **Reproduce.** A native or Linux-ABI program as root: `seteuid(1000)`, then
 `seteuid(0)`. Linux allows the second call; here it is refused.

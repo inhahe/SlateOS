@@ -9739,7 +9739,8 @@ pub(crate) enum PathAccess {
 /// The set-group-ID bit of a mode.
 pub const S_ISGID: u16 = 0o2000;
 
-/// Who makes a node now: the calling process's uid and gid, or root's in
+/// Who makes a node now: the calling process's filesystem uid and gid --
+/// its effective ids, unless `setfsuid` set them apart -- or root's in
 /// kernel context.
 ///
 /// Read before a filesystem's lock is taken -- as [`check_path_access`]
@@ -9748,7 +9749,7 @@ pub const S_ISGID: u16 = 0o2000;
 fn creator_ids() -> (u32, u32) {
     let task = crate::sched::current_task_id();
     match crate::proc::thread::acting_process(task) {
-        Some(pid) if pid != 0 => crate::proc::pcb::process_uid_gid(pid).unwrap_or((0, 0)),
+        Some(pid) if pid != 0 => crate::proc::pcb::process_fs_ids(pid).unwrap_or((0, 0)),
         _ => (0, 0),
     }
 }
@@ -9943,15 +9944,16 @@ fn parent_of(path: &Path) -> &Path {
     path.parent().unwrap_or(Path::new("/"))
 }
 
-/// The calling process's uid and gid, or `None` for a kernel task (or a
-/// process being torn down), which the permission checks let pass.
+/// The calling process's filesystem uid and gid -- whom file access is
+/// decided for -- or `None` for a kernel task (or a process being torn
+/// down), which the permission checks let pass.
 fn caller_uid_gid() -> Option<(u32, u32)> {
     let task_id = crate::sched::current_task_id();
     let pid = match crate::proc::thread::acting_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return None,
     };
-    crate::proc::pcb::get_credentials(pid).map(|c| (c.uid, c.gid))
+    crate::proc::pcb::process_fs_ids(pid)
 }
 
 /// Whether `uid` may change a file owned by `owner` from attributes `old` to
@@ -10281,7 +10283,8 @@ pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<(
         None => return Ok(()), // No credentials — process being torn down.
     };
 
-    path_access_verdict(path, creds.uid, creds.gid, &creds.groups, want)
+    // The filesystem ids decide, as Linux's `fsuid`/`fsgid` do.
+    path_access_verdict(path, creds.fsuid, creds.fsgid, &creds.groups, want)
 }
 
 /// The gate's decision, with the caller's identity passed in rather than
@@ -10340,7 +10343,12 @@ pub(crate) fn check_object_access(
         Some(c) => c,
         None => return Ok(()), // No credentials -- process being torn down.
     };
-    check_acl(AclSubject::Held(obj.id(), meta), creds.uid, creds.gid, want)
+    check_acl(
+        AclSubject::Held(obj.id(), meta),
+        creds.fsuid,
+        creds.fsgid,
+        want,
+    )
 }
 
 /// What [`check_acl`] is asked about: the file a path names now, or a file

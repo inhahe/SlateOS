@@ -6959,6 +6959,50 @@ pub const SYS_FS_MKFIFO: u64 = 1157;
 /// capability with `READ`, as `SYS_FS_OPEN` does.
 pub const SYS_FIFO_OPEN: u64 = 1158;
 
+/// `SYS_PROCESS_SET_IDS` (1159) -- move between user or group ids by
+/// Linux's rules: the native `setuid`, `seteuid`, `setreuid`, `setresuid`,
+/// `setfsuid` and their group twins (`kernel/src/proc/setid.rs`).
+///
+/// `arg0` the operation, `arg1`..`arg3` its ids, `0xFFFF_FFFF` leaving one as
+/// it is:
+///
+/// | op | Linux call | ids |
+/// |---|---|---|
+/// | [`SET_IDS_UID`] 0 | `setuid` | `arg1` |
+/// | [`SET_IDS_REUID`] 1 | `setreuid` | real, effective |
+/// | [`SET_IDS_RESUID`] 2 | `setresuid` | real, effective, saved |
+/// | [`SET_IDS_FSUID`] 3 | `setfsuid` | `arg1` |
+/// | 4..=7 | the same for group ids | |
+///
+/// Privileged -- holding `SET_CREDENTIALS` over processes -- a caller may
+/// set any id, and `SET_IDS_UID` sets all four. Unprivileged, it may move an
+/// id only to a value one of its ids holds: `NotPermitted` (`EPERM`)
+/// otherwise; `InvalidArgument` for `SET_IDS_UID` of `0xFFFF_FFFF` or an
+/// unknown op. `SET_IDS_FSUID` answers the old filesystem id and never
+/// fails, as `setfsuid` does; the rest answer 0. Root's authority follows the
+/// user ids: put aside while the effective id is not 0 but another is, back
+/// with it, gone when none is 0 -- so `seteuid(1000)` then `seteuid(0)` works
+/// and `setuid(1000)` is for good. No authority comes from an id of 0 here,
+/// unlike the Linux calls: a native program's privilege is its capability.
+pub const SYS_PROCESS_SET_IDS: u64 = 1159;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setuid`.
+pub const SET_IDS_UID: u64 = 0;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setreuid`.
+pub const SET_IDS_REUID: u64 = 1;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setresuid`.
+pub const SET_IDS_RESUID: u64 = 2;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setfsuid`.
+pub const SET_IDS_FSUID: u64 = 3;
+/// Added to a [`SYS_PROCESS_SET_IDS`] user operation: its group twin.
+pub const SET_IDS_GROUP: u64 = 4;
+
+/// `SYS_PROCESS_GET_IDS` (1160) -- the caller's ids: `arg0` a buffer of eight
+/// `u32`s, filled with the real, effective, saved and filesystem user ids,
+/// then the same group ids (`getresuid`, `getresgid`, and the filesystem
+/// ids Linux shows only in `/proc/<pid>/status`). Returns 0;
+/// `InvalidAddress` for a buffer that cannot be written.
+pub const SYS_PROCESS_GET_IDS: u64 = 1160;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

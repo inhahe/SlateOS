@@ -450,14 +450,53 @@ fn current_cred() -> Option<PeerCred> {
     Some(PeerCred { pid, uid, gid })
 }
 
+/// The credentials a message carries when its sender states none: the
+/// sender's pid and its *real* user and group ids, as Linux's `scm_send`
+/// records them (`current_uid()`, `current_gid()`) -- where a peer's
+/// credentials ([`current_cred`], `SO_PEERCRED`) are the effective ones.
+/// `None` in kernel context.
+fn current_real_cred() -> Option<PeerCred> {
+    let pid = crate::proc::thread::owner_process(sched::current_task_id())?;
+    if pid == 0 {
+        return None;
+    }
+    let creds = crate::proc::pcb::get_credentials(pid)?;
+    Some(PeerCred {
+        pid,
+        uid: creds.ruid,
+        gid: creds.rgid,
+    })
+}
+
+/// Who states credentials on a send: its pid and its real, effective and
+/// saved user and group ids ([`check_stated_cred_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stater {
+    /// The sender's process.
+    pid: crate::proc::pcb::ProcessId,
+    /// Its real, effective and saved user ids.
+    uids: [u32; 3],
+    /// Its real, effective and saved group ids.
+    gids: [u32; 3],
+}
+
+impl Stater {
+    /// Root, for this check: an effective user id of 0, Linux's
+    /// `CAP_SYS_ADMIN`, `CAP_SETUID` and `CAP_SETGID` as the Linux layer's
+    /// `set*id` calls take them.
+    const fn is_root(&self) -> bool {
+        self.uids[1] == 0
+    }
+}
+
 /// Check credentials the caller states for one message it sends
 /// (`SCM_CREDENTIALS` on a send), as Linux's `scm_check_creds` and
 /// `__scm_send` do: the pid must be the caller's own, or -- for root
-/// (`CAP_SYS_ADMIN`) -- any live process's; the uid and gid the caller's own,
-/// or any for root (`CAP_SETUID`, `CAP_SETGID`). Root is uid 0, as the Linux
-/// layer's `set*id` calls take it; the caller has one uid and one gid, so
-/// "one of its real, effective or saved ids" is that one. Kernel context may
-/// state anything that names a live process.
+/// (`CAP_SYS_ADMIN`) -- any live process's; the uid one of the caller's
+/// real, effective and saved user ids, and the gid one of its group ids, or
+/// any for root (`CAP_SETUID`, `CAP_SETGID`). Root is an effective uid of 0
+/// ([`Stater::is_root`]). Kernel context may state anything that names a
+/// live process.
 ///
 /// # Errors
 ///
@@ -468,9 +507,12 @@ pub fn check_stated_cred(stated: PeerCred) -> KernelResult<PeerCred> {
     let caller = match crate::proc::thread::owner_process(sched::current_task_id()) {
         None | Some(0) => None,
         Some(pid) => {
-            let (uid, gid) =
-                crate::proc::pcb::process_uid_gid(pid).ok_or(KernelError::NotPermitted)?;
-            Some(PeerCred { pid, uid, gid })
+            let c = crate::proc::pcb::get_credentials(pid).ok_or(KernelError::NotPermitted)?;
+            Some(Stater {
+                pid,
+                uids: [c.ruid, c.uid, c.suid],
+                gids: [c.rgid, c.gid, c.sgid],
+            })
         }
     };
     check_stated_cred_for(caller, stated, |pid| crate::proc::pcb::state(pid).is_some())
@@ -480,7 +522,7 @@ pub fn check_stated_cred(stated: PeerCred) -> KernelResult<PeerCred> {
 /// (`None`: kernel context), with `alive` saying whether a pid names a
 /// process -- a zombie counts, as Linux finds a pid until it is reaped.
 fn check_stated_cred_for(
-    caller: Option<PeerCred>,
+    caller: Option<Stater>,
     stated: PeerCred,
     alive: impl Fn(crate::proc::pcb::ProcessId) -> bool,
 ) -> KernelResult<PeerCred> {
@@ -488,9 +530,12 @@ fn check_stated_cred_for(
         return Err(KernelError::InvalidArgument);
     }
     if let Some(me) = caller {
-        // Root may claim anything; anyone else only exactly themselves.
-        let may =
-            me.uid == 0 || (stated.pid == me.pid && stated.uid == me.uid && stated.gid == me.gid);
+        // Root may claim anything; anyone else its own pid and one of its
+        // own ids of each kind.
+        let may = me.is_root()
+            || (stated.pid == me.pid
+                && me.uids.contains(&stated.uid)
+                && me.gids.contains(&stated.gid));
         if !may {
             return Err(KernelError::NotPermitted);
         }
@@ -1401,7 +1446,7 @@ fn send_dgram(
     }
     let pid = current_user_pid();
     let task = sched::current_task_id();
-    let cred = stated.or_else(current_cred);
+    let cred = stated.or_else(current_real_cred);
     let limit = Limit::new(limit_for(h, Direction::Send, nonblocking), task);
     loop {
         {
@@ -2146,9 +2191,33 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     // --- credentials a sender states (SCM_CREDENTIALS on a send) ---
     let claim = |pid, uid, gid| PeerCred { pid, uid, gid };
     let alive = |pid: crate::proc::pcb::ProcessId| pid == 7 || pid == 9;
-    let me = claim(7, 1000, 100);
-    if check_stated_cred_for(Some(me), me, alive) != Ok(me) {
+    let stater = |pid, uid, gid| Stater {
+        pid,
+        uids: [uid; 3],
+        gids: [gid; 3],
+    };
+    let me = stater(7, 1000, 100);
+    if check_stated_cred_for(Some(me), claim(7, 1000, 100), alive) != Ok(claim(7, 1000, 100)) {
         return Err("a process may not state its own credentials");
+    }
+    // A process that put root aside (real and saved uid 0, effective 1000)
+    // may state either id it holds, but is not root for the pid or another
+    // uid.
+    let dropped = Stater {
+        pid: 7,
+        uids: [0, 1000, 0],
+        gids: [0, 0, 0],
+    };
+    if check_stated_cred_for(Some(dropped), claim(7, 0, 0), alive) != Ok(claim(7, 0, 0))
+        || check_stated_cred_for(Some(dropped), claim(7, 1000, 0), alive) != Ok(claim(7, 1000, 0))
+    {
+        return Err("a process may not state its real or effective uid");
+    }
+    if check_stated_cred_for(Some(dropped), claim(7, 5, 0), alive) != Err(KernelError::NotPermitted)
+        || check_stated_cred_for(Some(dropped), claim(9, 0, 0), alive)
+            != Err(KernelError::NotPermitted)
+    {
+        return Err("a process with an effective uid of 1000 counted as root");
     }
     for (stated, why) in [
         (
@@ -2162,7 +2231,7 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
             return Err(why);
         }
     }
-    let root = claim(7, 0, 0);
+    let root = stater(7, 0, 0);
     if check_stated_cred_for(Some(root), claim(9, 1000, 100), alive) != Ok(claim(9, 1000, 100)) {
         return Err("root may not state another live process's credentials");
     }

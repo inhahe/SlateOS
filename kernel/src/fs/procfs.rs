@@ -3107,7 +3107,10 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     // cutime cstime priority nice num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..kstkeip=0> signal blocked
     // sigignore sigcatch wchan <nswap/cnswap=0> exit_signal=17 processor
-    // <rt_priority..env_end=0> exit_code.
+    // rt_priority policy <delayacct_blkio_ticks..env_end=0> exit_code.
+    // rt_priority (1..=99 under SCHED_FIFO/SCHED_RR, else 0) and policy
+    // (Linux's number) are the thread's own; literal zeros until 2026-10-07,
+    // when they became real (design-decisions 1544).
     // Split around the comm so the name can be raw bytes. Field 2 is
     // parenthesised precisely because it may contain anything, and Linux
     // stores it as bytes; decoding it here rendered every undecodable name as
@@ -3118,7 +3121,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     out.extend_from_slice(name);
     let text = format!(
         ") {} {} {} {} {} {} 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
-         0 0 0 0 0 {} {} {} {} {} 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+         0 0 0 0 0 {} {} {} {} {} 0 0 17 {} {} {} 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
         pgrp,
@@ -3146,6 +3149,8 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
         sigcatch,
         wchan,
         processor,
+        task.attr.rt_priority,
+        task.attr.policy.linux(),
         exit_code,
     );
     out.extend_from_slice(text.as_bytes());
@@ -16554,6 +16559,11 @@ pub fn self_test() -> KernelResult<()> {
             max_wait_ticks: 0,
             stack_used: None,
             stack_pct: None,
+            attr: crate::sched::task::SchedAttr {
+                policy: crate::sched::task::SchedPolicy::Fifo,
+                rt_priority: 50,
+                reset_on_fork: false,
+            },
             wait: crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, 0x7f00_1000),
         };
         let data = build_pid_stat(&synth, 999_999, true);
@@ -16581,6 +16591,16 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!(
                 "[procfs]   FAIL: synthetic stat processor (field 39) = {:?}, want 3",
                 rest.get(36)
+            );
+            return Err(KernelError::InternalError);
+        }
+        // fields 40 (rt_priority) and 41 (policy), indices 37 and 38: the
+        // synthetic thread is SCHED_FIFO (1) at 50.
+        if rest.get(37) != Some(&"50") || rest.get(38) != Some(&"1") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat rt_priority/policy (fields 40/41) = {:?}/{:?}, want 50/1",
+                rest.get(37),
+                rest.get(38)
             );
             return Err(KernelError::InternalError);
         }
@@ -16690,6 +16710,7 @@ pub fn self_test() -> KernelResult<()> {
                 max_wait_ticks: 0,
                 stack_used: None,
                 stack_pct: None,
+                attr: crate::sched::task::SchedAttr::default(),
                 wait: crate::wchan::Wait::NONE,
             };
             // stat field 3 is the first token after the `(comm) ` prefix.  The
@@ -16765,6 +16786,7 @@ pub fn self_test() -> KernelResult<()> {
             max_wait_ticks: 0,
             stack_used: None,
             stack_pct: None,
+            attr: crate::sched::task::SchedAttr::default(),
             wait: crate::wchan::Wait::NONE,
         };
         let data = build_pid_stat(&synth, 999_999, true);
@@ -18771,6 +18793,7 @@ fn test_pid_signal_sets() -> KernelResult<()> {
         max_wait_ticks: 0,
         stack_used: None,
         stack_pct: None,
+        attr: crate::sched::task::SchedAttr::default(),
         wait: crate::wchan::Wait::NONE,
     };
     // SIGHUP and SIGRTMAX (64) ignored, SIGINT blocked, SIGTERM pending.

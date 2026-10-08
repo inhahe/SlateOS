@@ -5528,11 +5528,7 @@ pub fn set_scheduler(task_id: TaskId, attr: task::SchedAttr) -> Option<task::Sch
     let mut state = SCHED.lock();
     let mut old = None;
     let (old_effective, new_effective) = relevel_locked(&mut state, task_id, |t| {
-        old = Some(task::SchedAttr {
-            policy: t.policy,
-            rt_priority: t.rt_priority,
-            reset_on_fork: t.reset_on_fork,
-        });
+        old = Some(t.sched_attr());
         t.policy = attr.policy;
         t.rt_priority = if attr.policy.is_realtime() {
             attr.rt_priority.clamp(1, 99)
@@ -5565,11 +5561,7 @@ pub fn set_scheduler(task_id: TaskId, attr: task::SchedAttr) -> Option<task::Sch
 #[must_use]
 pub fn get_sched_attr(task_id: TaskId) -> Option<task::SchedAttr> {
     let state = SCHED.lock();
-    state.tasks.get(&task_id).map(|t| task::SchedAttr {
-        policy: t.policy,
-        rt_priority: t.rt_priority,
-        reset_on_fork: t.reset_on_fork,
-    })
+    state.tasks.get(&task_id).map(|t| t.sched_attr())
 }
 
 /// The time slice `task_id` is given each time it is dispatched, in
@@ -5627,11 +5619,7 @@ impl Inheritance {
 pub fn inheritance_from(parent: TaskId) -> Option<Inheritance> {
     let state = SCHED.lock();
     let p = state.tasks.get(&parent)?;
-    let creator = task::SchedAttr {
-        policy: p.policy,
-        rt_priority: p.rt_priority,
-        reset_on_fork: p.reset_on_fork,
-    };
+    let creator = p.sched_attr();
     let mut attr = task::SchedAttr {
         reset_on_fork: false,
         ..creator
@@ -6361,6 +6349,9 @@ pub struct TaskInfo {
     pub state: TaskState,
     /// Base priority level (0 = highest).
     pub priority: u8,
+    /// Its policy, real-time priority and `SCHED_RESET_ON_FORK`:
+    /// `/proc/<pid>/stat` fields 40 and 41.
+    pub attr: task::SchedAttr,
     /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz).
     pub total_ticks: u64,
     /// User-mode (ring 3) CPU time, in timer ticks.  `user_ticks +
@@ -6439,6 +6430,7 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             name_len: task.name_len,
             state: task.state,
             priority: task.priority,
+            attr: task.sched_attr(),
             total_ticks: task.total_ticks,
             user_ticks: task.user_ticks,
             sys_ticks: task.sys_ticks,
@@ -6483,6 +6475,7 @@ pub fn task_info(task_id: TaskId) -> Option<TaskInfo> {
         name_len: task.name_len,
         state: task.state,
         priority: task.priority,
+        attr: task.sched_attr(),
         total_ticks: task.total_ticks,
         user_ticks: task.user_ticks,
         sys_ticks: task.sys_ticks,

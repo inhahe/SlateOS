@@ -905,6 +905,17 @@ pub struct Task {
 }
 
 impl Task {
+    /// The task's scheduling attributes, as `sched_getscheduler` and
+    /// `sched_getparam` report them.
+    #[must_use]
+    pub const fn sched_attr(&self) -> SchedAttr {
+        SchedAttr {
+            policy: self.policy,
+            rt_priority: self.rt_priority,
+            reset_on_fork: self.reset_on_fork,
+        }
+    }
+
     /// Get the effective scheduling priority, accounting for both
     /// interactive boost and priority inheritance.
     ///

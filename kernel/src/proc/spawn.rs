@@ -22795,11 +22795,16 @@ pub fn self_test_linux_dev_stdin() -> KernelResult<()> {
     let exe_elf = elf::build_linux_dev_stdin_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-dev-stdin"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The program makes the file it opens again by /dev/fd/N: like every C fixture that opens a file, it
+    // needs a wildcard File capability to pass `sys_fs_open`'s
+    // `require_cap_type(File, ...)` (it had none, and the first boot to run
+    // it failed there).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-linux-dev-stdin",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &file_caps,
         fd_map: &[],
         argv,
         envp,
@@ -23024,6 +23029,10 @@ pub fn self_test_linux_sigaltstack() -> KernelResult<()> {
             Some(0xA2..=0xA5) => {
                 "a frame that did not fit the stack did not end the child by SIGSEGV"
             }
+            // The flooding child's own exits, passed on by the parent.
+            Some(0x3A) => "a signal nested on the alternate stack was not placed below the last",
+            Some(0x3B) => "4096 nested signals never ran out of alternate stack",
+            Some(0x2D) => "the flooding child's first signal returned instead of nesting",
             Some(0xA6 | 0xA7) => "a fault with SIGSEGV blocked did not end the child by SIGSEGV",
             Some(0xAF) => "wait4 for a child failed",
             None => "no exit code: the program died -- a fault the stack should have caught?",
@@ -23159,11 +23168,16 @@ pub fn self_test_linux_mlock() -> KernelResult<()> {
     let exe_elf = elf::build_linux_mlock_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-mlock"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The program reads /proc/self/status for VmLck: like every C fixture that opens a file, it
+    // needs a wildcard File capability to pass `sys_fs_open`'s
+    // `require_cap_type(File, ...)` (it had none, and the first boot to run
+    // it failed there).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-linux-mlock",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &file_caps,
         fd_map: &[],
         argv,
         envp,
@@ -23260,11 +23274,16 @@ pub fn self_test_linux_null_buffer() -> KernelResult<()> {
     let exe_elf = elf::build_linux_null_buffer_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-null-buffer"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The program makes and reads its scratch file in /tmp: like every C fixture that opens a file, it
+    // needs a wildcard File capability to pass `sys_fs_open`'s
+    // `require_cap_type(File, ...)` (it had none, and the first boot to run
+    // it failed there).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-linux-null-buffer",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &file_caps,
         fd_map: &[],
         argv,
         envp,
@@ -23559,11 +23578,15 @@ pub fn self_test_linux_ptrace() -> KernelResult<()> {
     let exe_elf = elf::build_linux_ptrace_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-ptrace"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The tracer opens its tracee's /proc/<pid>/mem: like every C fixture
+    // that opens a file, it needs a wildcard File capability to pass
+    // `sys_fs_open`'s `require_cap_type(File, ...)`.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-linux-ptrace",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &file_caps,
         fd_map: &[],
         argv,
         envp,

@@ -549,21 +549,21 @@ pub fn decode_utf8(s: &[u8]) -> Option<(char, usize)> {
     Some((ch, ch.len_utf8()))
 }
 
-/// `iswprint` in a UTF-8 locale.
+/// `iswprint` in a UTF-8 locale: [`quoting::printable_char`], the one answer
+/// the tree gives to "does this character print as itself?".
 ///
-/// glibc's rule is: assigned, not a control, and not a space other than
-/// U+0020 -- where its spaces are the separators (`Zs`, `Zl`, `Zp`) less the
-/// three no-break ones. This follows it except for unassigned code points,
-/// which glibc does not print and this does, for want of the table: the
-/// database's descriptions have none, and everything a rule read from a file
-/// is escaped by `file_printable` before it reaches the output.
+/// glibc 2.39's rule under `C.UTF-8` is: assigned, not a control (`Cc`), and
+/// not one of the two separators U+2028 and U+2029. The other spaces print:
+/// measured, `iswprint` is 1 for U+1680, U+2000-U+200A, U+205F and U+3000
+/// alike. This copy once refused those eleven as well, so a name holding one
+/// came out in octal where `file` prints it as it is. The one difference
+/// that remains is quoting's own: an unassigned code point, which glibc does
+/// not print and this does, for want of the table -- the database's
+/// descriptions have none, and everything a rule read from a file is escaped
+/// by `file_printable` before it reaches the output.
 #[must_use]
 pub fn iswprint(c: char) -> bool {
-    let cp = u32::from(c);
-    if charwidth::char_width(c).is_none() {
-        return false;
-    }
-    !matches!(cp, 0x1680 | 0x2000..=0x2006 | 0x2008..=0x200a | 0x2028 | 0x2029 | 0x205f | 0x3000)
+    quoting::printable_char(c)
 }
 
 /// `file_checkfield`: a width or precision under 1024.
@@ -1080,6 +1080,28 @@ mod tests {
         assert_eq!(file_printable(true, 512, b"\x01\xff", 2), b"\x01\xff");
         assert_eq!(file_strtrim(b"  hi there \t\0junk"), b"hi there");
         assert_eq!(file_strtrim(b"   "), b"");
+    }
+
+    /// glibc 2.39's `iswprint` under `C.UTF-8`, measured: every space but the
+    /// two separators prints, the C1 controls do not.
+    #[test]
+    fn spaces_print_and_separators_and_controls_do_not() {
+        for c in [
+            '\u{a0}', '\u{1680}', '\u{2000}', '\u{200a}', '\u{205f}', '\u{3000}', 'é',
+        ] {
+            assert!(iswprint(c), "U+{:04X}", u32::from(c));
+        }
+        for c in ['\u{2028}', '\u{2029}', '\u{85}', '\u{7f}', '\u{1}'] {
+            assert!(!iswprint(c), "U+{:04X}", u32::from(c));
+        }
+        assert_eq!(
+            printable_mb("a\u{2000}b".as_bytes()).unwrap(),
+            "a\u{2000}b".as_bytes()
+        );
+        assert_eq!(
+            printable_mb("\u{2028}".as_bytes()).unwrap(),
+            b"\\342\\200\\250"
+        );
     }
 
     #[test]

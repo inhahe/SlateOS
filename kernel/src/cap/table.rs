@@ -501,7 +501,10 @@ fn test_suspend_restore() -> KernelResult<()> {
     };
     let mut t = CapTable::new();
     let clock = t.insert(ResourceType::SystemClock, 0, Rights::WRITE)?;
-    let own = t.insert(ResourceType::Process, 7, both)?;
+    // DUPLICATE too, which `duplicate` asks of the entry it copies: a copy is
+    // made of this one below. Without it the copy was refused, and the test
+    // failed the boot with `PermissionDenied` before reaching its point.
+    let own = t.insert(ResourceType::Process, 7, both.union(Rights::DUPLICATE))?;
     let file = t.insert(ResourceType::File, 0, Rights::READ)?;
     let gone = t.insert(ResourceType::Process, 8, both)?;
     if t.suspend(keep) != 3 || t.suspended_count() != 3 {

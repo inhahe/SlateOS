@@ -216,8 +216,26 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Twelve programs still lack it: `bc df dir ed find hostname install
-kill ls more patch vdir`. That list is now
+all. Five programs still lack it: `ed hostname kill more patch`.
+`find` was converted on 2026-10-08, with its output rebuilt on stdio's
+terms: each sink a buffered `Stream` as upstream's `FILE *` is, `-print`
+unchecked, `-printf` checked call by call (`find: 'standard output':
+REASON`, once per failed buffer), `-ls` checked field by field and fatal
+at `list_file`'s stage (`Failed to write output (at stage 275)`), an
+`-fprint` file closed and checked at the end (fatal), `fflush (stdout)`
+checked after that, and `close_stdout` last; `find-diff.sh` holds
+twenty-three descriptor cases, all agreeing with findutils 4.9.0.
+`df` was converted on 2026-10-08: its help and version had gone out by
+`print!`, which panics on a failed write, and its table through Rust's
+`Stdout` with a failure turned into status 1 and nothing said; it is
+gnulib's `close_stdout` now, measured by `df-diff.sh`'s descriptor cases.
+`bc` the same day, to what Ubuntu's bc does, which is not GNU's: Debian's
+`05_notice_read_write_errors.diff` checks each value, string and diagnostic
+as it is written and ends the run at the first failure (`dc: could not
+write output file: REASON`, sic), leaves `--help` and `--version`
+unchecked, and a closed standard input is the scanner's `read() in flex
+scanner failed`; `bc-diff.sh` holds twenty descriptor cases.
+That list is now
 pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
 a program is added without the guard, when one is converted without being
 taken off the list, and when a program has only one half of it. Two had
@@ -268,6 +286,26 @@ standard output was a quiet success. They go through standard output's
 `Stream` now, a write per upstream `printf`, to `close_stdout`, and a dangling
 symbolic link named on the command line is `cannot operate on dangling
 symlink`, as `fts` makes upstream say, where it was `cannot access`.
+`install` followed: its run already went through standard output's `Stream`
+to `close_stdout`, so it was the guard and its help and version, which were
+`print!`/`println!`. `install-diff.sh` gained the descriptor cases -- standard
+output closed, input closed, error full and closed, beside the full disk it
+had -- and agrees on all of them (213 rows, 2 differing on purpose). The
+guard is safe here for an ordering reason worth knowing: `-v`'s line is
+written before each copy opens its files, so no file of `install`'s holds
+descriptor 1 when it is written; see
+`TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER` for why that is luck
+rather than structure.
+`ls`, `dir` and `vdir` followed together, being one program built three
+times: the guard in each wrapper, `stdfd::restore` in `coreutils::ls::main`,
+and the listing moved off Rust's own `Stdout` -- which calls a closed
+descriptor's `EBADF` success, so `ls t >&-` had exited 0 -- onto standard
+output's `Stream`, judged at the end by `close_stdout` with `ls`'s failure
+status, 2. `Out::flush` now only hands its bytes to the stream: the stream
+writes them out before anything goes to standard error, which is
+`error()`'s `fflush`, and leaving the rest to the close is what makes `ls
+>/dev/full` say `write error: No space left on device` with its reason, as
+GNU's does. `ls-diff.sh` gained the descriptor cases.
 `cmp` was converted on 2026-10-07 with diffutils'
 `xstdopen` and its own stdout checks: 163 rows agree with GNU 3.10, 10 differ
 on purpose. `sort` was converted on 2026-10-03, its output moved onto

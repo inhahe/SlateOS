@@ -173,6 +173,13 @@ printf 't/f\0t/sub\0' > ../list0
 printf 't/f\0\0t/sub\0' > ../list0-empty
 printf 't/f\0t/sub' > ../list0-no-nul
 
+# Enough names that a listing outgrows stdio's 4096-byte buffer many times
+# over, for the full-disk cases: where the buffer stands when a write fails
+# decides what findutils says. Beside the tree too, since `find .` and a bare
+# `find` are cases above and would list all two thousand.
+mkdir ../many
+for n in $(seq 1 2000); do : > "../many/a-name-long-enough-to-fill-buffers-$n"; done
+
 # ------------------------------------------------------------------- cases ---
 #
 # One shell command line per case, `find` standing for whichever find is
@@ -756,6 +763,47 @@ find t -perm $'\377'
 !we escape an undecodable argument byte as \377, GNU writes it raw (design-decisions.md §369)|find t -size $'\377'
 !we escape an undecodable format byte as \377, GNU writes it raw (design-decisions.md §369)|find t -printf $'%\377\n'
 !we escape an undecodable predicate byte as \377, GNU writes it raw (design-decisions.md §369)|find t $'-\377'
+
+# --- the descriptors, as the program was given them ---
+# findutils 4.9.0 writes through stdio and checks only some of it. `-print`,
+# `-print0` and `-fprint` are unchecked: a failure sets the stream's error
+# flag and is heard of at the end, from `cleanup`'s `fflush (stdout)` --
+# `find: 'standard output': REASON`, not fatal -- or an `-fprint` file's
+# `fclose` -- `find: 'FILE': REASON`, fatal -- and then from `close_stdout`
+# (`write error`, a reason only when the close itself failed). `-printf` is
+# checked call by call, so a large one onto a full disk says so once per
+# buffer; `-ls` is checked field by field, and dies at the first failure
+# naming `list_file`'s stage. A flush before each child empties the buffer,
+# so nothing is left for `cleanup` to fail on. Until 2026-10-08 ours printed
+# `find: REASON` at its own flush points, with no name, and saw neither a
+# closed output (Rust's runtime puts /dev/null there) nor a stage.
+find t -maxdepth 0 >/dev/full
+find t -maxdepth 0 -printf '%p\n' >/dev/full
+find ../many >/dev/full
+find ../many -printf '%p\n' >/dev/full
+find ../many -print0 >/dev/full
+find ../many -ls >/dev/full
+find t -maxdepth 0 >&-
+find t -maxdepth 0 -printf '%p\n' >&-
+find ../many >&-
+find ../many -printf '%p\n' >&-
+find t -maxdepth 0 -fprint /dev/full
+find ../many -fprint /dev/full
+find t -maxdepth 0 -fprintf /dev/full '%p\n'
+find ../many -fprintf /dev/full '%p\n'
+find t -maxdepth 0 -fprint /dev/full -print >/dev/full
+find t -maxdepth 0 -fprint /dev/stdout >/dev/full
+find t -maxdepth 0 -print -exec true \; >/dev/full
+find t -maxdepth 0 -printf '%p\c' >/dev/full
+find t -maxdepth 0 -print >/dev/full 2>/dev/full
+find nosuch t -maxdepth 0 -print >/dev/full
+# An `-fprint` file is opened with `fopen_safer` (`sharefile.c` includes
+# `stdio--.h`): never on a closed descriptor 1, so what `-print` writes to
+# standard output does not end up in it. And one file under two names is one
+# stream, by device and inode, so the two do not write over each other.
+find t -maxdepth 0 -print -fprint ../fp1 >&-; r=$?; od -c ../fp1; (exit $r)
+find t -maxdepth 0 -fprint ../fp2 -fprint ./../fp2; r=$?; od -c ../fp2; (exit $r)
+find t/f t/g -fprint ../fp3 -fprintf ./../fp3 '<%p>\n'; r=$?; od -c ../fp3; (exit $r)
 
 # --- deliberate differences ---
 # The only two messages in the whole interface that are *about the program

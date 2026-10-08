@@ -52,6 +52,14 @@
 //!     such message, because `-n` is not an option with an argument — it is a
 //!     flag that changes how the *next positional word* is read, so `renice -n`
 //!     is `not enough arguments`.
+//! 16. **Standard output was judged by gnulib's rule, not util-linux's**
+//!     (2026-10-07, found by `scripts/renice-diff.sh`). `renice 5 $$ >&-`
+//!     said `write error: Bad file descriptor` and exited 1; util-linux's
+//!     `close_stdout` forgives `EBADF` at the final flush, so upstream exits 0
+//!     in silence. And its success lines went out before a later failure's
+//!     message, because gnulib's `error()` flushes standard output first and
+//!     util-linux's `warn` does not. Standard output is
+//!     `ulclosestream::Stdout` now, util-linux's `closestream.h`.
 //!
 //! # Measured against util-linux 2.39.3
 //!
@@ -575,17 +583,21 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let mut out = Stream::stdout();
+    // util-linux's standard output: glibc's buffer, and `close_stdout`'s
+    // verdict at the end -- which forgives a closed descriptor at the final
+    // flush, where gnulib's reports it. Measured: `renice 5 $$ >&-` exits 0,
+    // silent (`scripts/renice-diff.sh`).
+    let mut stdout = ulclosestream::Stdout::new(1);
     let mut err = Stream::stderr();
 
     let status = match request {
         // `usage()` writes to stdout and exits 0; `print_version` likewise.
         Request::Help => {
-            let _ = out.write_all(help_text().as_bytes());
+            stdout.write(help_text().as_bytes());
             0
         }
         Request::Version => {
-            let _ = out.write_all(version_text().as_bytes());
+            stdout.write(version_text().as_bytes());
             0
         }
         Request::Run {
@@ -597,14 +609,43 @@ fn run_main() -> ExitCode {
             let lookup = |name: &[u8]| db.user_by_name(name).map(|u| u.uid);
             let mut sched = imp::Kernel;
             run(
-                relative, priority, &targets, &mut sched, &lookup, &mut out, &mut err,
+                relative,
+                priority,
+                &targets,
+                &mut sched,
+                &lookup,
+                &mut UlStdout(&mut stdout),
+                &mut err,
             )
         }
     };
 
     // `close_stdout_atexit()`: a success line that could not be written is not
-    // a success.
-    stdfd::close_stdout("renice", out, ExitCode::from(status))
+    // a success -- unless the descriptor was closed, which util-linux forgives.
+    ExitCode::from(stdout.close(status, b"renice"))
+}
+
+/// util-linux's standard output as the `impl Write` [`run`] reports through.
+///
+/// Its writes are stdio's: held in glibc's buffer and written when it fills or
+/// at the end, and a failure is the stream's to remember and `close`'s to
+/// judge. Upstream's diagnostics are `warn`s, which -- unlike gnulib's
+/// `error()` -- do not flush standard output first, so with both streams in one
+/// file a failure comes out ahead of the success lines still held. This keeps
+/// that: the diagnostics go to standard error directly, past this buffer.
+struct UlStdout<'a>(&'a mut ulclosestream::Stdout);
+
+impl Write for UlStdout<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    /// Nothing: upstream never calls `fflush (stdout)`, so what is held stays
+    /// held until `close`.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------ unix ----

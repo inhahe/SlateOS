@@ -155,7 +155,7 @@ run_case() { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }wc $*"; }
 # directory): what `wc` does when the input it was told to read cannot be. Both
 # sides were once very different here -- ours read a closed descriptor as an
 # empty file and exited 0, because Rust's `io::stdin()` turns `EBADF` into end
-# of input. See `known-issues/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
+# of input. See `known-issues-resolved/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
 run_closed() { compare '<&-' "$@"; report "wc $* <&-"; }
 run_from() { local from=$1; shift; compare "<$from" "$@"; report "wc $* < $from"; }
 run_stdin() {

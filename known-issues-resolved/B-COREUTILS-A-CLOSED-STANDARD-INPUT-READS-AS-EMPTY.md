@@ -1,10 +1,12 @@
 ## B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-07 (lane B), pending a boot test on `main` before
-the move to `known-issues-resolved/`. Every program the 2026-10-03 sweep
-found reads a closed standard input as upstream does -- 37 of them, and
-the `-i`/`-ok` prompts of `rm`, `cp`, `mv`, `ln` and `find`; "Where,
-measured" lists them.
+**Status:** RESOLVED -- fixed 2026-10-07 (lane B), boot-confirmed on `main`
+2026-10-08: the last of the fixes is in `7cb7d34bb`, contained in
+`d69b1bbaa`, whose boot passed and which was published to `main` with its
+boot-history row as `27f5baacd`. Every program the 2026-10-03 sweep found
+reads a closed standard input as upstream does -- 37 of them, and the
+`-i`/`-ok` prompts of `rm`, `cp`, `mv`, `ln` and `find`; "Where, measured"
+lists them.
 
 **In short:** when a program is started with its standard input closed
 (`prog <&-`) and then reads it, GNU's tools report it as an error, for

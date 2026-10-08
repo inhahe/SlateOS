@@ -616,6 +616,71 @@ pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
     imp::fd_safer(file)
 }
 
+/// gnulib's `open_safer`, as a method on [`std::fs::OpenOptions`]: the open,
+/// then [`fd_safer`], so that the file never takes descriptor 0, 1 or 2.
+///
+/// # Where, and only where, upstream does it
+///
+/// Not every program: whether a file opened with a standard descriptor
+/// closed lands *on* that descriptor is observable, and upstream decides it
+/// per program. In coreutils 9.4 the safer opens come from per-file headers
+/// -- `stdio--.h` (a safe `fopen`) in `comm`, `csplit`, `digest.c` (the
+/// `*sum` programs and `cksum`), `dircolors`, `du`, `join`, `pr`, `ptx`,
+/// `shuf`, `tee`, `tsort` and `uniq`; `fcntl--.h` (a safe `open`) in
+/// `copy.c` (`cp`, `mv`, `install`), `shred`, `split` and `tail`;
+/// `stdlib--.h` for `sort`'s and `tac`'s temporary files; `unistd--.h` in
+/// `nohup`; `openat_safer` for `ln`'s target directory; and gnulib's `fts`
+/// and `randread` -- and `system.h`, which every program includes, carries
+/// none of them. So `cat`, `sort`'s inputs, `paste`, `wc` and the rest open
+/// plainly, and a file opened with standard input closed *is* standard
+/// input: measured, `sort f - <&-` sorts `f` once and exits 0 (its
+/// `xfclose` leaves descriptor 0 open, so `-` finds `f` at its end), and
+/// `paste f - <&-` says `standard input is closed` (it checks for exactly
+/// that descriptor). A port opens as its upstream does, and these are for
+/// the programs whose upstream is safe -- what `tee` needed: `printf
+/// 'hello\n' | tee out.txt >&-` wrote `hello` into `out.txt` twice and
+/// exited 0, where GNU's writes it once and says `tee: 'standard output':
+/// Bad file descriptor`. `known-issues/TD-B-GUARDED-PROGRAMS-OPEN-FILES-
+/// WITHOUT-OPEN-SAFER.md` lists which programs are converted.
+pub trait OpenSafer {
+    /// [`std::fs::OpenOptions::open`], kept off descriptors 0-2.
+    ///
+    /// # Errors
+    ///
+    /// What the open said, or `EMFILE` from moving the file up.
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File>;
+}
+
+impl OpenSafer for std::fs::OpenOptions {
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File> {
+        self.open(path).and_then(fd_safer)
+    }
+}
+
+/// [`std::fs::File::open`], kept off descriptors 0-2: `open_safer (name,
+/// O_RDONLY)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn open_read_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open_safer(path)
+}
+
+/// [`std::fs::File::create`], kept off descriptors 0-2: `open_safer (name,
+/// O_WRONLY | O_CREAT | O_TRUNC, 0666)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn create_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_safer(path)
+}
+
 /// Whether `fd` is a terminal — `isatty(3)`.
 ///
 /// The module already asks this to choose stdout's buffering, and several
@@ -1373,15 +1438,25 @@ impl Inner {
 
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self, fd: i32) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.drain_checked(fd);
+    }
+
+    /// [`Inner::drain`], also handing back this push's own failure --
+    /// stdio's `fflush` returning `EOF`. Nothing buffered is success,
+    /// whatever failed before, as an `fflush` with nothing to write is.
+    fn drain_checked(&mut self, fd: i32) -> io::Result<()> {
         if self.buf.is_empty() {
-            return;
+            return Ok(());
         }
         before_diagnostic(fd);
         let result = imp::write_all(fd, &self.buf);
         self.buf.clear();
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 
     /// One `write`, honouring the buffering mode: stdio's `fwrite`, through
@@ -1399,18 +1474,28 @@ impl Inner {
     /// that fills part-way it wrote out the remainder glibc keeps for the
     /// close. The `glibc_measured` test holds the table.
     fn put(&mut self, fd: i32, bytes: &[u8]) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.put_checked(fd, bytes);
+    }
+
+    /// [`Inner::put`], also handing back the failure of a write this call
+    /// made -- the flush of a buffer it filled, or its own bytes going
+    /// straight out: stdio's `fwrite` coming up short, `fprintf` returning a
+    /// negative count.
+    fn put_checked(&mut self, fd: i32, bytes: &[u8]) -> io::Result<()> {
         before_diagnostic(fd);
         if bytes.is_empty() {
             // Nothing to write allocates nothing, as `fwrite` of nothing does
             // not: the first real write is still the first.
-            return;
+            return Ok(());
         }
         let line = match self.mode {
             Buffering::None => {
-                if let Err(e) = imp::write_all(fd, bytes) {
+                return imp::write_all(fd, bytes).map_err(|e| {
+                    let copy = clone_error(&e);
                     self.record(fd, e);
-                }
-                return;
+                    copy
+                });
             }
             Buffering::Line => true,
             Buffering::Block => false,
@@ -1430,9 +1515,11 @@ impl Inner {
             imp::write_all(fd, b)
         });
         self.buf = held;
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 }
 
@@ -1667,6 +1754,39 @@ impl Stream {
         self.with(Inner::drain);
     }
 
+    /// `fflush`, with its verdict: push what is buffered, and say whether
+    /// *that* push failed -- not whether anything ever did, which
+    /// [`Stream::errored`] answers. Nothing buffered is success, whatever
+    /// failed before, as `fflush` with nothing to write is.
+    ///
+    /// For a utility that reports a failed flush in its own words before
+    /// [`close_stdout`] has its say: findutils' `cleanup` ends `if (fflush
+    /// (stdout) == EOF) nonfatal_nontarget_file_error (errno, "standard
+    /// output")`, and `-printf`'s `\c` is a checked `fflush` of its stream.
+    ///
+    /// # Errors
+    ///
+    /// This flush's failure, which the stream keeps as well, as it keeps any.
+    pub fn flush_now(&mut self) -> io::Result<()> {
+        self.with(Inner::drain_checked)
+    }
+
+    /// A write that says whether it failed: stdio's `fwrite` coming up short,
+    /// or `fprintf` returning a negative count -- which happens when the call
+    /// itself had to write and the write failed: a buffer it filled could
+    /// not be flushed, or its bytes went straight out (an unbuffered stream)
+    /// and did not arrive. The failure is kept as well, as any write's is.
+    ///
+    /// For a utility that checks its writes one by one, as findutils'
+    /// `checked_fprintf` does for `-printf`, and `list_file` for `-ls`.
+    ///
+    /// # Errors
+    ///
+    /// The failure of a write this call made.
+    pub fn write_checked(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.with(|inner, fd| inner.put_checked(fd, bytes))
+    }
+
     /// Give up on the stream: forget what is still buffered, and forget the
     /// failure that stopped it.
     ///
@@ -1812,6 +1932,33 @@ mod tests {
 
     fn shared() -> std::sync::MutexGuard<'static, ()> {
         SHARED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `write_checked` reports the failure of a write *it* made -- the flush
+    /// of a buffer it filled, or its own bytes on an unbuffered stream -- and
+    /// not before; `flush_now` reports its own push failing, and nothing
+    /// when there was nothing to push, whatever failed earlier.
+    #[test]
+    fn checked_writes_and_flushes_report_their_own_failures() {
+        let mut s = broken(Buffering::Block);
+        // Held in the buffer: nothing has been written, so nothing failed.
+        assert!(s.write_checked(b"abc").is_ok());
+        assert!(!s.errored());
+        // The push of what is held fails, and says so.
+        assert!(s.flush_now().is_err());
+        assert!(s.errored());
+        // Nothing left to push: success, though the stream has failed.
+        assert!(s.flush_now().is_ok());
+        assert!(s.errored());
+
+        // A write that fills the buffer fails in that very call.
+        let mut b = broken(Buffering::Block);
+        assert!(b.write_checked(&vec![b'x'; 20_000]).is_err());
+
+        // Unbuffered: every write goes out at once, and fails at once.
+        let mut u = broken(Buffering::None);
+        assert!(u.write_checked(b"x").is_err());
+        assert!(u.write_checked(b"").is_ok());
     }
 
     #[test]
@@ -2297,5 +2444,63 @@ mod tests {
         assert_eq!(text, b"kept");
         drop(file);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The three safer opens open as the calls they replace do. Where the
+    /// descriptor lands needs one of 0-2 closed, which a test cannot do safely
+    /// (see the test above); `tee-diff.sh`'s closed-stdout cases and
+    /// `awk-diff.sh`'s `wfile_closed_case` hold that end to end.
+    #[test]
+    fn the_safer_opens_open_as_the_plain_ones_do() {
+        use super::OpenSafer;
+        use std::io::{Read, Write};
+
+        let dir = std::env::temp_dir().join(format!("stdfd-open-safer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+
+        // `create_safer`: creates, and truncates what is there.
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"first")
+            .unwrap();
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"2nd")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd");
+
+        // `open_read_safer`: reads, and refuses to write.
+        let mut text = Vec::new();
+        super::open_read_safer(&path)
+            .unwrap()
+            .read_to_end(&mut text)
+            .unwrap();
+        assert_eq!(text, b"2nd");
+        assert!(
+            super::open_read_safer(&path)
+                .unwrap()
+                .write_all(b"x")
+                .is_err()
+        );
+        assert!(super::open_read_safer(dir.join("missing")).is_err());
+
+        // `open_safer`: the options are the caller's, passed through.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open_safer(&path)
+            .unwrap()
+            .write_all(b"+")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd+");
+        let refused = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open_safer(&path)
+            .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

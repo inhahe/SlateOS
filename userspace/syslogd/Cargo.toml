@@ -3,6 +3,10 @@ name = "syslogd"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS system log daemon — JSON-lines log aggregation and query"
+
+[lints]
+workspace = true
+
 [dependencies]
 # One journal-record escaper, shared with every other writer. A log message
 # is attacker-shaped text: unescaped, a quote ends the field and a newline

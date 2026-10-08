@@ -94,11 +94,11 @@ mkdir -p "$scratch"
 # tee inherits. Without it the case runs with SIGPIPE at its default, so it kills
 # tee, unless tee's mode ignores it.
 SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; PARTIAL=
-PIPE_IGNORED=
+PIPE_IGNORED=; STDOUT_CLOSED=
 
 reset_knobs() {
   SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; PARTIAL=
-  PIPE_IGNORED=
+  PIPE_IGNORED=; STDOUT_CLOSED=
 }
 
 # --- what a directory looks like afterwards ----------------------------------
@@ -168,7 +168,11 @@ compare() {
     if [ "$side" = ours ]; then dir=$od; out=$o_bin; err=$o_err
     else dir=$gd; out=$g_bin; err=$g_err; fi
     ( cd "$dir" && eval "$SETUP" ) >/dev/null 2>&1
-    if [ -n "$STDIN_CLOSED" ]; then
+    if [ -n "$STDOUT_CLOSED" ]; then
+      # Standard output closed: the files tee opens must not land on
+      # descriptor 1, or what it copies to "standard output" goes into them.
+      ( cd "$dir" && printf '%b' "$STDIN" | timeout -k 2 60 env PATH="$bindir/$side" tee "$@" >&- 2>"$err" )
+    elif [ -n "$STDIN_CLOSED" ]; then
       ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" tee "$@" <&- >"$out" 2>"$err" )
     elif [ -n "$STDIN_FILE" ]; then
       ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" tee "$@" <"$STDIN_FILE" >"$out" 2>"$err" )
@@ -526,9 +530,24 @@ STDIN='x\n'; xfail_case 'our --version names SlateOS' --version
 # an empty stdin and called it a success. `guard_std_fds!` and `stdfd::restore`
 # undo that, and `tee` now reads descriptor 0 itself (`stdfd::RawStdin`) rather
 # than through `io::stdin()`, which turns `EBADF` into end of input. See
-# `known-issues/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
+# `known-issues-resolved/B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
 STDIN_CLOSED=1; run_case out
 STDIN_CLOSED=1; run_case -a out
+
+# Closed stdout, with files to write. The first file tee opens takes the
+# lowest free descriptor -- 1 -- unless it is opened as gnulib's `open_safer`
+# opens it. Until 2026-10-07 ours was not: `printf 'hello\n' | tee out.txt
+# >&-` wrote `hello` into `out.txt` twice (once as the file, once as
+# "standard output") and exited 0, where GNU writes it once and says
+# `tee: 'standard output': Bad file descriptor`. `coreutils::stdfd::OpenSafer`
+# and the crate's `clippy.toml` are the fix; these hold it.
+STDOUT_CLOSED=1; STDIN='hello\n'; run_case out.txt
+STDOUT_CLOSED=1; STDIN='a\nb\n'; run_case out1 out2
+STDOUT_CLOSED=1; STDIN='x\n'; SETUP='printf "old\n" > out.txt'; run_case -a out.txt
+STDOUT_CLOSED=1; STDIN='x\n'; run_case -p out.txt
+STDOUT_CLOSED=1; STDIN='x\n'; run_case --output-error=warn out.txt
+STDOUT_CLOSED=1; STDIN='x\n'; run_case --output-error=exit out.txt
+STDOUT_CLOSED=1; STDIN='x\n'; run_case out.txt nosuchdir/out
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

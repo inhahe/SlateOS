@@ -24168,11 +24168,16 @@ pub fn self_test_linux_setid() -> KernelResult<()> {
             }
             Some(0x35) => "an unprivileged setfsuid to an id it holds none of changed something",
             Some(0x40) => "root could not make its test file",
+            Some(0x5d) => {
+                "root could not give its test file an ACL (setxattr of system.posix_acl_access)"
+            }
             Some(0x41..=0x44) => {
                 "seteuid(1000) as root did not leave the real and saved ids 0 (getresuid, getuid, \
                  geteuid)"
             }
-            Some(0x45) => "root's 0600 file opened with the effective id 1000",
+            Some(0x45) => {
+                "root's file, closed to others by its ACL, opened with the effective id 1000"
+            }
             Some(0x46) => "seteuid to an id the process holds none of was allowed",
             Some(0x47 | 0x48) => "seteuid(0) did not bring root and its file access back",
             Some(0x49..=0x4c) => "the saved id alone did not keep root within reach",

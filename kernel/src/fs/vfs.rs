@@ -4350,9 +4350,17 @@ impl Vfs {
     /// any count, `/dev/full` refuses); `None` for every other file, and for
     /// a path that no longer resolves (the write's own error is then the
     /// answer).
+    ///
+    /// Gated as [`write_at_resolved`](Self::write_at_resolved) is, since it
+    /// stands in for that write: a path the caller may not write answers
+    /// that refusal, as the write would have.
     #[must_use]
     pub fn write_without_data_resolved(path: impl AsRef<Path>) -> Option<KernelResult<()>> {
-        let (fs, _id, _opts, relative) = resolve_mount(path.as_ref()).ok()?;
+        let path = path.as_ref();
+        if let Err(e) = check_path_access(path, PathAccess::Write) {
+            return Some(Err(e));
+        }
+        let (fs, _id, _opts, relative) = resolve_mount(path).ok()?;
         fs.lock().write_without_data(&relative)
     }
 

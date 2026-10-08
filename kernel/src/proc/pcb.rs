@@ -3242,11 +3242,28 @@ const _: () = assert!(rlimit_defaults_are_ordered());
 
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource`.
 ///
+/// `RLIMIT_CPU`'s and `RLIMIT_RTTIME`'s soft limit read as far as a
+/// `SIGXCPU` has raised it, which the table records a moment later
+/// ([`crate::proc::cputimer::effective_limit`]): a `SIGXCPU` handler that
+/// asks is told the raised limit, as on Linux.
+///
 /// Returns `None` if `pid` is unknown or `resource >= NUM_RLIMITS`.
 /// Callers in kernel context (no live PCB) should use
 /// [`DEFAULT_RLIMITS`] directly rather than going through this lookup.
 #[must_use]
 pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
+    let stored = get_rlimit_stored(pid, resource)?;
+    // With the process table let go: the CPU-time limits take their own lock.
+    Some(crate::proc::cputimer::effective_limit(
+        pid, resource, stored,
+    ))
+}
+
+/// [`get_rlimit`] as the process table holds it, without a raise the
+/// CPU-time limits have made and not yet written back: for those limits'
+/// own bookkeeping (`crate::proc::cputimer`).
+#[must_use]
+pub fn get_rlimit_stored(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
     if resource >= NUM_RLIMITS {
         return None;
     }

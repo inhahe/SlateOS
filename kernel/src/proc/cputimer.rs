@@ -366,7 +366,7 @@ pub fn get_itimer(pid: ProcessId, which: u32) -> KernelResult<(u64, u64)> {
 /// the process table and arm, re-arm or drop the thresholds -- Linux's
 /// `update_rlimit_cpu`. A soft limit already passed is due at the next tick.
 pub fn rlimit_cpu_changed(pid: ProcessId) {
-    let Some((soft, hard)) = pcb::get_rlimit(pid, RLIMIT_CPU) else {
+    let Some((soft, hard)) = pcb::get_rlimit_stored(pid, RLIMIT_CPU) else {
         return;
     };
     let limit = (soft != RLIM_INFINITY).then(|| CpuLimit {
@@ -481,6 +481,42 @@ fn rttime_expire(pid: ProcessId, account: &ProcCpuAccount, ticks: u64) {
     }
 }
 
+/// `stored` -- process `pid`'s limit `resource` as the process table holds
+/// it -- with the soft limit as far as a `SIGXCPU` has raised it. Linux
+/// raises `RLIMIT_CPU`'s and `RLIMIT_RTTIME`'s in the tick that sends the
+/// signal, before a handler can ask; here the tick cannot take the process
+/// table, which catches up through the work queue ([`raise_soft_limit`],
+/// [`raise_rttime_soft_limit`]), and a reader in between -- the `SIGXCPU`
+/// handler itself, as often as not -- is told the raised value
+/// ([`pcb::get_rlimit`]). Every other limit, an infinite one, and one not
+/// raised, is `stored`. Until 2026-10-08 the handler read the old limit (the
+/// CPU-time ring-3 test, 0x7D).
+#[must_use]
+pub fn effective_limit(pid: ProcessId, resource: u32, stored: (u64, u64)) -> (u64, u64) {
+    let (soft, hard) = stored;
+    if soft == RLIM_INFINITY {
+        return stored;
+    }
+    let raised = match resource {
+        RLIMIT_CPU => with_table(|table| {
+            table
+                .get(&pid)
+                .and_then(|entry| entry.limit)
+                .map(|limit| limit.soft)
+                .filter(|&next| next != NO_CPU_EXPIRY)
+                .and_then(|next| next.checked_div(NS_PER_SEC))
+        }),
+        RLIMIT_RTTIME => pcb::cpu_account(pid)
+            .map(|account| account.rttime().0)
+            .filter(|&next| next != NO_CPU_EXPIRY),
+        _ => None,
+    };
+    match raised {
+        Some(next) if next > soft => (next.min(hard), hard),
+        _ => stored,
+    }
+}
+
 /// Work-queue half of an `RLIMIT_RTTIME` `SIGXCPU`: raise process `pid`'s
 /// soft limit to where the account moved it, as Linux raises it.
 fn raise_rttime_soft_limit(pid: u64) {
@@ -488,7 +524,7 @@ fn raise_rttime_soft_limit(pid: u64) {
         return;
     };
     let (next, _) = account.rttime();
-    if let Some((soft, hard)) = pcb::get_rlimit(pid, RLIMIT_RTTIME)
+    if let Some((soft, hard)) = pcb::get_rlimit_stored(pid, RLIMIT_RTTIME)
         && soft != RLIM_INFINITY
         && next != NO_CPU_EXPIRY
         && soft < next
@@ -516,7 +552,7 @@ fn raise_rttime_soft_limit(pid: u64) {
 /// limits, in its account. An infinite soft limit turns the count off, as on
 /// Linux.
 pub fn rlimit_rttime_changed(pid: ProcessId) {
-    let Some((soft, hard)) = pcb::get_rlimit(pid, RLIMIT_RTTIME) else {
+    let Some((soft, hard)) = pcb::get_rlimit_stored(pid, RLIMIT_RTTIME) else {
         return;
     };
     let Some(account) = pcb::cpu_account(pid) else {
@@ -543,7 +579,7 @@ fn raise_soft_limit(pid: u64) {
     let Some(next_secs) = next_secs else {
         return;
     };
-    if let Some((soft, hard)) = pcb::get_rlimit(pid, RLIMIT_CPU)
+    if let Some((soft, hard)) = pcb::get_rlimit_stored(pid, RLIMIT_CPU)
         && soft != RLIM_INFINITY
         && soft < next_secs
     {

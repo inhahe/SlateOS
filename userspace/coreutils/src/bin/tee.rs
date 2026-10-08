@@ -341,6 +341,7 @@ fn ignore_sigint() {
 fn ignore_sigint() {}
 
 fn run(settings: &Settings) -> ExitCode {
+    use coreutils::stdfd::OpenSafer;
     // Before a byte is copied, so an interrupt during the first read is
     // already covered.
     if settings.ignore_interrupts {
@@ -364,9 +365,12 @@ fn run(settings: &Settings) -> ExitCode {
 
     for path in &settings.files {
         let opened = if settings.append {
-            OpenOptions::new().create(true).append(true).open(path)
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open_safer(path)
         } else {
-            File::create(path)
+            coreutils::stdfd::create_safer(path)
         };
         match opened {
             Ok(f) => outputs.push(Output {

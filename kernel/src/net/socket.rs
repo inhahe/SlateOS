@@ -1202,6 +1202,29 @@ pub fn take_so_error(handle: SocketHandle) -> KernelResult<i32> {
     Ok(pending)
 }
 
+/// The pending socket error, left pending: what [`take_so_error`] would
+/// answer.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the handle has been closed.
+pub fn pending_so_error(handle: SocketHandle) -> KernelResult<i32> {
+    Ok(inner_of(handle)?.lock().so_error)
+}
+
+/// Keep `errno` as the pending socket error, replacing any before it: a
+/// `recvmmsg` that failed after receiving some messages keeps its failure
+/// for the next receive or [`take_so_error`], as Linux's does with
+/// `WRITE_ONCE(sk->sk_err, ...)` (`syscall::linux::sys_recvmmsg`).
+///
+/// # Errors
+///
+/// `InvalidHandle` if the handle has been closed.
+pub fn set_so_error(handle: SocketHandle, errno: i32) -> KernelResult<()> {
+    inner_of(handle)?.lock().so_error = errno;
+    Ok(())
+}
+
 /// Whether the socket is currently connected.
 ///
 /// # Errors

@@ -965,29 +965,12 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         pcb::note_killed_on_cpu(pid, task_id);
     }
 
-    // Capture the exiting thread's accumulated counters while its Task is
-    // still alive in the scheduler — `remove_thread` folds them into the
-    // owning process's accumulators so they survive the Task's destruction.
-    // (Lock ordering: read SCHED here, before taking PROCESS_TABLE inside
-    // remove_thread, to avoid nesting the two locks.)
-    let (exit_user, exit_sys) = sched::cpu_ticks(task_id).unwrap_or((0, 0));
-    let (exit_min, exit_maj) = sched::fault_counts(task_id).unwrap_or((0, 0));
-    let (exit_nv, exit_niv) = sched::ctxsw_counts(task_id).unwrap_or((0, 0));
-    let acct = pcb::ThreadExitAccounting {
-        user_ticks: exit_user,
-        sys_ticks: exit_sys,
-        min_flt: exit_min,
-        maj_flt: exit_maj,
-        nvcsw: exit_nv,
-        nivcsw: exit_niv,
-    };
-
     // The first thread -- the one whose id is the process's -- leaves its last
     // snapshot with the process: the scheduler frees its task at the next reap
     // pass, but `/proc/<pid>` goes on describing it until the process itself
-    // is reaped, as Linux's zombie group leader does. Taken here for the same
-    // reason as the counters above: SCHED is read before PROCESS_TABLE is
-    // taken, never inside it.
+    // is reaped, as Linux's zombie group leader does. Taken before
+    // `remove_exiting_thread`, which reads the thread's counters from the
+    // scheduler itself, under PROCESS_TABLE (`pcb::process_counters`).
     if task_id == pid
         && let Some(leader) = sched::task_info(task_id)
     {
@@ -1003,9 +986,9 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     let guarded_pgrps = pcb::guarded_child_pgrps(pid);
 
     // Remove from the process's thread list.
-    match pcb::remove_thread(pid, task_id, acct) {
-        Ok((is_zombie, wake_task, any_waiter)) => {
-            if is_zombie {
+    match pcb::remove_exiting_thread(pid, task_id) {
+        Ok(removed) => {
+            if removed.zombie {
                 serial_println!("[thread] Process {} has no threads left — now zombie", pid);
 
                 // The threads it traced are let go -- or ended, under
@@ -1038,63 +1021,18 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // Release namespace reference so the namespace can be cleaned up.
                 crate::ipc::namespace::detach(pid);
 
-                // Wake a task blocked in `waitpid(pid)` for this process.
-                if let Some(waiter) = wake_task {
-                    crate::sched::wake(waiter);
-                }
-                // Wake a parent blocked in `waitpid(-1)` (wait for any
-                // child) so it can re-scan and reap this newly-zombied
-                // child.
-                if let Some(waiter) = any_waiter {
-                    crate::sched::wake(waiter);
-                }
-
-                // Whether the parent will collect this zombie, decided by
-                // `remove_thread` from its `SIGCHLD` disposition: a parent that
-                // ignores `SIGCHLD` is sent nothing and the process is
-                // released below; one with `SA_NOCLDWAIT` is still sent it.
-                let notice = pcb::exit_notice(pid).unwrap_or(pcb::ExitNotice::Zombie);
-
-                // Post SIGCHLD to the parent. This is distinct from the
-                // wait4() wakeups above (which target a thread parked in
-                // wait4()): SIGCHLD drives the *signal* path, used by a
-                // parent running a SIGCHLD handler or parked in
-                // sigsuspend()/pause() — e.g. dash's job-control `wait`
-                // builtin, which arms a SIGCHLD handler then sigsuspends,
-                // reaping with waitpid(WNOHANG) only after the signal wakes
-                // it.  Without this the parent livelocks in sigsuspend.
-                if let Some(parent) = pcb::parent(pid) {
-                    if parent != 0 && notice != pcb::ExitNotice::ReapSilently {
-                        // How the child ended, and who it was: `si_status`
-                        // and `si_uid` were 0 until 2026-10-01, so a handler
-                        // could not tell an exit from a kill
-                        // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
-                        let ended = pcb::exit_info(pid).unwrap_or_else(|| pcb::ExitInfo::exited(0));
-                        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
-                        let info = crate::proc::signal::SigInfo::child(
-                            u32::try_from(pid).unwrap_or(0),
-                            child_uid,
-                            ended.sigchld_code_and_status(),
-                        );
-                        // Linux-ABI parents: their per-signal rt_sigaction
-                        // disposition decides -- dropped as it is sent when
-                        // it ignores SIGCHLD and nothing blocks it, else
-                        // pending for deliver_linux_signal. Native parents go
-                        // through classify_post so a registered trampoline
-                        // handler runs and a no-handler parent correctly
-                        // drops it (SIGCHLD default action = ignore).
-                        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
-                            crate::syscall::linux::post_linux_sigchld(parent, info);
-                        } else {
-                            // Discarding the PostDecision is intentional:
-                            // SIGCHLD's default is ignore, so a no-handler
-                            // native parent yields Drop with no side effect;
-                            // a handler yields Deliver (already marked
-                            // pending). There is no Terminate case for 17.
-                            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
-                        }
-                    }
-                }
+                // Its parent is told of its end -- unless a tracer that is not
+                // the parent holds it, which is told first (`ptrace`); the
+                // parent's turn comes when that tracer has waited for it
+                // (`release_traced_exit`). Whether it was held was decided in
+                // the same step that made it a zombie, so exactly one of the
+                // two tells the parent.
+                crate::proc::ptrace::on_process_zombie(pid, removed.held);
+                let notice = if removed.held {
+                    None
+                } else {
+                    Some(tell_parent_of_end(pid, removed.wake, removed.any_waiter))
+                };
 
                 // Now that this process is a zombie and its children have
                 // been reparented to init, any group it used to guard may be
@@ -1104,18 +1042,9 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                     crate::syscall::handlers::kill_orphaned_pgrp(*pgrp);
                 }
 
-                // A zombie its parent asked never to be left is released now,
-                // last, once everything above that reads its record is done.
-                // No `wait` could have taken it first: every one treats it as
-                // already gone. Its address space is freed now too, or -- if a
-                // thread of it was killed while a CPU still ran it -- as soon
-                // as that CPU has switched away.
-                if notice != pcb::ExitNotice::Zombie && pcb::release_autoreaped(pid) {
-                    serial_println!(
-                        "[thread] Process {} released at exit: its parent does not wait \
-                         for its children",
-                        pid
-                    );
+                // Last, once everything above that reads its record is done.
+                if let Some(notice) = notice {
+                    release_if_unwanted(pid, notice);
                 }
             }
         }
@@ -1130,6 +1059,96 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     }
 
     Some(pid)
+}
+
+/// Tell zombie `pid`'s parent of its end: wake the parent's task waiting for
+/// it (`wake`) or for any child (`any_waiter`), and send the parent `SIGCHLD`
+/// as its disposition says. Returns the zombie's [`pcb::ExitNotice`], for
+/// [`release_if_unwanted`].
+///
+/// `SIGCHLD` is distinct from the wakeups (which target a thread parked in
+/// `wait4`): it drives the *signal* path, used by a parent running a
+/// `SIGCHLD` handler or parked in `sigsuspend`/`pause` -- e.g. dash's
+/// job-control `wait` builtin, which arms a handler, then sigsuspends, and
+/// reaps with `waitpid(WNOHANG)` only after the signal wakes it. Without it
+/// the parent livelocks in `sigsuspend`.
+fn tell_parent_of_end(
+    pid: ProcessId,
+    wake: Option<TaskId>,
+    any_waiter: Option<TaskId>,
+) -> pcb::ExitNotice {
+    for waiter in [wake, any_waiter].into_iter().flatten() {
+        sched::wake(waiter);
+    }
+    // Whether the parent will collect this zombie, decided from its `SIGCHLD`
+    // disposition by `pcb`: a parent that ignores `SIGCHLD` is sent nothing
+    // and the process is released; one with `SA_NOCLDWAIT` is still sent it.
+    let notice = pcb::exit_notice(pid).unwrap_or(pcb::ExitNotice::Zombie);
+    if let Some(parent) = pcb::parent(pid)
+        && parent != 0
+        && notice != pcb::ExitNotice::ReapSilently
+    {
+        // How the child ended, and who it was: `si_status` and `si_uid` were
+        // 0 until 2026-10-01, so a handler could not tell an exit from a kill
+        // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
+        let ended = pcb::exit_info(pid).unwrap_or_else(|| pcb::ExitInfo::exited(0));
+        // The child's real uid, as Linux's `do_notify_parent` reports it.
+        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
+        let info = crate::proc::signal::SigInfo::child(
+            u32::try_from(pid).unwrap_or(0),
+            child_uid,
+            ended.sigchld_code_and_status(),
+        );
+        // Linux-ABI parents: their per-signal rt_sigaction disposition
+        // decides -- dropped as it is sent when it ignores SIGCHLD and nothing
+        // blocks it, else pending for deliver_linux_signal. Native parents go
+        // through classify_post so a registered trampoline handler runs and a
+        // no-handler parent correctly drops it (SIGCHLD default action =
+        // ignore).
+        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
+            crate::syscall::linux::post_linux_sigchld(parent, info);
+        } else {
+            // Discarding the PostDecision is intentional: SIGCHLD's default
+            // is ignore, so a no-handler native parent yields Drop with no
+            // side effect; a handler yields Deliver (already marked pending).
+            // There is no Terminate case for 17.
+            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
+        }
+    }
+    notice
+}
+
+/// Release zombie `pid` now if its parent asked never to be left one
+/// (`notice` not [`pcb::ExitNotice::Zombie`]), once everything that reads its
+/// record is done. No `wait` could have taken it first: every one treats it
+/// as already gone. Its address space is freed now too, or -- if a thread of
+/// it was killed while a CPU still ran it -- as soon as that CPU has switched
+/// away.
+fn release_if_unwanted(pid: ProcessId, notice: pcb::ExitNotice) {
+    if notice != pcb::ExitNotice::Zombie && pcb::release_autoreaped(pid) {
+        serial_println!(
+            "[thread] Process {} released at exit: its parent does not wait for its children",
+            pid
+        );
+    }
+}
+
+/// Hand zombie `pid`, whose end a tracer held (`pcb::Process::exit_held`), to
+/// its parent: the tracer has waited for it, or has exited. The parent is
+/// told now, as at any other process's end -- woken, sent `SIGCHLD` -- and the
+/// process released at once if the parent does not wait for its children:
+/// Linux's `do_notify_parent` from `wait_task_zombie`'s `EXIT_TRACE` case, or
+/// from `__ptrace_detach` for a tracer's exit. A no-op for a process whose end
+/// was not held, or was handed over already.
+///
+/// Holding no lock: it takes the process table's, the scheduler's and the
+/// signal registry's.
+pub fn release_traced_exit(pid: ProcessId) {
+    let Some((wake, any_waiter)) = pcb::release_exit_hold(pid) else {
+        return;
+    };
+    let notice = tell_parent_of_end(pid, wake, any_waiter);
+    release_if_unwanted(pid, notice);
 }
 
 /// Get the process ID that owns a given thread.
@@ -1229,38 +1248,33 @@ pub(crate) fn self_test_with_thread<R>(tid: TaskId, pid: ProcessId, body: impl F
 /// its **live** threads and its **already-exited** threads.
 ///
 /// Each thread's CPU time is charged tick-by-tick by the scheduler
-/// (Linux tick-sampling model).  When a thread exits, `on_thread_exit`
+/// (Linux tick-sampling model).  When a thread exits, `remove_exiting_thread`
 /// folds its ticks into the per-process accumulator
 /// (`Process::acct_user_ticks`/`acct_sys_ticks`) before the scheduler
 /// destroys the Task, so the total here is
-/// `accumulator + Σ(live thread ticks)`.  Returns `(0, 0)` if the process
-/// is unknown.  Ticks are at `USER_HZ` (100 Hz).
+/// `accumulator + Σ(live thread ticks)`, read as one snapshot
+/// ([`pcb::process_counters`]).  Returns `(0, 0)` if the process is
+/// unknown.  Ticks are at `USER_HZ` (100 Hz).
 ///
 /// This makes the result exact for multi-threaded processes even after
 /// worker threads have exited — not just single-threaded ones.
 ///
-/// Sourced by the Linux-ABI `getrusage(RUSAGE_SELF)` `ru_utime`/
-/// `ru_stime`, `times` `tms_utime`/`tms_stime`, and `/proc/<pid>/stat`
-/// utime/stime surfaces.  Children-time (`cutime`/`cstime`,
-/// `RUSAGE_CHILDREN`) is tracked separately — see
-/// [`crate::proc::pcb::process_child_ticks`].
+/// The sampled measure the PROF and VIRT clocks read. What `getrusage`,
+/// `times`, the wait family and `/proc` report is the precise run time split
+/// in these ticks' proportion -- [`crate::proc::pcb::process_times`].
 #[must_use]
 pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
-    // Exited-thread accumulator (also serves as the existence check:
-    // `None` means the process is unknown).
-    let Some((mut user, mut sys)) = pcb::process_acct_ticks(pid) else {
-        return (0, 0);
-    };
-    // Add live threads' in-flight ticks.
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((u, s)) = sched::cpu_ticks(tid) {
-                user = user.saturating_add(u);
-                sys = sys.saturating_add(s);
-            }
-        }
-    }
-    (user, sys)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.cpu.user_ticks, c.cpu.sys_ticks))
+}
+
+/// The processor time process `pid` has used -- its live threads' and its
+/// exited ones', precise cycles and sampled ticks ([`sched::CpuSample`]) --
+/// or `None` if the process is unknown. What its CPU-time clocks read
+/// (`CLOCK_PROCESS_CPUTIME_ID` and the per-process `CPUCLOCK_*` ids); a
+/// zombie's is its final total.
+#[must_use]
+pub fn process_cpu_sample(pid: ProcessId) -> Option<sched::CpuSample> {
+    pcb::process_counters(pid).map(|c| c.cpu)
 }
 
 /// Sum the `(min_flt, maj_flt)` page-fault counts of a process across both
@@ -1277,18 +1291,7 @@ pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
 /// [`crate::proc::pcb::process_child_faults`].
 #[must_use]
 pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
-    let Some((mut min_flt, mut maj_flt)) = pcb::process_acct_faults(pid) else {
-        return (0, 0);
-    };
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((mn, mj)) = sched::fault_counts(tid) {
-                min_flt = min_flt.saturating_add(mn);
-                maj_flt = maj_flt.saturating_add(mj);
-            }
-        }
-    }
-    (min_flt, maj_flt)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.min_flt, c.maj_flt))
 }
 
 /// Sum the `(nvcsw, nivcsw)` context-switch counts of a process across both
@@ -1302,18 +1305,7 @@ pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
 /// separately — see [`crate::proc::pcb::process_child_ctxsw`].
 #[must_use]
 pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
-    let Some((mut nvcsw, mut nivcsw)) = pcb::process_acct_ctxsw(pid) else {
-        return (0, 0);
-    };
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((nv, niv)) = sched::ctxsw_counts(tid) {
-                nvcsw = nvcsw.saturating_add(nv);
-                nivcsw = nivcsw.saturating_add(niv);
-            }
-        }
-    }
-    (nvcsw, nivcsw)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.nvcsw, c.nivcsw))
 }
 
 /// Everything the wait family reports about one process's resource use.
@@ -1324,10 +1316,12 @@ pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
 /// the same child differently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessUsage {
-    /// User-mode CPU time in `USER_HZ` (100 Hz) ticks.
-    pub user_ticks: u64,
-    /// Kernel-mode CPU time in `USER_HZ` ticks.
-    pub sys_ticks: u64,
+    /// User-mode CPU time, in nanoseconds: the precise run time split by the
+    /// tick ratio (`pcb::process_times`, Linux's
+    /// `thread_group_cputime_adjusted`).
+    pub utime_ns: u64,
+    /// Kernel-mode CPU time, in nanoseconds, split likewise.
+    pub stime_ns: u64,
     /// Minor page faults (no I/O required).
     pub min_flt: u64,
     /// Major page faults (backing store read).
@@ -1357,19 +1351,18 @@ pub struct ProcessUsage {
 /// degradation the `getrusage` surfaces already take.
 #[must_use]
 pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
-    let (user, sys) = process_cpu_ticks(pid);
-    let (cuser, csys) = pcb::process_child_ticks(pid);
-    let (min_flt, maj_flt) = process_fault_counts(pid);
+    let own = pcb::process_counters(pid).unwrap_or_default();
+    let (utime, stime) = pcb::process_times(pid).unwrap_or((0, 0));
+    let (cuser, csys) = pcb::process_child_times(pid);
     let (cmin, cmaj) = pcb::process_child_faults(pid);
-    let (nvcsw, nivcsw) = process_ctxsw_counts(pid);
     let (cnv, cniv) = pcb::process_child_ctxsw(pid);
     ProcessUsage {
-        user_ticks: user.saturating_add(cuser),
-        sys_ticks: sys.saturating_add(csys),
-        min_flt: min_flt.saturating_add(cmin),
-        maj_flt: maj_flt.saturating_add(cmaj),
-        nvcsw: nvcsw.saturating_add(cnv),
-        nivcsw: nivcsw.saturating_add(cniv),
+        utime_ns: utime.saturating_add(cuser),
+        stime_ns: stime.saturating_add(csys),
+        min_flt: own.min_flt.saturating_add(cmin),
+        maj_flt: own.maj_flt.saturating_add(cmaj),
+        nvcsw: own.nvcsw.saturating_add(cnv),
+        nivcsw: own.nivcsw.saturating_add(cniv),
     }
 }
 

@@ -23686,10 +23686,6 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          SGI_CYCLE reject: OK".
 ##
 ##      Known limitations:
-##        * CLOCK_PROCESS_CPUTIME_ID(2) / CLOCK_THREAD_CPUTIME_ID(3)
-##          still return monotonic ns instead of the actual
-##          process/thread CPU usage.  Tracking CPU time per task is
-##          a real scheduler change, out of scope for this batch.
 ##        * CLOCK_REALTIME_ALARM(8) and CLOCK_BOOTTIME_ALARM(9) in
 ##          Linux differ from their non-alarm twins only when timers
 ##          armed on them fire while the system is in suspend; for

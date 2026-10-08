@@ -1966,6 +1966,16 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Integrity,
         || lockdep::self_test_lock_context(),
     );
+
+    // The boot runs in task 0, at the idle level: two tasks that never block
+    // would keep it off the CPU for good, but for the booster, which lifts it
+    // until `idle_loop` (`sched::BOOT_TASK_WORKING`). Here, because the
+    // booster is the timer's, just enabled.
+    selftest::dispatch(
+        "Boot task not starved",
+        selftest::Severity::Integrity,
+        || sched::self_test_boot_not_starved(),
+    );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     // The workqueue worker, as soon as tasks can be scheduled preemptively:
@@ -3626,6 +3636,44 @@ extern "C" fn kernel_main() -> ! {
         "Linux ignored signals dropped at the send (ring 3)",
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_ignored_at_send(),
+    );
+    // The CPU-time clocks measure processor time, precisely, per thread and
+    // per process (crate::syscall::linux::cpu_clock, pcb::process_counters).
+    selftest::dispatch_debug(
+        "Linux CPU-time clocks (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_cpu_clocks(),
+    );
+    // The same clocks through the native door (handlers::sys_cpu_clock).
+    selftest::dispatch_debug(
+        "native CPU-time clocks (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_cpu_clock(),
+    );
+    // Timers on those clocks, fired from the tick: POSIX timers, the CPU
+    // itimers, sleeps, RLIMIT_CPU (crate::proc::cputimer).
+    selftest::dispatch_debug(
+        "Linux CPU-time timers (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_cpu_timers(),
+    );
+    // Named pipes: the opens that need no second task in the kernel, the
+    // rest -- blocking opens across a fork among them -- from ring 3
+    // (crate::ipc::fifo).
+    selftest::dispatch("Named pipes (FIFOs)", selftest::Severity::Integrity, || {
+        ipc::fifo::self_test()
+    });
+    selftest::dispatch_debug(
+        "Linux named pipes (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_fifo(),
+    );
+    // Real, effective, saved and filesystem ids, moved by Linux's rules,
+    // root's authority following them (crate::proc::setid).
+    selftest::dispatch_debug(
+        "Linux user and group ids (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_setid(),
     );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
@@ -9673,6 +9721,9 @@ fn install_boot_file(path: &str, contents: &[u8], image_is_root: bool) {
 /// Maintenance (reap + refill) runs at reduced frequency to keep
 /// lock pressure low.
 fn idle_loop() -> ! {
+    // The boot is over: from here task 0 is the idle task alone, and the
+    // anti-starvation booster leaves it be (`sched::boot_work_done`).
+    sched::boot_work_done();
     let mut tick_counter = 0u32;
     loop {
         // Notify RCU that this CPU is entering idle.  An idle CPU is

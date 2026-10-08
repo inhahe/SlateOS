@@ -234,12 +234,19 @@ pub fn scan_once(parent_pid: ProcessId, req: WaitRequest) -> KernelResult<Option
                 // status, as a process's would read.
                 TraceReport::Exited(status) => ChildEvent::Exited(exit_info_of(status)),
             };
-            return Ok(Some(FoundEvent {
+            let found = FoundEvent {
                 pid: id,
                 uid: pcb::process_uid(id).unwrap_or(0),
                 usage: crate::proc::thread::process_usage_both(id),
                 event,
-            }));
+            };
+            // A process's end the tracer held, waited for: its parent's now
+            // (`thread::release_traced_exit`, a no-op for a thread's) -- after
+            // the usage above is read, since the parent may not want it kept.
+            if matches!(report, TraceReport::Exited(_)) && !req.nowait {
+                crate::proc::thread::release_traced_exit(id);
+            }
+            return Ok(Some(found));
         }
     }
 

@@ -5,6 +5,7 @@
 //! - **Channels** (primary): structured messages + capability transfer.
 //!   Async (buffered) by default, sync (rendezvous) as option.
 //! - **Pipes**: one-way byte streams with splice/vmsplice optimization.
+//! - **Named pipes** (FIFOs): pipes reached by a node in the filesystem.
 //! - **Shared memory**: direct memory sharing with ring buffer support,
 //!   futex signaling, and seqlocks.
 //! - **Eventfd counters**: lightweight wake-up notifications.
@@ -24,6 +25,7 @@ pub mod channel;
 pub mod completion;
 pub mod epoll;
 pub mod eventfd;
+pub mod fifo;
 pub mod futex;
 pub mod inotify;
 pub mod io_ring;

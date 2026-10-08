@@ -24,8 +24,10 @@ use crate::mm::vma::{Vma, VmaKind};
 use crate::sched::task::TaskId;
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -96,42 +98,102 @@ pub fn processes_created() -> u64 {
 ///
 /// During early development, all processes run as uid=0 (root).
 /// The user/group model is enforced once a login service exists.
-#[derive(Debug, Clone)]
+///
+/// A process has four user ids and four group ids, as on Linux
+/// (`credentials(7)`): the **real** id says whom it acts for; the
+/// **effective** id decides what it may do -- `uid` and `gid` here, the
+/// fields every permission check has always read; the **saved** set-user-ID
+/// is one it may switch its effective id back to; and the **filesystem** id
+/// decides its file access and owns what it makes -- the effective id, unless
+/// `setfsuid` set it apart. `proc::setid` changes them by Linux's rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessCredentials {
-    /// User ID (0 = root/system).
+    /// Effective user ID (0 = root/system): what permission and authority
+    /// decisions use. Linux's `euid`.
     pub uid: u32,
-    /// Primary group ID.
+    /// Effective group ID. Linux's `egid`.
     pub gid: u32,
     /// Supplementary group IDs.
     pub groups: Vec<u32>,
+    /// Real user ID: whom the process acts for (`getuid`, a signal's
+    /// `si_uid`, per-user limits).
+    pub ruid: u32,
+    /// Saved set-user-ID: an id the effective one may return to without
+    /// privilege -- what lets root `seteuid(1000)` and later `seteuid(0)`.
+    pub suid: u32,
+    /// Filesystem user ID: whose files the process may open, and who owns
+    /// what it makes. Follows the effective id; `setfsuid` sets it apart.
+    pub fsuid: u32,
+    /// Real group ID.
+    pub rgid: u32,
+    /// Saved set-group-ID.
+    pub sgid: u32,
+    /// Filesystem group ID.
+    pub fsgid: u32,
 }
 
 impl ProcessCredentials {
     /// Create default (root) credentials.
     #[must_use]
     pub fn root() -> Self {
-        Self {
-            uid: 0,
-            gid: 0,
-            groups: Vec::new(),
-        }
+        Self::new(0, 0)
     }
 
-    /// Create credentials for a specific user/group.
-    #[allow(dead_code)] // Public API — used when login/user management is implemented.
+    /// Credentials for user `uid` and group `gid`: all four of each.
     #[must_use]
     pub fn new(uid: u32, gid: u32) -> Self {
         Self {
             uid,
             gid,
             groups: Vec::new(),
+            ruid: uid,
+            suid: uid,
+            fsuid: uid,
+            rgid: gid,
+            sgid: gid,
+            fsgid: gid,
         }
     }
 
-    /// Check if this process runs as root.
+    /// Check if this process runs as root (its effective user id is 0).
     #[must_use]
     pub fn is_root(&self) -> bool {
         self.uid == 0
+    }
+
+    /// Whether any of its real, effective and saved user ids is 0: root's
+    /// authority, put aside while the effective id is another, is within
+    /// reach (`change_credentials`).
+    #[must_use]
+    pub fn any_root_uid(&self) -> bool {
+        self.ruid == 0 || self.uid == 0 || self.suid == 0
+    }
+
+    /// Every user id -- real, effective, saved, filesystem -- `uid`: what a
+    /// privileged `setuid` and the native `SYS_PROCESS_SET_CREDENTIALS` do.
+    pub fn set_all_uids(&mut self, uid: u32) {
+        self.ruid = uid;
+        self.uid = uid;
+        self.suid = uid;
+        self.fsuid = uid;
+    }
+
+    /// Every group id `gid`, as [`set_all_uids`](Self::set_all_uids).
+    pub fn set_all_gids(&mut self, gid: u32) {
+        self.rgid = gid;
+        self.gid = gid;
+        self.sgid = gid;
+        self.fsgid = gid;
+    }
+
+    /// What an exec leaves: the saved and filesystem ids become the effective
+    /// ones, as Linux's exec sets them. No set-user-ID bit is honoured here,
+    /// so the effective ids stay as they were.
+    pub fn exec(&mut self) {
+        self.suid = self.uid;
+        self.fsuid = self.uid;
+        self.sgid = self.gid;
+        self.fsgid = self.gid;
     }
 }
 
@@ -477,6 +539,15 @@ pub struct Process {
     /// from the parent's `SIGCHLD` disposition when the last thread leaves,
     /// and [`ExitNotice::Zombie`] until then.
     pub exit_notice: ExitNotice,
+    /// A zombie whose end is its tracer's to report first: its first thread
+    /// is traced by a process that is not its parent
+    /// (`crate::proc::ptrace::holds_exit`). Until that tracer has waited for
+    /// it -- or let it go, by exiting -- its parent's `wait` does not see it
+    /// and the parent is sent no `SIGCHLD`; then [`release_exit_hold`] hands
+    /// it to the parent, as Linux's `EXIT_TRACE` does (`wait_task_zombie`).
+    /// Its [`ExitNotice`] is decided then, from the parent's disposition at
+    /// that moment.
+    pub exit_held: bool,
     /// Threads of this process killed from elsewhere while some CPU was
     /// still executing them ([`crate::sched::task_is_on_cpu`]).
     ///
@@ -1195,24 +1266,35 @@ pub struct Process {
     /// Number of write-family syscalls issued (`syscw`).
     pub io_syscw: u64,
 
-    // --- Per-process CPU-time accounting (Linux tick-sampling model) ---
+    // --- Per-process CPU-time accounting ---
     //
-    // Live threads' CPU ticks are charged tick-by-tick on the scheduler
-    // (`Task::user_ticks`/`sys_ticks`).  When a thread exits it is removed
-    // from the scheduler, so its ticks would vanish; instead `on_thread_exit`
-    // folds the exiting thread's `(user_ticks, sys_ticks)` into these two
-    // accumulators.  A process's total CPU time is therefore
-    // `acct_user_ticks + Σ(live threads' user_ticks)` (and likewise for sys);
-    // see `proc::thread::process_cpu_ticks`.  This makes the self/thread CPU
-    // surfaces exact even for multi-threaded processes that have already
-    // reaped worker threads.  Reset to 0 for a freshly-forked child (Linux
-    // resets per-task CPU accounting on fork).
+    // Live threads' CPU time is kept on the scheduler: ticks charged
+    // tick-by-tick (`Task::user_ticks`/`sys_ticks`, Linux's tick sampling)
+    // and TSC cycles charged at each switch-out (`Task::total_cycles`). When
+    // a thread exits it is removed from the scheduler, so its time would
+    // vanish; instead `remove_thread` folds it into these accumulators, under
+    // this table's lock, in the same critical section that takes the thread
+    // off `threads`. A process's total is therefore the accumulator plus its
+    // live threads' (`process_cpu_sample`, which reads both under the same
+    // lock, so a thread's time is counted exactly once whichever side of its
+    // exit a reader falls). Reset to 0 for a freshly-forked child (Linux
+    // resets per-task CPU accounting on fork); kept across exec, as Linux's
+    // CPU clocks run on through it.
     /// Accumulated user-mode ticks from this process's already-exited
     /// threads (live threads are summed separately at query time).
     pub acct_user_ticks: u64,
     /// Accumulated kernel-mode ticks from this process's already-exited
     /// threads.
     pub acct_sys_ticks: u64,
+    /// Accumulated TSC cycles run by this process's already-exited threads
+    /// -- the precise counterpart of the two above, which the CPU-time
+    /// clocks read (`sched::CpuSample`).
+    pub acct_cycles: u64,
+    /// The running totals its CPU-time timers are checked against, which
+    /// every thread of it holds (`sched::ProcCpuAccount`): kept once such a
+    /// timer is armed ([`activate_cpu_account`]). A fork's child gets a new
+    /// one; exec keeps it, as Linux's CPU clocks and itimers run on.
+    pub cpu_account: Arc<crate::sched::ProcCpuAccount>,
 
     // --- Children CPU-time accounting (POSIX cutime/cstime) ---
     //
@@ -1224,11 +1306,22 @@ pub struct Process {
     // unreaped zombie's time is not yet visible to the parent), which is
     // exactly POSIX/Linux semantics.  Backs `times` `tms_cutime`/`tms_cstime`,
     // `getrusage(RUSAGE_CHILDREN)`, and `/proc/<pid>/stat` fields 16/17.
-    // Reset to 0 for a freshly-forked child.
-    /// Accumulated user-mode ticks of reaped descendant processes.
-    pub child_user_ticks: u64,
-    /// Accumulated kernel-mode ticks of reaped descendant processes.
-    pub child_sys_ticks: u64,
+    // Reset to 0 for a freshly-forked child. In nanoseconds: each child's
+    // run time split as `process_times` splits it (Linux's
+    // `thread_group_cputime_adjusted`), plus its own children's.
+    /// Accumulated user nanoseconds of reaped descendant processes.
+    pub child_utime_ns: u64,
+    /// Accumulated system nanoseconds of reaped descendant processes.
+    pub child_stime_ns: u64,
+    /// The user/system split of the process's run time last reported
+    /// (`process_times`), which keeps the next from going back -- Linux's
+    /// `signal->prev_cputime`.
+    pub prev_cputime: crate::sched::PrevCputime,
+    /// How many times the process has exec'd: the address space a
+    /// `/proc/<pid>/mem` opened before an exec reads is gone with it, and the
+    /// file reads end-of-file, as Linux's (which holds the `mm` it opened)
+    /// does (`fs::procfs`, [`note_exec`]).
+    pub exec_gen: u64,
 
     // --- Per-process page-fault accounting (minflt/majflt) ---
     //
@@ -1394,6 +1487,7 @@ impl Process {
             wait_task: None,
             wait_any_task: None,
             exit_notice: ExitNotice::Zombie,
+            exit_held: false,
             killed_on_cpu: Vec::new(),
             ready: false,
             vmas: Vec::new(),
@@ -1508,8 +1602,12 @@ impl Process {
             // accounting for a freshly-forked child).
             acct_user_ticks: 0,
             acct_sys_ticks: 0,
-            child_user_ticks: 0,
-            child_sys_ticks: 0,
+            acct_cycles: 0,
+            cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
+            child_utime_ns: 0,
+            child_stime_ns: 0,
+            prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
+            exec_gen: 0,
             acct_min_flt: 0,
             acct_maj_flt: 0,
             child_min_flt: 0,
@@ -1570,8 +1668,19 @@ pub const LINUX_PR_TSC_SIGSEGV: u32 = 2;
 /// name it if the exit/reap path wedges on it — this lock is on the suspected
 /// spawn/kill/reap hang path (`on_task_exit` → `get_crash_info`,
 /// `remove_thread`).
-static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
-    Mutex::named(BTreeMap::new(), b"PROCTBL");
+///
+/// **Boxed.** A `Process` is about 1.3 KiB, and a `BTreeMap` holding values
+/// inline passes the value by value through every level of an insert or a
+/// removal (`insert_recursing`, `split`, `slice_insert`; `remove_kv_tracking`,
+/// `bulk_steal_*`), each frame with its own copy in a debug build -- some
+/// 19 KiB of kernel stack for one process created, forked or reaped, and a
+/// 14 KiB node allocation per eleven processes. Boxed, the map moves pointers.
+/// The same pattern overran the stack in `proc::signal` on 2026-10-08
+/// (known-issues A-LARGE-KERNEL-STACK-FRAMES-REMAIN-IN-SELF-TESTS-AND-KSHELL).
+static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::named(BTreeMap::new(), b"PROCTBL");
+
+/// [`PROCESS_TABLE`]'s map: every process, boxed, by pid.
+type ProcessTable = BTreeMap<ProcessId, Box<Process>>;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1588,7 +1697,7 @@ static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
 ///
 /// Returns the new process's PID.
 pub fn create(name: &str, parent: ProcessId) -> ProcessId {
-    let mut proc = Process::new(String::from(name), parent);
+    let mut proc = Box::new(Process::new(String::from(name), parent));
 
     // Allocate a per-process PML4 with kernel entries cloned.
     // If allocation fails, the process falls back to the kernel
@@ -1845,7 +1954,7 @@ pub fn fork_create(
         .collect();
 
     let pid = alloc_pid();
-    let child = Process {
+    let child = Box::new(Process {
         pid,
         name,
         state: ProcessState::Creating,
@@ -1867,6 +1976,7 @@ pub fn fork_create(
         wait_any_task: None,
         // Decided afresh at this child's own exit, from its own parent.
         exit_notice: ExitNotice::Zombie,
+        exit_held: false,
         killed_on_cpu: Vec::new(),
         ready: false,
         vmas,
@@ -2042,8 +2152,12 @@ pub fn fork_create(
         // time from this point, and has reaped no children of its own.
         acct_user_ticks: 0,
         acct_sys_ticks: 0,
-        child_user_ticks: 0,
-        child_sys_ticks: 0,
+        acct_cycles: 0,
+        cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
+        child_utime_ns: 0,
+        child_stime_ns: 0,
+        prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
+        exec_gen: 0,
         // Page-fault accounting also resets on fork.
         acct_min_flt: 0,
         acct_maj_flt: 0,
@@ -2063,7 +2177,7 @@ pub fn fork_create(
         // child runs the same image, so it honours the same commit policy
         // until it execs.
         mmap_commit_policy,
-    };
+    });
 
     table.insert(pid, child);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
@@ -2075,6 +2189,12 @@ pub fn fork_create(
     for handle in fork_retain_handles {
         let _ = crate::fs::handle::dup_shared(handle);
     }
+
+    // The child inherits RLIMIT_CPU and RLIMIT_RTTIME, and is held to them
+    // by its own CPU time: arm the thresholds on its (fresh) clock. Its
+    // itimers are not inherited, as on Linux.
+    crate::proc::cputimer::rlimit_cpu_changed(pid);
+    crate::proc::cputimer::rlimit_rttime_changed(pid);
 
     Ok(pid)
 }
@@ -2117,24 +2237,79 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.threads.push(task_id);
+    // The thread charges its process's running CPU-time totals from now on
+    // (`PROCESS_TABLE` -> `SCHED`, the documented order). Under the table's
+    // lock, so `activate_cpu_account` sees it either in `threads` or holding
+    // the account, never neither.
+    crate::sched::set_cpu_account(task_id, Arc::clone(&proc.cpu_account));
     Ok(())
 }
 
-/// Per-thread accounting totals captured at thread-exit time.
+/// Make process `pid`'s running CPU-time totals be kept, if they are not
+/// already -- a CPU-time timer is being armed against it -- and answer its
+/// account, or `None` if there is no such process.
 ///
-/// When a thread exits it is removed from the scheduler, so the
-/// per-task counters it carried (`Task::user_ticks`/`sys_ticks` and
-/// `Task::min_flt`/`maj_flt`) would otherwise vanish.  The caller
-/// (`proc::thread::on_thread_exit`) snapshots them from the scheduler
-/// while the task is still alive and passes them to [`remove_thread`],
-/// which folds them into the owning process's `acct_*` accumulators so
-/// a process's totals stay exact across thread reaping.
+/// Filled from the same snapshot [`process_counters`] reads, under the
+/// table's lock and then the scheduler's (`sched::activate_cpu_account`), so
+/// the totals agree with the process's clocks from the first tick.
+pub fn activate_cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuAccount>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    if !proc.cpu_account.is_active() {
+        let exited = crate::sched::CpuSample {
+            cycles: proc.acct_cycles,
+            user_ticks: proc.acct_user_ticks,
+            sys_ticks: proc.acct_sys_ticks,
+        };
+        crate::sched::activate_cpu_account(&proc.cpu_account, exited, &proc.threads);
+    }
+    Some(Arc::clone(&proc.cpu_account))
+}
+
+/// Process `pid` is exec'ing: the address space it had is about to go, and
+/// with it anything bound to it (`Process::exec_gen`). A no-op for a process
+/// that is not there.
+pub fn note_exec(pid: ProcessId) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        proc.exec_gen = proc.exec_gen.wrapping_add(1);
+    }
+}
+
+/// How many times process `pid` has exec'd ([`note_exec`]), or `None` if
+/// there is no such process.
+#[must_use]
+pub fn exec_generation(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exec_gen)
+}
+
+/// Process `pid`'s CPU-time account, active or not, or `None` if there is no
+/// such process.
+#[must_use]
+pub fn cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuAccount>> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| Arc::clone(&p.cpu_account))
+}
+
+/// Per-thread accounting totals folded into a process as the thread leaves it.
+///
+/// When a thread exits it is removed from the scheduler, so the per-task
+/// counters it carried (`Task::user_ticks`/`sys_ticks`, `total_cycles`,
+/// `min_flt`/`maj_flt`, `nvcsw`/`nivcsw`) would otherwise vanish.
+/// [`remove_exiting_thread`] reads them from the scheduler itself, under the
+/// table's lock (see [`process_counters`] for why there); [`remove_thread`]
+/// folds the ones its caller gives -- zero for a thread that never ran, or a
+/// self-test's synthetic values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ThreadExitAccounting {
     /// User-mode (ring 3) CPU time of the exiting thread, in timer ticks.
     pub user_ticks: u64,
     /// Kernel-mode (ring 0) CPU time of the exiting thread, in timer ticks.
     pub sys_ticks: u64,
+    /// TSC cycles the exiting thread ran (`Task::total_cycles`, and those
+    /// since it was last switched in).
+    pub cycles: u64,
     /// Minor page faults charged to the exiting thread.
     pub min_flt: u64,
     /// Major page faults charged to the exiting thread.
@@ -2143,6 +2318,20 @@ pub struct ThreadExitAccounting {
     pub nvcsw: u64,
     /// Involuntary context switches charged to the exiting thread.
     pub nivcsw: u64,
+}
+
+impl From<crate::sched::TaskCounters> for ThreadExitAccounting {
+    fn from(c: crate::sched::TaskCounters) -> Self {
+        Self {
+            user_ticks: c.cpu.user_ticks,
+            sys_ticks: c.cpu.sys_ticks,
+            cycles: c.cpu.cycles,
+            min_flt: c.min_flt,
+            maj_flt: c.maj_flt,
+            nvcsw: c.nvcsw,
+            nivcsw: c.nivcsw,
+        }
+    }
 }
 
 /// What a parent's `SIGCHLD` disposition makes of a child that exits now --
@@ -2166,6 +2355,30 @@ fn exit_notice_for(parent: ProcessId) -> ExitNotice {
     } else {
         ExitNotice::Zombie
     }
+}
+
+/// Hand zombie `pid`, whose end its tracer held ([`Process::exit_held`]), to
+/// its parent: its tracer has waited for it, or has exited. Its
+/// [`ExitNotice`] is decided now, from the parent's `SIGCHLD` disposition as
+/// it is now, as Linux's `wait_task_zombie` asks `do_notify_parent` only
+/// then. Returns the waiters its end wakes -- a task waiting for `pid` itself
+/// and one of the parent's waiting for any child -- or `None` when it was not
+/// held (or is gone), and nothing changed: the caller then tells nobody.
+pub fn release_exit_hold(pid: ProcessId) -> Option<(Option<TaskId>, Option<TaskId>)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).filter(|p| p.exit_held)?;
+    proc.exit_held = false;
+    let parent = proc.parent;
+    if parent != pid {
+        proc.exit_notice = exit_notice_for(parent);
+    }
+    let wake = proc.wait_task.take();
+    let any = if parent == pid {
+        None
+    } else {
+        table.get_mut(&parent).and_then(|p| p.wait_any_task.take())
+    };
+    Some((wake, any))
 }
 
 /// The [`ExitNotice`] decided for `pid` when it became a zombie, or `None`
@@ -2206,22 +2419,73 @@ pub fn note_killed_on_cpu(pid: ProcessId, task: TaskId) {
 /// When a process becomes a zombie, all its living children are
 /// reparented to PID 1 (init) and registered as orphans so init
 /// can reap them when they eventually exit.
+///
+/// Folds the counters `acct` gives: zero for a thread that never ran, or a
+/// self-test's synthetic values. A thread that ran leaves through
+/// [`remove_exiting_thread`], which reads its counters from the scheduler.
 pub fn remove_thread(
     pid: ProcessId,
     task_id: TaskId,
     acct: ThreadExitAccounting,
 ) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
+    remove_thread_counting(pid, task_id, Some(acct)).map(|r| (r.zombie, r.wake, r.any_waiter))
+}
+
+/// What taking a thread off its process came to ([`remove_exiting_thread`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadRemoved {
+    /// It was the last: the process is a zombie now.
+    pub zombie: bool,
+    /// A task blocked waiting for this process, to wake.
+    pub wake: Option<TaskId>,
+    /// A task of the parent's blocked waiting for any child, to wake.
+    pub any_waiter: Option<TaskId>,
+    /// The zombie's end is its tracer's to report first
+    /// ([`Process::exit_held`]): the parent is told nothing now -- that is
+    /// [`release_exit_hold`]'s, later, exactly once -- and `wake` and
+    /// `any_waiter` are `None`, left registered for then.
+    pub held: bool,
+}
+
+/// [`remove_thread`] for a thread that has run and is exiting
+/// (`thread::on_thread_exit`): the counters folded into the process are the
+/// thread's own, read from the scheduler under this table's lock, in the same
+/// critical section that takes it off `threads` -- which is what lets
+/// [`process_counters`] count it exactly once. Its task must still be in the
+/// scheduler; the scheduler frees it later.
+pub fn remove_exiting_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<ThreadRemoved> {
+    remove_thread_counting(pid, task_id, None)
+}
+
+/// The body of [`remove_thread`] and [`remove_exiting_thread`]: `given` is
+/// the counters to fold, or `None` to read them from the scheduler.
+fn remove_thread_counting(
+    pid: ProcessId,
+    task_id: TaskId,
+    given: Option<ThreadExitAccounting>,
+) -> KernelResult<ThreadRemoved> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
+    let was_thread = proc.threads.contains(&task_id);
     proc.threads.retain(|&t| t != task_id);
 
     // Fold the exiting thread's per-task counters into the per-process
-    // accumulators so they survive the thread's removal from the scheduler.
-    // The caller captured these from the scheduler while the task was still
-    // alive (the scheduler frees the Task after this point).
+    // accumulators so they survive the thread's removal from the scheduler
+    // (which frees the Task after this point). Read here, under the lock
+    // and after the thread has left `threads`, so no reader of
+    // `process_counters` can see it both live and folded, or neither. Only
+    // a thread that was the process's: a stray id names someone else's task.
+    let acct = match given {
+        Some(acct) => acct,
+        None if was_thread => crate::sched::task_counters(task_id)
+            .map(ThreadExitAccounting::from)
+            .unwrap_or_default(),
+        None => ThreadExitAccounting::default(),
+    };
     proc.acct_user_ticks = proc.acct_user_ticks.saturating_add(acct.user_ticks);
     proc.acct_sys_ticks = proc.acct_sys_ticks.saturating_add(acct.sys_ticks);
+    proc.acct_cycles = proc.acct_cycles.saturating_add(acct.cycles);
     proc.acct_min_flt = proc.acct_min_flt.saturating_add(acct.min_flt);
     proc.acct_maj_flt = proc.acct_maj_flt.saturating_add(acct.maj_flt);
     proc.acct_nvcsw = proc.acct_nvcsw.saturating_add(acct.nvcsw);
@@ -2235,16 +2499,24 @@ pub fn remove_thread(
         // Capture the final exit code for the container layer (init-exit
         // notification) before the lock is dropped below.
         let zombie_exit_code = proc.exit_code.unwrap_or(0);
-        let wake = proc.wait_task.take();
         // Capture the parent before re-borrowing the table so we can
         // wake any `waitpid(-1)` waiter blocked in the parent.
         let parent_of_zombie = proc.parent;
+        // Traced by a process that is not its parent: its end goes to the
+        // tracer first (`Process::exit_held`), decided under this lock so
+        // that no `wait` of the parent's sees it in between. Its parent's
+        // waiters stay registered, to be woken when it is released.
+        proc.exit_held =
+            parent_of_zombie != pid && crate::proc::ptrace::holds_exit(pid, parent_of_zombie);
+        let held = proc.exit_held;
+        let wake = if held { None } else { proc.wait_task.take() };
         // Whether the parent will ever collect this zombie, decided now and
         // under this lock, so that no `wait` can see the process as a zombie
         // its parent asked never to be left (`ExitNotice`). The parent's
         // waiters are still woken below: one whose last child this was must
-        // learn there is nothing left (ECHILD).
-        if parent_of_zombie != pid {
+        // learn there is nothing left (ECHILD). A held zombie's is decided
+        // when it is released.
+        if parent_of_zombie != pid && !held {
             proc.exit_notice = exit_notice_for(parent_of_zombie);
         }
 
@@ -2265,7 +2537,7 @@ pub fn remove_thread(
         // the parent re-registers on its next blocking wait if more
         // children remain.  Guard against a process being its own
         // parent (kernel pid 0 / pathological cases).
-        let any_waiter = if parent_of_zombie != pid {
+        let any_waiter = if parent_of_zombie != pid && !held {
             table
                 .get_mut(&parent_of_zombie)
                 .and_then(|p| p.wait_any_task.take())
@@ -2289,10 +2561,15 @@ pub fn remove_thread(
         // A no-op for ordinary (non-container-init) processes.
         crate::container::notify_init_exit(pid, zombie_exit_code);
 
-        return Ok((true, wake, any_waiter));
+        return Ok(ThreadRemoved {
+            zombie: true,
+            wake,
+            any_waiter,
+            held,
+        });
     }
 
-    Ok((false, None, None))
+    Ok(ThreadRemoved::default())
 }
 
 /// Grant a capability to a process.
@@ -2491,9 +2768,17 @@ pub fn inherit_caps_from(parent: ProcessId, child: ProcessId) -> usize {
         // child with most of its parent's authority is strictly better than a
         // process that could not start, and `insert_caps` above already
         // established that precedent for capability transfer over IPC.
+        // What the parent's entry has put aside goes with the copy, as with
+        // a fork's: the child's credentials decide, once they are set
+        // (`inherit_credentials`), whether it is ever given back.
         if proc
             .cap_table
-            .insert(entry.resource_type, entry.resource_id, entry.rights)
+            .insert_with_suspended(
+                entry.resource_type,
+                entry.resource_id,
+                entry.rights,
+                entry.suspended,
+            )
             .is_ok()
         {
             copied = copied.saturating_add(1);
@@ -3066,6 +3351,18 @@ pub fn set_rlimit(
         return Err(KernelError::PermissionDenied);
     }
     proc.rlimits[resource as usize] = (new_cur, new_max);
+    drop(table);
+    // RLIMIT_CPU is enforced by thresholds on the process's CPU time, armed
+    // from the limits (Linux's `update_rlimit_cpu`); after the table's lock,
+    // which arming takes.
+    if resource == crate::proc::cputimer::RLIMIT_CPU {
+        crate::proc::cputimer::rlimit_cpu_changed(pid);
+    }
+    // RLIMIT_RTTIME by the tick's count of a real-time thread's running,
+    // against the limits it reads from the process's CPU account.
+    if resource == crate::proc::cputimer::RLIMIT_RTTIME {
+        crate::proc::cputimer::rlimit_rttime_changed(pid);
+    }
     Ok(())
 }
 
@@ -3371,11 +3668,7 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
 /// Until 2026-10-01 a 0 was refused up front with `InvalidArgument`, before
 /// the terminal checks, and a group that did not exist read the same as one
 /// in another session (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
-fn judge_fg_group(
-    table: &BTreeMap<ProcessId, Process>,
-    pgid: ProcessId,
-    sid: ProcessId,
-) -> KernelResult<()> {
+fn judge_fg_group(table: &ProcessTable, pgid: ProcessId, sid: ProcessId) -> KernelResult<()> {
     let mut exists = false;
     for p in table.values() {
         if p.pgid == pgid && pgid != 0 && p.state != ProcessState::Zombie {
@@ -3683,7 +3976,7 @@ pub fn pids_of_user(uid: u32) -> Vec<ProcessId> {
     let table = PROCESS_TABLE.lock();
     table
         .values()
-        .filter(|p| p.credentials.uid == uid && p.state != ProcessState::Zombie)
+        .filter(|p| p.credentials.ruid == uid && p.state != ProcessState::Zombie)
         .map(|p| p.pid)
         .collect()
 }
@@ -3907,8 +4200,11 @@ pub fn get_dumpable(pid: ProcessId) -> Option<u32> {
 /// may inspect. Otherwise, any of:
 /// - the reader is the target;
 /// - the reader runs as uid 0, as Linux's `CAP_SYS_PTRACE`;
-/// - the reader has the target's uid and gid, and the target is dumpable
-///   (`PR_SET_DUMPABLE` left at 1, `SUID_DUMP_USER`);
+/// - the reader's filesystem uid and gid are each of the target's real,
+///   effective and saved ids, and the target is dumpable (`PR_SET_DUMPABLE`
+///   left at 1, `SUID_DUMP_USER`) -- Linux's `__ptrace_may_access` for
+///   `PTRACE_MODE_FSCREDS`: a target that switched ids is no longer simply
+///   its user's;
 /// - the reader holds a `Process` capability for the target with `READ`.
 #[must_use]
 pub fn may_inspect(reader: Option<ProcessId>, target: Option<ProcessId>) -> bool {
@@ -3924,15 +4220,23 @@ pub fn may_access(reader: Option<ProcessId>, target: Option<ProcessId>, rights: 
     let Some(reader) = reader else {
         return true;
     };
-    let reader_ids = process_uid_gid(reader);
-    let is_root = reader_ids.is_some_and(|(uid, _)| uid == 0);
+    let reader_creds = get_credentials(reader);
+    let is_root = reader_creds
+        .as_ref()
+        .is_some_and(ProcessCredentials::is_root);
     let Some(target) = target else {
         return is_root;
     };
     if reader == target || is_root {
         return true;
     }
-    let same_user = reader_ids.is_some() && process_uid_gid(target) == reader_ids;
+    let same_user = match (reader_creds, get_credentials(target)) {
+        (Some(r), Some(t)) => {
+            [t.ruid, t.uid, t.suid].iter().all(|&id| id == r.fsuid)
+                && [t.rgid, t.gid, t.sgid].iter().all(|&id| id == r.fsgid)
+        }
+        _ => false,
+    };
     if same_user && get_dumpable(target) == Some(1) {
         return true;
     }
@@ -4686,7 +4990,7 @@ pub type JcWaiters = (Option<TaskId>, Option<TaskId>);
 /// pid (captured before the second mutable borrow).  Factored out so
 /// [`record_jc_stopped`] and [`record_jc_continued`] share identical wake
 /// semantics.
-fn take_jc_waiters(table: &mut BTreeMap<ProcessId, Process>, pid: ProcessId) -> JcWaiters {
+fn take_jc_waiters(table: &mut ProcessTable, pid: ProcessId) -> JcWaiters {
     let (wake, parent) = match table.get_mut(&pid) {
         Some(proc) => (proc.wait_task.take(), proc.parent),
         None => return (None, None),
@@ -5094,7 +5398,7 @@ pub fn group_exit_wstatus(pid: ProcessId) -> Option<i32> {
 /// process is still in the table, such as the parent's `SIGCHLD`.
 #[must_use]
 pub fn exit_info(pid: ProcessId) -> Option<ExitInfo> {
-    PROCESS_TABLE.lock().get(&pid).map(Process::exit_info)
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exit_info())
 }
 
 /// Try to reap (wait for) a zombie child process.
@@ -5129,19 +5433,24 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
             return Err(KernelError::PermissionDenied);
         }
 
-        if proc.state != ProcessState::Zombie {
-            return Ok(None); // Still running.
+        // Still running -- or ended, and its tracer's to report first.
+        if proc.state != ProcessState::Zombie || proc.exit_held {
+            return Ok(None);
         }
 
         let info = proc.exit_info();
 
         // Capture the child's CPU time to credit the parent's children-time
         // accumulator (POSIX cutime/cstime).  The child is a zombie, so all
-        // its threads have already folded their ticks into `acct_*`; we also
-        // carry up the child's own children-time (its reaped grandchildren),
+        // its threads have already folded their time into `acct_*`; its run
+        // time is split as `process_times` splits it (against its own last
+        // split, so a wait that read its usage first credits the same), and
+        // its own children-time (its reaped grandchildren) is carried up,
         // mirroring Linux's `wait_task_zombie` accumulation.
-        let child_user = proc.acct_user_ticks.saturating_add(proc.child_user_ticks);
-        let child_sys = proc.acct_sys_ticks.saturating_add(proc.child_sys_ticks);
+        let mut prev = proc.prev_cputime;
+        let (own_utime, own_stime) = exited_counters(proc).cpu.adjusted(&mut prev);
+        let child_user = own_utime.saturating_add(proc.child_utime_ns);
+        let child_sys = own_stime.saturating_add(proc.child_stime_ns);
         // Same carry-up for page faults (ru_minflt/ru_majflt children).
         let child_min = proc.acct_min_flt.saturating_add(proc.child_min_flt);
         let child_maj = proc.acct_maj_flt.saturating_add(proc.child_maj_flt);
@@ -5155,8 +5464,8 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
         // is removed (parent is a distinct table entry).  Absent for a
         // kernel-spawned child whose parent (pid 0) isn't in the table.
         if let Some(parent) = table.get_mut(&parent_pid) {
-            parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_user);
-            parent.child_sys_ticks = parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_utime_ns = parent.child_utime_ns.saturating_add(child_user);
+            parent.child_stime_ns = parent.child_stime_ns.saturating_add(child_sys);
             parent.child_min_flt = parent.child_min_flt.saturating_add(child_min);
             parent.child_maj_flt = parent.child_maj_flt.saturating_add(child_maj);
             parent.child_nvcsw = parent.child_nvcsw.saturating_add(child_nv);
@@ -5215,7 +5524,7 @@ pub fn release_autoreaped(pid: ProcessId) -> bool {
 ///
 /// Must be called with no `PROCESS_TABLE` lock held: every step takes it or a
 /// lock ordered after it.
-fn finish_process(pid: ProcessId, mut proc: Process) {
+fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     // The open-file lock is ordered after the process table, which is why
     // this waits until the record is out of it.
     for vma in &proc.vmas {
@@ -5264,7 +5573,8 @@ pub fn peek_exit(
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
     }
-    if proc.state != ProcessState::Zombie {
+    // Still running, or a zombie its tracer holds ([`Process::exit_held`]).
+    if proc.state != ProcessState::Zombie || proc.exit_held {
         return Ok(None);
     }
     Ok(Some((proc.exit_info(), proc.credentials.uid)))
@@ -5319,7 +5629,9 @@ fn peek_exit_matching(
             && is_collectable(proc)
         {
             has_child = true;
-            if proc.state == ProcessState::Zombie {
+            // A zombie its tracer holds is a child still, but not one to
+            // report ([`Process::exit_held`]).
+            if proc.state == ProcessState::Zombie && !proc.exit_held {
                 return Ok(Some((proc.pid, proc.exit_info(), proc.credentials.uid)));
             }
         }
@@ -5337,13 +5649,14 @@ fn peek_exit_matching(
 /// process is not reaped, so the UID must be looked up separately.
 #[must_use]
 pub fn process_uid(pid: ProcessId) -> Option<u32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.uid)
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.ruid)
 }
 
-/// Read a process's real UID *and* primary GID together, or `None` if the
-/// PID is unknown.
+/// Read a process's effective UID *and* effective primary GID together, or
+/// `None` if the PID is unknown -- the identity a peer's credentials report
+/// (Linux's `SO_PEERCRED` gives the effective ids).
 ///
-/// One lookup rather than [`process_uid`] plus a second call, because the
+/// One lookup rather than two calls, because the
 /// caller is snapshotting an identity for `SYS_CHANNEL_PEER_CRED` and two
 /// separate reads can straddle a credential change — producing a pair that
 /// describes no state the process was ever in.  A service authorising on a
@@ -5354,6 +5667,17 @@ pub fn process_uid_gid(pid: ProcessId) -> Option<(u32, u32)> {
         .lock()
         .get(&pid)
         .map(|p| (p.credentials.uid, p.credentials.gid))
+}
+
+/// Process `pid`'s filesystem user and group ids -- whom its file accesses
+/// are decided for, and who owns what it makes -- or `None` if there is no
+/// such process.
+#[must_use]
+pub fn process_fs_ids(pid: ProcessId) -> Option<(u32, u32)> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.credentials.fsuid, p.credentials.fsgid))
 }
 
 /// Mark a process as "ready" (fully initialized and accepting requests).
@@ -6709,9 +7033,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
 /// The process table, for [`resolve_fault`]: at once when it is free; with
 /// `wait`, after waiting for it, unless the calling task holds it already.
 /// `None` is "busy".
-fn lock_table_for_fault(
-    wait: bool,
-) -> Option<crate::sync::MutexGuard<'static, BTreeMap<ProcessId, Process>>> {
+fn lock_table_for_fault(wait: bool) -> Option<crate::sync::MutexGuard<'static, ProcessTable>> {
     table_or_busy(
         wait,
         || PROCESS_TABLE.try_lock(),
@@ -7408,6 +7730,8 @@ fn destroy_process_resources(
     crate::proc::itimer::cancel_real(pid);
     // Delete its POSIX timers, so none can queue a signal for a dead PID.
     crate::proc::posix_timer::process_exit(pid);
+    // And its CPU-time itimers and RLIMIT_CPU thresholds.
+    crate::proc::cputimer::process_exit(pid);
     // Drop any Linux per-signal sigaction state for this process.
     crate::syscall::linux::linux_sigaction_on_exit(pid);
 
@@ -8801,18 +9125,26 @@ pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> Kerne
     Ok(())
 }
 
-/// A process changes its own identity: as [`set_credentials`], and when the
-/// uid leaves 0 the process also loses root's authority, in the same step
-/// (`cap::rights_without_root`).
+/// A process changes its own identity: as [`set_credentials`], and root's
+/// authority (`cap::rights_without_root`) follows its user ids in the same
+/// step, as Linux's capabilities follow them (`cap_emulate_setxuid`):
+///
+/// - every one of the real, effective and saved ids leaving 0 -- from a
+///   process that had one at 0 -- takes root's authority away for good, what
+///   was put aside included (Linux clears the permitted set);
+/// - the effective id leaving 0 while another stays puts it aside
+///   (`CapTable::suspend`; Linux clears the effective set): the process
+///   cannot use it, but can have it back;
+/// - the effective id returning to 0 gives back what was put aside.
 ///
 /// Every credential-changing syscall comes here -- the native
-/// `SYS_PROCESS_SET_CREDENTIALS` and the Linux `setuid` family alike -- so a
-/// drop of root is one-way whichever ABI asked for it. The identity and the
-/// capability table change under one lock: nothing can observe the new uid
-/// with the old authority.
+/// `SYS_PROCESS_SET_CREDENTIALS`, `SYS_PROCESS_SET_IDS` and the Linux
+/// `setuid` family alike -- so the rule holds whichever ABI asked. The
+/// identity and the capability table change under one lock: nothing can
+/// observe the new ids with the old authority.
 ///
-/// Returns how many capabilities were narrowed or revoked (0 when the uid did
-/// not leave 0).
+/// Returns how many capability entries were narrowed, put aside or given
+/// back.
 ///
 /// # Errors
 ///
@@ -8820,15 +9152,114 @@ pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> Kerne
 pub fn change_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<usize> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    Ok(swap_credentials(proc, credentials))
+}
 
-    let leaves_root = proc.credentials.uid == 0 && credentials.uid != 0;
-    proc.credentials = credentials;
-    if !leaves_root {
-        return Ok(0);
-    }
-    Ok(proc.cap_table.narrow_all(|entry| {
+/// [`change_credentials`], deciding the new credentials under the same lock:
+/// `change` is given the process's credentials and whether it holds the
+/// `SET_CREDENTIALS` right over processes, and answers the credentials to
+/// install -- or a refusal, which leaves everything as it was. Nothing can
+/// change the credentials between the decision and the change, so a
+/// `setuid` racing another in a second thread is decided against what it
+/// replaces (`proc::setid`).
+///
+/// `change` runs under the process table's lock: it must not call back into
+/// this module.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not in the table; whatever
+/// `change` answers.
+pub fn update_credentials(
+    pid: ProcessId,
+    change: impl FnOnce(&ProcessCredentials, bool) -> KernelResult<ProcessCredentials>,
+) -> KernelResult<usize> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let may_set = proc
+        .cap_table
+        .has_capability_type(ResourceType::Process, Rights::SET_CREDENTIALS);
+    let credentials = change(&proc.credentials, may_set)?;
+    Ok(swap_credentials(proc, credentials))
+}
+
+/// Install `credentials` in `proc`, root's authority following the user
+/// ids as [`change_credentials`] describes. Returns how many capability
+/// entries changed.
+fn swap_credentials(proc: &mut Process, credentials: ProcessCredentials) -> usize {
+    let old = core::mem::replace(&mut proc.credentials, credentials);
+    let new = &proc.credentials;
+    let without_root = |entry: &cap::table::CapEntry| {
         cap::rights_without_root(entry.resource_type, entry.resource_id, entry.rights)
-    }))
+    };
+    if old.any_root_uid() && !new.any_root_uid() {
+        // For good: nothing put aside comes back.
+        let narrowed = proc.cap_table.narrow_all(without_root);
+        return narrowed.saturating_add(proc.cap_table.drop_suspended());
+    }
+    if old.uid == 0 && new.uid != 0 {
+        return proc.cap_table.suspend(without_root);
+    }
+    if old.uid != 0 && new.uid == 0 {
+        return proc.cap_table.restore();
+    }
+    0
+}
+
+/// Process `pid` is exec'ing: its saved and filesystem ids become its
+/// effective ones ([`ProcessCredentials::exec`]), and root's authority put
+/// aside goes for good if no user id is 0 after that -- Linux's exec
+/// computes a non-root process's permitted capabilities afresh, from nothing.
+/// A no-op for a process that is not there.
+pub fn exec_credentials(pid: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return;
+    };
+    proc.credentials.exec();
+    if !proc.credentials.any_root_uid() {
+        proc.cap_table.drop_suspended();
+    }
+}
+
+/// Spawn: `child` takes `parent`'s credentials as a fork and an exec would
+/// leave them -- `posix_spawn`'s contract -- with what an exec does to the
+/// saved and filesystem ids ([`ProcessCredentials::exec`]), and, when no user
+/// id of its is 0, without the root rights its inherited capabilities had
+/// put aside.
+///
+/// Until 2026-10-08 a spawned child kept the root credentials every new
+/// process record starts with, whoever its parent was: a program a user
+/// spawned ran as uid 0, past every file's permission bits and free to
+/// `setuid` to anyone.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if either process is not in the table.
+pub fn inherit_credentials(parent: ProcessId, child: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let mut credentials = table
+        .get(&parent)
+        .ok_or(KernelError::NoSuchProcess)?
+        .credentials
+        .clone();
+    credentials.exec();
+    let proc = table.get_mut(&child).ok_or(KernelError::NoSuchProcess)?;
+    if !credentials.any_root_uid() {
+        proc.cap_table.drop_suspended();
+    }
+    proc.credentials = credentials;
+    Ok(())
+}
+
+/// How many of process `pid`'s capability entries have rights put aside
+/// (`CapTable::suspend`): 0 for none, or no such process.
+#[must_use]
+pub fn suspended_rights(pid: ProcessId) -> usize {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map_or(0, |p| p.cap_table.suspended_count())
 }
 
 /// Get the list of thread task IDs for a process.
@@ -8853,18 +9284,68 @@ pub fn process_acct_ticks(pid: ProcessId) -> Option<(u64, u64)> {
         .map(|p| (p.acct_user_ticks, p.acct_sys_ticks))
 }
 
-/// Get a process's accumulated children CPU ticks (from reaped descendants)
-/// as `(child_user_ticks, child_sys_ticks)`.  Returns `(0, 0)` if the
-/// process is unknown.
+/// What process `pid`'s threads have used and counted -- the exited ones'
+/// accumulators plus every live thread's [`crate::sched::TaskCounters`] --
+/// or `None` if the process is unknown. A zombie's is its final total.
+///
+/// One snapshot: the table's lock is held while the live threads are summed
+/// (`PROCESS_TABLE` → `SCHED`, the documented order), and [`remove_thread`]
+/// folds an exiting thread's counters into the accumulators and takes it off
+/// `threads` under the same lock. So each thread is counted exactly once,
+/// whichever side of its exit a reader falls -- read separately, a thread
+/// that exited between the two reads was missed entirely -- and a CPU-time
+/// clock read from it never runs backwards: what an exiting thread folds
+/// in is sampled at the fold, after anything a reader saw of it live.
+#[must_use]
+pub fn process_counters(pid: ProcessId) -> Option<crate::sched::TaskCounters> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    Some(exited_counters(proc).plus(crate::sched::counters_sum(&proc.threads)))
+}
+
+/// What `proc`'s exited threads left: its `acct_*` accumulators.
+fn exited_counters(proc: &Process) -> crate::sched::TaskCounters {
+    crate::sched::TaskCounters {
+        cpu: crate::sched::CpuSample {
+            cycles: proc.acct_cycles,
+            user_ticks: proc.acct_user_ticks,
+            sys_ticks: proc.acct_sys_ticks,
+        },
+        min_flt: proc.acct_min_flt,
+        maj_flt: proc.acct_maj_flt,
+        nvcsw: proc.acct_nvcsw,
+        nivcsw: proc.acct_nivcsw,
+    }
+}
+
+/// Process `pid`'s run time as `(user, system)` nanoseconds -- the precise
+/// total of [`process_counters`] split in the proportion its ticks saw,
+/// against the process's last split (`sched::CpuSample::adjusted`, Linux's
+/// `thread_group_cputime_adjusted`) -- or `None` if the process is unknown.
+/// What `getrusage(RUSAGE_SELF)`, `times`, the wait family and
+/// `/proc/<pid>/stat` report.
+#[must_use]
+pub fn process_times(pid: ProcessId) -> Option<(u64, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let sample = exited_counters(proc)
+        .plus(crate::sched::counters_sum(&proc.threads))
+        .cpu;
+    Some(sample.adjusted(&mut proc.prev_cputime))
+}
+
+/// Get a process's accumulated children CPU time (from reaped descendants)
+/// as `(user, system)` nanoseconds.  Returns `(0, 0)` if the process is
+/// unknown.
 ///
 /// Backs `times` `tms_cutime`/`tms_cstime`, `getrusage(RUSAGE_CHILDREN)`,
 /// and `/proc/<pid>/stat` fields 16/17.
 #[must_use]
-pub fn process_child_ticks(pid: ProcessId) -> (u64, u64) {
+pub fn process_child_times(pid: ProcessId) -> (u64, u64) {
     let table = PROCESS_TABLE.lock();
     table
         .get(&pid)
-        .map(|p| (p.child_user_ticks, p.child_sys_ticks))
+        .map(|p| (p.child_utime_ns, p.child_stime_ns))
         .unwrap_or((0, 0))
 }
 
@@ -11112,11 +11593,28 @@ fn test_destroy() -> KernelResult<()> {
 ///   3. **Children-time carry-up** — reaping a zombie credits the
 ///      parent's `child_*` accumulator with the child's CPU time *plus*
 ///      the child's own children-time (POSIX cutime/cstime), mirroring
-///      Linux's `wait_task_zombie` → `signal->cutime`/`cstime`.
+///      Linux's `wait_task_zombie` → `signal->cutime`/`cstime`. The CPU
+///      time is the child's run time split by its tick ratio
+///      (`sched::CpuSample::adjusted`), in nanoseconds.
 fn test_cpu_time_accounting() -> KernelResult<()> {
     let parent = create("cputime-parent", 0);
     let child = create("cputime-child", parent);
     let grandchild = create("cputime-grandchild", child);
+    // Synthetic run times, 30 ms and 80 ms of cycles, and the splits they
+    // should be credited as: user and system in the proportion of the ticks.
+    let ms_cycles = crate::bench::tsc_freq().checked_div(1_000).unwrap_or(0);
+    let gc_cycles = ms_cycles.saturating_mul(30);
+    let c_cycles = ms_cycles.saturating_mul(80);
+    let split = |cycles: u64, user_ticks: u64, sys_ticks: u64| {
+        crate::sched::CpuSample {
+            cycles,
+            user_ticks,
+            sys_ticks,
+        }
+        .adjusted(&mut crate::sched::PrevCputime::default())
+    };
+    let gc_split = split(gc_cycles, 2, 1);
+    let c_split = split(c_cycles, 5, 3);
 
     // Bring the grandchild to life then make it a zombie, charging it
     // 2 user / 1 sys ticks and 3 minor / 1 major faults at thread-exit.
@@ -11128,6 +11626,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 2,
             sys_ticks: 1,
+            cycles: gc_cycles,
             min_flt: 3,
             maj_flt: 1,
             nvcsw: 6,
@@ -11199,7 +11698,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The child reaps the grandchild → child.child_* == (2, 1).
+    // The child reaps the grandchild → child.child_* == its split.
     set_running(child)?;
     add_thread(child, 971)?;
     match try_reap(child, grandchild)? {
@@ -11211,10 +11710,11 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if process_child_ticks(child) != (2, 1) {
+    if process_child_times(child) != gc_split {
         serial_println!(
-            "[proc]   FAIL: child children-time != (2,1): {:?}",
-            process_child_ticks(child)
+            "[proc]   FAIL: child children-time != {:?}: {:?}",
+            gc_split,
+            process_child_times(child)
         );
         destroy(child);
         destroy(parent);
@@ -11250,6 +11750,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 5,
             sys_ticks: 3,
+            cycles: c_cycles,
             min_flt: 4,
             maj_flt: 2,
             nvcsw: 7,
@@ -11270,10 +11771,15 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if process_child_ticks(parent) != (7, 4) {
+    let both = (
+        c_split.0.saturating_add(gc_split.0),
+        c_split.1.saturating_add(gc_split.1),
+    );
+    if process_child_times(parent) != both {
         serial_println!(
-            "[proc]   FAIL: parent children-time != (7,4): {:?}",
-            process_child_ticks(parent)
+            "[proc]   FAIL: parent children-time != {:?}: {:?}",
+            both,
+            process_child_times(parent)
         );
         destroy(parent);
         return Err(KernelError::InternalError);

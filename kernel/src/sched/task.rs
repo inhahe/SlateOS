@@ -745,6 +745,32 @@ pub struct Task {
     /// Convert to nanoseconds via `bench::cycles_to_ns(total_cycles)`.
     pub total_cycles: u64,
 
+    /// The running processor-time totals of the process this task is a
+    /// thread of, shared by all its threads, which the switch-out and the
+    /// tick charge once a CPU-time timer on the process's clock has made
+    /// them keep it ([`super::ProcCpuAccount`]). `None` for a kernel task;
+    /// set as the thread joins its process (`proc::pcb::add_thread`).
+    pub cpu_account: Option<alloc::sync::Arc<super::ProcCpuAccount>>,
+
+    /// The earliest expiry of the CPU-time timers on this thread's own
+    /// clocks, per measure (`CpuClockKind` order: PROF, VIRT, SCHED), in
+    /// nanoseconds of that measure; [`super::NO_CPU_EXPIRY`] for none. The
+    /// tick compares them with the thread's sample. Lowered when a timer is
+    /// armed, recomputed after expiries (`proc::posix_timer`); an entry left
+    /// earlier than the truth only costs the tick a look.
+    pub cpu_timer_next: [u64; 3],
+
+    /// Ticks this thread has run under a real-time policy since it last
+    /// blocked, counted while its process has an `RLIMIT_RTTIME` -- Linux's
+    /// `p->rt.timeout`, which the tick checks against that limit
+    /// (`proc::cputimer`). Cleared when it blocks ([`Self::record_block`]).
+    pub rt_run_ticks: u64,
+
+    /// The user/system split of this thread's run time last reported
+    /// (`getrusage(RUSAGE_THREAD)`, `/proc/<pid>/task/<tid>/stat`), which
+    /// keeps the next from going back ([`super::CpuSample::adjusted`]).
+    pub prev_cputime: super::PrevCputime,
+
     /// CPU time charged to this task while it was executing **user-mode**
     /// (ring 3) code, in timer ticks (USER_HZ = 100, so 10 ms each).
     ///
@@ -992,6 +1018,10 @@ impl Task {
 
         // Reset burst counter for the next wake cycle.
         self.burst_ticks = 0;
+
+        // A real-time thread that sleeps starts its RLIMIT_RTTIME count
+        // again (Linux clears `rt.timeout` as it wakes).
+        self.rt_run_ticks = 0;
     }
 
     /// Whether the task has earned the interactive boost: its CPU bursts
@@ -1254,6 +1284,10 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            cpu_account: None,
+            cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1349,6 +1383,10 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            cpu_account: None,
+            cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1517,6 +1555,10 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            cpu_account: None,
+            cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
+            prev_cputime: super::PrevCputime { utime: 0, stime: 0 },
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,

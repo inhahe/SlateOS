@@ -1,5 +1,15 @@
 ## TD-B-COREUTILS-IS-LINTED-AT-STOCK-CLIPPY-NOT-AT-THE-STANDARD-CLAUDE-MD-MANDATES (lane B, 2026-09-04)
 
+**Status:** FIXED 2026-10-07 (lane B), pending a boot test on `main` before
+the move to `known-issues-resolved/`. Both crates inherit `[workspace.lints]`
+now: `coreutils` since `ee3db643f` (2026-09-15, "subject the 83 commands to
+the defensive lints"), which left this entry open for its other half, and
+`userspace/shell` since 2026-10-07 -- a 180-line toolchain smoke test, whose
+one finding was a slice that could not be proven in range (`&v[..5]`, now
+`take(5)`). It is off `scripts/workspace-lints-baseline.txt`, so it cannot
+lose them again without the ratchet saying so. Found still open while reading
+the `missing [lints]` warnings that cargo 1.98 prints in WSL.
+
 **In short:** `CLAUDE.md` requires every crate to deny `clippy::all` *and*
 `clippy::pedantic`, and to warn on five lints that catch panics and overflow
 (`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,

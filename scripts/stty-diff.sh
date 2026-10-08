@@ -51,13 +51,20 @@ import fcntl, os, struct, subprocess, sys, termios
 
 state, rows, cols, ttyout = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "1"
 cmd = sys.argv[sys.argv.index("--") + 1:]
+# Descriptors to close in the command alone, after the terminal is in place:
+# `TTYRUN_CLOSE=0,1` and the like.
+close = [int(x) for x in os.environ.get("TTYRUN_CLOSE", "").split(",") if x]
+def closer():
+    for fd in close:
+        os.close(fd)
 master, slave = os.openpty()
 name = os.ttyname(slave)
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 cmd = [os.fsencode(a).replace(b"@TTY@", os.fsencode(name)) for a in cmd]
 captured = b""
 if ttyout:
-    p = subprocess.Popen(cmd, stdin=slave, stdout=slave)
+    p = subprocess.Popen(cmd, stdin=slave, stdout=slave,
+                         preexec_fn=closer if close else None)
     # Read until the command exits; the terminal stays open, so read what
     # is there rather than waiting for an end.
     import select
@@ -71,7 +78,8 @@ if ttyout:
                 break
     rc = p.wait()
 else:
-    rc = subprocess.run(cmd, stdin=slave).returncode
+    rc = subprocess.run(cmd, stdin=slave,
+                        preexec_fn=closer if close else None).returncode
 raw = fcntl.ioctl(slave, termios.TCGETS, b"\0" * 60)
 ws = struct.unpack("HHHH", fcntl.ioctl(slave, termios.TIOCGWINSZ, b"\0" * 8))
 with open(state, "w") as f:
@@ -87,7 +95,8 @@ TTYOUT=0         # 1: standard output on the terminal too
 ROWS=24; WIDTH=80
 LOCALE=C.UTF-8
 STDIN=           # `null`: standard input /dev/null rather than a terminal
-reset_knobs() { COLS=-; TTYOUT=0; ROWS=24; WIDTH=80; LOCALE=C.UTF-8; STDIN=; }
+CLOSE=           # descriptors to close in stty alone: `1`, `0,1` and so on
+reset_knobs() { COLS=-; TTYOUT=0; ROWS=24; WIDTH=80; LOCALE=C.UTF-8; STDIN=; CLOSE=; }
 
 # $1 = side, $2 = output prefix; the rest is stty's argv.
 run_side() {
@@ -99,8 +108,8 @@ run_side() {
     echo $? >"$p.$side.rc"
     : >"$p.$side.state"
   else
-    diff_run timeout -k 5 30 python3 "$ttyrun" "$p.$side.state" "$ROWS" "$WIDTH" "$TTYOUT" -- \
-      "${envs[@]}" stty "$@" >"$p.$side.out" 2>"$p.$side.err"
+    TTYRUN_CLOSE=$CLOSE diff_run timeout -k 5 30 python3 "$ttyrun" "$p.$side.state" \
+      "$ROWS" "$WIDTH" "$TTYOUT" -- "${envs[@]}" stty "$@" >"$p.$side.out" 2>"$p.$side.err"
     echo $? >"$p.$side.rc"
   fi
   return 0
@@ -116,6 +125,7 @@ compare() {
   [ "$TTYOUT" = 1 ] && LABEL="$LABEL [stdout on a ${WIDTH}-column terminal]"
   [ "$STDIN" = null ] && LABEL="$LABEL [stdin /dev/null]"
   [ "$LOCALE" != C.UTF-8 ] && LABEL="$LABEL [LC_ALL=$LOCALE]"
+  [ -n "$CLOSE" ] && LABEL="$LABEL [descriptors $CLOSE closed]"
   reset_knobs
   local o_rc g_rc
   o_rc=$(cat "$p.ours.rc"); g_rc=$(cat "$p.gnu.rc")
@@ -295,6 +305,23 @@ run_case -F
 run_case --file
 run_case -F /nonexistent/tty
 run_case -F /dev/null
+
+# `-F` with standard descriptors closed. Upstream reopens the device over
+# descriptor 0 (`fd_reopen`); ours uses it where its open put it, which with
+# standard output closed is descriptor 1 -- but read-only, so printing the
+# settings there fails with the `EBADF` a closed descriptor gives, as GNU's
+# does. These hold the two indistinguishable, settings applied included.
+CLOSE=1; run_case -F @TTY@
+CLOSE=1; run_case -a -F @TTY@
+CLOSE=1; run_case -g -F @TTY@
+CLOSE=1; run_case -F @TTY@ -echo
+CLOSE=0; run_case -F @TTY@
+CLOSE=0; run_case -F @TTY@ -echo
+CLOSE=0,1; run_case -F @TTY@
+CLOSE=0,1; run_case -F @TTY@ -echo
+CLOSE=0,1; run_case -a -F @TTY@
+CLOSE=1; run_case -F /nonexistent/tty
+CLOSE=0; run_case -F /dev/null
 run_case -- echo
 run_case echo -- -echo
 run_case -

@@ -614,11 +614,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
     // A user: give the child and the grandchild a uid of their own.
     for p in [child, grandchild] {
-        let creds = pcb::ProcessCredentials {
-            uid: 4242,
-            gid: 4242,
-            ..pcb::ProcessCredentials::root()
-        };
+        let creds = pcb::ProcessCredentials::new(4242, 4242);
         if pcb::set_credentials(p, creds).is_err() {
             return fail("could not give the scratch processes a user", &pids);
         }

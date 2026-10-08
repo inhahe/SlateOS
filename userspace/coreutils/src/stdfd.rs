@@ -187,6 +187,9 @@ mod imp {
         // The same, and for the same reason, as `write` above.
         fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         fn close(fd: i32) -> i32;
+        // As `nohup.rs` and `sh.rs` declare it: two declarations of one C
+        // symbol must agree (`clashing_extern_declarations`).
+        fn dup2(oldfd: i32, newfd: i32) -> i32;
         // Declared as the standard library declares it, for the reason given
         // at `write`.
         fn open(path: *const core::ffi::c_char, oflag: i32, ...) -> i32;
@@ -361,6 +364,42 @@ mod imp {
         // SAFETY: `fcntl` returned a fresh descriptor that nothing else owns,
         // so the `File` may take it and will close it exactly once.
         Ok(unsafe { std::fs::File::from_raw_fd(dup) })
+    }
+
+    /// `F_SETFD` and `FD_CLOEXEC`, for [`move_to`] (with [`stdopen`]'s
+    /// `F_GETFD`): the Linux values.
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
+
+    pub fn move_to(file: std::fs::File, fd: i32) -> io::Result<()> {
+        use std::os::fd::IntoRawFd;
+
+        let raw = file.into_raw_fd();
+        if raw == fd {
+            // The open landed on `fd` itself. The standard library opened it
+            // close-on-exec, which a `dup2` onto `fd` would have cleared;
+            // clear it here, so that `fd` is the same either way.
+            // SAFETY: `F_GETFD` and `F_SETFD` read and write only the
+            // descriptor's flags, and `fd` is open: it is the file just
+            // opened, which this function now owns as `fd`.
+            let flags = unsafe { fcntl(fd, F_GETFD) };
+            // SAFETY: as above.
+            if flags < 0 || unsafe { fcntl(fd, F_SETFD, flags & !FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        // SAFETY: `dup2` acts only on the descriptor table, and `raw` is a
+        // live descriptor this function now owns.
+        let rc = unsafe { dup2(raw, fd) };
+        let failure = (rc < 0).then(io::Error::last_os_error);
+        // The original's close is not reported: nothing was read or written
+        // through it, so it has nothing to say that the caller could act on,
+        // and `dup2`'s verdict is the one that matters.
+        // SAFETY: `raw` is owned here -- `into_raw_fd` gave up the `File`'s
+        // claim on it -- and is closed exactly once, on both paths.
+        unsafe { close(raw) };
+        failure.map_or(Ok(()), Err)
     }
 
     pub fn read_fd(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
@@ -552,6 +591,12 @@ mod imp {
         drop(file);
         Ok(())
     }
+
+    /// No `dup2(2)` without libc, so nothing can be put on a descriptor.
+    pub fn move_to(file: std::fs::File, _fd: i32) -> io::Result<()> {
+        drop(file);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 /// Undo the runtime's substitution, restoring the descriptor table the process
@@ -614,6 +659,72 @@ pub fn sigpipe_ignored_at_startup() -> bool {
 /// it.
 pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
     imp::fd_safer(file)
+}
+
+/// gnulib's `open_safer`, as a method on [`std::fs::OpenOptions`]: the open,
+/// then [`fd_safer`], so that the file never takes descriptor 0, 1 or 2.
+///
+/// # Where, and only where, upstream does it
+///
+/// Not every program: whether a file opened with a standard descriptor
+/// closed lands *on* that descriptor is observable, and upstream decides it
+/// per program. In coreutils 9.4 the safer opens come from per-file headers
+/// -- `stdio--.h` (a safe `fopen`) in `comm`, `csplit`, `digest.c` (the
+/// `*sum` programs and `cksum`), `dircolors`, `du`, `join`, `pr`, `ptx`,
+/// `shuf`, `tee`, `tsort` and `uniq`; `fcntl--.h` (a safe `open`) in
+/// `copy.c` (`cp`, `mv`, `install`), `shred`, `split` and `tail`;
+/// `stdlib--.h` for `sort`'s and `tac`'s temporary files; `unistd--.h` in
+/// `nohup`; `openat_safer` for `ln`'s target directory; and gnulib's `fts`
+/// and `randread` -- and `system.h`, which every program includes, carries
+/// none of them. So `cat`, `sort`'s inputs, `paste`, `wc` and the rest open
+/// plainly, and a file opened with standard input closed *is* standard
+/// input: measured, `sort f - <&-` sorts `f` once and exits 0 (its
+/// `xfclose` leaves descriptor 0 open, so `-` finds `f` at its end), and
+/// `paste f - <&-` says `standard input is closed` (it checks for exactly
+/// that descriptor). A port opens as its upstream does, and these are for
+/// the programs whose upstream is safe -- what `tee` needed: `printf
+/// 'hello\n' | tee out.txt >&-` wrote `hello` into `out.txt` twice and
+/// exited 0, where GNU's writes it once and says `tee: 'standard output':
+/// Bad file descriptor`. `known-issues-resolved/TD-B-GUARDED-PROGRAMS-OPEN-
+/// FILES-WITHOUT-OPEN-SAFER.md` lists, program by program, which were
+/// converted and which were measured and left as they are.
+pub trait OpenSafer {
+    /// [`std::fs::OpenOptions::open`], kept off descriptors 0-2.
+    ///
+    /// # Errors
+    ///
+    /// What the open said, or `EMFILE` from moving the file up.
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File>;
+}
+
+impl OpenSafer for std::fs::OpenOptions {
+    fn open_safer<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<std::fs::File> {
+        self.open(path).and_then(fd_safer)
+    }
+}
+
+/// [`std::fs::File::open`], kept off descriptors 0-2: `open_safer (name,
+/// O_RDONLY)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn open_read_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open_safer(path)
+}
+
+/// [`std::fs::File::create`], kept off descriptors 0-2: `open_safer (name,
+/// O_WRONLY | O_CREAT | O_TRUNC, 0666)`.
+///
+/// # Errors
+///
+/// What the open said, or `EMFILE` from moving the file up.
+pub fn create_safer<P: AsRef<std::path::Path>>(path: P) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_safer(path)
 }
 
 /// Whether `fd` is a terminal — `isatty(3)`.
@@ -881,6 +992,65 @@ pub fn close_stdin() -> io::Result<()> {
 /// when the process started. Always `Ok` off Linux.
 pub fn close_descriptor(fd: i32) -> io::Result<()> {
     imp::close_fd(fd)
+}
+
+/// gnulib's `fd_reopen` once the file is open, and the second half of glibc's
+/// `freopen`: put `file` on descriptor `fd`, consuming it.
+///
+/// `dup2` it there and close the original -- unless the open already landed on
+/// `fd`, as it does when `fd` is closed and every lower descriptor open, since
+/// an open takes the lowest free number. That case is not an optimisation:
+/// `dup2 (fd, fd)` succeeds and does nothing, and closing the original would
+/// then close `fd` itself. `shuf -o FILE` did exactly that with standard
+/// output closed, and wrote its output to no descriptor at all (`nohup` had met
+/// the trap first, and kept a private copy of this until it moved here). Either
+/// way `fd` ends without close-on-exec, as a `dup2` onto it leaves it.
+///
+/// # Errors
+///
+/// What `dup2` or `fcntl` said. `Unsupported` off Linux, where there is no
+/// descriptor table to arrange.
+pub fn move_to(file: std::fs::File, fd: i32) -> io::Result<()> {
+    imp::move_to(file, fd)
+}
+
+/// How [`freopen`] opens its file: stdio's `"r"` or `"w"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reopen {
+    /// `"r"`: `O_RDONLY`.
+    Read,
+    /// `"w"`: `O_WRONLY | O_CREAT | O_TRUNC`, mode 0666 less the umask.
+    Write,
+}
+
+/// glibc's `freopen (name, mode, stream)` for the standard stream on `fd`:
+/// open `path`, then [`move_to`] `fd`, where the stream reads or writes.
+///
+/// Upstream's `uniq`, `shuf`, `tsort`, `dircolors`, `du --files0-from` and
+/// `ptx` take operands so, under `stdio--.h`'s `freopen_safer` -- whose
+/// guarding of the lower descriptors changes nothing once glibc has moved the
+/// file onto the stream's own number. A port that opened the operand as an
+/// ordinary file instead put it on whichever descriptor was free, and that is
+/// observable with a standard descriptor closed: `uniq f /nonexistent/x >&-`
+/// opened `f` *as* descriptor 1, closed it while reporting the output's
+/// failure, and aborted on the standard library's I/O-safety check.
+///
+/// # Errors
+///
+/// When the open fails, glibc's `freopen` closes `fd` before it returns, and
+/// `errno` is then that close's when it fails -- `EBADF`, when the stream was
+/// closed to begin with -- and the open's own otherwise. Measured, GNU's
+/// `tsort nosuch <&-` says `tsort: nosuch: Bad file descriptor`, and so does
+/// this. Otherwise what [`move_to`] said.
+pub fn freopen<P: AsRef<std::path::Path>>(path: P, mode: Reopen, fd: i32) -> io::Result<()> {
+    let opened = match mode {
+        Reopen::Read => std::fs::File::open(path),
+        Reopen::Write => std::fs::File::create(path),
+    };
+    match opened {
+        Ok(file) => move_to(file, fd),
+        Err(e) => Err(close_descriptor(fd).err().unwrap_or(e)),
+    }
 }
 
 /// Whether a diagnostic failed to reach descriptor 2 — `ferror (stderr)`,
@@ -1373,15 +1543,25 @@ impl Inner {
 
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self, fd: i32) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.drain_checked(fd);
+    }
+
+    /// [`Inner::drain`], also handing back this push's own failure --
+    /// stdio's `fflush` returning `EOF`. Nothing buffered is success,
+    /// whatever failed before, as an `fflush` with nothing to write is.
+    fn drain_checked(&mut self, fd: i32) -> io::Result<()> {
         if self.buf.is_empty() {
-            return;
+            return Ok(());
         }
         before_diagnostic(fd);
         let result = imp::write_all(fd, &self.buf);
         self.buf.clear();
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 
     /// One `write`, honouring the buffering mode: stdio's `fwrite`, through
@@ -1399,18 +1579,28 @@ impl Inner {
     /// that fills part-way it wrote out the remainder glibc keeps for the
     /// close. The `glibc_measured` test holds the table.
     fn put(&mut self, fd: i32, bytes: &[u8]) {
+        // Recorded either way; this caller does not ask about this one.
+        let _ = self.put_checked(fd, bytes);
+    }
+
+    /// [`Inner::put`], also handing back the failure of a write this call
+    /// made -- the flush of a buffer it filled, or its own bytes going
+    /// straight out: stdio's `fwrite` coming up short, `fprintf` returning a
+    /// negative count.
+    fn put_checked(&mut self, fd: i32, bytes: &[u8]) -> io::Result<()> {
         before_diagnostic(fd);
         if bytes.is_empty() {
             // Nothing to write allocates nothing, as `fwrite` of nothing does
             // not: the first real write is still the first.
-            return;
+            return Ok(());
         }
         let line = match self.mode {
             Buffering::None => {
-                if let Err(e) = imp::write_all(fd, bytes) {
+                return imp::write_all(fd, bytes).map_err(|e| {
+                    let copy = clone_error(&e);
                     self.record(fd, e);
-                }
-                return;
+                    copy
+                });
             }
             Buffering::Line => true,
             Buffering::Block => false,
@@ -1430,9 +1620,11 @@ impl Inner {
             imp::write_all(fd, b)
         });
         self.buf = held;
-        if let Err(e) = result {
+        result.map_err(|e| {
+            let copy = clone_error(&e);
             self.record(fd, e);
-        }
+            copy
+        })
     }
 }
 
@@ -1667,6 +1859,39 @@ impl Stream {
         self.with(Inner::drain);
     }
 
+    /// `fflush`, with its verdict: push what is buffered, and say whether
+    /// *that* push failed -- not whether anything ever did, which
+    /// [`Stream::errored`] answers. Nothing buffered is success, whatever
+    /// failed before, as `fflush` with nothing to write is.
+    ///
+    /// For a utility that reports a failed flush in its own words before
+    /// [`close_stdout`] has its say: findutils' `cleanup` ends `if (fflush
+    /// (stdout) == EOF) nonfatal_nontarget_file_error (errno, "standard
+    /// output")`, and `-printf`'s `\c` is a checked `fflush` of its stream.
+    ///
+    /// # Errors
+    ///
+    /// This flush's failure, which the stream keeps as well, as it keeps any.
+    pub fn flush_now(&mut self) -> io::Result<()> {
+        self.with(Inner::drain_checked)
+    }
+
+    /// A write that says whether it failed: stdio's `fwrite` coming up short,
+    /// or `fprintf` returning a negative count -- which happens when the call
+    /// itself had to write and the write failed: a buffer it filled could
+    /// not be flushed, or its bytes went straight out (an unbuffered stream)
+    /// and did not arrive. The failure is kept as well, as any write's is.
+    ///
+    /// For a utility that checks its writes one by one, as findutils'
+    /// `checked_fprintf` does for `-printf`, and `list_file` for `-ls`.
+    ///
+    /// # Errors
+    ///
+    /// The failure of a write this call made.
+    pub fn write_checked(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.with(|inner, fd| inner.put_checked(fd, bytes))
+    }
+
     /// Give up on the stream: forget what is still buffered, and forget the
     /// failure that stopped it.
     ///
@@ -1812,6 +2037,33 @@ mod tests {
 
     fn shared() -> std::sync::MutexGuard<'static, ()> {
         SHARED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `write_checked` reports the failure of a write *it* made -- the flush
+    /// of a buffer it filled, or its own bytes on an unbuffered stream -- and
+    /// not before; `flush_now` reports its own push failing, and nothing
+    /// when there was nothing to push, whatever failed earlier.
+    #[test]
+    fn checked_writes_and_flushes_report_their_own_failures() {
+        let mut s = broken(Buffering::Block);
+        // Held in the buffer: nothing has been written, so nothing failed.
+        assert!(s.write_checked(b"abc").is_ok());
+        assert!(!s.errored());
+        // The push of what is held fails, and says so.
+        assert!(s.flush_now().is_err());
+        assert!(s.errored());
+        // Nothing left to push: success, though the stream has failed.
+        assert!(s.flush_now().is_ok());
+        assert!(s.errored());
+
+        // A write that fills the buffer fails in that very call.
+        let mut b = broken(Buffering::Block);
+        assert!(b.write_checked(&vec![b'x'; 20_000]).is_err());
+
+        // Unbuffered: every write goes out at once, and fails at once.
+        let mut u = broken(Buffering::None);
+        assert!(u.write_checked(b"x").is_err());
+        assert!(u.write_checked(b"").is_ok());
     }
 
     #[test]
@@ -2297,5 +2549,201 @@ mod tests {
         assert_eq!(text, b"kept");
         drop(file);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Whether `fd` is close-on-exec: `fcntl (fd, F_GETFD) & FD_CLOEXEC`.
+    #[cfg(target_os = "linux")]
+    fn close_on_exec(fd: i32) -> bool {
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        // SAFETY: `F_GETFD` (1) only reads the descriptor's flags.
+        let flags = unsafe { fcntl(fd, 1) };
+        assert!(flags >= 0, "descriptor {fd} is not open");
+        flags & 1 != 0
+    }
+
+    /// A file of `text` in the temporary directory, for the tests below.
+    #[cfg(target_os = "linux")]
+    fn scratch_file(tag: &str, text: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("stdfd-{tag}-{}", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// Everything readable from `fd`, which is then closed: the descriptors
+    /// the tests below arrange belong to nothing else.
+    #[cfg(target_os = "linux")]
+    fn drain_and_close(fd: i32) -> Vec<u8> {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+
+        // SAFETY: the caller put a file on `fd` and nothing else owns it, so
+        // the `File` may take it and close it, once.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut text = Vec::new();
+        file.read_to_end(&mut text).unwrap();
+        text
+    }
+
+    // The descriptors the tests below arrange are 901-905: far above any file
+    // the rest of the suite holds open, one per test since they run at once,
+    // and under the default soft limit of 1024 that `dup2` is held to. Each
+    // test first closes its own, ignoring the answer: nothing else uses it, so
+    // the close either frees it or finds it free already.
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn move_to_puts_the_file_on_the_descriptor_without_close_on_exec() {
+        const FD: i32 = 901;
+        let path = scratch_file("move-to", b"moved");
+        let _ = super::close_descriptor(FD);
+        super::move_to(std::fs::File::open(&path).unwrap(), FD).unwrap();
+        let cloexec = close_on_exec(FD);
+        let text = drain_and_close(FD);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!cloexec, "a dup2 onto the descriptor clears close-on-exec");
+        assert_eq!(text, b"moved");
+    }
+
+    /// The case that closed `shuf -o`'s output: the open already landed on
+    /// the descriptor wanted.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn move_to_the_descriptor_it_is_on_keeps_it_open() {
+        use std::os::fd::AsRawFd;
+
+        let path = scratch_file("move-to-self", b"stays");
+        let file = std::fs::File::open(&path).unwrap();
+        let fd = file.as_raw_fd();
+        assert!(
+            close_on_exec(fd),
+            "the standard library opens close-on-exec"
+        );
+        super::move_to(file, fd).unwrap();
+        let cloexec = close_on_exec(fd);
+        let text = drain_and_close(fd);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!cloexec, "the same descriptor a dup2 would have left");
+        assert_eq!(text, b"stays");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_for_reading_puts_the_file_on_the_descriptor() {
+        const FD: i32 = 902;
+        let path = scratch_file("freopen-read", b"read me");
+        let _ = super::close_descriptor(FD);
+        super::freopen(&path, super::Reopen::Read, FD).unwrap();
+        let text = drain_and_close(FD);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(text, b"read me");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_for_writing_creates_and_truncates() {
+        const FD: i32 = 903;
+        let path = scratch_file("freopen-write", b"old and longer");
+        let _ = super::close_descriptor(FD);
+        super::freopen(&path, super::Reopen::Write, FD).unwrap();
+        let wrote = super::write_all(FD, b"new");
+        let closed = super::close_descriptor(FD);
+        let text = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(wrote.is_ok() && closed.is_ok(), "{wrote:?} {closed:?}");
+        assert_eq!(text, b"new");
+    }
+
+    /// glibc's rule: a failed open closes the stream's descriptor, and the
+    /// error is that close's when it fails -- `EBADF` for a stream that was
+    /// closed already, which is GNU's `tsort nosuch <&-`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_failing_on_a_closed_descriptor_reports_ebadf() {
+        const FD: i32 = 904;
+        let _ = super::close_descriptor(FD);
+        let e = super::freopen("/nonexistent/stdfd-freopen", super::Reopen::Read, FD)
+            .expect_err("opened a file that does not exist");
+        assert_eq!(e.raw_os_error(), Some(9), "want EBADF, got {e}");
+    }
+
+    /// And with the stream open, the open's own error -- after which the
+    /// descriptor is closed, as glibc closes it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn freopen_failing_on_an_open_descriptor_reports_the_open_and_closes_it() {
+        const FD: i32 = 905;
+        let path = scratch_file("freopen-fail", b"x");
+        let _ = super::close_descriptor(FD);
+        super::move_to(std::fs::File::open(&path).unwrap(), FD).unwrap();
+        let e = super::freopen("/nonexistent/stdfd-freopen", super::Reopen::Write, FD)
+            .expect_err("created a file in a directory that does not exist");
+        let after = super::imp::close_fd(FD);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "got {e}");
+        assert_eq!(
+            after.err().and_then(|e| e.raw_os_error()),
+            Some(9),
+            "the descriptor is closed afterwards"
+        );
+    }
+
+    /// The three safer opens open as the calls they replace do. Where the
+    /// descriptor lands needs one of 0-2 closed, which a test cannot do safely
+    /// (see the test above); `tee-diff.sh`'s closed-stdout cases and
+    /// `awk-diff.sh`'s `wfile_closed_case` hold that end to end.
+    #[test]
+    fn the_safer_opens_open_as_the_plain_ones_do() {
+        use super::OpenSafer;
+        use std::io::{Read, Write};
+
+        let dir = std::env::temp_dir().join(format!("stdfd-open-safer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+
+        // `create_safer`: creates, and truncates what is there.
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"first")
+            .unwrap();
+        super::create_safer(&path)
+            .unwrap()
+            .write_all(b"2nd")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd");
+
+        // `open_read_safer`: reads, and refuses to write.
+        let mut text = Vec::new();
+        super::open_read_safer(&path)
+            .unwrap()
+            .read_to_end(&mut text)
+            .unwrap();
+        assert_eq!(text, b"2nd");
+        assert!(
+            super::open_read_safer(&path)
+                .unwrap()
+                .write_all(b"x")
+                .is_err()
+        );
+        assert!(super::open_read_safer(dir.join("missing")).is_err());
+
+        // `open_safer`: the options are the caller's, passed through.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open_safer(&path)
+            .unwrap()
+            .write_all(b"+")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"2nd+");
+        let refused = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open_safer(&path)
+            .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -54,14 +54,24 @@
 //! (`TIMER_ABSTIME`) fires when the wall clock reads its time: a clock step
 //! re-programs it ([`clock_was_set`]).
 //!
-//! The CPU-time clocks are not timeable here yet, since the kernel keeps no
-//! per-task CPU time to fire on -- `timer_create` answers `EOPNOTSUPP` for
-//! them (`known-issues/A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED.md`).
-//! Neither are the alarm clocks, which need `CAP_WAKE_ALARM`.
+//! The **CPU-time clocks** -- a thread's or a process's processor time
+//! ([`TimerClock::Cpu`]) -- have no moment an `hrtimer` could be set for. A
+//! timer on one keeps its expiry as a value of the clock, and the timer tick
+//! watches for it: each tick compares the interrupted thread's sample, and its
+//! process's running totals, with the earliest expiry armed on them
+//! (`sched::cpu_timers_due`), and calls [`expire_cpu`] when one is reached --
+//! so such a timer fires up to a tick late, never early, as on Linux. Its
+//! clock is read *before* this module's lock is taken (the read takes the
+//! process table), so [`settime`], [`gettime`] and [`signal_dequeued`] look
+//! the timer up twice and start again if another took its id between. A
+//! process's clock may be timed by another process; a timer whose thread
+//! exited or whose process was reaped never fires again, cannot be set
+//! ([`TimerError::TargetGone`], `ESRCH`) and reads all zeros.
+//! The alarm clocks are not timeable, needing `CAP_WAKE_ALARM`.
 //!
-//! A timer's signal is only queued, from the interrupt, so a `SIGCONT` or a
-//! fatal signal from a timer does not reach a *stopped* process until it is
-//! continued (`known-issues/A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS.md`).
+//! A timer's signal is queued from the interrupt; a `SIGCONT` or `SIGKILL`
+//! for a *stopped* process is acted on through the work queue
+//! (`handlers::defer_act_on_stopped`), as Linux acts on it at the send.
 //!
 //! ## Lifetime
 //!
@@ -80,9 +90,11 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::hrtimer::{self, HrTimerHandle};
+use crate::proc::cputimer::{CpuClock, CpuClockTarget};
 use crate::proc::pcb::ProcessId;
 use crate::proc::signal::{self, SigInfo, TimerPost};
 use crate::sched::task::TaskId;
+use crate::sched::{CpuClockKind, CpuTimerTick, NO_CPU_EXPIRY, ProcExpiry};
 use crate::serial_println;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -137,6 +149,11 @@ pub enum TimerClock {
     Boottime,
     /// `CLOCK_TAI`.
     Tai,
+    /// A CPU-time clock: a thread's or a process's processor time
+    /// (`CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`, and the ids
+    /// `clock_getcpuclockid` and `pthread_getcpuclockid` make). Checked at the
+    /// tick, not by an `hrtimer` ([`expire_cpu`]).
+    Cpu(CpuClock),
 }
 
 impl TimerClock {
@@ -184,6 +201,9 @@ pub enum TimerError {
     /// Out of room: the `RLIMIT_SIGPENDING` charge, the ids, or memory
     /// (`EAGAIN`).
     Again,
+    /// A CPU-time timer whose thread exited or whose process was reaped
+    /// cannot be set (`ESRCH`, Linux's `posix_cpu_timer_set`).
+    TargetGone,
 }
 
 /// Where a timer is in its cycle.
@@ -259,6 +279,14 @@ impl PosixTimer {
     /// Whether the timer delivers nothing.
     fn sig_none(&self) -> bool {
         self.notify == Notify::None
+    }
+
+    /// The CPU-time clock it measures, if it measures one.
+    const fn cpu_clock(&self) -> Option<CpuClock> {
+        match self.clock {
+            TimerClock::Cpu(clock) => Some(clock),
+            _ => None,
+        }
     }
 }
 
@@ -504,6 +532,140 @@ fn fire(arg: u64) {
     }
 }
 
+/// A CPU-time signal timer's expiry, at clock value `now` -- Linux's
+/// `cpu_timer_fire`: a one-shot is done; a periodic one waits for its signal
+/// to be taken to re-arm ([`signal_dequeued`]), unless the signal is ignored,
+/// when nothing will be taken and it re-arms past `now` at once, counting what
+/// it skips. Answers the signal sent, for a stopped owner's sake.
+fn fire_cpu(timer: &mut PosixTimer, now: u64) -> Option<(ProcessId, u32)> {
+    let Notify::Signal {
+        signo,
+        value,
+        thread,
+    } = timer.notify
+    else {
+        // SIGEV_NONE timers are never armed at the tick.
+        return None;
+    };
+    let periodic = timer.interval > 0;
+    timer.status = if periodic {
+        Status::RequeuePending
+    } else {
+        Status::Disarmed
+    };
+    let info = SigInfo::timer(timer.id, value);
+    match signal::post_timer_signal(timer.pid, signo, timer.id, timer.arm_gen, thread, info) {
+        TimerPost::Queued | TimerPost::AlreadyQueued => Some((timer.pid, signo)),
+        TimerPost::Ignored => {
+            if periodic {
+                let skipped = forward(&mut timer.expiry, timer.interval, now);
+                add_overrun(&mut timer.overrun, skipped);
+                timer.status = Status::Armed;
+            }
+            Some((timer.pid, signo))
+        }
+        TimerPost::Gone => {
+            timer.status = Status::Disarmed;
+            None
+        }
+    }
+}
+
+/// Tell the tick that `timer`, an armed CPU-time timer, expires at `expiry`:
+/// lower its thread's or its process's earliest expiry for the timer's
+/// measure (`Task::cpu_timer_next`, `sched::ProcCpuAccount`). Called with
+/// [`TABLE`] held -- so no expiry computed from the table can overwrite it
+/// with a later one -- in process context: it may spin on the scheduler's
+/// lock (`TABLE` → the scheduler, this module's order). `account` is the
+/// process's, for a process target.
+fn publish_cpu_expiry(
+    clock: CpuClock,
+    account: Option<&crate::sched::ProcCpuAccount>,
+    expiry: u64,
+) {
+    match clock.target {
+        CpuClockTarget::Thread(tid) => {
+            // A thread gone meanwhile has no tick to check it at.
+            let _ = crate::sched::lower_thread_cpu_expiry(tid, clock.kind, expiry);
+        }
+        CpuClockTarget::Process(_) => {
+            if let Some(account) = account {
+                account.lower_next(ProcExpiry::timer(clock.kind), expiry);
+            }
+        }
+    }
+}
+
+/// The tick found a CPU-time timer due for the task it interrupted, or for
+/// its process (`sched::cpu_timers_due`, through `cputimer::expire`): fire
+/// every signal timer on the task's own clocks whose expiry its sample has
+/// reached, and every one on its process's clocks whose expiry the
+/// process's running totals have -- whoever owns the timer, since a process
+/// may time another's clock -- then recompute the earliest expiries the
+/// tick compares with. Interrupt context: [`TABLE`] is interrupt-safe, and the
+/// scheduler's lock is only tried (an expiry cache left early costs a look at
+/// the next tick).
+pub fn expire_cpu(due: &CpuTimerTick) {
+    /// Signals to look at for a stopped owner, at most this many a tick.
+    const MAX_ACTS: usize = 8;
+    let mut acts = [None::<(ProcessId, u32)>; MAX_ACTS];
+    with_table(|t| {
+        let mut thread_next = [NO_CPU_EXPIRY; 3];
+        let mut process_next = [NO_CPU_EXPIRY; 3];
+        let mut n = 0usize;
+        for slot in &mut t.slots {
+            let Some(timer) = slot.timer.as_mut() else {
+                continue;
+            };
+            let Some(clock) = timer.cpu_clock() else {
+                continue;
+            };
+            if !timer.ready || timer.sig_none() {
+                continue;
+            }
+            let (now, next) = match clock.target {
+                CpuClockTarget::Thread(tid) if tid == due.tid => {
+                    (due.thread.value(clock.kind), &mut thread_next)
+                }
+                CpuClockTarget::Process(pid) if pid == due.pid => match due.process {
+                    Some(totals) => (totals.value(clock.kind), &mut process_next),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if timer.status == Status::Armed
+                && now >= timer.expiry
+                && let Some(act) = fire_cpu(timer, now)
+            {
+                if let Some(a) = acts.get_mut(n) {
+                    *a = Some(act);
+                    n = n.saturating_add(1);
+                }
+            }
+            if timer.status == Status::Armed
+                && let Some(e) = next.get_mut(clock.kind.index())
+            {
+                *e = (*e).min(timer.expiry);
+            }
+        }
+        crate::sched::set_thread_cpu_expiry(due.tid, thread_next, false);
+        if due.process.is_some()
+            && let Some(account) = &due.account
+        {
+            for kind in CpuClockKind::ALL {
+                let next = process_next
+                    .get(kind.index())
+                    .copied()
+                    .unwrap_or(NO_CPU_EXPIRY);
+                account.set_next(ProcExpiry::timer(kind), next);
+            }
+        }
+    });
+    for (pid, signo) in acts.into_iter().flatten() {
+        crate::syscall::handlers::defer_act_on_stopped(pid, signo);
+    }
+}
+
 /// The signal layer has taken `pid`'s timer `id`'s queued signal -- to
 /// deliver it, or to discard it -- with record `info`, queued by the arming
 /// `token` names. Answers the record to deliver, or `None` if the signal is
@@ -518,6 +680,20 @@ fn fire(arg: u64) {
 /// Must not be called with the signal lock held.
 #[must_use]
 pub fn signal_dequeued(pid: ProcessId, id: i32, token: u64, mut info: SigInfo) -> Option<SigInfo> {
+    // A CPU-time timer re-arms against its clock, read before the table is
+    // taken (the read takes the process table): find out first whether this
+    // is one waiting on its signal.
+    let cpu = with_table(|t| {
+        let (_, slot) = t.ready_mut(pid, id)?;
+        let timer = slot.timer.as_ref()?;
+        let waiting =
+            timer.arm_gen == token && timer.status == Status::RequeuePending && timer.interval > 0;
+        if waiting { timer.cpu_clock() } else { None }
+    });
+    let cpu_now = cpu.map(|clock| {
+        let now = clock.target_alive(pid).then(|| clock.read()).flatten();
+        (clock, now, cpu_account_of(clock))
+    });
     with_table(|t| {
         let (idx, slot) = t.ready_mut(pid, id)?;
         let Slot { hr_gen, timer } = slot;
@@ -526,10 +702,25 @@ pub fn signal_dequeued(pid: ProcessId, id: i32, token: u64, mut info: SigInfo) -
             return None;
         }
         if timer.status == Status::RequeuePending && timer.interval > 0 {
-            let now = timer.domain.now();
-            let skipped = forward(&mut timer.expiry, timer.interval, now);
-            add_overrun(&mut timer.overrun, skipped);
-            arm_hr(idx, hr_gen, timer, now);
+            if let Some(clock) = timer.cpu_clock() {
+                // Linux's `posix_cpu_timer_rearm`: past now by whole intervals,
+                // and back on the tick's watch -- unless its thread or process
+                // has gone, when there is nothing to watch.
+                match cpu_now {
+                    Some((read_clock, Some(now), account)) if read_clock == clock => {
+                        let skipped = forward(&mut timer.expiry, timer.interval, now);
+                        add_overrun(&mut timer.overrun, skipped);
+                        timer.status = Status::Armed;
+                        publish_cpu_expiry(clock, account.as_deref(), timer.expiry);
+                    }
+                    _ => timer.status = Status::Disarmed,
+                }
+            } else {
+                let now = timer.domain.now();
+                let skipped = forward(&mut timer.expiry, timer.interval, now);
+                add_overrun(&mut timer.overrun, skipped);
+                arm_hr(idx, hr_gen, timer, now);
+            }
             timer.overrun_last = timer.overrun;
             timer.overrun = -1;
             // si_overrun shares si_uid's slot (SI_TIMER's record layout).
@@ -676,11 +867,18 @@ pub fn release(pid: ProcessId, id: i32) {
 /// on its signal or one that delivers nothing, first moves the expiry past
 /// now, counting the intervals as overrun.
 fn current(timer: &mut PosixTimer) -> (u64, u64) {
+    let now = timer.domain.now();
+    current_at(timer, now)
+}
+
+/// [`current`] at time `now` on the timer's clock -- for a CPU-time timer,
+/// whose clock is read before the table is taken. Linux's
+/// `__posix_cpu_timer_get` follows the same rules.
+fn current_at(timer: &mut PosixTimer, now: u64) -> (u64, u64) {
     let iv = timer.interval;
     if timer.status == Status::Disarmed {
         return (0, iv);
     }
-    let now = timer.domain.now();
     if iv > 0 && (timer.status == Status::RequeuePending || timer.sig_none()) {
         let skipped = forward(&mut timer.expiry, iv, now);
         add_overrun(&mut timer.overrun, skipped);
@@ -705,9 +903,15 @@ fn current(timer: &mut PosixTimer) -> (u64, u64) {
 /// A signal of the timer's still queued is taken off the queue (Linux 6.13
 /// drops it), and both overrun counts start again.
 ///
+/// A CPU-time timer's expiry is a value of its clock; one already reached
+/// fires at once (Linux's `posix_cpu_timer_set`), and the tick watches for
+/// the rest ([`expire_cpu`]).
+///
 /// # Errors
 ///
-/// [`TimerError::NoSuchTimer`] if the process has no such timer.
+/// [`TimerError::NoSuchTimer`] if the process has no such timer;
+/// [`TimerError::TargetGone`] for a CPU-time timer whose thread or process
+/// has gone.
 pub fn settime(
     pid: ProcessId,
     id: i32,
@@ -715,11 +919,139 @@ pub fn settime(
     value: u64,
     interval: u64,
 ) -> Result<(u64, u64), TimerError> {
+    // The timer's clock decides how it is armed, and a CPU-time clock is read
+    // before the table is taken; the timer could be deleted and another made
+    // under its id in between, so the arming checks the clock it was read
+    // for, and looks again if it changed.
+    loop {
+        let clock = clock_of(pid, id).ok_or(TimerError::NoSuchTimer)?;
+        let result = match clock {
+            TimerClock::Cpu(cpu) => settime_cpu(pid, id, cpu, abstime, value, interval),
+            _ => settime_hr(pid, id, abstime, value, interval),
+        };
+        match result {
+            Ok(old) => return Ok(old),
+            Err(Attempt::Failed(e)) => return Err(e),
+            Err(Attempt::Raced) => {}
+        }
+    }
+}
+
+/// Why one attempt at an operation that reads a timer's clock outside the
+/// table did not finish.
+enum Attempt {
+    /// It failed.
+    Failed(TimerError),
+    /// The timer under the id is not the one whose clock was read: look again.
+    Raced,
+}
+
+impl From<TimerError> for Attempt {
+    fn from(e: TimerError) -> Self {
+        Self::Failed(e)
+    }
+}
+
+/// The clock `pid`'s timer `id` measures, if it has a ready one.
+fn clock_of(pid: ProcessId, id: i32) -> Option<TimerClock> {
+    with_table(|t| {
+        let (_, slot) = t.ready_mut(pid, id)?;
+        slot.timer.as_ref().map(|timer| timer.clock)
+    })
+}
+
+/// The running-totals account a CPU-time timer on `clock` is checked
+/// against, for a process's clock.
+fn cpu_account_of(clock: CpuClock) -> Option<alloc::sync::Arc<crate::sched::ProcCpuAccount>> {
+    match clock.target {
+        CpuClockTarget::Process(p) => crate::proc::pcb::cpu_account(p),
+        CpuClockTarget::Thread(_) => None,
+    }
+}
+
+/// [`settime`] for a CPU-time timer on `clock`.
+fn settime_cpu(
+    pid: ProcessId,
+    id: i32,
+    clock: CpuClock,
+    abstime: bool,
+    value: u64,
+    interval: u64,
+) -> Result<(u64, u64), Attempt> {
+    if !clock.target_alive(pid) {
+        return Err(Attempt::Failed(TimerError::TargetGone));
+    }
+    let now = clock.read().ok_or(TimerError::TargetGone)?;
+    // The process's running totals are kept from here on: the tick checks
+    // the timer against them.
+    let account = match clock.target {
+        CpuClockTarget::Process(p) => {
+            Some(crate::proc::pcb::activate_cpu_account(p).ok_or(TimerError::TargetGone)?)
+        }
+        CpuClockTarget::Thread(_) => None,
+    };
+    let (old, sent) = with_table(|t| {
+        let generation = t.fresh_gen();
+        let (_, slot) = t.ready_mut(pid, id).ok_or(TimerError::NoSuchTimer)?;
+        let timer = slot.timer.as_mut().ok_or(TimerError::NoSuchTimer)?;
+        if timer.clock != TimerClock::Cpu(clock) {
+            return Err(Attempt::Raced);
+        }
+        let old = current_at(timer, now);
+        signal::remove_timer_signal(pid, id);
+        timer.arm_gen = generation;
+        timer.status = Status::Disarmed;
+        timer.overrun = -1;
+        timer.overrun_last = 0;
+        timer.interval = 0;
+        if value == 0 {
+            return Ok((old, None));
+        }
+        timer.interval = interval.min(KTIME_MAX);
+        timer.expiry = if abstime {
+            value.min(KTIME_MAX)
+        } else {
+            now.saturating_add(value).min(KTIME_MAX)
+        };
+        timer.status = Status::Armed;
+        if timer.sig_none() {
+            // Nothing to fire: the expiry is only for timer_gettime.
+            return Ok((old, None));
+        }
+        // Already reached -- an absolute time in the past -- notifies at
+        // once, even if the clock's thread never runs again.
+        let sent = if now >= timer.expiry {
+            fire_cpu(timer, now)
+        } else {
+            None
+        };
+        if timer.status == Status::Armed {
+            publish_cpu_expiry(clock, account.as_deref(), timer.expiry);
+        }
+        Ok((old, sent))
+    })?;
+    if let Some((owner, signo)) = sent {
+        crate::syscall::handlers::defer_act_on_stopped(owner, signo);
+    }
+    Ok(old)
+}
+
+/// [`settime`] for a timer on a clock an `hrtimer` can time.
+fn settime_hr(
+    pid: ProcessId,
+    id: i32,
+    abstime: bool,
+    value: u64,
+    interval: u64,
+) -> Result<(u64, u64), Attempt> {
     with_table(|t| {
         let generation = t.fresh_gen();
         let (idx, slot) = t.ready_mut(pid, id).ok_or(TimerError::NoSuchTimer)?;
         let Slot { hr_gen, timer } = slot;
         let timer = timer.as_mut().ok_or(TimerError::NoSuchTimer)?;
+        if timer.cpu_clock().is_some() {
+            return Err(Attempt::Raced);
+        }
         let old = current(timer);
         if let Some(h) = timer.hr.take() {
             hrtimer::cancel(h);
@@ -763,11 +1095,40 @@ pub fn settime(
 ///
 /// [`TimerError::NoSuchTimer`] if the process has no such timer.
 pub fn gettime(pid: ProcessId, id: i32) -> Result<(u64, u64), TimerError> {
-    with_table(|t| {
-        let (_, slot) = t.ready_mut(pid, id).ok_or(TimerError::NoSuchTimer)?;
-        let timer = slot.timer.as_mut().ok_or(TimerError::NoSuchTimer)?;
-        Ok(current(timer))
-    })
+    loop {
+        let clock = clock_of(pid, id).ok_or(TimerError::NoSuchTimer)?;
+        let cpu = match clock {
+            TimerClock::Cpu(cpu) => cpu,
+            _ => {
+                return with_table(|t| {
+                    let (_, slot) = t.ready_mut(pid, id).ok_or(TimerError::NoSuchTimer)?;
+                    let timer = slot.timer.as_mut().ok_or(TimerError::NoSuchTimer)?;
+                    Ok(current(timer))
+                });
+            }
+        };
+        // A CPU-time clock is read before the table is taken. Its thread or
+        // process gone, the timer reads all zeros, as Linux's
+        // `posix_cpu_timer_get` reports it -- and so does a disarmed one,
+        // interval and all.
+        let now = cpu.target_alive(pid).then(|| cpu.read()).flatten();
+        let result = with_table(|t| {
+            let (_, slot) = t.ready_mut(pid, id).ok_or(TimerError::NoSuchTimer)?;
+            let timer = slot.timer.as_mut().ok_or(TimerError::NoSuchTimer)?;
+            if timer.clock != clock {
+                return Err(Attempt::Raced);
+            }
+            Ok(match now {
+                Some(now) if timer.status != Status::Disarmed => current_at(timer, now),
+                _ => (0, 0),
+            })
+        });
+        match result {
+            Ok(cur) => return Ok(cur),
+            Err(Attempt::Failed(e)) => return Err(e),
+            Err(Attempt::Raced) => {}
+        }
+    }
 }
 
 /// `timer_getoverrun`: the overrun count of the last signal `pid`'s timer

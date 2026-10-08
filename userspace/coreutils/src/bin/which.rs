@@ -31,7 +31,10 @@
 //!    the low byte.
 //! 7. **`println!`**, which panics on a closed stdout; the panic message then
 //!    fails to print for the same reason and the runtime aborts, so
-//!    `which ls >&-` exited 134 where GNU exits 1.
+//!    `which ls >&-` exited 134. (GNU exits 0 there, having printed nowhere:
+//!    it never checks a write. Ours exits 1 with `write error` -- see
+//!    divergence 3 below. This line used to say GNU exits 1, which
+//!    `scripts/which-diff.sh` measured to be wrong on 2026-10-07.)
 //! 8. **No options at all** -- not `--help`, not `--version`, not `-a`.
 //! 9. The `split_path` helper split on `:` and handed back `&str`, so an empty
 //!    element stayed empty rather than meaning the current directory.
@@ -78,9 +81,19 @@
 //!    `init`, searches nothing, and prints `no init in ()` -- even though
 //!    `/init` exists and is executable. The directory part of `/init` is `/`,
 //!    and that is what is searched here.
-//! 3. **`--skip-tilde` compares whole components.** GNU's `$HOME` test is a
-//!    plain `strncmp`, so `HOME=/home/ann` also skips `/home/annex`. Here the
-//!    prefix must end at a `/` or at the end of the path.
+//! 3. **A failed write is reported.** GNU which has no `close_stdout` and
+//!    checks no write, so `which ls >/dev/full` and `which ls >&-` exit 0
+//!    with nothing printed anywhere -- a script reading the answer from a
+//!    file on a full disk is told it succeeded. Here the run ends in
+//!    `close_stdout`: `which: write error: No space left on device`, status
+//!    1, as every GNU *coreutils* program would say it.
+//!
+//!    (This list used to have a different third entry: that `--skip-tilde`
+//!    compares whole components where GNU's `$HOME` test is a plain `strncmp`
+//!    that also skips `/home/annex` for `HOME=/home/ann`. Measured on
+//!    2026-10-07, GNU does not: with `HOME=W/home` it finds `W/homex/bin/x`,
+//!    and with `HOME=W/hom` too. So that was never a divergence; the two
+//!    agree, and `which-diff.sh` holds them to it.)
 //! 4. **An unknown option is fatal.** GNU's `getopt` prints `invalid option
 //!    -- 'Z'` and the loop carries on, so `which -Z ls` silently answers as
 //!    though `-Z` had not been typed. Ignoring an option the user asked for is
@@ -405,8 +418,9 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
 
 /// Whether `path` is `prefix` or lies inside it.
 ///
-/// The boundary test is divergence 3: upstream compares `prefix.len()` bytes
-/// and stops, so `/home/annex` counts as inside `/home/ann`.
+/// The boundary test is upstream's too: measured, GNU which 2.21 does not
+/// count `/home/annex` as inside `/home/ann`. (This comment used to call it a
+/// divergence; see the note under divergence 3 in the module docs.)
 fn under(path: &[u8], prefix: &[u8]) -> bool {
     if prefix.is_empty() {
         return false;
@@ -667,7 +681,8 @@ fn is_non_directory(path: &[u8]) -> bool {
 fn main() -> ExitCode {
     // Upstream has no `atexit (close_stdout)`, but it also never checks a write
     // -- `which ls >&-` exits 0 there having printed nowhere. One value leaves
-    // this function, and it accounts for the writes.
+    // this function, and it accounts for the writes: divergence 3 in the
+    // module docs.
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -1231,8 +1246,9 @@ mod tests {
         );
     }
 
-    /// Divergence 3: upstream's prefix test is a bare `strncmp`, so it would
-    /// skip `/hx` for `HOME=/h`.
+    /// `/hx` is not under `HOME=/h`, so `--skip-tilde` keeps it -- measured
+    /// against GNU which 2.21, which agrees (`which-diff.sh`). Once believed to
+    /// be a place GNU went wrong; it is not.
     #[test]
     fn skip_tilde_compares_whole_components() {
         let fake = Fake::new(b"/w", &[b"/hx/cmd"]).with_home(b"/h");

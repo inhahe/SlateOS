@@ -25404,6 +25404,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::CharDevice => 'c',
                 crate::fs::EntryType::BlockDevice => 'b',
                 crate::fs::EntryType::Socket => 's',
+                crate::fs::EntryType::Fifo => 'p',
             };
 
             if let Some(Some(meta)) = metas.get(i) {
@@ -25475,6 +25476,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::CharDevice => "<CHR>    ",
                 crate::fs::EntryType::BlockDevice => "<BLK>    ",
                 crate::fs::EntryType::Socket => "<SOCK>   ",
+                crate::fs::EntryType::Fifo => "<FIFO>   ",
             };
             let size_str = if human_sizes {
                 alloc::format!("{:>8}", format_size_human(entry.size))
@@ -25727,6 +25729,7 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::CharDevice => "character special file",
                 crate::fs::EntryType::BlockDevice => "block special file",
                 crate::fs::EntryType::Socket => "socket",
+                crate::fs::EntryType::Fifo => "fifo",
             };
             shell_println!("  File: {}", path.display());
             shell_println!(
@@ -35394,6 +35397,7 @@ fn cmd_lsplus(args: &str) {
                     crate::fs::EntryType::CharDevice => "CHR ",
                     crate::fs::EntryType::BlockDevice => "BLK ",
                     crate::fs::EntryType::Socket => "SOCK",
+                    crate::fs::EntryType::Fifo => "FIFO",
                 };
                 let size = entry.meta.as_ref().map_or(0, |m| m.size);
                 shell_println!("  {:4} {:>10} {}", type_str, size, entry.name.display());
@@ -111527,6 +111531,9 @@ fn cmd_file(args: &str) {
         crate::fs::EntryType::Socket => {
             shell_println!("{}: socket", path.display());
         }
+        crate::fs::EntryType::Fifo => {
+            shell_println!("{}: fifo (named pipe)", path.display());
+        }
     }
 }
 
@@ -112033,6 +112040,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindT
                 crate::fs::EntryType::CharDevice | crate::fs::EntryType::BlockDevice => "",
                 // `=`, as `ls -F` marks a socket.
                 crate::fs::EntryType::Socket => "=",
+                crate::fs::EntryType::Fifo => "|",
             };
             shell_println!("{}{}", child_path.display(), type_str);
             tally.matches = tally.matches.saturating_add(1);
@@ -113384,6 +113392,7 @@ fn cmd_lsp(args: &str) {
                         crate::fs::vfs::EntryType::CharDevice => "CHR",
                         crate::fs::vfs::EntryType::BlockDevice => "BLK",
                         crate::fs::vfs::EntryType::Socket => "SOCK",
+                        crate::fs::vfs::EntryType::Fifo => "FIFO",
                     };
                     shell_println!("{:<5} {:<8} {}", type_str, entry.size, entry.name.display(),);
                 }
@@ -135086,6 +135095,7 @@ fn cmd_tar(args: &str) {
                 let type_ch = match entry.kind {
                     crate::fs::tar::EntryKind::Directory => 'd',
                     crate::fs::tar::EntryKind::Symlink => 'l',
+                    crate::fs::tar::EntryKind::Fifo => 'p',
                     _ => '-',
                 };
                 if verbose {
@@ -135149,6 +135159,26 @@ fn cmd_tar(args: &str) {
                                 out_path.display(),
                                 entry.link_target.display()
                             );
+                        }
+                    }
+                    crate::fs::tar::EntryKind::Fifo => {
+                        if let Some(parent) = out_path.parent()
+                            && !parent.is_empty()
+                        {
+                            // Best-effort, as for a file: a failure surfaces
+                            // as the mkfifo error below.
+                            let _ = Vfs::mkdir_all(parent);
+                        }
+                        let mode = u16::try_from(entry.mode & 0o7777).unwrap_or(0o600);
+                        match Vfs::mknod_fifo(&out_path, mode) {
+                            Ok(_) | Err(crate::error::KernelError::AlreadyExists) => {}
+                            Err(e) => {
+                                shell_println!("tar: mkfifo '{}': {:?}", out_path.display(), e);
+                                set_exit(1);
+                            }
+                        }
+                        if verbose {
+                            shell_println!("x {} (named pipe)", out_path.display());
                         }
                     }
                     crate::fs::tar::EntryKind::Other(t) => {

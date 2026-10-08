@@ -53,7 +53,7 @@ impl Complaint {
         let now = Instant::now();
         if self
             .last
-            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(60))
+            .is_some_and(|t| now.duration_since(t) < Duration::from_mins(1))
         {
             self.held = self.held.saturating_add(1);
             return;
@@ -137,7 +137,15 @@ fn bind(path: &Path) -> Result<UnixDatagram, String> {
 
 /// Listen until killed: each datagram received becomes one journal record.
 /// Returns only when the socket cannot be made, with status 1.
-pub fn run(opts: &Options, max_size: u64, rotate: &dyn Fn(&Path)) -> ExitCode {
+///
+/// `rotate` moves the journal aside once it grows past `max_size`, and
+/// returns each step of that which failed; the first is reported, as any
+/// other failure here is, and the rotation is tried again by the next record.
+pub fn run(
+    opts: &Options,
+    max_size: u64,
+    rotate: &dyn Fn(&Path) -> Vec<(PathBuf, io::Error)>,
+) -> ExitCode {
     let socket = match bind(&opts.socket) {
         Ok(s) => s,
         Err(message) => {
@@ -149,6 +157,7 @@ pub fn run(opts: &Options, max_size: u64, rotate: &dyn Fn(&Path)) -> ExitCode {
     let mut receiving = Complaint::default();
     let mut writing = Complaint::default();
     let mut cut = Complaint::default();
+    let mut rotating = Complaint::default();
     loop {
         let (len, truncated, creds) = match sys::receive(socket.as_raw_fd(), &mut buf) {
             Ok(got) => got,
@@ -179,8 +188,14 @@ pub fn run(opts: &Options, max_size: u64, rotate: &dyn Fn(&Path)) -> ExitCode {
             ));
             continue;
         }
-        if fs::metadata(&opts.journal).is_ok_and(|m| m.len() > max_size) {
-            rotate(&opts.journal);
+        if fs::metadata(&opts.journal).is_ok_and(|m| m.len() > max_size)
+            && let Some((path, e)) = rotate(&opts.journal).first()
+        {
+            rotating.about(&format!(
+                "cannot rotate {}: {}",
+                quotef_os(path.as_os_str()),
+                strerror(e)
+            ));
         }
     }
 }

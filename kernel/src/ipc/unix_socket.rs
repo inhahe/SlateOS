@@ -341,6 +341,13 @@ struct Socket {
     /// Tasks waiting for room here: datagram senders whose destination this
     /// is, clients whose listener this is.
     room: WaiterSet,
+    /// Linux's `sk_err`: an errno no call has reported yet -- a `recvmmsg`
+    /// that failed after receiving some messages keeps its failure here
+    /// (`syscall::linux::sys_recvmmsg`) -- for the next Linux receive, or
+    /// `getsockopt(SO_ERROR)`, to answer and clear ([`take_so_error`],
+    /// [`take_so_error_for_receive`]); 0 for none. Set and read by the Linux
+    /// ABI only: the native receive has no such notion and leaves it be.
+    so_error: i32,
 }
 
 impl Socket {
@@ -362,6 +369,7 @@ impl Socket {
             sndtimeo: None,
             readers: WaiterSet::new(),
             room: WaiterSet::new(),
+            so_error: 0,
         }
     }
 
@@ -450,14 +458,53 @@ fn current_cred() -> Option<PeerCred> {
     Some(PeerCred { pid, uid, gid })
 }
 
+/// The credentials a message carries when its sender states none: the
+/// sender's pid and its *real* user and group ids, as Linux's `scm_send`
+/// records them (`current_uid()`, `current_gid()`) -- where a peer's
+/// credentials ([`current_cred`], `SO_PEERCRED`) are the effective ones.
+/// `None` in kernel context.
+fn current_real_cred() -> Option<PeerCred> {
+    let pid = crate::proc::thread::owner_process(sched::current_task_id())?;
+    if pid == 0 {
+        return None;
+    }
+    let creds = crate::proc::pcb::get_credentials(pid)?;
+    Some(PeerCred {
+        pid,
+        uid: creds.ruid,
+        gid: creds.rgid,
+    })
+}
+
+/// Who states credentials on a send: its pid and its real, effective and
+/// saved user and group ids ([`check_stated_cred_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stater {
+    /// The sender's process.
+    pid: crate::proc::pcb::ProcessId,
+    /// Its real, effective and saved user ids.
+    uids: [u32; 3],
+    /// Its real, effective and saved group ids.
+    gids: [u32; 3],
+}
+
+impl Stater {
+    /// Root, for this check: an effective user id of 0, Linux's
+    /// `CAP_SYS_ADMIN`, `CAP_SETUID` and `CAP_SETGID` as the Linux layer's
+    /// `set*id` calls take them.
+    const fn is_root(&self) -> bool {
+        self.uids[1] == 0
+    }
+}
+
 /// Check credentials the caller states for one message it sends
 /// (`SCM_CREDENTIALS` on a send), as Linux's `scm_check_creds` and
 /// `__scm_send` do: the pid must be the caller's own, or -- for root
-/// (`CAP_SYS_ADMIN`) -- any live process's; the uid and gid the caller's own,
-/// or any for root (`CAP_SETUID`, `CAP_SETGID`). Root is uid 0, as the Linux
-/// layer's `set*id` calls take it; the caller has one uid and one gid, so
-/// "one of its real, effective or saved ids" is that one. Kernel context may
-/// state anything that names a live process.
+/// (`CAP_SYS_ADMIN`) -- any live process's; the uid one of the caller's
+/// real, effective and saved user ids, and the gid one of its group ids, or
+/// any for root (`CAP_SETUID`, `CAP_SETGID`). Root is an effective uid of 0
+/// ([`Stater::is_root`]). Kernel context may state anything that names a
+/// live process.
 ///
 /// # Errors
 ///
@@ -468,9 +515,12 @@ pub fn check_stated_cred(stated: PeerCred) -> KernelResult<PeerCred> {
     let caller = match crate::proc::thread::owner_process(sched::current_task_id()) {
         None | Some(0) => None,
         Some(pid) => {
-            let (uid, gid) =
-                crate::proc::pcb::process_uid_gid(pid).ok_or(KernelError::NotPermitted)?;
-            Some(PeerCred { pid, uid, gid })
+            let c = crate::proc::pcb::get_credentials(pid).ok_or(KernelError::NotPermitted)?;
+            Some(Stater {
+                pid,
+                uids: [c.ruid, c.uid, c.suid],
+                gids: [c.rgid, c.gid, c.sgid],
+            })
         }
     };
     check_stated_cred_for(caller, stated, |pid| crate::proc::pcb::state(pid).is_some())
@@ -480,7 +530,7 @@ pub fn check_stated_cred(stated: PeerCred) -> KernelResult<PeerCred> {
 /// (`None`: kernel context), with `alive` saying whether a pid names a
 /// process -- a zombie counts, as Linux finds a pid until it is reaped.
 fn check_stated_cred_for(
-    caller: Option<PeerCred>,
+    caller: Option<Stater>,
     stated: PeerCred,
     alive: impl Fn(crate::proc::pcb::ProcessId) -> bool,
 ) -> KernelResult<PeerCred> {
@@ -488,9 +538,12 @@ fn check_stated_cred_for(
         return Err(KernelError::InvalidArgument);
     }
     if let Some(me) = caller {
-        // Root may claim anything; anyone else only exactly themselves.
-        let may =
-            me.uid == 0 || (stated.pid == me.pid && stated.uid == me.uid && stated.gid == me.gid);
+        // Root may claim anything; anyone else its own pid and one of its
+        // own ids of each kind.
+        let may = me.is_root()
+            || (stated.pid == me.pid
+                && me.uids.contains(&stated.uid)
+                && me.gids.contains(&stated.gid));
         if !may {
             return Err(KernelError::NotPermitted);
         }
@@ -931,6 +984,51 @@ pub fn peer_cred(h: UnixHandle) -> KernelResult<Option<PeerCred>> {
 pub fn set_passcred(h: UnixHandle, on: bool) -> KernelResult<()> {
     TABLE.lock().socket_mut(h)?.passcred = on;
     Ok(())
+}
+
+/// Keep `errno` as `h`'s pending error ([`Socket::so_error`]), replacing any
+/// before it, as Linux's `recvmmsg` does with `WRITE_ONCE(sk->sk_err, ...)`.
+///
+/// # Errors
+///
+/// `InvalidHandle`.
+pub fn set_so_error(h: UnixHandle, errno: i32) -> KernelResult<()> {
+    TABLE.lock().socket_mut(h)?.so_error = errno;
+    Ok(())
+}
+
+/// Take `h`'s pending error, leaving none: `getsockopt(SO_ERROR)`. 0 when
+/// there is none.
+///
+/// # Errors
+///
+/// `InvalidHandle`.
+pub fn take_so_error(h: UnixHandle) -> KernelResult<i32> {
+    Ok(core::mem::take(&mut TABLE.lock().socket_mut(h)?.so_error))
+}
+
+/// Take `h`'s pending error for a receive about to start, by Linux's rule
+/// for each kind: a datagram or sequenced-packet socket answers it before
+/// anything queued (`__skb_try_recv_datagram`'s `sock_error`); a connected
+/// stream only when nothing is waiting to be read
+/// (`unix_stream_read_generic`), so bytes already sent are not lost behind
+/// it. 0 when there is none, or a stream has bytes.
+///
+/// # Errors
+///
+/// `InvalidHandle`.
+pub fn take_so_error_for_receive(h: UnixHandle) -> KernelResult<i32> {
+    let mut t = TABLE.lock();
+    let s = t.socket_mut(h)?;
+    if s.so_error == 0 {
+        return Ok(0);
+    }
+    if let (Kind::Stream, State::Connected { stream, .. }) = (s.kind, &s.state)
+        && stream_socket::readable_bytes(*stream) > 0
+    {
+        return Ok(0);
+    }
+    Ok(core::mem::take(&mut s.so_error))
 }
 
 /// Whether receives on `h` hand back the sender's credentials.
@@ -1401,7 +1499,7 @@ fn send_dgram(
     }
     let pid = current_user_pid();
     let task = sched::current_task_id();
-    let cred = stated.or_else(current_cred);
+    let cred = stated.or_else(current_real_cred);
     let limit = Limit::new(limit_for(h, Direction::Send, nonblocking), task);
     loop {
         {
@@ -1858,9 +1956,22 @@ pub fn shutdown(h: UnixHandle, how: u32) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// `h`'s readiness, in [`stream_socket::poll_status`]'s encoding: 0x01
-/// readable, 0x04 writable, 0x08 error, 0x10 hang-up.
+/// readable, 0x04 writable, 0x08 error, 0x10 hang-up. A pending error
+/// ([`Socket::so_error`]) is an error, as Linux's `unix_poll` reports
+/// `sk_err`.
 #[must_use]
 pub fn poll_status(h: UnixHandle) -> u16 {
+    let pending = TABLE
+        .lock()
+        .sockets
+        .get(&h.0)
+        .is_some_and(|s| s.so_error != 0);
+    let status = readiness(h);
+    if pending { status | 0x08 } else { status }
+}
+
+/// [`poll_status`] without the pending error.
+fn readiness(h: UnixHandle) -> u16 {
     let stream = {
         let t = TABLE.lock();
         let Some(s) = t.sockets.get(&h.0) else {
@@ -2055,7 +2166,7 @@ fn reports_node(name: &Path) -> bool {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[unix_socket] Running self-test...");
     let mut opened: Vec<UnixHandle> = Vec::new();
-    let result = run_self_test(&mut opened);
+    let result = run_self_test(&mut opened).and_then(|()| pending_error_checks(&mut opened));
     for h in opened {
         close(h);
     }
@@ -2068,6 +2179,52 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[unix_socket] Self-test PASSED");
+    Ok(())
+}
+
+/// A pending error ([`set_so_error`]): a datagram socket's receive answers
+/// it before what is queued, once; a stream's only once nothing waits to be
+/// read; readiness shows it as an error until it is taken; and
+/// `getsockopt(SO_ERROR)`'s [`take_so_error`] takes it.
+fn pending_error_checks(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
+    const EFAULT: i32 = 14;
+    let mut buf = [0u8; 8];
+    let (a, b) = pair(Kind::Dgram).map_err(|_| "socketpair (datagram) failed")?;
+    opened.push(a);
+    opened.push(b);
+    send(b, b"d", true).map_err(|_| "datagram send failed")?;
+    set_so_error(a, EFAULT).map_err(|_| "set_so_error failed")?;
+    if poll_status(a) & 0x08 == 0 {
+        return Err("a pending error was not an error to poll");
+    }
+    if take_so_error_for_receive(a) != Ok(EFAULT) || take_so_error_for_receive(a) != Ok(0) {
+        return Err("a datagram socket's receive did not answer its pending error first, once");
+    }
+    if poll_status(a) & 0x08 != 0 {
+        return Err("a taken error still showed to poll");
+    }
+    if recv(a, &mut buf, true, false).map(|r| r.len) != Ok(1) {
+        return Err("the datagram queued behind the pending error was lost");
+    }
+    let (c, d) = pair(Kind::Stream).map_err(|_| "socketpair (stream) failed")?;
+    opened.push(c);
+    opened.push(d);
+    send(d, b"xy", true).map_err(|_| "stream send failed")?;
+    set_so_error(c, EFAULT).map_err(|_| "set_so_error failed")?;
+    if take_so_error_for_receive(c) != Ok(0) {
+        return Err("a stream with bytes waiting answered its pending error before them");
+    }
+    if recv(c, &mut buf, true, false).map(|r| r.len) != Ok(2) {
+        return Err("a stream's bytes did not come before its pending error");
+    }
+    if take_so_error_for_receive(c) != Ok(EFAULT) {
+        return Err("a stream with nothing waiting did not answer its pending error");
+    }
+    set_so_error(c, EFAULT).map_err(|_| "set_so_error failed")?;
+    if take_so_error(c) != Ok(EFAULT) || take_so_error(c) != Ok(0) {
+        return Err("SO_ERROR did not take the pending error, once");
+    }
+    crate::serial_println!("[unix_socket]   pending error (recvmmsg's, SO_ERROR): OK");
     Ok(())
 }
 
@@ -2146,9 +2303,33 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     // --- credentials a sender states (SCM_CREDENTIALS on a send) ---
     let claim = |pid, uid, gid| PeerCred { pid, uid, gid };
     let alive = |pid: crate::proc::pcb::ProcessId| pid == 7 || pid == 9;
-    let me = claim(7, 1000, 100);
-    if check_stated_cred_for(Some(me), me, alive) != Ok(me) {
+    let stater = |pid, uid, gid| Stater {
+        pid,
+        uids: [uid; 3],
+        gids: [gid; 3],
+    };
+    let me = stater(7, 1000, 100);
+    if check_stated_cred_for(Some(me), claim(7, 1000, 100), alive) != Ok(claim(7, 1000, 100)) {
         return Err("a process may not state its own credentials");
+    }
+    // A process that put root aside (real and saved uid 0, effective 1000)
+    // may state either id it holds, but is not root for the pid or another
+    // uid.
+    let dropped = Stater {
+        pid: 7,
+        uids: [0, 1000, 0],
+        gids: [0, 0, 0],
+    };
+    if check_stated_cred_for(Some(dropped), claim(7, 0, 0), alive) != Ok(claim(7, 0, 0))
+        || check_stated_cred_for(Some(dropped), claim(7, 1000, 0), alive) != Ok(claim(7, 1000, 0))
+    {
+        return Err("a process may not state its real or effective uid");
+    }
+    if check_stated_cred_for(Some(dropped), claim(7, 5, 0), alive) != Err(KernelError::NotPermitted)
+        || check_stated_cred_for(Some(dropped), claim(9, 0, 0), alive)
+            != Err(KernelError::NotPermitted)
+    {
+        return Err("a process with an effective uid of 1000 counted as root");
     }
     for (stated, why) in [
         (
@@ -2162,7 +2343,7 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
             return Err(why);
         }
     }
-    let root = claim(7, 0, 0);
+    let root = stater(7, 0, 0);
     if check_stated_cred_for(Some(root), claim(9, 1000, 100), alive) != Ok(claim(9, 1000, 100)) {
         return Err("root may not state another live process's credentials");
     }

@@ -2507,7 +2507,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
     let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
     let creds = crate::proc::pcb::get_credentials(proc_id);
-    let (uid, gid) = creds.as_ref().map_or((0, 0), |c| (c.uid, c.gid));
+    let uids = creds.as_ref().map_or([0; 4], |c| {
+        crate::proc::setid::ids(c, crate::proc::setid::Which::User)
+    });
+    let gids = creds.as_ref().map_or([0; 4], |c| {
+        crate::proc::setid::ids(c, crate::proc::setid::Which::Group)
+    });
 
     // Field names and order follow Linux fs/proc/array.c proc_pid_status()
     // closely enough for key-based parsers (ps, htop, glibc, WINE).  Values
@@ -2537,12 +2542,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "PPid:\t{ppid}");
     let tracer = crate::proc::ptrace::tracer_of(task.id).unwrap_or(0);
     let _ = writeln!(s, "TracerPid:\t{tracer}");
-    // Linux prints four credential columns (real, effective, saved-set,
-    // filesystem).  Our credential model holds a single uid/gid, so all four
-    // columns carry the same value — consistent with getuid/geteuid/
-    // getresuid all returning the same id.
-    let _ = writeln!(s, "Uid:\t{uid}\t{uid}\t{uid}\t{uid}");
-    let _ = writeln!(s, "Gid:\t{gid}\t{gid}\t{gid}\t{gid}");
+    // Linux prints four credential columns: real, effective, saved-set,
+    // filesystem.
+    let [ru, eu, su, fu] = uids;
+    let [rg, eg, sg, fg] = gids;
+    let _ = writeln!(s, "Uid:\t{ru}\t{eu}\t{su}\t{fu}");
+    let _ = writeln!(s, "Gid:\t{rg}\t{eg}\t{sg}\t{fg}");
     // Groups: space-separated supplementary GIDs (may be empty).
     s.push_str("Groups:\t");
     if let Some(c) = creds.as_ref() {
@@ -2589,7 +2594,7 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let (sig, caught) = proc_signal_sets(proc_id, task.id);
     // A POSIX timer counts too: Linux charges each timer's preallocated
     // signal against the limit when the timer is created.
-    let queued: u32 = crate::proc::pcb::pids_of_user(uid)
+    let queued: u32 = crate::proc::pcb::pids_of_user(ru)
         .into_iter()
         .map(|pid| {
             let timers = u32::try_from(crate::proc::posix_timer::count(pid)).unwrap_or(u32::MAX);
@@ -2846,7 +2851,17 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     // A first thread that has exited belongs to no process any more, but
     // its directory is still the process's (`proc_target`).
     let proc_id = proc_target(task_id).unwrap_or(0);
-    Ok(build_pid_stat(&task, proc_id, reader_may_inspect(task_id)))
+    // utime/stime are the whole process's, as Linux's `do_task_stat(whole)`
+    // reports them (a kernel task's are its own).
+    let times = crate::proc::pcb::process_times(proc_id)
+        .or_else(|| crate::sched::thread_times(task_id))
+        .unwrap_or((0, 0));
+    Ok(build_pid_stat(
+        &task,
+        proc_id,
+        reader_may_inspect(task_id),
+        times,
+    ))
 }
 
 /// `/proc/<pid>/wchan` and `/proc/<pid>/task/<tid>/wchan` — what the task
@@ -2944,7 +2959,14 @@ fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
         .iter()
         .find(|t| t.id == tid)
         .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_stat(task, proc_id, reader_may_inspect(tid)))
+    // utime/stime are the thread's own.
+    let times = crate::sched::thread_times(tid).unwrap_or((0, 0));
+    Ok(build_pid_stat(
+        task,
+        proc_id,
+        reader_may_inspect(tid),
+        times,
+    ))
 }
 
 /// Length of Linux's `comm` field minus the trailing NUL: `TASK_COMM_LEN - 1`.
@@ -2974,7 +2996,17 @@ fn comm_truncate(name: &[u8]) -> &[u8] {
 /// `inspect` is whether the reader may inspect the task
 /// ([`reader_may_inspect`]): Linux fills the fields that say where the task
 /// is -- here, field 35 -- only for such a reader, and 0 for anyone else.
-fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) -> Vec<u8> {
+///
+/// `times` is the `(user, system)` nanoseconds fields 14 and 15 report: the
+/// process's run time for its own `stat`, the thread's for a thread's, each
+/// split by the tick ratio (`pcb::process_times`, `sched::thread_times`,
+/// Linux's `*_cputime_adjusted`).
+fn build_pid_stat(
+    task: &crate::sched::TaskInfo,
+    proc_id: u64,
+    inspect: bool,
+    times: (u64, u64),
+) -> Vec<u8> {
     use crate::sched::task::TaskState;
 
     // Field 2 (`comm`) must match `/proc/<pid>/comm` exactly, including the
@@ -2998,23 +3030,21 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
     let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
 
-    // utime/stime (fields 14/15): user and system CPU time in clock
-    // ticks.  USER_HZ == TICK_RATE_HZ == 100, so the raw timer-tick
-    // counts are already in ABI units.  These are this task's own
-    // tick-sampled user/kernel split (Linux `account_user_time`/
-    // `account_system_time` model); `user_ticks + sys_ticks ==
-    // total_ticks`.  For a single-threaded process this equals the
-    // process total; the thread-group-leader sum for multi-threaded
-    // processes is the same TD14 follow-up as getrusage's children path.
-    let utime = task.user_ticks;
-    let stime = task.sys_ticks;
+    // utime/stime (fields 14/15): user and system CPU time in clock ticks
+    // at USER_HZ == 100, from the nanoseconds the caller split (`times`),
+    // truncated as Linux's `nsec_to_clock_t` truncates.
+    const NS_PER_CLOCK_T: u64 = 10_000_000;
+    let utime = times.0 / NS_PER_CLOCK_T;
+    let stime = times.1 / NS_PER_CLOCK_T;
 
     // cutime/cstime (fields 16/17): user/system CPU time of this process's
     // reaped descendants, in clock ticks.  Process-wide, so keyed off
     // `proc_id` (a bare kernel thread with no PCB reports 0).  Credited at
     // wait/reap from each reaped child's (utime+cutime, stime+cstime),
     // mirroring Linux's `signal->cutime`/`cstime`.
-    let (cutime, cstime) = crate::proc::pcb::process_child_ticks(proc_id);
+    let (cutime_ns, cstime_ns) = crate::proc::pcb::process_child_times(proc_id);
+    let cutime = cutime_ns / NS_PER_CLOCK_T;
+    let cstime = cstime_ns / NS_PER_CLOCK_T;
 
     // minflt/majflt (fields 10/12): minor/major page faults charged to this
     // task.  Mirrors the utime/stime treatment above — a per-task value
@@ -3675,7 +3705,8 @@ fn set_pid_oom_score_adj(task_id: u64, data: &[u8]) -> KernelResult<()> {
         return Err(KernelError::PermissionDenied);
     }
     let current = crate::fs::oomkiller::get_score(pid).map_or(0, |s| s.adj);
-    let privileged = writer.is_none_or(|w| crate::proc::pcb::process_uid(w) == Some(0));
+    let privileged = writer
+        .is_none_or(|w| crate::proc::pcb::process_uid_gid(w).is_some_and(|(uid, _)| uid == 0));
     if adj < current && !privileged {
         return Err(KernelError::PermissionDenied);
     }
@@ -3781,7 +3812,8 @@ fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
 /// entry, mirroring Linux's magic fd links.
 ///
 /// Every target is derived from the real fd entry — a regular file
-/// resolves to its VFS path, a pipe to `pipe:[id]`, and anonymous kernel
+/// resolves to its VFS path, a pipe to `pipe:[id]` (both ends the same id), a
+/// named pipe's end to its node, and anonymous kernel
 /// objects (eventfd / pidfd / memfd) to Linux's `anon_inode:[type]`
 /// labels.  The console maps to `/dev/console`.  Nothing here is
 /// fabricated: if a File handle can no longer be resolved (it raced a
@@ -3792,7 +3824,20 @@ pub(crate) fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf 
         HandleKind::Console => PathBuf::from("/dev/console"),
         HandleKind::File => crate::fs::handle::handle_name(entry.raw_handle)
             .unwrap_or_else(|_| PathBuf::from("anon_inode:[file]")),
-        HandleKind::Pipe => PathBuf::from(format!("pipe:[{}]", entry.raw_handle)),
+        // A named pipe's end names its node, as Linux's link does; an
+        // ordinary pipe's, the pipe.
+        HandleKind::Pipe => {
+            match crate::ipc::pipe::fifo_node(crate::ipc::pipe::PipeHandle::from_raw(
+                entry.raw_handle,
+            )) {
+                Some((_, path)) => path,
+                // Both ends name the one pipe, as Linux's one inode.
+                None => PathBuf::from(format!(
+                    "pipe:[{}]",
+                    crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle).pipe_number()
+                )),
+            }
+        }
         HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),
         HandleKind::PidFd => PathBuf::from("anon_inode:[pidfd]"),
         HandleKind::MemFd => PathBuf::from("anon_inode:[memfd]"),
@@ -15275,6 +15320,23 @@ impl FileSystem for ProcFs {
         }
     }
 
+    // `/proc/<task>/mem` is bound to the address space its process has as it
+    // is opened: the number of times the process has exec'd. After another
+    // exec the handle reads end-of-file (`FileSystem::open_binding`).
+    fn open_binding(&mut self, path: &Path) -> Option<u64> {
+        let task = mem_file_task(strip_root(path).ok()?)?;
+        crate::proc::pcb::exec_generation(proc_target(task)?)
+    }
+
+    fn binding_current(&mut self, path: &Path, binding: u64) -> bool {
+        strip_root(path)
+            .ok()
+            .and_then(mem_file_task)
+            .and_then(proc_target)
+            .and_then(crate::proc::pcb::exec_generation)
+            == Some(binding)
+    }
+
     fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let rel = strip_root(path)?;
         if let Some(task) = mem_file_task(rel) {
@@ -15828,6 +15890,46 @@ pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = ProcFs::new();
+
+    // `/proc/<pid>/mem` is bound, as it is opened, to the address space its
+    // process has then (its exec generation); after an exec that binding no
+    // longer holds -- a handle reads end-of-file, as Linux's does -- and a new
+    // open binds to the new one. Every other file is bound to nothing.
+    {
+        let pid = crate::proc::pcb::create("procfs-mem-binding", 0);
+        let mem = PathBuf::from(format!("/{pid}/mem"));
+        let first = fs.open_binding(&mem);
+        let unbound = fs.open_binding(&PathBuf::from(format!("/{pid}/status")));
+        let held_before = first.is_some_and(|b| fs.binding_current(&mem, b));
+        crate::proc::pcb::note_exec(pid);
+        let held_after = first.is_some_and(|b| fs.binding_current(&mem, b));
+        let second = fs.open_binding(&mem);
+        crate::proc::pcb::destroy(pid);
+        let gone = first.is_some_and(|b| fs.binding_current(&mem, b));
+        if first.is_none()
+            || unbound.is_some()
+            || !held_before
+            || held_after
+            || second.is_none()
+            || second == first
+            || gone
+        {
+            serial_println!(
+                "[procfs]   FAIL: mem binding: first {:?}, status {:?}, held {} then {}, \
+                 reopened {:?}, after reaping {}",
+                first,
+                unbound,
+                held_before,
+                held_after,
+                second,
+                gone
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   /proc/<pid>/mem bound to its exec generation (ends at an exec): OK"
+        );
+    }
 
     // `entry_type`, which path resolution asks of every component it walks,
     // agrees with `stat` on every kind of entry, present or not. It is `stat`
@@ -16384,7 +16486,9 @@ pub fn self_test() -> KernelResult<()> {
         use crate::proc::linux_fd::FdEntry;
         let renders: &[(FdEntry, &str)] = &[
             (FdEntry::console(0), "/dev/console"),
-            (FdEntry::pipe(42, 0), "pipe:[42]"),
+            // Both ends of pipe 21 (handles 42 and 43) name the one pipe.
+            (FdEntry::pipe(42, 0), "pipe:[21]"),
+            (FdEntry::pipe(43, 0), "pipe:[21]"),
             (FdEntry::eventfd(0, 0), "anon_inode:[eventfd]"),
             (FdEntry::pidfd(7, 0), "anon_inode:[pidfd]"),
             (FdEntry::memfd(0, 0), "anon_inode:[memfd]"),
@@ -16673,8 +16777,6 @@ pub fn self_test() -> KernelResult<()> {
             state: crate::sched::task::TaskState::Ready,
             priority: 20,
             total_ticks: 7,
-            user_ticks: 5,
-            sys_ticks: 2,
             min_flt: 0,
             maj_flt: 0,
 
@@ -16698,7 +16800,7 @@ pub fn self_test() -> KernelResult<()> {
             },
             wait: crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, 0x7f00_1000),
         };
-        let data = build_pid_stat(&synth, 999_999, true);
+        let data = build_pid_stat(&synth, 999_999, true, (50_000_001, 29_999_999));
         let text = core::str::from_utf8(&data).unwrap_or("");
         let line = text.strip_suffix('\n').unwrap_or(text);
         let close = line.rfind(')').unwrap_or(0);
@@ -16737,7 +16839,8 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // field 14 (utime) sits at index 11; field 15 (stime) at index 12.
-        // The synthetic task has user_ticks=5, sys_ticks=2 (sum == total 7).
+        // The synthetic times are 50.000001 ms and 29.999999 ms: 5 and 2
+        // ticks, truncated.
         if rest.get(11).and_then(|f| f.parse::<u64>().ok()) != Some(5) {
             serial_println!(
                 "[procfs]   FAIL: synthetic stat utime (field 14) = {:?}, want 5",
@@ -16767,7 +16870,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // ... and 0 to a reader who may not inspect the task, waiting or not.
-        let hidden_data = build_pid_stat(&synth, 999_999, false);
+        let hidden_data = build_pid_stat(&synth, 999_999, false, (0, 0));
         let hidden_text = core::str::from_utf8(&hidden_data).unwrap_or("");
         let hidden_field = hidden_text
             .get(hidden_text.rfind(')').unwrap_or(0)..)
@@ -16781,7 +16884,7 @@ pub fn self_test() -> KernelResult<()> {
         }
         let mut idle = synth;
         idle.wait = crate::wchan::Wait::NONE;
-        let idle_data = build_pid_stat(&idle, 999_999, true);
+        let idle_data = build_pid_stat(&idle, 999_999, true, (0, 0));
         let idle_text = core::str::from_utf8(&idle_data).unwrap_or("");
         let idle_field = idle_text
             .get(idle_text.rfind(')').unwrap_or(0)..)
@@ -16824,8 +16927,6 @@ pub fn self_test() -> KernelResult<()> {
                 state: st,
                 priority: 20,
                 total_ticks: 0,
-                user_ticks: 0,
-                sys_ticks: 0,
                 min_flt: 0,
                 maj_flt: 0,
 
@@ -16847,7 +16948,7 @@ pub fn self_test() -> KernelResult<()> {
             };
             // stat field 3 is the first token after the `(comm) ` prefix.  The
             // synthetic comm has no parens, so `") "` locates the boundary.
-            let stat = build_pid_stat(&synth, 999_999, true);
+            let stat = build_pid_stat(&synth, 999_999, true, (0, 0));
             let stat_text = core::str::from_utf8(&stat).unwrap_or("");
             let stat_char = stat_text
                 .rfind(") ")
@@ -16900,8 +17001,6 @@ pub fn self_test() -> KernelResult<()> {
             state: crate::sched::task::TaskState::Ready,
             priority: 20,
             total_ticks: 0,
-            user_ticks: 0,
-            sys_ticks: 0,
             min_flt: 0,
             maj_flt: 0,
 
@@ -16921,7 +17020,7 @@ pub fn self_test() -> KernelResult<()> {
             attr: crate::sched::task::SchedAttr::default(),
             wait: crate::wchan::Wait::NONE,
         };
-        let data = build_pid_stat(&synth, 999_999, true);
+        let data = build_pid_stat(&synth, 999_999, true, (0, 0));
         let text = core::str::from_utf8(&data).unwrap_or("");
         // comm is the token between the first '(' and the last ')'.
         let open = text.find('(').map_or(0, |i| i.saturating_add(1));
@@ -18909,8 +19008,6 @@ fn test_pid_signal_sets() -> KernelResult<()> {
         state: crate::sched::task::TaskState::Ready,
         priority: 20,
         total_ticks: 0,
-        user_ticks: 0,
-        sys_ticks: 0,
         min_flt: 0,
         maj_flt: 0,
         nvcsw: 0,
@@ -18957,7 +19054,7 @@ fn test_pid_signal_sets() -> KernelResult<()> {
             return Err("SigQ is not queued/limit");
         }
 
-        let stat = build_pid_stat(&synth, PID, true);
+        let stat = build_pid_stat(&synth, PID, true, (0, 0));
         let text = core::str::from_utf8(&stat).unwrap_or("");
         let close = text.rfind(')').unwrap_or(0);
         let fields: Vec<&str> = text

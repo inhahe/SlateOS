@@ -1,6 +1,6 @@
 ### A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES -- 2026-10-02 -- OPEN (lane A)
 
-**Status:** OPEN (lane A) -- the ext4 device-node half fixed on lane-a-wip 2026-10-03, awaiting a boot on main: character and block device inodes read as devices with their numbers, and refuse reads with ENXIO. FIFOs remain.
+**Status:** OPEN (lane A) -- both halves fixed on lane-a-wip, awaiting a boot on main: the ext4 device nodes 2026-10-03 (character and block device inodes read as devices with their numbers, and refuse reads with ENXIO), and named pipes 2026-10-08 (`ipc::fifo`, design-decisions 1551: `mknod(S_IFIFO)` on memfs and ext4, opens with POSIX's waits, an ext4 FIFO read as one; checked by `self_test_linux_fifo` and `ipc::fifo::self_test`). Native programs need lane D's C library to use the two new calls (`requests/a-d-named-pipes-have-native-calls.md`). Stamp it FIXED and move it once a boot on main has run those tests.
 
 **In short:** two kinds of special file are missing or misreported.
 - **Named pipes (FIFOs) do not exist.** `mkfifo` and `mknod(path, S_IFIFO)`

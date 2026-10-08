@@ -284,6 +284,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lsns-diff.sh` | Differential test: our `lsns` against util-linux 2.39.3's. |
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
+| `scripts/mkdir-diff.sh` | Differential test: our `mkdir` against GNU coreutils 9.4's. |
+| `scripts/mkfifo-diff.sh` | Differential test: our `mkfifo` against GNU coreutils 9.4's. |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
 | `scripts/mktemp-diff.sh` | mktemp-diff.sh — compare our `mktemp` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/mono-spike/bcl.sh` | Build Mono's class libraries on the host, and stage what SlateOS's mono needs. |
@@ -370,6 +372,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/quote-sweep.py` | One-shot: route every file name in a coreutils diagnostic through `quote`. |
 | `scripts/raced-globals.py` | Find mutable process-globals that two or more `#[test]`s drive unserialised. |
 | `scripts/read-error-diff.sh` | read-error-diff.sh — one question, asked of every utility that answers it: |
+| `scripts/readlink-diff.sh` | Differential test: our `readlink` against GNU coreutils 9.4's. |
+| `scripts/realpath-diff.sh` | Differential test: our `realpath` against GNU coreutils 9.4's. |
 | `scripts/reclaim-space.py` | Free space on the shared build volume, without guessing what is in use. |
 | `scripts/reintro-benchmark.py` | Reintroduction check for the benchmark scroll fixes. |
 | `scripts/reintro-credmanager.py` | Reintroduction check for the credmanager scroll fixes. |
@@ -388,8 +392,10 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/reintro-sysinfo.py` | Reintroduction check for the sysinfo scroll fixes. |
 | `scripts/reintro-textview.py` | Reintroduction check for the toolkit/desktop wheel-unit fixes. |
 | `scripts/reintro-toolkit-focus.py` | Prove the toolkit's focus, caret and selection tests are regression tests. |
+| `scripts/renice-diff.sh` | Differential test: our `renice` against util-linux 2.39.3's. |
 | `scripts/resolve-rip.sh` | resolve-rip.sh — map a kernel RIP (or any code address) to the containing |
 | `scripts/rm-diff.sh` | Differential test: our `rm` against GNU coreutils'. |
+| `scripts/rmdir-diff.sh` | Differential test: our `rmdir` against GNU coreutils 9.4's. |
 | `scripts/run-checker.sh` | `run_checker` — the one implementation of "did that checker reach a verdict?" |
 | `scripts/run-timeout.py` | run-timeout.py — run a command with a hard timeout and guaranteed |
 | `scripts/rust_scopes.py` | Resolve, for every line of a Rust file, the item scopes enclosing it. |
@@ -414,6 +420,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/shuf-diff.sh` | shuf-diff.sh — compare our `shuf` against GNU coreutils 9.4's, inside WSL. |
+| `scripts/sleep-diff.sh` | Differential test: our `sleep` against GNU coreutils 9.4's. |
 | `scripts/smartcols-cases.py` | Scripts for scripts/smartcols-diff.sh: tables to build, each printed. |
 | `scripts/smartcols-diff.sh` | Differential test: `userspace/smartcols`, the port of libsmartcols, against |
 | `scripts/snapshot-todo2.sh` | Commit the current todo2.txt to local-only history on the orphan branch |
@@ -507,6 +514,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |
+| `scripts/true-diff.sh` | Differential test: our `true` and `false` against GNU coreutils 9.4's. |
 | `scripts/truncate-diff.sh` | truncate-diff.sh — compare our `truncate` against the real GNU one, in WSL. |
 | `scripts/tsort-diff.sh` | Differential test: our tsort against GNU tsort. |
 | `scripts/tsort-probe.py` | Ad-hoc measurement of GNU `tsort`. Not part of the build; kept only so the |
@@ -528,6 +536,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
 | `scripts/wedge-soak.sh` | wedge-soak.sh — armed hang-repro soak for the still-open boot wedge race. |
+| `scripts/which-diff.sh` | Differential test: our `which` against GNU which 2.21 (`gnu-which`). |
 | `scripts/which-lane.py` | Print which of the six parallel-agent lanes this session is, and what it owns. |
 | `scripts/who-diff.sh` | Differential test: our `who` against GNU coreutils 9.4's. |
 | `scripts/who-holds-dir.py` | Report which processes are keeping a directory un-renamable, without admin. |
@@ -538,4 +547,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_528 scripts._
+_537 scripts._

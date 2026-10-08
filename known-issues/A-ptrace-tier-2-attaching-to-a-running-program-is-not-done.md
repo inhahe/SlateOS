@@ -32,16 +32,23 @@ Tier 2 but attaching
   its former id, is its id still. The fix: the exec'ing thread takes the
   leader's task id (`pcb::claim_leader_id`'s id), which needs the scheduler
   to re-key a live task.
-- **A traced child's end reaches its real parent at once.** Linux hides a
-  traced child's zombie from its real parent until its tracer -- when that is
-  not the parent -- has reaped it (`wait_consider_task`); here both are told
-  at once (`ptrace::on_thread_exit`, `pcb::peek_exit*`). Only a child of a
-  traced program that its tracer keeps tracing (`TRACEFORK` with the child
-  not detached) is affected.
-- **`/proc/<pid>/mem` across an exec.** The file is resolved by pid at each
-  access, so a descriptor opened before the target exec'd reads the new
-  image; Linux ties it to the address space and answers EOF after an exec.
-  The fix: an exec generation on the process, recorded at open.
+- ~~**A traced child's end reaches its real parent at once.**~~ Fixed on
+  lane-a-wip 2026-10-08, awaiting a boot: a process traced by one that is
+  not its parent ends for its tracer first (`pcb::Process::exit_held`,
+  decided as it becomes a zombie); its parent's `wait` does not see it and
+  is sent no `SIGCHLD` until the tracer has waited for it or exited
+  (`thread::release_traced_exit`), as Linux's `wait_consider_task` and
+  `wait_task_zombie` do. A first thread that ends while its process has
+  threads left is reported with the process, once it has ended
+  (`delay_group_leader`). Checked by the tier-2 ring-3 test's sixth part.
+- ~~**`/proc/<pid>/mem` across an exec.**~~ Fixed on lane-a-wip
+  2026-10-08, awaiting a boot: an open of it is bound to its process's exec
+  generation (`Process::exec_gen`, the VFS's `open_binding` hook kept by the
+  handle), so after an exec it reads end-of-file and writes fail (`EIO`;
+  Linux writes nothing and answers 0), as Linux's, which holds the `mm` it
+  opened, does. That also keeps a descriptor to a process's own memory,
+  kept across its exec of a privileged program, from reaching the new
+  image (the Mempodipper hole). Checked by `procfs::self_test`.
 - **An untraced native program's `int3` or single step** is logged and the
   program runs on, as before: the native exception set has no breakpoint or
   trace code (`proc::exception::ExceptionCode`). A Linux program gets
@@ -51,8 +58,15 @@ Tier 2 but attaching
   follows `PTRACE_EVENT_VFORK` at once; a single step over a `syscall`
   instruction stops with `TRAP_TRACE` after the `SYSRET`, where Linux's
   `user_single_step_report` says `TRAP_BRKPT` at the call's exit (both at
-  the next instruction; GDB treats both as the step); `PTRACE_GETSIGMASK`,
+  the next instruction; GDB treats both as the step); `PTRACE_PEEKSIGINFO`
+  lists a queue by signal number where Linux lists it in the order sent
+  (only the listing can tell: delivery always takes the lowest-numbered
+  signal first, `signal::peek_pending`). ~~`PTRACE_GETSIGMASK`,
   `SETSIGMASK`, `PEEKSIGINFO` and `GET_RSEQ_CONFIGURATION` -- CRIU's -- are
-  `EIO`.
+  `EIO`~~: done on lane-a-wip 2026-10-08, awaiting a boot, with
+  `OLDSETOPTIONS`, `GET`/`SET_SYSCALL_USER_DISPATCH_CONFIG` (always off:
+  syscall user dispatch is not offered) and `SECCOMP_GET_FILTER`/`METADATA`
+  (`EINVAL`: there are no filters); `INTERRUPT` and `LISTEN` are `EIO`, as
+  for any tracee not seized. Checked by the tier-2 ring-3 test's fifth part.
 
 **How to see it.** `PTRACE_ATTACH` from any program: `EPERM`.

@@ -2195,11 +2195,15 @@ fn spawn_process_inner(
         }
     }
 
-    // Apply the initial user/group identity if one was requested (honors a
-    // container image's `User` config / the Docker `--user`/`-u` flag). The
-    // child's credentials are replaced with a fresh numeric identity (no
-    // supplementary groups). A failure here is logged but never fails the
-    // spawn — the child simply keeps the inherited (root) credentials.
+    // The child's identity. An initial user/group identity, when one was
+    // requested (a container image's `User` config, the Docker `--user`/`-u`
+    // flag -- kernel callers only), replaces the credentials with a fresh
+    // numeric identity (no supplementary groups); a failure there is logged,
+    // and the child keeps root's, which only the kernel asks for. Otherwise a
+    // process's child is its parent's user, as `posix_spawn` -- a fork and an
+    // exec -- leaves it (`pcb::inherit_credentials`), and a spawn whose parent
+    // cannot be read fails rather than start a child as root. A
+    // kernel-spawned child (`parent == 0`) is root.
     if let Some((uid, gid)) = options.uid_gid {
         if let Err(e) = pcb::set_credentials(pid, pcb::ProcessCredentials::new(uid, gid)) {
             serial_println!(
@@ -2208,6 +2212,18 @@ fn spawn_process_inner(
                 e,
             );
         }
+    } else if options.parent != 0
+        && let Err(e) = pcb::inherit_credentials(options.parent, pid)
+    {
+        serial_println!(
+            "[spawn] Process {}: parent {}'s credentials could not be read: {:?} -- spawn \
+             aborted",
+            pid,
+            options.parent,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
     }
 
     // Step 5f: the child's process group, session and signal state -- its
@@ -2476,6 +2492,13 @@ pub fn exec_process(
     // cancelled; and if it answered requests, the new program does not
     // until it registers itself (`cap::request`, design-decisions 1548).
     crate::cap::request::on_process_exit(pid);
+
+    // The old address space goes next: a `/proc/<pid>/mem` opened on it reads
+    // end-of-file from now on, as Linux's does (`pcb::note_exec`).
+    pcb::note_exec(pid);
+    // The saved and filesystem ids become the effective ones, as Linux's exec
+    // sets them (`pcb::exec_credentials`).
+    pcb::exec_credentials(pid);
 
     // Step 3: Tear down the old user address space.
     //
@@ -3552,6 +3575,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_job_and_signals()?;
     test_spawn_child_of_sigchld_ignorer_is_reaped()?;
     test_spawn_with_uid_gid()?;
+    test_spawn_inherits_credentials()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
@@ -23895,7 +23919,13 @@ pub fn self_test_linux_exec_threads() -> KernelResult<()> {
 /// exits; a fork and a vfork make their events (`VFORK_DONE` too) and a
 /// traced grandchild the tracer reads and detaches; `PTRACE_SYSCALL` stops at
 /// a call's entry and exit, with `PTRACE_GET_SYSCALL_INFO`, a changed result
-/// and a skipped call (`crate::proc::ptrace`, design-decisions 1547).
+/// and a skipped call (`crate::proc::ptrace`, design-decisions 1547); a
+/// tracer reads and sets a child's signal mask -- the one it set, not
+/// `rt_sigsuspend`'s, which restarts when its signal is taken away -- and
+/// lists its pending signals (`PTRACE_GETSIGMASK`, `SETSIGMASK`,
+/// `PEEKSIGINFO`), its rseq area and its syscall user dispatch; and a traced
+/// child's end is its tracer's to see before its parent's
+/// (`pcb::Process::exit_held`).
 pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 90_000_000_000;
@@ -23949,6 +23979,27 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
             Some(0x32) => "the traced child's clone failed",
             Some(0x33 | 0x34) => "a traced child's own fork/vfork or wait for it failed",
             Some(0x35) => "the system-call child did not see 12345 and 777",
+            Some(0x36) => "the signals child's MAP_FIXED page was not where it asked",
+            Some(0x37) => "the signals child's rseq registration failed",
+            Some(0x38) => "the signals child's rt_sigaction failed",
+            Some(0x39) => "the signals child's rt_sigqueueinfo failed",
+            Some(0x3a) => {
+                "rt_sigsuspend did not answer EINTR after the handled SIGUSR1 (it must restart, \
+                 not end, when its SIGWINCH is taken away)"
+            }
+            Some(0x3b) => "the signals child's SIGUSR1 handler did not run exactly once",
+            Some(0x3c) => {
+                "after rt_sigsuspend the child's mask was not the one its tracer set at the stop"
+            }
+            Some(0x3d) => "the holding child's fork failed",
+            Some(0x3e) => {
+                "a parent saw its traced child's end (wait4 WNOHANG) before the tracer waited \
+                 for it"
+            }
+            Some(0x3f) => {
+                "a parent could not reap its traced child's end, exit 7, after the tracer waited \
+                 for it"
+            }
             Some(0x40 | 0x41) => "the thread child did not stop for its SIGSTOP",
             Some(0x42 | 0x43) => "SETOPTIONS(TRACECLONE|TRACEEXIT) or CONT failed",
             Some(0x44..=0x4b) => {
@@ -23991,6 +24042,51 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
                 "write(-1) could not be skipped at its entry with 777, its exit stopped at"
             }
             Some(0x97 | 0x98) => "the system-call child did not end 0x2B",
+            Some(0xa0 | 0xa1) => "the signals child did not start in its SIGSTOP stop",
+            Some(0xa2 | 0xa3) => "PTRACE_INTERRUPT or LISTEN of a tracee not seized was not EIO",
+            Some(0xa4) => "PTRACE_OLDSETOPTIONS failed",
+            Some(0xa5..=0xa8) => {
+                "PTRACE_GET_RSEQ_CONFIGURATION did not report the area, 32 and the signature \
+                 (24, however much was copied)"
+            }
+            Some(0xa9..=0xab) => {
+                "PTRACE_GET_SYSCALL_USER_DISPATCH_CONFIG did not report it off (EINVAL for a \
+                 wrong size)"
+            }
+            Some(0xac | 0xad) => "the signals child did not stop after sending itself signals",
+            Some(0xae | 0xaf) => "PTRACE_GETSIGMASK did not read the mask (EINVAL for size 4)",
+            Some(0xb0 | 0xb1) => "PTRACE_PEEKSIGINFO did not list SIGUSR2 in the thread's queue",
+            Some(0xb2..=0xb5) => {
+                "PTRACE_PEEKSIGINFO did not list SIGUSR1 then the queued SIGRTMIN in the \
+                 process's queue, from an offset"
+            }
+            Some(0xb6..=0xba) => {
+                "PTRACE_PEEKSIGINFO past the end, of none, of nr -1, of an unknown flag or into a \
+                 bad buffer was not 0, 0, EINVAL, EINVAL, EFAULT"
+            }
+            Some(0xbb | 0xbc) => "PTRACE_SETSIGMASK kept SIGKILL or SIGSTOP",
+            Some(0xbd..=0xc1) => {
+                "a mask that unblocked a pending SIGUSR1 did not have the child stop for it"
+            }
+            Some(0xc2..=0xc7) => {
+                "the SIGWINCH stop in rt_sigsuspend was not at its exit (130, -ERESTARTNOHAND) \
+                 with the child's own mask to read"
+            }
+            Some(0xc8..=0xcd) => {
+                "rt_sigsuspend did not start over, its SIGWINCH taken away, under the mask the \
+                 tracer set"
+            }
+            Some(0xce | 0xcf) => "the signals child did not end 0x2C",
+            Some(0xd0..=0xd6) => {
+                "the holding child's start, its PTRACE_EVENT_FORK or its traced grandchild's \
+                 SIGSTOP start failed"
+            }
+            Some(0xd7..=0xd9) => {
+                "the tracer's waitid(WNOWAIT) did not see the traced grandchild's exit 7"
+            }
+            Some(0xda | 0xdb) => "the holding child did not stop after its wait4(WNOHANG)",
+            Some(0xdc) => "the tracer's own wait for the traced grandchild did not reap exit 7",
+            Some(0xdd | 0xde) => "the holding child did not end 0x2D",
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };
@@ -24004,7 +24100,221 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux ptrace tier 2 (ring 3: a traced thread from its first instruction, its \
          tgkill, int3 and exit stops and its exit report; fork and vfork events and a traced \
-         grandchild; system-call entry and exit stops, a changed result, a skipped call): OK"
+         grandchild; system-call entry and exit stops, a changed result, a skipped call; signal \
+         masks, pending signals, rseq and an rt_sigsuspend that restarts; a traced child's end \
+         its tracer's before its parent's): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of real, effective, saved and filesystem ids through the Linux
+/// ABI: [`elf::build_linux_setid_test_elf`] (`build/setidtest.c`), run as
+/// root. `seteuid(1000)` keeps the real and saved ids 0, shuts root's file,
+/// and `seteuid(0)` brings root back; the saved id alone keeps root within
+/// reach; `setfsuid` moves file access alone and answers the old id; the
+/// group ids move the same way; a child that leaves every id 0 cannot come
+/// back; `setreuid` moves the saved id as Linux's does, and a privileged
+/// `setuid` sets all three (`crate::proc::setid`).
+pub fn self_test_linux_setid() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux user and group ids (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_setid_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-setid"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens files: `sys_fs_open` wants a wildcard File capability, as
+    // every ring-3 fixture that opens one is given (c6fa64b1b).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-setid",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: user and group ids spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: user and group ids (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x34) => {
+                "a child that left every user id 0 got root back (or could not leave it)"
+            }
+            Some(0x35) => "an unprivileged setfsuid to an id it holds none of changed something",
+            Some(0x40) => "root could not make its test file",
+            Some(0x5d) => {
+                "root could not give its test file an ACL (setxattr of system.posix_acl_access)"
+            }
+            Some(0x41..=0x44) => {
+                "seteuid(1000) as root did not leave the real and saved ids 0 (getresuid, getuid, \
+                 geteuid)"
+            }
+            Some(0x45) => {
+                "root's file, closed to others by its ACL, opened with the effective id 1000"
+            }
+            Some(0x46) => "seteuid to an id the process holds none of was allowed",
+            Some(0x47 | 0x48) => "seteuid(0) did not bring root and its file access back",
+            Some(0x49..=0x4c) => "the saved id alone did not keep root within reach",
+            Some(0x4d..=0x50) => "setfsuid did not move file access alone, or answer the old id",
+            Some(0x51..=0x55) => "the group ids did not move as the user ids do",
+            Some(0x56 | 0x57) => "the child that gave up root did not end 0x2B",
+            Some(0x58..=0x5c) => {
+                "setreuid did not move the saved id as Linux's does, or a privileged setuid did \
+                 not set all three for good"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: user and group ids (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux user and group ids (ring 3: seteuid away and back, the saved id, \
+         setfsuid, group ids, a drop for good, setreuid and setuid): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of named pipes through the Linux ABI:
+/// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
+/// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a
+/// writer with no reader `ENXIO`, a reader at once, with no `POLLHUP` until a
+/// writer has come), bytes through, `fstat` of an end naming the node; whole
+/// writes of at most `PIPE_BUF` and no `POLLOUT` without room for one;
+/// blocking opens across a fork in both orders and a blocking write of more
+/// than the FIFO holds; `O_RDWR`, which never waits; a broken pipe; an end
+/// opened again through `/proc/self/fd`; and a FIFO unlinked while open
+/// (`crate::ipc::fifo`).
+pub fn self_test_linux_fifo() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux named pipes (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_fifo_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fifo"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens files: `sys_fs_open` wants a wildcard File capability, as
+    // every ring-3 fixture that opens one is given (c6fa64b1b).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fifo",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: named pipes spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: named pipes (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31) => {
+                "a child's blocking write-only open, or its 100000-byte blocking write, failed"
+            }
+            Some(0x32 | 0x33) => "a child's nonblocking writer did not open or write",
+            Some(0x3f) => "mmap of the test's buffers failed",
+            Some(0x40..=0x43) => {
+                "mknod(S_IFIFO) did not make a FIFO that stat, a second mknod and getdents see"
+            }
+            Some(0x44) => "a nonblocking writer with no reader was not ENXIO",
+            Some(0x45..=0x47) => {
+                "a nonblocking reader did not open at once, read end of file, and poll nothing"
+            }
+            Some(0x48..=0x4c) => {
+                "bytes did not go from a writer to the reader (or EAGAIN when empty)"
+            }
+            Some(0x4d | 0x4e) => "fstat of an end did not say S_IFIFO and the node's inode",
+            Some(0x4f | 0x50) => "the writer's close was not POLLHUP and end of file",
+            Some(0x51 | 0x52) => "a writer did not open, or F_GETPIPE_SZ was not 65536",
+            Some(0x53..=0x56) => {
+                "a 200-byte nonblocking write into a FIFO with 100 bytes of room was not EAGAIN \
+                 with no POLLOUT, or the fill and drain failed"
+            }
+            Some(0x57..=0x5b) => {
+                "a child's blocking writer did not meet the parent's reader, or its 100000 bytes \
+                 did not all arrive"
+            }
+            Some(0x5c..=0x60) => "the parent's blocking reader did not meet a child's writer",
+            Some(0x61..=0x67) => {
+                "O_RDWR waited, or did not read what it wrote, or its bytes outlived the last close"
+            }
+            Some(0x68..=0x6a) => "a writer whose reader had gone did not get EPIPE",
+            Some(0x6b..=0x6e) => "/proc/self/fd of an end did not name the FIFO or open it again",
+            Some(0x6f..=0x73) => "a FIFO unlinked while open did not go on",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: named pipes (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux named pipes (ring 3: mknod S_IFIFO, nonblocking and blocking opens, \
+         whole writes, O_RDWR, a broken pipe, /proc/self/fd, unlinked while open): OK"
     );
     Ok(())
 }
@@ -24280,6 +24590,335 @@ pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of the CPU-time clocks through the Linux ABI:
+/// [`elf::build_linux_cpu_clocks_test_elf`] (`build/cpuclocktest.c`).
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the clocks
+/// `clock_getcpuclockid` and `pthread_getcpuclockid` make
+/// (`syscall::linux::cpu_clock`): their resolutions and refusals, that they
+/// measure processor time -- advancing with a spin, not with a sleep -- that
+/// a worker thread's is readable by its process and stays in the process's
+/// after it exits (`pcb::process_counters`), that the process clock never
+/// goes back while threads come and go, and that a forked child's starts from
+/// zero and is readable until the child is reaped.
+pub fn self_test_linux_cpu_clocks() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!("[spawn] Running Linux CPU-time clocks (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_cpu_clocks_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-clocks"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-cpu-clocks",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: CPU-time clocks spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: CPU-time clocks (ring 3) — the program did not finish in 120 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox mmap failed",
+            Some(0x31..=0x33) => "a CPUCLOCK_SCHED clock's resolution is not 1 ns",
+            Some(0x34) => "the PROF or VIRT resolution is not one tick",
+            Some(0x35..=0x37) => "clock_getres took a clock id that names nothing",
+            Some(0x38) => "clock_getres refused a NULL result pointer",
+            Some(0x39 | 0x3A) => "clock_settime of clock 2 or 3 was not EINVAL",
+            Some(0x3B) => "clock_settime of a process's clock was not EPERM",
+            Some(0x3C) => "clock_settime with a NULL time was not EFAULT",
+            Some(0x3D) => "clock_settime of a pid that is no process's was not EINVAL",
+            Some(0x3E | 0x3F) => "clock_gettime took a clock id that names nothing",
+            Some(0x40) => "the thread clock was ahead of the process clock",
+            Some(0x41) => "the thread clock did not advance with a 200 ms spin",
+            Some(0x42) => "the thread clock advanced far more than the wall clock",
+            Some(0x43) => "the process clock fell behind the thread clock",
+            Some(0x44) => "the process clock advanced while it slept",
+            Some(0x45 | 0x46) => "the PROF/VIRT clocks did not move in whole ticks",
+            Some(0x47) => "the thread's PROF clock was ahead of the process's",
+            Some(0x50) => "the worker thread did not start",
+            Some(0x51) => "the worker's clock did not advance while it spun",
+            Some(0x52) => "another thread's tid named the process clock",
+            Some(0x53) => "the worker could not read its own clocks",
+            Some(0x54) => "the process clock did not cover both threads",
+            Some(0x55) => "the exited worker's clock was still readable",
+            Some(0x56) => "the exited worker's time left the process clock",
+            Some(0x57) => "a brief worker did not start",
+            Some(0x58) => "the process clock went back while threads came and went",
+            Some(0x60) => "fork failed",
+            Some(0x61) => "the forked child's clock did not start from zero",
+            Some(0x62) => "the parent could read the child's thread clock",
+            Some(0x63) => "the parent could not read the running child's process clock",
+            Some(0x64) => "the zombie child's process clock was unreadable or short",
+            Some(0x65) => "wait4 failed",
+            Some(0x66) => "the reaped child's process clock was still readable",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: CPU-time clocks (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux CPU-time clocks (ring 3: resolutions and refusals; a spin advances the \
+         thread and process clocks and a sleep does not; PROF/VIRT in whole ticks; a worker's \
+         clock readable and its time kept after it exits; never back; a child's from zero until \
+         reaped): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the CPU-time timers through the Linux ABI:
+/// [`elf::build_linux_cpu_timers_test_elf`] (`build/cputimertest.c`). POSIX
+/// timers on the process and thread CPU clocks, `ITIMER_PROF` and
+/// `ITIMER_VIRTUAL`, `clock_nanosleep` on CPU clocks, timers on another
+/// thread's and a child's clock, `RLIMIT_CPU` and `RLIMIT_RTTIME` -- all fired from the tick
+/// (`sched::cpu_timers_due`, `proc::cputimer::expire`,
+/// `posix_timer::expire_cpu`).
+pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 180_000_000_000;
+
+    serial_println!("[spawn] Running Linux CPU-time timers (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_cpu_timers_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-timers"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-cpu-timers",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: CPU-time timers spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: CPU-time timers (ring 3) — the program did not finish in 180 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "a mailbox mmap failed",
+            Some(0x31) => "rt_sigaction failed",
+            Some(0x32) => "timer_create on a CPU-time clock failed",
+            Some(0x33 | 0x34) => "the worker thread did not start or stop",
+            Some(0x35) => "wait4 failed",
+            Some(0x40) => "timer_settime on the process clock failed",
+            Some(0x41) => "timer_gettime showed more than was set, or nothing",
+            Some(0x42) => "the process-clock timer fired while the process slept",
+            Some(0x43) => "the process-clock timer did not fire while the process spun",
+            Some(0x44) => "the process-clock timer fired before its time",
+            Some(0x45) => "an expired one-shot timer still read time left",
+            Some(0x46) => "timer_delete failed",
+            Some(0x48) => "timer_settime on the thread clock failed",
+            Some(0x49) => "the periodic thread-clock timer did not signal five times",
+            Some(0x4A) => "the periodic thread-clock timer ran ahead of its clock",
+            Some(0x4B) => "timer_getoverrun or timer_delete failed",
+            Some(0x50 | 0x52) => "setitimer(ITIMER_PROF / ITIMER_VIRTUAL) failed",
+            Some(0x51) => "getitimer(ITIMER_PROF) showed more than was set, or nothing",
+            Some(0x53) => "SIGPROF or SIGVTALRM did not come while the process spun",
+            Some(0x54) => "a fired one-shot itimer still read time left",
+            Some(0x55..=0x57) => "setitimer did not answer the old setting, or disarm",
+            Some(0x60 | 0x61) => "a sleep on the process clock did not end as a worker spun",
+            Some(0x62) => "an absolute sleep on the process clock did not end on time",
+            Some(0x63) => "a sleep on the worker's clock did not end",
+            Some(0x64..=0x66) => "a lone sleep on the process clock was not ended by a signal",
+            Some(0x67) => "a sleep on the caller's own thread clock was not EINVAL",
+            Some(0x68) => "a sleep on clock 3 or a CLOCKFD id was not EOPNOTSUPP",
+            Some(0x69) => "a sleep on a pid that is no process's was not EINVAL",
+            Some(0x70 | 0x71) => "a timer on the worker's clock did not fire as it spun",
+            Some(0x72) => "a timer on an exited thread's clock could still be set",
+            Some(0x73) => "a timer on an exited thread's clock did not read zeros",
+            Some(0x74 | 0x75) => "fork, or a timer on the child's clock, failed",
+            Some(0x76) => "a timer on the child's clock did not fire as it spun",
+            Some(0x77) => "the spinning child did not exit cleanly",
+            Some(0x78 | 0x7A) => "fork or setrlimit(RLIMIT_CPU) failed",
+            Some(0x79) => "RLIMIT_CPU's hard limit did not end the child with SIGKILL",
+            Some(0x7B) => "RLIMIT_CPU's hard limit never ended the child",
+            Some(0x7C) => "RLIMIT_CPU's soft limit did not send exactly one SIGXCPU",
+            Some(0x7D) => "the soft limit was not raised a second at SIGXCPU",
+            Some(0x80) => "setrlimit(RLIMIT_RTTIME) failed",
+            Some(0x81) => "sched_setscheduler(SCHED_FIFO) failed",
+            Some(0x82) => "RLIMIT_RTTIME's hard limit never ended the real-time child",
+            Some(0x83) => "fork for the RLIMIT_RTTIME child failed",
+            Some(0x84) => "RLIMIT_RTTIME's hard limit did not end the child with SIGKILL",
+            Some(0x85) => "RLIMIT_RTTIME's soft limit did not send exactly one SIGXCPU",
+            Some(0x86) => "RLIMIT_RTTIME's soft limit was not raised a second at SIGXCPU",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: CPU-time timers (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux CPU-time timers (ring 3: process and thread CPU-clock timers fire on \
+         CPU time, not sleep; ITIMER_PROF/VIRTUAL; clock_nanosleep on CPU clocks; another \
+         thread's and a child's clock; RLIMIT_CPU and RLIMIT_RTTIME SIGXCPU then SIGKILL): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `SYS_CPU_CLOCK`, the CPU-time clocks through the native
+/// door: [`elf::build_native_cpu_clock_test_elf`] (`build/cpuclocknative.c`).
+/// The same clock ids and answers as the Linux ABI's (`handlers::sys_cpu_clock`
+/// decodes them with `syscall::linux::cpu_clock`): resolutions, a spin
+/// advances the clocks and a sleep does not, the refusals, and a forked
+/// child's clock from zero, readable by its parent as a process's but not as
+/// a thread's.
+pub fn self_test_native_cpu_clock() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running native CPU-time clocks (ring 3) integration test...");
+    let exe_elf = elf::build_native_cpu_clock_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-cpu-clock"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-cpu-clock",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: native CPU-time clocks spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: native CPU-time clocks (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "SYS_PROCESS_ID failed",
+            Some(0x31 | 0x32) => "a CPUCLOCK_SCHED clock's resolution is not 1 ns",
+            Some(0x33 | 0x34) => "the PROF or VIRT resolution is not one tick",
+            Some(0x40) => "the thread clock was ahead of the process clock",
+            Some(0x41) => "the thread clock did not advance with a 200 ms spin",
+            Some(0x42) => "the thread clock advanced far more than the wall clock",
+            Some(0x43) => "the process clock fell behind the thread clock",
+            Some(0x44) => "the process clock advanced while it slept",
+            Some(0x45) => "the PROF clock did not move in whole ticks",
+            Some(0x50) => "an unknown op was not -EINVAL",
+            Some(0x51) => "a clock that is not a CPU-time one was not -EINVAL",
+            Some(0x52 | 0x53) => "a CLOCKFD id or CPUCLOCK_WHICH 3 was not -EINVAL",
+            Some(0x54) => "a pid that is no process's was not -EINVAL",
+            Some(0x55) => "another process's thread clock was not -EINVAL",
+            Some(0x60) => "fork failed",
+            Some(0x61) => "the forked child's clock did not start from zero",
+            Some(0x62) => "the parent could not read the child's process clock",
+            Some(0x63) => "the parent could read the child's thread clock",
+            Some(0x64) => "the child's exit code was lost",
+            Some(0x70) => "CPU_CLOCK_NANOSLEEP to a time already passed did not return at once",
+            Some(0x71) => "CPU_CLOCK_NANOSLEEP on clock 3 or a CLOCKFD id was not -EOPNOTSUPP",
+            Some(0x72) => "CPU_CLOCK_NANOSLEEP on a clock it cannot sleep on was not -EINVAL",
+            Some(0x73) => "CPU_CLOCK_NANOSLEEP with no request was not -EFAULT",
+            Some(0x74..=0x76) => "SYS_ITIMER_SET/GET of ITIMER_PROF did not arm, show, disarm",
+            Some(0x77) => "SYS_ITIMER_SET of ITIMER_VIRTUAL did not arm and disarm",
+            Some(0x78) => "SYS_ITIMER_SET of interval timer 3 was not refused",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: native CPU-time clocks (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native CPU-time clocks (ring 3: SYS_CPU_CLOCK reads and resolves the Linux \
+         clock ids, a spin advances them and a sleep does not, refusals, a child's from zero): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every
@@ -24427,7 +25066,7 @@ pub fn self_test_linux_posix_timers() -> KernelResult<()> {
             Some(0x35) => "an unknown clock was not EINVAL",
             Some(0x36) => "CLOCK_MONOTONIC_RAW was not EOPNOTSUPP",
             Some(0x37) => "CLOCK_REALTIME_ALARM was not EPERM",
-            Some(0x38) => "a CPU-time clock was not EOPNOTSUPP",
+            Some(0x38) => "timer_create on a CPU-time clock (2, or -6) failed",
             Some(0x39) => "a bad sigev_notify was not EINVAL",
             Some(0x3A) => "SIGEV_THREAD_ID naming no thread of ours was not EINVAL",
             Some(0x3B) => "SIGEV_THREAD_ID naming our own thread failed",
@@ -39850,6 +40489,87 @@ fn test_spawn_with_uid_gid() -> KernelResult<()> {
 
     serial_println!("[spawn]   Spawn with initial uid/gid (explicit + default): OK");
     Ok(())
+}
+
+/// Test: a process's spawned child is its parent's user -- the parent's ids
+/// as an exec leaves them -- and keeps root's rights put aside only while
+/// one of its user ids is 0. Until 2026-10-08 every spawned child was root.
+fn test_spawn_inherits_credentials() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    let elf_data = elf::build_test_elf_public();
+    let parent = pcb::create("cred-parent", 0);
+    let mut spawned: alloc::vec::Vec<(ProcessId, TaskId)> = alloc::vec::Vec::new();
+
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[spawn]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        pcb::grant_capability(parent, ResourceType::SystemClock, 0, Rights::WRITE)?;
+        // Root puts its authority aside: real and saved uid 0, effective
+        // 1000, and group 100 with a supplementary group.
+        let mut aside = pcb::ProcessCredentials::root();
+        aside.uid = 1000;
+        aside.fsuid = 1000;
+        aside.set_all_gids(100);
+        aside.groups = alloc::vec![7];
+        pcb::change_credentials(parent, aside)?;
+        if pcb::suspended_rights(parent) != 1 {
+            return fail("the parent's clock right was not put aside");
+        }
+        let child = spawn_process(&elf_data, &SpawnOptions::new("cred-child").parent(parent))?;
+        spawned.push((child.pid, child.task_id));
+        let mut want = pcb::ProcessCredentials::new(1000, 100);
+        want.ruid = 0;
+        want.groups = alloc::vec![7];
+        let got = pcb::get_credentials(child.pid);
+        if got.as_ref() != Some(&want) {
+            serial_println!("[spawn]   got {:?}, want {:?}", got, want);
+            return fail("the child is not its parent's user, as an exec leaves it");
+        }
+        if pcb::suspended_rights(child.pid) != 1
+            || pcb::has_capability_type(child.pid, ResourceType::SystemClock, Rights::WRITE)
+        {
+            return fail(
+                "the child of a parent with root's rights put aside does not have them aside",
+            );
+        }
+        // Every id 1000: the parent's authority is gone for good, and its
+        // child has no root id and nothing put aside.
+        pcb::change_credentials(parent, pcb::ProcessCredentials::new(1000, 100))?;
+        let user = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("cred-child-user").parent(parent),
+        )?;
+        spawned.push((user.pid, user.task_id));
+        if pcb::get_credentials(user.pid) != Some(pcb::ProcessCredentials::new(1000, 100)) {
+            return fail("a user's child is not that user");
+        }
+        if pcb::suspended_rights(user.pid) != 0
+            || pcb::has_capability_type(user.pid, ResourceType::SystemClock, Rights::WRITE)
+        {
+            return fail("a user's child has root's clock right");
+        }
+        Ok(())
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        if pcb::state(pid).is_some() {
+            teardown_fixture(pid, task);
+        }
+    }
+    crate::proc::signal::remove(parent);
+    pcb::destroy(parent);
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   A spawned child is its parent's user, root's rights aside only while a \
+             user id of its is 0: OK"
+        );
+    }
+    result
 }
 
 /// Test: take_initial_args is one-shot.

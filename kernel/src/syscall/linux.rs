@@ -136,6 +136,7 @@
 use crate::error::KernelError;
 use crate::fs::path::{Path, PathBuf};
 use crate::proc::pcb;
+use crate::proc::setid;
 use crate::syscall::wait;
 
 use super::dispatch::{SyscallArgs, SyscallResult};
@@ -1419,15 +1420,19 @@ pub mod restart_block {
     use crate::sync::PreemptSpinMutex as Mutex;
     use alloc::collections::BTreeMap;
 
-    /// A saved `nanosleep`-family resume: the absolute hrtimer-clock deadline
-    /// to sleep until, and the user `rem` pointer (0 = none) to update if the
-    /// resumed sleep is interrupted again.
+    /// A saved `nanosleep`-family resume: the absolute deadline to sleep
+    /// until, and the user `rem` pointer (0 = none) to update if the resumed
+    /// sleep is interrupted again.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct NanosleepBlock {
-        /// Absolute deadline on the `hrtimer::now_ns()` monotonic clock.
+        /// Absolute deadline: on the `hrtimer::now_ns()` monotonic clock, or
+        /// on `clock` if there is one.
         pub deadline_ns: u64,
         /// User pointer to a `struct timespec` for the remaining time, or 0.
         pub rem_ptr: u64,
+        /// The CPU-time clock a `clock_nanosleep` on one sleeps on (Linux's
+        /// `posix_cpu_nsleep_restart`), or `None` for the monotonic clock.
+        pub clock: Option<crate::proc::cputimer::CpuClock>,
     }
 
     static BLOCKS: Mutex<BTreeMap<TaskId, NanosleepBlock>> = Mutex::new(BTreeMap::new());
@@ -4594,6 +4599,11 @@ fn dispatch_socket_read(
     if cap == 0 {
         return SyscallResult::ok(0);
     }
+    if let Some(r) =
+        inet_pending_error(crate::net::socket::SocketHandle::from_raw(entry.raw_handle))
+    {
+        return r;
+    }
     // A datagram socket has no stream: `read(2)` receives one datagram (dropping
     // the source, as `read` takes no address out-param). Routing through the shared
     // datagram receive keeps the connected-peer filter (a connected UDP socket only
@@ -4660,6 +4670,9 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    if let Some(r) = inet_pending_error(h) {
+        return r;
+    }
     let mut kbuf = alloc::vec![0u8; 4096];
     let mut done = 0usize;
     while done < total_req {
@@ -6576,11 +6589,17 @@ fn open_common(
             }
             r
         }
-        Ok(None) => handlers::fs_open_kernel_path_mode(
+        Ok(None) => match handlers::fs_open_node_kernel_path_mode(
             canon_path,
             translate_open_flags(flags) | no_symlinks_bit,
             linux_create_mode(mode),
-        ),
+        ) {
+            handlers::NodeOpen::Done(r) => r,
+            // A named pipe: the opener gets its pipe, not the node.
+            handlers::NodeOpen::Fifo(node) => {
+                return open_fifo_fd(|a, nb| crate::ipc::fifo::open(&node, a, nb), flags);
+            }
+        },
     };
     if r.value < 0 {
         return linux_from_native(r);
@@ -6631,6 +6650,82 @@ fn open_common(
                 arg4: 0,
                 arg5: 0,
             });
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// How Linux `open` flags `flags` open a named pipe: `O_RDONLY` for reading,
+/// `O_WRONLY` for writing, `O_RDWR` for both. Access mode 3 -- neither, which
+/// Linux keeps for `ioctl`-only opens -- is answered `EINVAL` by
+/// [`open_fifo_fd`] before this is asked.
+fn fifo_access(flags: u32) -> crate::ipc::pipe::FifoAccess {
+    use crate::ipc::pipe::FifoAccess;
+    match flags & oflags::O_ACCMODE {
+        oflags::O_WRONLY => FifoAccess::Write,
+        oflags::O_RDWR => FifoAccess::Both,
+        _ => FifoAccess::Read,
+    }
+}
+
+/// Open a named pipe's node for the caller -- an `open` of it by `flags` --
+/// and give it a descriptor for the end: `open` makes the FIFO open
+/// (`ipc::fifo::open`, or `open_held` for a reopen), with the access and the
+/// nonblocking that `flags` say.
+///
+/// The FIFO open's own refusals are Linux's: `ENXIO` for a nonblocking write
+/// open with no reader; a signal while waiting for the other side restarts the
+/// call or, with a handler that did not ask for that, `EINTR`
+/// (`-ERESTARTSYS`). Access mode 3 is `EINVAL`, as `fifo_open`'s default
+/// case, before anything is opened.
+///
+/// One reference per process per pipe end, as for every pipe end here: an end
+/// this process holds already is shared by the new descriptor, and the open's
+/// own reference goes back.
+fn open_fifo_fd(
+    open: impl FnOnce(
+        crate::ipc::pipe::FifoAccess,
+        bool,
+    ) -> crate::error::KernelResult<crate::ipc::pipe::PipeHandle>,
+    flags: u32,
+) -> SyscallResult {
+    use crate::cap::ResourceType;
+    if flags & oflags::O_ACCMODE == oflags::O_ACCMODE {
+        return linux_err(errno::EINVAL);
+    }
+    let opened = open(fifo_access(flags), flags & oflags::O_NONBLOCK != 0);
+    let handle = match opened {
+        Ok(h) => h,
+        Err(KernelError::Interrupted) => {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let Some(pid) = caller_pid() else {
+        crate::ipc::pipe::close(handle);
+        return linux_err(errno::EBADF);
+    };
+    let raw = handle.raw();
+    let took = if pcb::owns_ipc_handle(pid, ResourceType::Pipe, raw) {
+        crate::ipc::pipe::close(handle);
+        false
+    } else {
+        pcb::register_ipc_handle(pid, ResourceType::Pipe, raw);
+        true
+    };
+    let status = flags & (oflags::O_ACCMODE | oflags::O_APPEND | oflags::O_NONBLOCK);
+    let mut entry = FdEntry::pipe(raw, status);
+    if flags & oflags::O_CLOEXEC != 0 {
+        entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+    }
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            if took {
+                // The open's own reference, given back; the table's error
+                // is the caller's.
+                let _ = close_handle(entry);
+            }
             linux_err(linux_errno_for(e))
         }
     }
@@ -6770,6 +6865,21 @@ fn reopen_own_fd(pid: u64, fd: i32, flags: u32) -> SyscallResult {
             };
             took_reference = true;
             FdEntry::file(new, status)
+        }
+        // A named pipe's end: its node opened again, as Linux opens the
+        // inode -- with the open's waits -- whatever its name is now.
+        HandleKind::Pipe
+            if crate::ipc::pipe::fifo_node(PipeHandle::from_raw(entry.raw_handle)).is_some() =>
+        {
+            let Some((hold, path)) =
+                crate::ipc::pipe::fifo_node(PipeHandle::from_raw(entry.raw_handle))
+            else {
+                return linux_err(errno::ENXIO);
+            };
+            return open_fifo_fd(
+                |a, nb| crate::ipc::fifo::open_held(hold, &path, a, nb),
+                flags,
+            );
         }
         HandleKind::Pipe => {
             let raw = entry.raw_handle;
@@ -7067,11 +7177,23 @@ fn open_kernel_path_install(
     // would be the same mistake one layer down.
     let create_mode = linux_create_mode(mode);
     let opened = match (beneath, tmpfile.is_some()) {
-        (Some(b), false) => crate::fs::handle::open_beneath_with_mode(b, kernel_flags, create_mode),
-        (None, false) => crate::fs::handle::open_with_mode(path, kernel_flags, create_mode),
+        (Some(b), false) => {
+            crate::fs::handle::open_node_beneath_with_mode(b, kernel_flags, create_mode)
+        }
+        (None, false) => crate::fs::handle::open_node_with_mode(path, kernel_flags, create_mode),
         // O_TMPFILE: a file with no name, in the directory the path names.
-        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode),
-        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode),
+        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode)
+            .map(crate::fs::handle::Opened::File),
+        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode)
+            .map(crate::fs::handle::Opened::File),
+    };
+    // A named pipe: the opener gets its pipe, not the node.
+    let opened = match opened {
+        Ok(crate::fs::handle::Opened::Fifo(node)) => {
+            return open_fifo_fd(|a, nb| crate::ipc::fifo::open(&node, a, nb), flags);
+        }
+        Ok(crate::fs::handle::Opened::File(h)) => Ok(h),
+        Err(e) => Err(e),
     };
     let raw_handle = match opened {
         Ok(h) => h,
@@ -9213,9 +9335,152 @@ fn nanosleep_core(deadline_ns: u64, rem_ptr: u64) -> SyscallResult {
         restart_block::NanosleepBlock {
             deadline_ns,
             rem_ptr,
+            clock: None,
         },
     );
     restart::restart_result(restart::ERESTART_RESTARTBLOCK)
+}
+
+/// `clock_nanosleep` on CPU-time clock `clockid` -- 2, or a negative id that
+/// is no CLOCKFD one -- for `req` ns (or until the clock reads `req`, for
+/// `abstime`): Linux's `posix_cpu_nsleep`. A thread may not sleep on its own
+/// clock (`EINVAL`: it would never advance); an id that names nothing is
+/// `EINVAL`, as for a timer.
+fn cpu_nanosleep(clockid: i32, abstime: bool, req: u64, rem_ptr: u64) -> SyscallResult {
+    const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
+    let tid = crate::sched::current_task_id();
+    if clockid < 0 && clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
+        let upid = !(clockid >> 3);
+        if upid == 0 || u64::try_from(upid).is_ok_and(|u| u == tid) {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    let clock = match cpu_clock(clockid, caller_pid(), tid, false) {
+        Ok(Some(clock)) => clock,
+        Ok(None) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
+    };
+    let Some(now) = clock.read() else {
+        return linux_err(errno::EINVAL);
+    };
+    let target = if abstime {
+        req
+    } else {
+        now.saturating_add(req)
+    };
+    let rem_ptr = if abstime { 0 } else { rem_ptr };
+    cpu_nanosleep_until(clock, target, abstime, rem_ptr)
+}
+
+/// `clock_nanosleep` on a CPU-time clock for a native program
+/// (`SYS_CPU_CLOCK`'s `CPU_CLOCK_NANOSLEEP`): Linux's checks in Linux's
+/// order -- `CLOCK_THREAD_CPUTIME_ID` (3) and a CLOCKFD id `EOPNOTSUPP`, any
+/// other clock that is not a CPU-time one `EINVAL`, then the request
+/// (`EFAULT`, `EINVAL`) -- and [`cpu_nanosleep`]. A native program has no
+/// `restart_syscall`: an interrupted sleep answers `EINTR`, the time left
+/// written to `rem_ptr` for a relative one, for its C library to go round
+/// again if it means to.
+pub(crate) fn cpu_nanosleep_native(
+    clockid: i32,
+    flags: u64,
+    req_ptr: u64,
+    rem_ptr: u64,
+) -> SyscallResult {
+    const TIMER_ABSTIME: u64 = 1;
+    const CLOCKFD: i32 = 3;
+    const CLOCKFD_MASK: i32 = 7;
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+    if clockid == 3 || (clockid < 0 && clockid & CLOCKFD_MASK == CLOCKFD) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    if clockid != 2 && clockid >= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let req = match read_timespec(req_ptr) {
+        Ok(t) => t,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
+        return linux_err(errno::EINVAL);
+    }
+    let answer = cpu_nanosleep(clockid, flags & TIMER_ABSTIME != 0, req.to_nanos(), rem_ptr);
+    if restart::sentinel_magnitude(answer.value).is_some() {
+        restart_block::clear(crate::sched::current_task_id());
+        return linux_err(errno::EINTR);
+    }
+    answer
+}
+
+/// Sleep, interruptibly, until CPU-time clock `clock` reads `target` -- the
+/// body of [`cpu_nanosleep`] and of `restart_syscall` resuming one.
+///
+/// No timer interrupt can be set for a moment a CPU clock reaches: the
+/// sleeper wakes at the earliest moment it could have -- the time left on
+/// the clock, divided by the CPUs that can advance it (one for a thread's,
+/// every CPU for a process's), and at least a tick -- and looks again, so a
+/// clock that runs flat out is caught within a tick and one that does not run
+/// at all costs a wakeup per the time left. A clock whose thread or process
+/// has gone never reaches it; only a signal ends that sleep, as on Linux.
+///
+/// Interrupted: an absolute sleep restarts as it was asked (`ERESTARTNOHAND`);
+/// a relative one writes the CPU time left to `rem_ptr` and resumes through
+/// `restart_syscall` -- or, a handler run, answers `EINTR`.
+fn cpu_nanosleep_until(
+    clock: crate::proc::cputimer::CpuClock,
+    target: u64,
+    abstime: bool,
+    rem_ptr: u64,
+) -> SyscallResult {
+    const GONE_POLL_NS: u64 = 1_000_000_000;
+    let task = crate::sched::current_task_id();
+    let pid = caller_pid();
+    let pace = match clock.target {
+        CpuClockTarget::Thread(_) => 1,
+        CpuClockTarget::Process(_) => u64::try_from(crate::smp::cpu_count().max(1)).unwrap_or(1),
+    };
+    loop {
+        let now = clock.read();
+        if now.is_some_and(|n| n >= target) {
+            restart_block::clear(task);
+            return SyscallResult::ok(0);
+        }
+        let Some(pid) = pid else {
+            // The kernel sleeps on no CPU clock.
+            return linux_err(errno::EINVAL);
+        };
+        let wait = now
+            .map_or(GONE_POLL_NS, |n| {
+                target.saturating_sub(n).checked_div(pace).unwrap_or(0)
+            })
+            .max(crate::sched::TICK_NS);
+        let deadline = crate::hrtimer::now_ns().saturating_add(wait);
+        if interruptible_sleep_until(pid, task, deadline) {
+            continue;
+        }
+        // A signal. A sleep whose time has come meanwhile is done.
+        let left = clock.read().map_or(target, |n| target.saturating_sub(n));
+        if left == 0 {
+            restart_block::clear(task);
+            return SyscallResult::ok(0);
+        }
+        if abstime {
+            return restart::restart_result(restart::ERESTARTNOHAND);
+        }
+        if rem_ptr != 0
+            && let Err(e) = write_timespec(rem_ptr, LinuxTimespec::from_nanos(left))
+        {
+            return linux_err(linux_errno_for(e));
+        }
+        restart_block::save_nanosleep(
+            task,
+            restart_block::NanosleepBlock {
+                deadline_ns: target,
+                rem_ptr,
+                clock: Some(clock),
+            },
+        );
+        return restart::restart_result(restart::ERESTART_RESTARTBLOCK);
+    }
 }
 
 /// `nanosleep(req, rem)` — sleep for the requested timespec, interruptibly.
@@ -10370,7 +10635,7 @@ fn file_flags_ioctl(pid: u64, fd: i32, request: u32, arg: u64) -> SyscallResult 
     }
     if flags & !(FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
         // Who may not change this file's flags at all is told so first.
-        let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+        let uid = pcb::get_credentials(pid).map_or(0, |c| c.fsuid);
         return match crate::fs::vfs::attribute_change_verdict(uid, meta.uid, attrs, new) {
             Ok(()) => linux_err(errno::EOPNOTSUPP),
             Err(e) => linux_err(linux_errno_for(e)),
@@ -15812,37 +16077,32 @@ fn sys_personality(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::from(current))
 }
 
-/// `getresuid(ruid, euid, suid)` — fetch real/effective/saved user IDs.
-///
-/// We have no uid model yet (everything runs as the implicit root-
-/// equivalent owner of all kernel objects via the capability system),
-/// so we report uid 0 for all three fields.  This matches what a
-/// process started by `init` on a Linux system would see and lets
-/// `geteuid()==0` privilege checks in pre-existing Linux code fire
-/// the way the program expects.
+/// `getresuid(ruid, euid, suid)` -- the caller's real, effective and saved
+/// user ids (0, 0, 0 in kernel context, which has none).
 ///
 /// Errors:
 ///   - `-EFAULT` on a bad user pointer.
 fn sys_getresuid(args: &SyscallArgs) -> SyscallResult {
-    let ruid_ptr = args.arg0;
-    let euid_ptr = args.arg1;
-    let suid_ptr = args.arg2;
-    write_uid32_triple(ruid_ptr, euid_ptr, suid_ptr)
+    let [r, e, s, _] = caller_ids(setid::Which::User);
+    write_uid32_triple(args.arg0, args.arg1, args.arg2, [r, e, s])
 }
 
-/// `getresgid(rgid, egid, sgid)` — fetch real/effective/saved group IDs.
-///
-/// Same model and contract as [`sys_getresuid`]; reports 0 for all
-/// three.
+/// `getresgid(rgid, egid, sgid)` -- [`sys_getresuid`] for the group ids.
 fn sys_getresgid(args: &SyscallArgs) -> SyscallResult {
-    let rgid_ptr = args.arg0;
-    let egid_ptr = args.arg1;
-    let sgid_ptr = args.arg2;
-    write_uid32_triple(rgid_ptr, egid_ptr, sgid_ptr)
+    let [r, e, s, _] = caller_ids(setid::Which::Group);
+    write_uid32_triple(args.arg0, args.arg1, args.arg2, [r, e, s])
 }
 
-/// Helper shared by [`sys_getresuid`] / [`sys_getresgid`]: write three
-/// `uid_t` (Linux x86_64: 32-bit unsigned) zeros to the three user
+/// The caller's four ids of `which` -- real, effective, saved, filesystem --
+/// or all 0 in kernel context or for a process going away.
+fn caller_ids(which: setid::Which) -> [u32; 4] {
+    caller_pid()
+        .and_then(pcb::get_credentials)
+        .map_or([0; 4], |c| setid::ids(&c, which))
+}
+
+/// Helper shared by [`sys_getresuid`] / [`sys_getresgid`]: write the three
+/// `uid_t` (Linux x86_64: 32-bit unsigned) `ids` to the three user
 /// pointers, in `(ruid, euid, suid)` order — matching Linux's gate
 /// order in `kernel/sys.c::SYSCALL_DEFINE3(getresuid, ...)`:
 ///
@@ -15876,9 +16136,9 @@ fn sys_getresgid(args: &SyscallArgs) -> SyscallResult {
 /// `getresuid(NULL, valid, valid)` on Linux faults at `put_user(ruid,
 /// NULL)` before the other two writes are attempted.  Iterate `[a, b, c]`
 /// in declaration order so the first NULL short-circuits with EFAULT.
-fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
-    let zero = [0u8; 4];
-    for &p in &[a, b, c] {
+fn write_uid32_triple(a: u64, b: u64, c: u64, ids: [u32; 3]) -> SyscallResult {
+    for (p, id) in [a, b, c].into_iter().zip(ids) {
+        let bytes = id.to_ne_bytes();
         if p == 0 {
             // Linux: put_user(value, NULL) -> -EFAULT via the access
             // exception table on the faulting store.  Pre-batch we
@@ -15890,8 +16150,8 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         // SAFETY: validate_user_write above confirmed a 4-byte
-        // writable user range; we copy exactly 4 zero bytes.
-        let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), p, 4) };
+        // writable user range; we copy exactly 4 bytes.
+        let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), p, 4) };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
@@ -15934,16 +16194,14 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
 /// `usage` is a bad pointer.
 /// Write a `struct timeval { i64 tv_sec; i64 tv_usec; }` into `buf` at
-/// byte `off`, derived from `ticks` at `USER_HZ == 100` (10 ms/tick).
+/// byte `off`, from `ns` nanoseconds, truncated to the microsecond as
+/// Linux's `ns_to_kernel_old_timeval` truncates.
 ///
-/// Used to fill `getrusage`'s `ru_utime`/`ru_stime` from the scheduler's
-/// per-task tick counters.  Pure integer math, saturating throughout so
-/// an implausibly large tick count can never overflow or panic.
-fn write_rusage_timeval(buf: &mut [u8; 144], off: usize, ticks: u64) {
-    // 100 Hz → 10_000 microseconds per tick.
-    let micros = ticks.saturating_mul(10_000);
-    let secs = micros / 1_000_000;
-    let usecs = micros % 1_000_000;
+/// Used to fill `getrusage`'s and `wait4`'s `ru_utime`/`ru_stime` from the
+/// precise run time split by the tick ratio (`pcb::process_times`).
+fn write_rusage_timeval(buf: &mut [u8; 144], off: usize, ns: u64) {
+    let secs = ns / 1_000_000_000;
+    let usecs = (ns % 1_000_000_000) / 1_000;
     #[allow(clippy::cast_possible_wrap)]
     let secs_i = secs as i64;
     #[allow(clippy::cast_possible_wrap)]
@@ -16002,23 +16260,23 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     //   - RUSAGE_THREAD (1): just the calling thread.
     //   - RUSAGE_CHILDREN (-1): CPU time of reaped descendants
     //     (`signal->cutime`/`cstime`), accumulated at wait/reap.
-    let (user_ticks, sys_ticks): (u64, u64) = match who_i32 {
+    let (utime_ns, stime_ns): (u64, u64) = match who_i32 {
         RUSAGE_SELF => {
             let pid = caller_pid().unwrap_or(0);
-            crate::proc::thread::process_cpu_ticks(pid)
+            crate::proc::pcb::process_times(pid).unwrap_or((0, 0))
         }
         RUSAGE_THREAD => {
             let tid = crate::sched::current_task_id();
-            crate::sched::cpu_ticks(tid).unwrap_or((0, 0))
+            crate::sched::thread_times(tid).unwrap_or((0, 0))
         }
         _ => {
             // RUSAGE_CHILDREN: reaped-children CPU time.
             let pid = caller_pid().unwrap_or(0);
-            crate::proc::pcb::process_child_ticks(pid)
+            crate::proc::pcb::process_child_times(pid)
         }
     };
-    write_rusage_timeval(&mut buf, 0, user_ticks);
-    write_rusage_timeval(&mut buf, 16, sys_ticks);
+    write_rusage_timeval(&mut buf, 0, utime_ns);
+    write_rusage_timeval(&mut buf, 16, stime_ns);
 
     // ru_minflt (offset 64) and ru_majflt (offset 72), both
     // `__kernel_long_t` (i64).  Minor faults resolved without I/O
@@ -16299,14 +16557,14 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
 /// that happens to fall in the errno band is still treated as success).
 ///
 /// `tms_utime`/`tms_stime` (the calling process's user/system CPU time
-/// in clock ticks at `USER_HZ == 100`) are sourced from the scheduler's
-/// per-task tick counters, summed across the process's live and exited
-/// threads.  `tms_cutime`/`tms_cstime` (CPU time of reaped descendants)
-/// come from the per-process children-time accumulator credited at
-/// wait/reap.  `buf == NULL` is permitted (POSIX:
+/// in clock ticks at `USER_HZ == 100`) are its precise run time, summed
+/// across its live and exited threads and split in the proportion its
+/// ticks saw (`pcb::process_times`, Linux's `thread_group_cputime_adjusted`),
+/// as `nsec_to_clock_t` truncates it.  `tms_cutime`/`tms_cstime` (CPU time
+/// of reaped descendants) come from the per-process children-time
+/// accumulator credited at wait/reap.  `buf == NULL` is permitted (POSIX:
 /// the caller wants only the return value). A non-NULL but unwritable
-/// `buf` returns `EFAULT`.  Because our tick rate equals Linux's USER_HZ,
-/// a tick count maps directly to a `clock_t` with no rescale.
+/// `buf` returns `EFAULT`.
 fn sys_times(args: &SyscallArgs) -> SyscallResult {
     let tms_ptr = args.arg0;
 
@@ -16320,17 +16578,13 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         let pid = caller_pid().unwrap_or(0);
-        let (user_ticks, sys_ticks) = crate::proc::thread::process_cpu_ticks(pid);
-        let (cuser_ticks, csys_ticks) = crate::proc::pcb::process_child_ticks(pid);
+        let (utime_ns, stime_ns) = crate::proc::pcb::process_times(pid).unwrap_or((0, 0));
+        let (cutime_ns, cstime_ns) = crate::proc::pcb::process_child_times(pid);
         let mut buf = [0u8; TMS_SIZE];
-        #[allow(clippy::cast_possible_wrap)]
-        let utime_i = user_ticks as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let stime_i = sys_ticks as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let cutime_i = cuser_ticks as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let cstime_i = csys_ticks as i64;
+        let utime_i = nsec_to_clock_t(utime_ns);
+        let stime_i = nsec_to_clock_t(stime_ns);
+        let cutime_i = nsec_to_clock_t(cutime_ns);
+        let cstime_i = nsec_to_clock_t(cstime_ns);
         buf[0..8].copy_from_slice(&utime_i.to_ne_bytes()); // tms_utime
         buf[8..16].copy_from_slice(&stime_i.to_ne_bytes()); // tms_stime
         buf[16..24].copy_from_slice(&cutime_i.to_ne_bytes()); // tms_cutime
@@ -16348,6 +16602,14 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_wrap)]
     let v = ticks as i64;
     SyscallResult::ok(v)
+}
+
+/// Nanoseconds as a `clock_t` of `USER_HZ` (100) ticks, truncated -- Linux's
+/// `nsec_to_clock_t`, for `times`, `waitid`'s `si_utime`/`si_stime` and
+/// `/proc`.
+pub(crate) fn nsec_to_clock_t(ns: u64) -> i64 {
+    const NS_PER_CLOCK_T: u64 = 10_000_000;
+    i64::try_from(ns / NS_PER_CLOCK_T).unwrap_or(i64::MAX)
 }
 
 /// `getpgrp()` — return the calling process's process-group ID.
@@ -16716,330 +16978,172 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // Credentials: setuid / setgid family + capabilities
 //
-// We have no UID/GID model — all processes run as the implicit "root"
-// owner of all kernel objects, mediated by the capability system.
-// The Linux credential syscalls all degenerate to silent success
-// (since "set to 0" is always permitted, and we treat every value as
-// "becoming 0" effectively).  Rejecting non-zero values with EPERM
-// would be more truthful, but breaks programs that drop privileges at
-// startup as a defense-in-depth measure: they'd refuse to continue
-// when setuid(nobody) fails.  The friendlier stub accepts the call
-// and quietly keeps the program in its "as if root" state — which is
-// the only state we actually support.
+// Real, effective, saved and filesystem ids, changed by Linux's rules --
+// `crate::proc::setid`, which the native `SYS_PROCESS_SET_IDS` shares -- with
+// root's authority following the user ids (`pcb::change_credentials`):
+// put aside while the effective id is not 0 but another is, back with it,
+// gone when every id has left 0. Until 2026-10-08 a process had one uid, so
+// root's `seteuid(1000)` was permanent and `getresuid` answered 0, 0, 0
+// whatever the ids were (known-issues A-ONE-UID-NO-SAVED-SET-USER-ID).
+//
+// In kernel context -- the boot self-test, with no calling process -- each
+// call is a no-op success: the kernel has no Linux credentials.
 // ---------------------------------------------------------------------------
 
-/// `setuid(uid)` — set the process uid, with Linux-shaped permission
-/// checks against the caller's current credentials.
-///
-/// Linux's real contract is split across real / effective / saved
-/// uids, but our PCB only carries a single `credentials.uid` field
-/// (the `geteuid()` syscall is aliased to `getuid()`).  Within that
-/// single-uid model we still enforce the two error paths that
-/// real Linux callers depend on:
-///
-///   - `EINVAL` if `uid == (uid_t)-1` (`u32::MAX`).  Linux reserves
-///     `INVALID_UID` and rejects setuid attempts targeting it; some
-///     hardening libraries (libcap, systemd-credentials) probe for
-///     this and gate further behavior on the errno.
-///   - `EPERM` if the caller's current uid is not 0 (root) and the
-///     requested uid differs from the current uid.  This is the
-///     "you can't gain privileges" check.  Real Linux additionally
-///     allows transitions to a saved-uid the process inherited via
-///     setuid-bit binary; we don't honour setuid bits so the
-///     simpler rule is correct in our model.
-///
-/// On success the new uid is written to the PCB and the function
-/// returns 0.  A self-uid-to-self-uid call (the common idiom in
-/// startup code that's already at the desired uid) is a no-op
-/// success, even for non-root, matching Linux.
-///
-/// Kernel-context callers (boot self-test, in-kernel helpers with
-/// no `caller_pid()`) treat the call as a no-op success without
-/// touching any PCB — the kernel has no Linux credentials.
+/// A set-id answer, as Linux's call answers it.
+fn setid_result(r: crate::error::KernelResult<()>) -> SyscallResult {
+    match r {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `setuid(uid)` -- `proc::setid::set_id`: a privileged caller (effective
+/// user id 0, or the `SET_CREDENTIALS` right) sets all four user ids,
+/// another only its effective and filesystem ids, to its real or saved id
+/// (`EPERM` otherwise). `EINVAL` for `(uid_t)-1`, as Linux's `INVALID_UID`.
 fn sys_setuid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let requested = args.arg0 as u32;
-    if requested == u32::MAX {
+    let uid = args.arg0 as u32;
+    if uid == setid::KEEP {
         return linux_err(errno::EINVAL);
     }
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        // The caller's PID resolved but the process record is gone
-        // (race with exit).  Linux returns 0 from setuid on the
-        // happy path; matching that silent-success keeps callers in
-        // tear-down from observing a confusing errno.
-        None => return SyscallResult::ok(0),
-    };
-    if requested != creds.uid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if requested == creds.uid {
-        return SyscallResult::ok(0);
-    }
-    creds.uid = requested;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        // The only failure pcb::set_credentials reports today is
-        // NoSuchProcess, which means the PCB vanished between the
-        // get_credentials and set_credentials calls (tear-down
-        // race).  Match the get-side handling above: no errno.
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_id(
+        pid,
+        setid::Which::User,
+        setid::Authority::Linux,
+        uid,
+    ))
 }
 
-/// `setgid(gid)` — set the process gid.  Same shape as
-/// [`sys_setuid`]: `EINVAL` for `gid == (gid_t)-1`, `EPERM` if a
-/// non-root process tries to change to a different gid, no-op
-/// success when `gid` matches the current value.
-///
-/// Kernel-context (no `caller_pid()`) is a no-op success.
+/// `setgid(gid)` -- [`sys_setuid`]'s rule for the group ids; privilege is the
+/// same test (Linux's `CAP_SETGID`).
 fn sys_setgid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let requested = args.arg0 as u32;
-    if requested == u32::MAX {
+    let gid = args.arg0 as u32;
+    if gid == setid::KEEP {
         return linux_err(errno::EINVAL);
     }
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return SyscallResult::ok(0),
-    };
-    // Permission check keys on uid, not gid: Linux only lets root
-    // (uid == 0) change gid arbitrarily, regardless of what gid the
-    // process currently has.  A non-root process can call setgid
-    // with its current gid (no-op success) but not change it.
-    if requested != creds.gid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if requested == creds.gid {
-        return SyscallResult::ok(0);
-    }
-    creds.gid = requested;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_id(
+        pid,
+        setid::Which::Group,
+        setid::Authority::Linux,
+        gid,
+    ))
 }
 
-/// `setreuid(ruid, euid)` — set the real and effective uid.
-///
-/// Linux passes both as `uid_t` (u32) where `(uid_t)-1` means "leave
-/// this one alone".  Our PCB carries a single combined uid (the
-/// `geteuid` syscall is aliased to `getuid`), so we can't honour the
-/// per-component contract literally.  Within that single-uid model
-/// we still:
-///   - apply the requested transition (using [`apply_uid_change`]),
-///   - reject privilege escalation with `EPERM` when the caller is
-///     non-root and the resolved new uid differs from the current uid,
-///   - accept the no-change case (both args `-1`) as a 0-return.
-///
-/// See [`apply_uid_change`] for the selection rule used when both
-/// arguments are non-(-1).
+/// `setreuid(ruid, euid)` -- `proc::setid::set_re_id`; `(uid_t)-1` leaves an
+/// id as it is, and the saved id follows the new effective one when the real
+/// id is given or the effective id becomes other than the old real one.
 fn sys_setreuid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let ruid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let euid = args.arg1 as u32;
-    apply_uid_change(ruid, euid, u32::MAX)
+    let (ruid, euid) = (args.arg0 as u32, args.arg1 as u32);
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    setid_result(setid::set_re_id(
+        pid,
+        setid::Which::User,
+        setid::Authority::Linux,
+        ruid,
+        euid,
+    ))
 }
 
-/// `setregid(rgid, egid)` — set the real and effective gid.  Mirrors
-/// [`sys_setreuid`] but updates `credentials.gid`; the permission gate
-/// still keys on `credentials.uid` (only a root caller may change gid
-/// to a different value, matching Linux's `CAP_SETGID` gating).
+/// `setregid(rgid, egid)` -- [`sys_setreuid`] for the group ids.
 fn sys_setregid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let rgid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let egid = args.arg1 as u32;
-    apply_gid_change(rgid, egid, u32::MAX)
+    let (rgid, egid) = (args.arg0 as u32, args.arg1 as u32);
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    setid_result(setid::set_re_id(
+        pid,
+        setid::Which::Group,
+        setid::Authority::Linux,
+        rgid,
+        egid,
+    ))
 }
 
-/// `setresuid(ruid, euid, suid)` — set the real / effective / saved
-/// uid.  See [`apply_uid_change`] for the selection rule.
-///
-/// We don't track ruid / euid / suid separately, so all three are
-/// folded into the single PCB uid.  Programs that distinguish them
-/// (notably some sudo-style privilege transitions) will not see a
-/// faithful split, but the no-change-with-(-1) sentinel and the
-/// EPERM gating are exact.
+/// `setresuid(ruid, euid, suid)` -- [`apply_uid_change`].
 fn sys_setresuid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let ruid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let euid = args.arg1 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let suid = args.arg2 as u32;
+    let (ruid, euid, suid) = (args.arg0 as u32, args.arg1 as u32, args.arg2 as u32);
     apply_uid_change(ruid, euid, suid)
 }
 
-/// `setresgid(rgid, egid, sgid)` — set the real / effective / saved
-/// gid.  Same shape as [`sys_setresuid`] but updates `credentials.gid`;
-/// the permission gate still keys on `credentials.uid`.
+/// `setresgid(rgid, egid, sgid)` -- [`apply_gid_change`].
 fn sys_setresgid(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
-    let rgid = args.arg0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let egid = args.arg1 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let sgid = args.arg2 as u32;
+    let (rgid, egid, sgid) = (args.arg0 as u32, args.arg1 as u32, args.arg2 as u32);
     apply_gid_change(rgid, egid, sgid)
 }
 
-/// Shared implementation for `setreuid` / `setresuid`.
-///
-/// Selects the new uid that the caller wants to install and applies
-/// it to `credentials.uid` via the PCB.  The selection prioritises
-/// `euid` over `ruid` over `suid`, since the effective uid is what
-/// governs access checks in the Linux model and is what our single
-/// PCB uid corresponds to.  An argument of `u32::MAX` is Linux's
-/// `(uid_t)-1` "no change" sentinel and is skipped.  If every
-/// argument is `-1` the call is a no-op success.
-///
-/// Permission gate:
-///   - Caller uid == 0 (root): any target uid accepted.
-///   - Caller uid != 0 with resolved new uid != current: EPERM.
-///   - Caller uid != 0 with resolved new uid == current: 0 (no-op).
-///   - Kernel context (no `caller_pid()`): no-op success.
+/// `setresuid`'s body -- `proc::setid::set_res_id`: `(uid_t)-1` leaves an id
+/// as it is; an unprivileged caller may give each id only a value one of its
+/// real, effective and saved ids holds (`EPERM`). A no-op success in kernel
+/// context.
 fn apply_uid_change(ruid: u32, euid: u32, suid: u32) -> SyscallResult {
-    let new_uid_opt = if euid != u32::MAX {
-        Some(euid)
-    } else if ruid != u32::MAX {
-        Some(ruid)
-    } else if suid != u32::MAX {
-        Some(suid)
-    } else {
-        None
-    };
-    let Some(new_uid) = new_uid_opt else {
-        // All arguments are -1 — Linux treats this as a no-op
-        // success.  Don't bother looking up creds.
-        return SyscallResult::ok(0);
-    };
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return SyscallResult::ok(0),
-    };
-    if new_uid != creds.uid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if new_uid == creds.uid {
-        return SyscallResult::ok(0);
-    }
-    creds.uid = new_uid;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        // PCB vanished mid-call (tear-down race); no errno for that
-        // in Linux's setresuid contract.
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_res_id(
+        pid,
+        setid::Which::User,
+        setid::Authority::Linux,
+        ruid,
+        euid,
+        suid,
+    ))
 }
 
-/// Shared implementation for `setregid` / `setresgid`.  Same shape as
-/// [`apply_uid_change`] but updates `credentials.gid`.  The permission
-/// gate still keys on `credentials.uid` because Linux uses
-/// `CAP_SETGID` (which we approximate via "uid == 0") for arbitrary
-/// gid changes regardless of which gid the caller currently has.
+/// `setresgid`'s body -- [`apply_uid_change`] for the group ids.
 fn apply_gid_change(rgid: u32, egid: u32, sgid: u32) -> SyscallResult {
-    let new_gid_opt = if egid != u32::MAX {
-        Some(egid)
-    } else if rgid != u32::MAX {
-        Some(rgid)
-    } else if sgid != u32::MAX {
-        Some(sgid)
-    } else {
-        None
-    };
-    let Some(new_gid) = new_gid_opt else {
-        return SyscallResult::ok(0);
-    };
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    let mut creds = match pcb::get_credentials(pid) {
-        Some(c) => c,
-        None => return SyscallResult::ok(0),
-    };
-    if new_gid != creds.gid && creds.uid != 0 {
-        return linux_err(errno::EPERM);
-    }
-    if new_gid == creds.gid {
-        return SyscallResult::ok(0);
-    }
-    creds.gid = new_gid;
-    match pcb::change_credentials(pid, creds).map(|_| ()) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(_) => SyscallResult::ok(0),
-    }
+    setid_result(setid::set_res_id(
+        pid,
+        setid::Which::Group,
+        setid::Authority::Linux,
+        rgid,
+        egid,
+        sgid,
+    ))
 }
 
-/// `setfsuid(fsuid)` — set the filesystem uid (used for permission
-/// checks on subsequent FS ops), returning the *previous* fsuid.
-///
-/// Linux's contract is unusual: setfsuid never reports an error — the
-/// return value is always the previous fsuid, even if the change was
-/// rejected (e.g. because the caller lacks permission to change it).
-/// Callers therefore use the round-trip idiom
-///     old = setfsuid(N);
-///     ... privileged FS op ...
-///     setfsuid(old);
-/// and they need `old == previous_fsuid` for restore to be correct.
-///
-/// We don't carry a separate fsuid field — our credentials model has
-/// a single uid that doubles as real/effective/saved/fs.  The
-/// faithful behavior in that model is:
-///   - Report the caller's current `credentials.uid` as the previous
-///     fsuid (since fsuid == uid in our model).
-///   - Do not actually mutate state.  No subsequent FS access checks
-///     would consult an updated fsuid because the VFS has no
-///     permission checks yet.
-///
-/// Round-trip property: `old = setfsuid(N); setfsuid(old);` correctly
-/// restores the caller's view because both calls return the same
-/// constant `credentials.uid`.  Programs that gate on the *return*
-/// value (which is the documented Linux contract) work; programs that
-/// depend on subsequent VFS calls seeing the changed fsuid would fail
-/// — but we have no VFS permission checks, so there is nothing to
-/// observe the divergence.  Tracked in todo.txt.
-///
-/// Kernel context: no caller_pid, no credentials, report 0.
-fn sys_setfsuid(_args: &SyscallArgs) -> SyscallResult {
+/// `setfsuid(fsuid)` -- `proc::setid::set_fs_id`: the filesystem uid --
+/// whose files the process may open, and who owns what it makes -- becomes
+/// `fsuid` if the caller is privileged or holds that id among its four; the
+/// answer is the old filesystem uid either way, never an error, as Linux's.
+/// Callers rely on that for `old = setfsuid(n); ...; setfsuid(old)`. 0 in
+/// kernel context.
+fn sys_setfsuid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let fsuid = args.arg0 as u32;
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    match pcb::get_credentials(pid) {
-        Some(c) =>
-        {
-            #[allow(clippy::cast_lossless)]
-            SyscallResult::ok(i64::from(c.uid))
-        }
-        None => SyscallResult::ok(0),
-    }
+    let old = setid::set_fs_id(pid, setid::Which::User, setid::Authority::Linux, fsuid);
+    SyscallResult::ok(i64::from(old))
 }
 
-/// `setfsgid(fsgid)` — set the filesystem gid, returning the previous
-/// fsgid.  Same shape as [`sys_setfsuid`]: reports the current
-/// `credentials.gid` as the "previous" value, doesn't mutate state.
-fn sys_setfsgid(_args: &SyscallArgs) -> SyscallResult {
+/// `setfsgid(fsgid)` -- [`sys_setfsuid`] for the filesystem gid.
+fn sys_setfsgid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let fsgid = args.arg0 as u32;
     let Some(pid) = caller_pid() else {
         return SyscallResult::ok(0);
     };
-    match pcb::get_credentials(pid) {
-        Some(c) =>
-        {
-            #[allow(clippy::cast_lossless)]
-            SyscallResult::ok(i64::from(c.gid))
-        }
-        None => SyscallResult::ok(0),
-    }
+    let old = setid::set_fs_id(pid, setid::Which::Group, setid::Authority::Linux, fsgid);
+    SyscallResult::ok(i64::from(old))
 }
 
 /// `getgroups(size, list)` — fetch the supplementary group list.
@@ -19693,20 +19797,47 @@ fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
+    let tp = args.arg1;
+    // A negative id has a .clock_set -- the CPU-time clocks'
+    // `posix_cpu_clock_set`, and a CLOCKFD id's `pc_clock_settime` -- so the
+    // time is copied in first (EFAULT), and then neither can be set: a CPU
+    // clock that names something is EPERM ("you can never reset a CPU
+    // clock"), one that names nothing EINVAL, and a CLOCKFD id EINVAL (no
+    // clock is ever behind a file descriptor here). Neither checks the
+    // time's shape.
+    if clockid_i32 < 0 {
+        if tp == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(tp, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+        return match cpu_clock(
+            clockid_i32,
+            caller_pid(),
+            crate::sched::current_task_id(),
+            false,
+        ) {
+            Ok(Some(_)) => linux_err(errno::EPERM),
+            Ok(None) => linux_err(errno::EINVAL),
+            Err(e) => linux_err(e),
+        };
+    }
     if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
         return linux_err(errno::EINVAL);
     }
     // Linux clocks whose k_clock entry has .clock_set == NULL:
-    //   MONOTONIC(1), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
-    //   REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
-    //   REALTIME_ALARM(8), BOOTTIME_ALARM(9).
-    // Clocks with .clock_set: REALTIME(0), PROCESS_CPUTIME_ID(2), TAI(11).
+    //   MONOTONIC(1), PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3),
+    //   MONOTONIC_RAW(4), REALTIME_COARSE(5), MONOTONIC_COARSE(6),
+    //   BOOTTIME(7), REALTIME_ALARM(8), BOOTTIME_ALARM(9).
+    // Clocks with .clock_set: REALTIME(0), TAI(11).
     // Linux folds these into the same -EINVAL as the unknown-clockid
-    // case (single `if (!kc || !kc->clock_set)` gate).
-    if matches!(clockid_i32, 1 | 3..=9) {
+    // case (single `if (!kc || !kc->clock_set)` gate). PROCESS_CPUTIME_ID
+    // was taken to have one until 2026-10-08; Linux 6.6.87 answers EINVAL
+    // (its `clock_process` has no `.clock_set`).
+    if matches!(clockid_i32, 1..=9) {
         return linux_err(errno::EINVAL);
     }
-    let tp = args.arg1;
     if tp == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -20295,12 +20426,12 @@ fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
 /// | `mknod("/x", S_IFCHR, 0)`          | `EPERM`     | `EPERM`   | `EPERM`    | `EPERM` |
 /// | `mknod("/x", S_IFREG, 0)`          | 0, a file   | `EPERM`   | `EPERM`    | 0, a file |
 /// | `mknod("/x", S_IFSOCK, 0)`         | 0, a node   | `EPERM`   | `EPERM`    | 0, a node |
-/// | `mknod("/x", S_IFIFO, 0)`          | 0, a FIFO   | `EPERM`   | `EPERM`    | `EPERM`** |
+/// | `mknod("/x", S_IFIFO, 0)`          | 0, a FIFO   | `EPERM`   | `EPERM`    | 0, a FIFO** |
 ///
 /// *Linux's `may_mknod` returns `EPERM` for `S_IFDIR`; we agree on that
 /// terminal value — it just arrives via the mode-switch, not the
-/// `CAP_MKNOD` check. **No named pipes exist to make (known-issues
-/// `A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES`).
+/// `CAP_MKNOD` check. **Since 2026-10-08 (`ipc::fifo`); `EPERM` before, for
+/// want of named pipes.
 ///
 /// ## Why it matters
 ///
@@ -20337,12 +20468,10 @@ fn sys_mknodat(args: &SyscallArgs) -> SyscallResult {
 ///
 /// As Linux's `vfs_mknod`, only a device node needs `CAP_MKNOD`, which no
 /// caller here holds, so `S_IFCHR`/`S_IFBLK` are `EPERM`. A regular file
-/// (`S_IFREG`, or no type) and a socket's node (`S_IFSOCK` -- one nothing is
-/// bound to, which `connect` then refuses) are made, with the mode's
-/// permission bits less the umask. A FIFO is `EPERM` too, but for want of
-/// named pipes rather than of authority (known-issues
-/// `A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES`). All of these
-/// were `EPERM` until 2026-10-02.
+/// (`S_IFREG`, or no type), a socket's node (`S_IFSOCK` -- one nothing is
+/// bound to, which `connect` then refuses) and a named pipe's (`S_IFIFO`,
+/// `ipc::fifo`) are made, with the mode's permission bits less the umask.
+/// All of these were `EPERM` until 2026-10-02, the FIFO until 2026-10-08.
 fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
     // S_IF* constants mirrored locally — `umode_t` is 16-bit on x86_64
     // Linux, but the bit fields are the same as our module-level u32
@@ -20378,10 +20507,9 @@ fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
     let mode = (mode_raw as u16) as u32;
     let kind = mode & S_IFMT_BITS;
     match kind {
-        0 | S_IFREG_BITS | S_IFSOCK_BITS => {}
-        S_IFCHR_BITS | S_IFBLK_BITS | S_IFIFO_BITS => {
-            // A device needs CAP_MKNOD, which no caller holds; a FIFO needs
-            // named pipes, which do not exist (see this function's doc).
+        0 | S_IFREG_BITS | S_IFSOCK_BITS | S_IFIFO_BITS => {}
+        S_IFCHR_BITS | S_IFBLK_BITS => {
+            // A device needs CAP_MKNOD, which no caller holds.
             return linux_err(errno::EPERM);
         }
         S_IFDIR_BITS => {
@@ -20402,9 +20530,17 @@ fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
         return r;
     }
     let perm = linux_create_mode(u64::from(mode & 0o7777));
-    if kind == S_IFSOCK_BITS {
-        return match crate::fs::Vfs::mknod_socket(&resolved, perm) {
+    if kind == S_IFSOCK_BITS || kind == S_IFIFO_BITS {
+        let made = if kind == S_IFIFO_BITS {
+            crate::fs::Vfs::mknod_fifo(&resolved, perm)
+        } else {
+            crate::fs::Vfs::mknod_socket(&resolved, perm)
+        };
+        return match made {
             Ok(_) => SyscallResult::ok(0),
+            // A filesystem that cannot hold the node (FAT): EPERM, as Linux's
+            // `vfs_mknod` answers for one without `mknod`.
+            Err(KernelError::NotSupported) => linux_err(errno::EPERM),
             Err(e) => linux_err(linux_errno_for(e)),
         };
     }
@@ -20427,19 +20563,19 @@ fn sys_mknod_common(dirfd: i32, path: u64, mode_raw: u64) -> SyscallResult {
 // Interval timers (getitimer, setitimer) and the legacy alarm() / pause()
 //
 // Linux delivers ITIMER_REAL via SIGALRM, ITIMER_VIRTUAL via SIGVTALRM,
-// ITIMER_PROF via SIGPROF.  We now back ITIMER_REAL with a real
-// hrtimer-driven per-process timer (see proc::itimer):
+// ITIMER_PROF via SIGPROF.  ITIMER_REAL is a real hrtimer-driven
+// per-process timer (see proc::itimer); ITIMER_VIRTUAL and ITIMER_PROF run
+// on the process's VIRT and PROF CPU-time clocks, checked at the tick (see
+// proc::cputimer):
 //
-//   - getitimer(ITIMER_REAL) reports the live remaining/interval.
-//     VIRTUAL and PROF still report a zeroed (disarmed) timer because they
-//     need per-task CPU-time accounting hooks we don't have yet.
+//   - getitimer reports the live remaining/interval of each.
 //
 //   - setitimer(ITIMER_REAL) arms (or, for a zero it_value, disarms) the
 //     real timer; on expiry it posts SIGALRM via proc::signal::set_pending,
 //     which delivers to a registered handler at the next syscall-return
 //     checkpoint and wakes any pause()/signalfd/rt_sigtimedwait waiter.
-//     setitimer(VIRTUAL|PROF) still accepts cancellation and returns
-//     -ENOSYS on a non-zero arm.
+//     setitimer(VIRTUAL|PROF) arms the CPU-time itimer the same way, a tick
+//     added to the value as Linux's set_cpu_itimer adds it.
 //     A process with NO SIGALRM handler is terminated (exit 128+SIGALRM) at
 //     the next syscall-return checkpoint when the timer fires, matching
 //     Linux; the dominant case (handler installed before arming) delivers to
@@ -20511,15 +20647,16 @@ fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
     }
 
     let mut buf = [0u8; ITIMERVAL_SIZE];
-    // ITIMER_REAL is implemented; report its remaining/interval. VIRTUAL(1)
-    // and PROF(2) need per-task CPU-time accounting we don't have, so they
-    // report a zeroed (disarmed) timer. An in-kernel caller has no
-    // per-process timer, so it also reports zero.
-    if which_i32 == 0 {
-        if let Some(pid) = caller_pid() {
-            let (remaining_ns, interval_ns) = crate::proc::itimer::get_real(pid);
-            itimerval_fill(&mut buf, remaining_ns, interval_ns);
-        }
+    // The process's timer of that kind: remaining and interval. An
+    // in-kernel caller has no per-process timer, so it reports zero.
+    if let Some(pid) = caller_pid() {
+        let (remaining_ns, interval_ns) = if which_i32 == 0 {
+            crate::proc::itimer::get_real(pid)
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            crate::proc::cputimer::get_itimer(pid, which_i32 as u32).unwrap_or((0, 0))
+        };
+        itimerval_fill(&mut buf, remaining_ns, interval_ns);
     }
     // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range above.
     let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), value, ITIMERVAL_SIZE) };
@@ -20608,39 +20745,42 @@ fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
     // Linux's do_setitimer ordering (a faulting `old_value` returns EFAULT
     // with the new timer already armed). `value_*`/`interval_*` were
     // validated non-negative with usec in [0, 1e6) above.
-    if which_i32 == 0 {
-        if let Some(pid) = caller_pid() {
+    if let Some(pid) = caller_pid() {
+        #[allow(clippy::cast_sign_loss)]
+        let value_ns = crate::proc::itimer::timeval_to_ns(value_sec as u64, value_usec as u64);
+        #[allow(clippy::cast_sign_loss)]
+        let interval_ns =
+            crate::proc::itimer::timeval_to_ns(interval_sec as u64, interval_usec as u64);
+        let (prev_remaining_ns, prev_interval_ns) = if which_i32 == 0 {
+            crate::proc::itimer::set_real(pid, value_ns, interval_ns)
+        } else {
+            // ITIMER_VIRTUAL (1) / ITIMER_PROF (2), validated above.
             #[allow(clippy::cast_sign_loss)]
-            let value_ns = crate::proc::itimer::timeval_to_ns(value_sec as u64, value_usec as u64);
-            #[allow(clippy::cast_sign_loss)]
-            let interval_ns =
-                crate::proc::itimer::timeval_to_ns(interval_sec as u64, interval_usec as u64);
-            let (prev_remaining_ns, prev_interval_ns) =
-                crate::proc::itimer::set_real(pid, value_ns, interval_ns);
-            if old_value != 0 {
-                if let Err(e) = crate::mm::user::validate_user_write(old_value, ITIMERVAL_SIZE) {
-                    return linux_err(linux_errno_for(e));
-                }
-                let mut old_buf = [0u8; ITIMERVAL_SIZE];
-                itimerval_fill(&mut old_buf, prev_remaining_ns, prev_interval_ns);
-                // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range.
-                let r = unsafe {
-                    crate::mm::user::copy_to_user(old_buf.as_ptr(), old_value, ITIMERVAL_SIZE)
-                };
-                if let Err(e) = r {
-                    return linux_err(linux_errno_for(e));
-                }
+            match crate::proc::cputimer::set_itimer(pid, which_i32 as u32, value_ns, interval_ns) {
+                Ok(prev) => prev,
+                Err(e) => return linux_err(linux_errno_for(e)),
             }
-            return SyscallResult::ok(0);
+        };
+        if old_value != 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(old_value, ITIMERVAL_SIZE) {
+                return linux_err(linux_errno_for(e));
+            }
+            let mut old_buf = [0u8; ITIMERVAL_SIZE];
+            itimerval_fill(&mut old_buf, prev_remaining_ns, prev_interval_ns);
+            // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(old_buf.as_ptr(), old_value, ITIMERVAL_SIZE)
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
         }
-        // No per-process timer context (boot/kernel caller): fall through to
-        // the legacy cancel-only path below.
+        return SyscallResult::ok(0);
     }
 
     if !is_cancel {
-        // ITIMER_VIRTUAL/PROF need per-task CPU-time accounting we don't
-        // have yet (and an in-kernel ITIMER_REAL caller has no process timer
-        // to arm). Refuse honestly so the caller knows to fall back.
+        // An in-kernel caller has no process timer to arm. Refuse honestly
+        // so the caller knows to fall back.
         return linux_err(errno::ENOSYS);
     }
 
@@ -20975,6 +21115,9 @@ fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
         // stale socket it may remove (`bind` refuses an existing name) from a
         // file it must not.
         crate::fs::EntryType::Socket => (S_IFSOCK, 0o755),
+        // A named pipe's node: `S_ISFIFO` is how `mkfifo`'s caller, a shell's
+        // `[ -p ]` and `find -type p` know one.
+        crate::fs::EntryType::Fifo => (S_IFIFO, 0o644),
     };
     let perm = if meta.permissions == 0 {
         default_perm
@@ -21195,6 +21338,14 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
     if entry.kind == HandleKind::File
         && let Ok(meta) = crate::fs::handle::fstat(entry.raw_handle)
     {
+        fill_stat_from_meta(buf, &meta);
+        return;
+    }
+
+    // A named pipe's end: its node, as Linux's fstat of a FIFO reports the
+    // node's inode -- its owner, mode and times, and a link count of 0 once
+    // its name is gone.
+    if let Some(meta) = fifo_meta(entry) {
         fill_stat_from_meta(buf, &meta);
         return;
     }
@@ -21613,6 +21764,18 @@ const STATX_BASIC_STATS: u32 = STATX_TYPE
     | STATX_CTIME
     | STATX_INO;
 
+/// The metadata of the named pipe's node an fd is an end of
+/// (`ipc::pipe::fifo_node`), or `None` for any other fd -- an ordinary pipe's
+/// included -- or a node whose metadata cannot be read.
+fn fifo_meta(entry: &crate::proc::linux_fd::FdEntry) -> Option<crate::fs::FileMeta> {
+    if entry.kind != crate::proc::linux_fd::HandleKind::Pipe {
+        return None;
+    }
+    let (hold, _) =
+        crate::ipc::pipe::fifo_node(crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle))?;
+    crate::fs::Vfs::object_metadata(&hold).ok()
+}
+
 /// Fill a 256-byte struct statx for the given fd-table entry.
 fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::FdEntry) {
     use crate::proc::linux_fd::HandleKind;
@@ -21621,6 +21784,12 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
     if entry.kind == HandleKind::File
         && let Ok(meta) = crate::fs::handle::fstat(entry.raw_handle)
     {
+        fill_statx_from_meta(buf, &meta);
+        return;
+    }
+
+    // A named pipe's end: its node's metadata, as `fill_stat_for_fd` takes it.
+    if let Some(meta) = fifo_meta(entry) {
         fill_statx_from_meta(buf, &meta);
         return;
     }
@@ -36010,6 +36179,11 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
 fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
     let task = crate::sched::current_task_id();
     match restart_block::take(task) {
+        Some(restart_block::NanosleepBlock {
+            deadline_ns,
+            rem_ptr,
+            clock: Some(clock),
+        }) => cpu_nanosleep_until(clock, deadline_ns, false, rem_ptr),
         Some(block) => nanosleep_core(block.deadline_ns, block.rem_ptr),
         None => linux_err(errno::EINTR),
     }
@@ -36710,41 +36884,40 @@ fn sys_map_shadow_stack(_args: &SyscallArgs) -> SyscallResult {
 // Additional signal-handling and POSIX-timer syscalls
 //
 // The basic signal API (rt_sigaction / rt_sigprocmask / rt_sigpending /
-// kill / tkill / tgkill / nanosleep / sigaltstack) is already
-// implemented elsewhere in this file.  This block fills in the rest:
+// kill / tkill / tgkill / nanosleep / sigaltstack) is implemented elsewhere
+// in this file.  This block has the rest:
 //
-//   * rt_sigsuspend: returns EINTR after validating the mask — there is
-//     no real signal delivery in this kernel, but "I was interrupted"
-//     is the documented end-of-suspend wakeup answer and callers handle
-//     it.
-//   * rt_sigtimedwait: returns EAGAIN (timeout) after validating the
-//     mask + timespec, which is the documented "no signal arrived in
-//     the timeout window" answer.  If timeout is NULL (= wait forever)
-//     we also return EAGAIN; this is mildly hostile, but the
-//     alternative — blocking forever — would hang any caller.
-//   * rt_sigqueueinfo / rt_tgsigqueueinfo: validate siginfo (128 bytes)
-//     and dispatch to the existing kill / tgkill semantics — these are
-//     just kill-with-payload.  We accept the signal but drop the
-//     siginfo because we don't carry it through dispatch.
-//   * timer_create / _delete / _settime / _gettime / _getoverrun:
-//     POSIX per-process timer objects.  No per-process timer state in
-//     this kernel, so timer_create returns ENOSYS and the rest return
-//     EINVAL (the answer for an unknown timerid_t).
+//   * rt_sigsuspend: waits under a temporary mask until a signal it lets
+//     through is pending, and restarts if none of them ran a handler.
+//   * rt_sigtimedwait: takes a signal of the set it waits for, or times out.
+//   * rt_sigqueueinfo / rt_tgsigqueueinfo: kill / tgkill carrying the
+//     caller's si_code and si_value.
+//
+// The POSIX timer calls are `crate::proc::posix_timer`'s.
 // ---------------------------------------------------------------------------
 
 /// `rt_sigsuspend(mask*, sigsetsize)` — atomically install `*mask` as the
-/// blocked set, suspend until a signal whose action runs a handler (or
-/// terminates the process) is delivered, then restore the previous mask and
-/// return `-EINTR`.
+/// blocked set and wait until a signal it does not block is pending. The call
+/// ends only when such a signal runs a handler (`-EINTR`, the mask put back
+/// by the handler's `rt_sigreturn`) or ends the process; a signal that runs
+/// no handler -- ignored after all, a job-control stop and continue, or one a
+/// tracer took away -- has it put the mask back and start over, waiting
+/// again (Linux's `-ERESTARTNOHAND`). POSIX: sigsuspend "shall return after
+/// the signal-catching function returns", and only then.
 ///
 /// This mirrors Linux exactly: the original mask is stashed as the
 /// `saved_sigmask` (cf. `TIF_RESTORE_SIGMASK`) and restored when the signal
 /// is delivered — either by `emit_linux_rt_frame` writing it into the
 /// handler frame's `uc_sigmask` (so `rt_sigreturn` restores it), or by the
-/// no-handler tail of the Linux delivery loop. We park on the same
-/// `signalfd` wait-queue `pause()`/`signalfd`/`rt_sigtimedwait` use, testing
-/// against `pending & !blocked` under the *temporary* mask, so a signal that
-/// is blocked by `*mask` does not wake us (matching Linux).
+/// no-handler tail of the Linux delivery loop, after which the restart runs
+/// the call again from its registers. We park on the same `signalfd`
+/// wait-queue `pause()`/`signalfd`/`rt_sigtimedwait` use, testing against
+/// `pending & !blocked` under the *temporary* mask, so a signal that is
+/// blocked by `*mask` does not wake us (matching Linux).
+///
+/// Until 2026-10-08 the call answered `-EINTR` whatever the signal did, so a
+/// signal a traced program's debugger took away, or a stop and continue,
+/// ended a wait that should have gone on.
 ///
 /// An in-kernel caller (`caller_pid() == None`, e.g. the boot self-test) has
 /// no signal queue to park on and the boot CPU is single-threaded, so we keep
@@ -36785,12 +36958,13 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
 
     // Park until a signal deliverable under the temporary mask is pending.
     // Register-then-recheck closes the post-before-park race exactly like
-    // sys_pause.  sigsuspend's only exit is EINTR; the saved mask is
-    // restored by the signal-delivery checkpoint that runs right after.
+    // sys_pause. The answer is resolved by the signal-delivery checkpoint
+    // that runs right after: `-EINTR` once a handler's frame is built, a
+    // restart when nothing ran one (the saved mask put back first).
     loop {
         let deliverable = !crate::proc::signal::blocked(caller);
         if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
-            return linux_err(errno::EINTR);
+            return restart::restart_result(restart::ERESTARTNOHAND);
         }
         crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
         if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
@@ -37243,9 +37417,9 @@ enum TimerClockKind {
     /// A clock timers run on here.
     Timeable(crate::proc::posix_timer::TimerClock),
     /// A CPU-time clock -- `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`
-    /// or a process's or thread's (a negative id, as glibc passes them). Linux
-    /// times them; this kernel keeps no per-task CPU time to fire on, so once
-    /// the id is found valid the answer is `EOPNOTSUPP`.
+    /// or a process's or thread's (a negative id, as glibc passes them),
+    /// decoded by [`cpu_clock`] once the timer's id is taken, as Linux's
+    /// `posix_cpu_timer_create` checks it then.
     CpuTime(i32),
     /// `CLOCK_REALTIME_ALARM` / `CLOCK_BOOTTIME_ALARM`: need `CAP_WAKE_ALARM`.
     Alarm,
@@ -37274,35 +37448,96 @@ fn timer_clock_kind(clockid: i32) -> Result<TimerClockKind, i32> {
     }
 }
 
-/// Whether CPU-time clock `clockid` names something a timer of `caller`'s
-/// could measure -- Linux's `pid_for_clock(clock, false)`: a valid clock kind,
-/// and for a nonzero pid a thread of the caller's own (per-thread clocks) or a
-/// live process.
-fn cpu_clock_target_ok(clockid: i32, caller: Option<u64>) -> bool {
-    // CPUCLOCK_WHICH: PROF 0, VIRT 1, SCHED 2; 3 is no clock.
+use crate::proc::cputimer::{CpuClock, CpuClockTarget};
+use crate::sched::CpuClockKind;
+
+/// What `clockid` names as a CPU-time clock, for a call made by task `tid`
+/// of process `pid` (`None`: a kernel task, which counts as a process of one
+/// thread) -- Linux's `clockid_to_kclock` and `pid_for_clock`:
+///
+/// - `Ok(None)`: not a CPU-time clock at all -- an id of 0 or more other than
+///   `CLOCK_PROCESS_CPUTIME_ID` (2) and `CLOCK_THREAD_CPUTIME_ID` (3), or a
+///   negative one whose low three bits are 3 (`CLOCKFD`, a clock behind a
+///   file descriptor);
+/// - `Err(EINVAL)`: a CPU-time clock that names nothing: `CPUCLOCK_WHICH` 3,
+///   a thread that is not one of the caller's own, or a pid that is not a
+///   process's;
+/// - otherwise the clock. A negative id is `~pid << 3 | perthread << 2 |
+///   which`; pid 0 is the caller (its thread, or its process).
+///
+/// Any process's clock may be read, as on Linux, where `/proc/<pid>/stat`
+/// tells anyone the same thing to the tick (design-decisions §1516 keeps
+/// `stat` open to all); a thread's only by its own process. `gettime` is
+/// Linux's one allowance for `clock_gettime`: the process clock named by a
+/// thread of the caller's own that is not the first one (whose id is the
+/// process's) is the caller's process; for anything else -- a resolution,
+/// a timer, a sleep -- the pid must be a process's.
+pub(crate) fn cpu_clock(
+    clockid: i32,
+    pid: Option<u64>,
+    tid: u64,
+    gettime: bool,
+) -> Result<Option<CpuClock>, i32> {
     const CPUCLOCK_CLOCK_MASK: i32 = 3;
-    const CPUCLOCK_MAX: i32 = 3;
     const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
-    if clockid >= 0 {
-        // CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID: the caller's.
-        return true;
+    const CLOCKFD: i32 = 3;
+    const CLOCKFD_MASK: i32 = 7;
+    // The caller's own process: a kernel task's is itself.
+    let own_process = pid.map_or(CpuClockTarget::Thread(tid), CpuClockTarget::Process);
+    match clockid {
+        2 => {
+            return Ok(Some(CpuClock {
+                kind: CpuClockKind::Sched,
+                target: own_process,
+            }));
+        }
+        3 => {
+            return Ok(Some(CpuClock {
+                kind: CpuClockKind::Sched,
+                target: CpuClockTarget::Thread(tid),
+            }));
+        }
+        c if c >= 0 || c & CLOCKFD_MASK == CLOCKFD => return Ok(None),
+        _ => {}
     }
-    if clockid & CPUCLOCK_CLOCK_MASK >= CPUCLOCK_MAX {
-        return false;
-    }
-    // CPUCLOCK_PID: the pid is the id's complement, shifted down three.
-    let upid = !(clockid >> 3);
-    if upid == 0 {
-        return true;
-    }
-    let Ok(target) = u64::try_from(upid) else {
-        return false;
+    let kind = match clockid & CPUCLOCK_CLOCK_MASK {
+        0 => CpuClockKind::Prof,
+        1 => CpuClockKind::Virt,
+        2 => CpuClockKind::Sched,
+        _ => return Err(errno::EINVAL),
     };
-    if clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
-        caller.is_some() && crate::proc::thread::owner_process(target) == caller
+    // CPUCLOCK_PID: the id's complement, shifted down three -- never negative
+    // for a negative id.
+    let upid = u64::try_from(!(clockid >> 3)).map_err(|_| errno::EINVAL)?;
+    let target = if clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
+        if upid == 0 || upid == tid {
+            CpuClockTarget::Thread(tid)
+        } else if pid.is_some() && crate::proc::thread::owner_process(upid) == pid {
+            CpuClockTarget::Thread(upid)
+        } else {
+            return Err(errno::EINVAL);
+        }
+    } else if upid == 0 || (gettime && upid == tid) {
+        own_process
+    } else if crate::proc::pcb::state(upid).is_some() {
+        CpuClockTarget::Process(upid)
     } else {
-        crate::proc::pcb::state(target).is_some()
-    }
+        return Err(errno::EINVAL);
+    };
+    Ok(Some(CpuClock { kind, target }))
+}
+
+/// Read CPU-time clock `clock`, in nanoseconds, or `EINVAL` if what it
+/// measures has gone (a process reaped, a thread's task reaped)
+/// ([`CpuClock::read`]).
+pub(crate) fn read_cpu_clock(clock: CpuClock) -> Result<u64, i32> {
+    clock.read().ok_or(errno::EINVAL)
+}
+
+/// The resolution of CPU-time clock `clock`, in nanoseconds
+/// ([`CpuClock::resolution`]).
+pub(crate) const fn cpu_clock_res(clock: CpuClock) -> u64 {
+    clock.resolution()
 }
 
 /// Linux's `good_sigevent` for `caller`'s new timer `id`: what its expiry
@@ -37361,8 +37596,8 @@ fn timer_notify(
 /// `EOPNOTSUPP`); an id (`EAGAIN`, from `RLIMIT_SIGPENDING` or the ids
 /// running out); the sigevent's content (`EINVAL`); the id out to `out`, for
 /// the Linux call (`EFAULT`); then the clock's own refusals (`EPERM` for an
-/// alarm clock, `EINVAL` / `EOPNOTSUPP` for a CPU-time one). An id taken and
-/// then refused is used up, as on Linux. Answers the new timer's id.
+/// alarm clock, `EINVAL` for a CPU-time one that names nothing). An id taken
+/// and then refused is used up, as on Linux. Answers the new timer's id.
 pub(crate) fn timer_create_common(clock_arg: u64, sevp: u64, out: Option<u64>) -> Result<i32, i32> {
     use crate::proc::posix_timer;
     let event = if sevp == 0 {
@@ -37411,11 +37646,13 @@ pub(crate) fn timer_create_common(clock_arg: u64, sevp: u64, out: Option<u64>) -
         TimerClockKind::Timeable(clock) => clock,
         TimerClockKind::Alarm => return refuse(errno::EPERM),
         TimerClockKind::CpuTime(c) => {
-            return refuse(if cpu_clock_target_ok(c, caller) {
-                errno::EOPNOTSUPP
-            } else {
-                errno::EINVAL
-            });
+            match cpu_clock(c, caller, crate::sched::current_task_id(), false) {
+                Ok(Some(clock)) => posix_timer::TimerClock::Cpu(clock),
+                // `timer_clock_kind` only calls 2, 3 and non-CLOCKFD
+                // negative ids CPU-time ones, and those all decode.
+                Ok(None) => return refuse(errno::EINVAL),
+                Err(e) => return refuse(e),
+            }
         }
     };
     let Some((pid, id)) = reserved else {
@@ -37482,6 +37719,18 @@ fn write_timer_itimerspec(ptr: u64, spec: TimerSpecNs) -> Result<(), i32> {
     unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), ptr, buf.len()) }.map_err(linux_errno_for)
 }
 
+/// The errno a POSIX timer call answers for `e`: `EINVAL` for no such timer,
+/// `EAGAIN` for no room, `ESRCH` for a CPU-time timer whose thread or process
+/// has gone (Linux's `posix_cpu_timer_set`).
+const fn timer_errno(e: crate::proc::posix_timer::TimerError) -> i32 {
+    use crate::proc::posix_timer::TimerError;
+    match e {
+        TimerError::NoSuchTimer => errno::EINVAL,
+        TimerError::Again => errno::EAGAIN,
+        TimerError::TargetGone => errno::ESRCH,
+    }
+}
+
 /// A timer id argument: `timer_t` is an `int`, the register's low half.
 #[allow(clippy::cast_possible_truncation)]
 const fn timer_id_arg(arg: u64) -> i32 {
@@ -37506,7 +37755,7 @@ pub(crate) fn timer_settime_common(
     let pid = caller_pid().ok_or(errno::EINVAL)?;
     let abstime = flags & u64::from(posix_timer::TIMER_ABSTIME) != 0;
     let old = posix_timer::settime(pid, timer_id_arg(id_arg), abstime, value, interval)
-        .map_err(|_| errno::EINVAL)?;
+        .map_err(timer_errno)?;
     if old_ptr != 0 {
         write_timer_itimerspec(old_ptr, old)?;
     }
@@ -37517,8 +37766,7 @@ pub(crate) fn timer_settime_common(
 /// setting out (`EFAULT`).
 pub(crate) fn timer_gettime_common(id_arg: u64, cur_ptr: u64) -> Result<(), i32> {
     let pid = caller_pid().ok_or(errno::EINVAL)?;
-    let cur =
-        crate::proc::posix_timer::gettime(pid, timer_id_arg(id_arg)).map_err(|_| errno::EINVAL)?;
+    let cur = crate::proc::posix_timer::gettime(pid, timer_id_arg(id_arg)).map_err(timer_errno)?;
     write_timer_itimerspec(cur_ptr, cur)
 }
 
@@ -39352,6 +39600,42 @@ fn unix_send_failed(
     sigpipe_on_epipe(r, !stream || flags & msgflags::MSG_NOSIGNAL != 0)
 }
 
+/// A pending error ([`crate::ipc::unix_socket::take_so_error_for_receive`])
+/// a receive on the `AF_UNIX` socket `h` answers before anything else, as
+/// Linux's `sock_error` -- or `None` to go on.
+fn unix_pending_error(h: crate::ipc::unix_socket::UnixHandle) -> Option<SyscallResult> {
+    match crate::ipc::unix_socket::take_so_error_for_receive(h) {
+        Ok(errno) if errno != 0 => Some(linux_err(errno)),
+        _ => None,
+    }
+}
+
+/// A pending error a receive on the `AF_INET`/`AF_INET6` socket `h` answers
+/// before anything else, by Linux's rule for each kind: a datagram socket
+/// answers it first (`__skb_try_recv_datagram`); a stream only when nothing
+/// waits to be read and its peer has not closed (`tcp_recvmsg` checks
+/// `SOCK_DONE`, then `sk_err`). `ETIMEDOUT` is left to the connection's own
+/// timeout report (`net::socket::recv`), which clears it as it answers.
+/// `None` to go on.
+fn inet_pending_error(h: crate::net::socket::SocketHandle) -> Option<SyscallResult> {
+    const ETIMEDOUT: i32 = 110;
+    let pending = crate::net::socket::pending_so_error(h).ok()?;
+    if pending == 0 || pending == ETIMEDOUT {
+        return None;
+    }
+    if !crate::net::socket::is_dgram(h).unwrap_or(false) {
+        let mut one = [0u8; 1];
+        // Bytes waiting (or the peer's end of file) come first.
+        if crate::net::socket::recv(h, &mut one, true, true).is_ok() {
+            return None;
+        }
+    }
+    match crate::net::socket::take_so_error(h) {
+        Ok(errno) if errno != 0 => Some(linux_err(errno)),
+        _ => None,
+    }
+}
+
 /// `recv`/`recvfrom`/`read` on an `AF_UNIX` descriptor: into `buf` (room
 /// `cap`), the sender's address to `addr_ptr` if it is not null. Returns the
 /// bytes copied -- or, with `MSG_TRUNC`, a datagram's whole length.
@@ -39370,6 +39654,9 @@ fn unix_recv(
         Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
+    if let Some(r) = unix_pending_error(h) {
+        return r;
+    }
     let room = usize::try_from(cap).unwrap_or(usize::MAX).min(limit);
     if room > 0 && crate::mm::user::validate_user_write(buf, room).is_err() {
         // A buffer that cannot take the bytes: answered by the socket, as
@@ -39694,7 +39981,7 @@ fn take_rights(fds: &[i32]) -> Result<Option<crate::ipc::passed::Bundle>, Syscal
             }
         }
     }
-    let uid = pcb::process_uid_gid(pid).map_or(u32::MAX, |(uid, _)| uid);
+    let uid = pcb::process_uid(pid).unwrap_or(u32::MAX);
     let nofile = pcb::get_rlimit(pid, 7).map_or(u64::MAX, |(cur, _)| cur);
     if refused.is_none() && uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
         refused = Some(linux_err(errno::ETOOMANYREFS));
@@ -39832,6 +40119,9 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
+    if let Some(r) = unix_pending_error(h) {
+        return r;
+    }
     // Validate every destination first, so a bad pointer loses nothing.
     let mut room = 0usize;
     for &(base, len) in &iovs {
@@ -41108,6 +41398,9 @@ fn dispatch_dgram_recvfrom(
     addr_ptr: u64,
     addrlen_ptr: u64,
 ) -> SyscallResult {
+    if let Some(r) = inet_pending_error(h) {
+        return r;
+    }
     // A short buffer truncates the datagram (Linux discards the overflow unless
     // MSG_TRUNC is set; we always discard — the datagram is consumed whole either
     // way). Cap the staging buffer at the user's request length.
@@ -41720,6 +42013,11 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     if mh.msg_iovlen > 1024 {
         return linux_err(errno::EMSGSIZE);
     }
+    if let Some(r) =
+        inet_pending_error(crate::net::socket::SocketHandle::from_raw(entry.raw_handle))
+    {
+        return r;
+    }
     // First pass: validate each destination iovec writable and compute the
     // bounded receive capacity (one page total).
     let mut segs: alloc::vec::Vec<Seg> = alloc::vec::Vec::new();
@@ -42095,10 +42393,12 @@ fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
 ///   does not bound the wait for the first message. What is left of it is
 ///   written back when anything was received;
 /// - the first failure ends the run, and is the answer only when nothing was
-///   received; otherwise the answer is how many messages were. Linux keeps
-///   such a failure (other than `EAGAIN`) as the socket's pending error for
-///   the next call; here it is not kept, and the next call meets whatever
-///   caused it afresh (known-issues `A-SOCKETS-HAVE-NO-PENDING-ERROR`).
+///   received; otherwise the answer is how many messages were, and the
+///   failure -- unless `EAGAIN` -- is kept as the socket's pending error, for
+///   the next receive or `getsockopt(SO_ERROR)` to answer, as Linux keeps it
+///   (`unix_socket::set_so_error`, `net::socket::set_so_error`). Until
+///   2026-10-08 it was dropped (known-issues
+///   `A-SOCKETS-HAVE-NO-PENDING-ERROR`).
 ///
 /// Until 2026-10-02 this answered `EBADF` for every socket.
 fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
@@ -42185,6 +42485,23 @@ fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
     }
     if received == 0 {
         return failure.unwrap_or(SyscallResult::ok(0));
+    }
+    // A failure after some messages is the socket's to report next time.
+    if let Some(r) = failure
+        && r.value < 0
+        && let errno = i32::try_from(r.value.saturating_neg()).unwrap_or(errno::EIO)
+        && errno != errno::EAGAIN
+    {
+        // The socket closed meanwhile: there is nobody to report it to.
+        let _ = match entry.kind {
+            HandleKind::UnixSocket => {
+                crate::ipc::unix_socket::set_so_error(unix_handle(&entry), errno)
+            }
+            _ => crate::net::socket::set_so_error(
+                crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
+                errno,
+            ),
+        };
     }
     // What is left of the timeout, written back as Linux does once anything
     // was received; a timeout that cannot be written back makes the answer
@@ -42644,8 +42961,9 @@ fn socket_get_multicast(
 }
 
 /// `getsockopt(2)` on an `AF_UNIX` descriptor: `SO_TYPE`, `SO_DOMAIN`,
-/// `SO_PROTOCOL`, `SO_ACCEPTCONN`, `SO_ERROR` (always 0: a Unix-domain
-/// connect fails at once or not at all), the buffer sizes, `SO_PASSCRED`, and
+/// `SO_PROTOCOL`, `SO_ACCEPTCONN`, `SO_ERROR` (the pending error, taken: a
+/// Unix-domain connect fails at once or not at all, so only a `recvmmsg`
+/// that failed part-way leaves one), the buffer sizes, `SO_PASSCRED`, and
 /// `SO_PEERCRED` -- the peer's pid, uid and gid as the kernel recorded them,
 /// or Linux's `{0, 65534, 65534}` ("nobody") for a socket with no peer or a
 /// peer with no process. As Linux, a value longer than `*optlen` is cut to
@@ -42673,7 +42991,9 @@ fn unix_getsockopt(
             None => return linux_err(errno::EBADF),
         },
         so::SO_DOMAIN => int(i32::from(AF_UNIX)),
-        so::SO_PROTOCOL | so::SO_ERROR => int(0),
+        so::SO_PROTOCOL => int(0),
+        // The pending error, taken (`sys_recvmmsg` keeps one).
+        so::SO_ERROR => int(crate::ipc::unix_socket::take_so_error(h).unwrap_or(0)),
         so::SO_PASSCRED => int(i32::from(unix_socket::passcred(h))),
         so::SO_ACCEPTCONN => int(i32::from(unix_socket::is_listening(h))),
         so::SO_SNDBUF | so::SO_RCVBUF => {
@@ -46319,6 +46639,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::CharDevice => 2,  // DT_CHR
             crate::fs::EntryType::BlockDevice => 6, // DT_BLK
             crate::fs::EntryType::Socket => 12,     // DT_SOCK
+            crate::fs::EntryType::Fifo => 1,        // DT_FIFO
         };
 
         out.extend_from_slice(&d_ino.to_le_bytes());
@@ -46529,13 +46850,10 @@ fn waitid_siginfo(found: &WaitidFound) -> WaitidSiginfo {
     // `_rest[12..20]`.  (28..32 is the padding the compiler inserts to align
     // an 8-byte `clock_t` after the 4-byte `si_status`; it stays zero.)
     // Linux measures these in USER_HZ ticks — `nsec_to_clock_t` in
-    // `wait_task_zombie` — which is exactly what `ProcessUsage` stores, so
-    // no conversion is right here and any conversion would be wrong.
+    // `wait_task_zombie` — from the nanoseconds `ProcessUsage` holds.
     let mut rest = [0u8; 100];
-    #[allow(clippy::cast_possible_wrap)]
-    let utime = found.usage.user_ticks as i64;
-    #[allow(clippy::cast_possible_wrap)]
-    let stime = found.usage.sys_ticks as i64;
+    let utime = nsec_to_clock_t(found.usage.utime_ns);
+    let stime = nsec_to_clock_t(found.usage.stime_ns);
     if let Some(slot) = rest.get_mut(4..12) {
         slot.copy_from_slice(&utime.to_ne_bytes());
     }
@@ -46611,9 +46929,9 @@ fn write_user_rusage(
     }
     let mut buf = [0u8; RUSAGE_SIZE];
     // ru_utime @ 0, ru_stime @ 16 — same encoder as `sys_getrusage`, so the
-    // two syscalls cannot disagree about what a tick is worth.
-    write_rusage_timeval(&mut buf, 0, usage.user_ticks);
-    write_rusage_timeval(&mut buf, 16, usage.sys_ticks);
+    // two syscalls cannot disagree.
+    write_rusage_timeval(&mut buf, 0, usage.utime_ns);
+    write_rusage_timeval(&mut buf, 16, usage.stime_ns);
     let mut put = |off: usize, v: u64| {
         #[allow(clippy::cast_possible_wrap)]
         let signed = v as i64;
@@ -46845,16 +47163,17 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     let mut buf = [0u8; 128];
     // Non-zero CPU times so the si_utime/si_stime slots (siginfo offsets 32
     // and 40) are distinguishable from the zero-fill around them.  These are
-    // USER_HZ ticks on the wire, exactly as Linux's `nsec_to_clock_t` leaves
-    // them, so the encoder must pass them through unscaled.
+    // USER_HZ ticks on the wire, Linux's `nsec_to_clock_t` of the
+    // nanoseconds `ProcessUsage` holds: 31.0x and 42.0x ticks truncate to
+    // 31 and 42.
     let probe = WaitidFound {
         si_code: CLD_EXITED,
         si_pid: 0x1234,
         si_uid: 7,
         si_status: 99,
         usage: crate::proc::thread::ProcessUsage {
-            user_ticks: 31,
-            sys_ticks: 42,
+            utime_ns: 310_000_009,
+            stime_ns: 429_999_999,
             ..crate::proc::thread::ProcessUsage::default()
         },
     };
@@ -49520,36 +49839,24 @@ fn sys_gettimeofday(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `getuid()` — real user id.  Reads the caller's process credentials.
+/// `getuid()` -- the real user id (0 in kernel context).
 fn sys_getuid(_args: &SyscallArgs) -> SyscallResult {
-    let pid = match caller_pid() {
-        Some(p) => p,
-        None => return SyscallResult::ok(0), // kernel task
-    };
-    let uid = pcb::get_credentials(pid).map_or(0, |c| u64::from(c.uid));
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(uid as i64)
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::User)[0]))
 }
 
-/// `getgid()`
+/// `getgid()` -- the real group id.
 fn sys_getgid(_args: &SyscallArgs) -> SyscallResult {
-    let pid = match caller_pid() {
-        Some(p) => p,
-        None => return SyscallResult::ok(0),
-    };
-    let gid = pcb::get_credentials(pid).map_or(0, |c| u64::from(c.gid));
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(gid as i64)
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::Group)[0]))
 }
 
-/// `geteuid()` — currently aliased to `uid` (no euid tracking yet).
-fn sys_geteuid(args: &SyscallArgs) -> SyscallResult {
-    sys_getuid(args)
+/// `geteuid()` -- the effective user id, which permission checks use.
+fn sys_geteuid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::User)[1]))
 }
 
-/// `getegid()` — currently aliased to `gid` (no egid tracking yet).
-fn sys_getegid(args: &SyscallArgs) -> SyscallResult {
-    sys_getgid(args)
+/// `getegid()` -- the effective group id.
+fn sys_getegid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(i64::from(caller_ids(setid::Which::Group)[1]))
 }
 
 /// `prlimit64(pid, resource, new_limit, old_limit)` — get and/or set
@@ -50848,11 +51155,10 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
     // MONOTONIC_COARSE(6), BOOTTIME(7), REALTIME_ALARM(8),
     // BOOTTIME_ALARM(9), TAI(11).  Pre-batch we returned EINVAL for
     // ALARM(8), ALARM(9), and TAI(11), diverging from Linux which fills
-    // them all in.
+    // them all in.  So do the negative ids of the per-process and
+    // per-thread CPU-time clocks (`cpu_clock`).
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
-    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
-    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
     const CLOCK_MONOTONIC_RAW: u64 = 4;
     const CLOCK_REALTIME_COARSE: u64 = 5;
     const CLOCK_MONOTONIC_COARSE: u64 = 6;
@@ -50874,6 +51180,29 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
     let clockid: u64 = u64::from(clockid_i32 as u32);
     let tp_ptr = args.arg1;
 
+    // The CPU-time clocks: CLOCK_PROCESS_CPUTIME_ID (2),
+    // CLOCK_THREAD_CPUTIME_ID (3), and a process's or thread's by id. The
+    // value is read before the pointer is tried, as Linux does.
+    match cpu_clock(
+        clockid_i32,
+        caller_pid(),
+        crate::sched::current_task_id(),
+        true,
+    ) {
+        Ok(Some(clock)) => {
+            let ns = match read_cpu_clock(clock) {
+                Ok(ns) => ns,
+                Err(e) => return linux_err(e),
+            };
+            if let Err(e) = write_timespec(tp_ptr, LinuxTimespec::from_nanos(ns)) {
+                return linux_err(linux_errno_for(e));
+            }
+            return SyscallResult::ok(0);
+        }
+        Ok(None) => {}
+        Err(e) => return linux_err(e),
+    }
+
     let ns: u64 = match clockid {
         // Wall-clock family.  TAI is realtime + TAI offset; our offset
         // is 0 so it coincides with realtime.  REALTIME_ALARM mirrors
@@ -50887,11 +51216,11 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
         | CLOCK_MONOTONIC_RAW
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
-        | CLOCK_BOOTTIME_ALARM
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID => crate::hrtimer::now_ns(),
-        // Anything else (out-of-range or SGI_CYCLE=10) -> EINVAL,
-        // matching Linux's clockid_to_kclock NULL return.
+        | CLOCK_BOOTTIME_ALARM => crate::hrtimer::now_ns(),
+        // Anything else (out-of-range, SGI_CYCLE=10, or a CLOCKFD id: no
+        // clock is ever behind a file descriptor here) -> EINVAL, matching
+        // Linux's clockid_to_kclock NULL return and its answer for an fd
+        // that is not a clock's.
         _ => return linux_err(errno::EINVAL),
     };
 
@@ -50941,6 +51270,11 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
 ///     `posix_get_coarse_res`, which reports `KTIME_LOW_RES = TICK_NSEC`
 ///     — 10ms at our HZ=100.  `sys_clock_gettime` floors these clockids
 ///     to the same 10ms grid, so getres/gettime stay consistent.
+///   * A process's or thread's CPU-time clock by id (negative) is checked
+///     as `posix_cpu_clock_getres` checks it -- `EINVAL` unless it names a
+///     thread of the caller's or a process (`cpu_clock`, which glibc's
+///     `clock_getcpuclockid` relies on to tell a live pid from a dead one)
+///     -- and reports 1ns for `CPUCLOCK_SCHED`, a tick for PROF and VIRT.
 fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
     // Linux's `SYSCALL_DEFINE2(clock_getres)` (kernel/time/posix-timers.c):
     //   kc = clockid_to_kclock(which_clock);
@@ -50956,11 +51290,21 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
+    let cpu = match cpu_clock(
+        clockid_i32,
+        caller_pid(),
+        crate::sched::current_task_id(),
+        false,
+    ) {
+        Ok(cpu) => cpu,
+        Err(e) => return linux_err(e),
+    };
     // Valid posix clockids: 0..=9, 11. SGI_CYCLE(10) is reserved-
-    // not-implemented (clockid_to_kclock returns NULL).  Negative
-    // clockids encode dynamic-CPU/posix-fd clocks in Linux; we don't
-    // implement any of those, so reject them as EINVAL.
-    if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
+    // not-implemented (clockid_to_kclock returns NULL).  The negative ids
+    // other than the CPU-time clocks name a clock behind a file descriptor
+    // (CLOCKFD), and none is ever one here: EINVAL, Linux's answer for an fd
+    // that is not a clock's.
+    if cpu.is_none() && (!(0..=11).contains(&clockid_i32) || clockid_i32 == 10) {
         return linux_err(errno::EINVAL);
     }
     let res_ptr = args.arg1;
@@ -50968,15 +51312,16 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
         // Linux permits NULL — succeed without writing.
         return SyscallResult::ok(0);
     }
-    // Coarse clocks report TICK_NSEC (10ms at HZ=100); every other
-    // (high-res / well-known CPU-SCHED) clock reports 1ns.
-    let tv_nsec: i64 =
-        if clockid_i32 == CLOCK_REALTIME_COARSE || clockid_i32 == CLOCK_MONOTONIC_COARSE {
-            10_000_000 // 1e9 / HZ(100)
-        } else {
-            1
-        };
-    let ts = LinuxTimespec { tv_sec: 0, tv_nsec };
+    // Coarse clocks report TICK_NSEC (10ms at HZ=100); the CPU-time ones
+    // theirs (`cpu_clock_res`); every other (high-res) clock 1ns.
+    let tv_nsec: u64 = if let Some(clock) = cpu {
+        cpu_clock_res(clock)
+    } else if clockid_i32 == CLOCK_REALTIME_COARSE || clockid_i32 == CLOCK_MONOTONIC_COARSE {
+        crate::sched::TICK_NS
+    } else {
+        1
+    };
+    let ts = LinuxTimespec::from_nanos(tv_nsec);
     if let Err(e) = write_timespec(res_ptr, ts) {
         return linux_err(linux_errno_for(e));
     }
@@ -51061,6 +51406,27 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     //
     // (Pre-batch we also skipped (1), (2), (4) entirely; those
     // were fixed in earlier batches and are preserved below.)
+    //
+    // The CPU-time clocks -- CLOCK_PROCESS_CPUTIME_ID (2) and a process's
+    // or another thread's by id -- sleep until the clock reads the time
+    // (`cpu_nanosleep`); CLOCK_THREAD_CPUTIME_ID (3) has no nsleep, nor has
+    // a CLOCKFD id (a clock behind a file descriptor): EOPNOTSUPP.
+    if clockid_i32 == 2 || clockid_i32 < 0 {
+        const CLOCKFD: i32 = 3;
+        const CLOCKFD_MASK: i32 = 7;
+        if clockid_i32 & CLOCKFD_MASK == CLOCKFD {
+            return linux_err(errno::EOPNOTSUPP);
+        }
+        let req = match read_timespec(req_ptr) {
+            Ok(t) => t,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+        if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
+            return linux_err(errno::EINVAL);
+        }
+        let abstime = flags & TIMER_ABSTIME != 0;
+        return cpu_nanosleep(clockid_i32, abstime, req.to_nanos(), args.arg3);
+    }
     // Valid posix clockids: REALTIME(0), MONOTONIC(1),
     // PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
     // REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
@@ -58986,6 +59352,7 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         let b = NanosleepBlock {
             deadline_ns: 1_234_567,
             rem_ptr: 0xdead_beef,
+            clock: None,
         };
         restart_block::save_nanosleep(t1, b);
         if restart_block::take(t2).is_some() {
@@ -62679,9 +63046,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             {
                 let parent = pcb::create("rlimit-nproc-test-parent", 0);
                 // Give it a non-root uid so RLIMIT_NPROC actually fires.
-                let mut creds = pcb::ProcessCredentials::root();
-                creds.uid = 1000;
-                creds.gid = 1000;
+                let creds = pcb::ProcessCredentials::new(1000, 1000);
                 pcb::set_credentials(parent, creds).expect("set creds");
                 // NPROC.cur = 1 so the count (just the parent) + 1 = 2 > 1
                 // triggers EAGAIN.
@@ -70851,7 +71216,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Drop to uid 1000 directly via PCB (mirrors what a
                 // root-context setuid(1000) call would do).
                 let mut new_creds = c.clone();
-                new_creds.uid = 1000;
+                new_creds.set_all_uids(1000);
                 pcb::set_credentials(test_pid, new_creds).expect("set creds");
                 let c2 = pcb::get_credentials(test_pid).expect("creds2");
                 if c2.uid != 1000 {
@@ -70874,19 +71239,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Self-uid no-op succeeds even for non-root (verified
                 // by setting uid=1000 again).
                 let mut same = c2.clone();
-                same.uid = 1000;
+                same.set_all_uids(1000);
                 pcb::set_credentials(test_pid, same).expect("self-set");
                 assert_eq!(pcb::get_credentials(test_pid).map(|c| c.uid), Some(1000));
                 pcb::destroy(test_pid);
             }
 
-            // apply_uid_change / apply_gid_change selection rule
-            // (batch 53).  These are exercised at the pure-function
-            // level since the dispatch path runs in kernel context with
-            // no caller_pid, which makes all calls trivially succeed.
-            //
-            // Selection rule: euid wins over ruid wins over suid.
-            // All -1 = no-op success.  Kernel context = no-op success.
+            // apply_uid_change / apply_gid_change in kernel context: a
+            // no-op success whatever the ids, there being no caller_pid
+            // and so no credentials to change. Their rules are tested by
+            // `proc::setid::self_test`, and from ring 3 by
+            // `spawn::self_test_linux_setid`.
             {
                 // All -1: no-op success.
                 if apply_uid_change(u32::MAX, u32::MAX, u32::MAX).value != 0 {
@@ -70951,8 +71314,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
 
             // setfsuid / setfsgid kernel-context: return 0 (no PCB to
-            // read).  Real-process behaviour is "return current uid/gid"
-            // and is covered by the in-PCB test below.
+            // read). A process's -- the old filesystem id answered, the
+            // new one taken only when allowed -- is `proc::setid`'s
+            // self-test's.
             {
                 let a = SyscallArgs {
                     arg0: 0,
@@ -71071,8 +71435,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 // Seed creds with non-default uid/gid so we can see them
                 // come back from setfsuid/setfsgid.
                 let mut seeded = pcb::get_credentials(test_pid).expect("creds");
-                seeded.uid = 1500;
-                seeded.gid = 2500;
+                seeded.set_all_uids(1500);
+                seeded.set_all_gids(2500);
                 seeded.groups = alloc::vec![10, 20, 30];
                 pcb::set_credentials(test_pid, seeded).expect("seed");
 
@@ -73825,10 +74189,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: clock_settime TAI not EPERM");
                 return Err(KernelError::InternalError);
             }
-            // clock_settime(CLOCK_PROCESS_CPUTIME_ID=2, ts_ok) -> falls past
-            // EINVAL gate; PROCESS_CPUTIME_ID has .clock_set in Linux's
-            // posix_clocks[] entry that ultimately fails with EPERM in our
-            // model (no CAP_SYS_TIME).  Probe verifies the gate path.
+            // clock_settime(CLOCK_PROCESS_CPUTIME_ID=2, ts_ok) -> EINVAL:
+            // Linux's `clock_process` has no .clock_set (6.6.87 answers
+            // EINVAL; this probe expected EPERM until 2026-10-08).
             let a = SyscallArgs {
                 arg0: 2,
                 arg1: cts_ok_ptr,
@@ -73837,9 +74200,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::CLOCK_SETTIME, &a).value != -i64::from(errno::EPERM) {
+            if dispatch_linux(nr::CLOCK_SETTIME, &a).value != -i64::from(errno::EINVAL) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: clock_settime PROCESS_CPUTIME_ID not EPERM"
+                    "[syscall/linux]   FAIL: clock_settime PROCESS_CPUTIME_ID not EINVAL"
                 );
                 return Err(KernelError::InternalError);
             }

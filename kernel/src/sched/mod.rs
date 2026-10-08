@@ -71,6 +71,7 @@ use crate::serial_print;
 use crate::serial_println;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -4434,12 +4435,23 @@ pub fn timer_tick(from_user: bool) -> bool {
     // blocking.  If the lock is held, we simply skip tracking for
     // this tick — the next tick will catch up.
     let mut bandwidth_exceeded = false;
+    // A CPU-time timer this tick found due: expired once SCHED is let go.
+    let mut cpu_timer_tick = None;
     if let Some(mut state) = SCHED.try_lock() {
         if !state.initialized {
             return false;
         }
         if let Some(task) = state.tasks.get_mut(&current_id) {
             task.tick_burst(from_user);
+            if let Some(account) = &task.cpu_account {
+                account.charge_tick(from_user);
+                // A real-time thread's run without blocking, counted while
+                // its process has an RLIMIT_RTTIME (Linux's `watchdog`).
+                if task.policy.is_realtime() && account.rttime_limited() {
+                    task.rt_run_ticks = task.rt_run_ticks.saturating_add(1);
+                }
+            }
+            cpu_timer_tick = cpu_timers_due(task);
 
             // CPU bandwidth enforcement: if the task has a quota and
             // has used all its ticks for this period, throttle it.
@@ -4465,6 +4477,13 @@ pub fn timer_tick(from_user: bool) -> bool {
     }
     // Even if we couldn't acquire SCHED for burst tracking, the
     // time slice tick still happened above — don't lose it.
+
+    // A CPU-time timer of the interrupted task's, or of its process's, is
+    // due: queue its signal (or wake its sleeper) now that SCHED is free.
+    // Interrupt context: `expire` takes only interrupt-safe locks.
+    if let Some(due) = cpu_timer_tick {
+        crate::proc::cputimer::expire(due);
+    }
 
     // BSP drives bandwidth period resets, load average sampling, and
     // the soft lockup watchdog.
@@ -4533,21 +4552,6 @@ pub fn timer_tick(from_user: bool) -> bool {
     }
 
     false
-}
-
-/// Return the accumulated `(user_ticks, sys_ticks)` CPU time for a task
-/// by its scheduler id, or `None` if no such task is registered.
-///
-/// Ticks are at `USER_HZ` (100 Hz, 10 ms each), the same units Linux
-/// uses for `times`/`/proc` clock_t fields.  Used by the Linux-ABI
-/// `getrusage`/`times`/`/proc/<pid>/stat` CPU-time surfaces (via the
-/// per-process roll-up in `proc::thread::process_cpu_ticks`).  Takes the
-/// global `SCHED` lock — not for hot paths.
-#[must_use]
-pub fn cpu_ticks(tid: TaskId) -> Option<(u64, u64)> {
-    let state = SCHED.lock();
-    let task = state.tasks.get(&tid)?;
-    Some((task.user_ticks, task.sys_ticks))
 }
 
 /// Return a task's current [`TaskState`] by its scheduler id, or `None` if no
@@ -4681,6 +4685,641 @@ pub fn ctxsw_counts(tid: TaskId) -> Option<(u64, u64)> {
     let state = SCHED.lock();
     let task = state.tasks.get(&tid)?;
     Some((task.nvcsw, task.nivcsw))
+}
+
+/// The processor time one task -- or several, summed -- has used, as the
+/// CPU-time clocks read it ([`cpu_sample`], [`counters_sum`]).
+///
+/// Two measures, as Linux keeps them. `cycles` is the precise one: TSC
+/// cycles, charged to the task at each switch-out ([`account_cycles`]) and,
+/// while it is running, those since it was switched in. It is what
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and every
+/// `CPUCLOCK_SCHED` clock read. The ticks are the sampled one: each timer
+/// tick charges a whole tick to whichever mode it found the task in
+/// ([`Task::tick_burst`]); the `CPUCLOCK_PROF` clocks read user plus system
+/// ticks and the `CPUCLOCK_VIRT` ones user ticks alone, as Linux's do under
+/// tick accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuSample {
+    /// TSC cycles run: [`Task::total_cycles`] plus, for a running task, the
+    /// cycles since it was switched in.
+    pub cycles: u64,
+    /// Timer ticks that found it running user code ([`Task::user_ticks`]).
+    pub user_ticks: u64,
+    /// Timer ticks that found it in the kernel ([`Task::sys_ticks`]).
+    pub sys_ticks: u64,
+}
+
+impl CpuSample {
+    /// The two samples' sum (saturating; the counters are 64-bit and cannot
+    /// in practice overflow).
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            cycles: self.cycles.saturating_add(other.cycles),
+            user_ticks: self.user_ticks.saturating_add(other.user_ticks),
+            sys_ticks: self.sys_ticks.saturating_add(other.sys_ticks),
+        }
+    }
+
+    /// The precise measure in nanoseconds.
+    #[must_use]
+    pub fn ns(self) -> u64 {
+        crate::bench::cycles_to_ns(self.cycles)
+    }
+
+    /// User plus system ticks in nanoseconds: what a `CPUCLOCK_PROF` clock
+    /// reads.
+    #[must_use]
+    pub const fn prof_ns(self) -> u64 {
+        self.user_ticks
+            .saturating_add(self.sys_ticks)
+            .saturating_mul(TICK_NS)
+    }
+
+    /// User ticks in nanoseconds: what a `CPUCLOCK_VIRT` clock reads.
+    #[must_use]
+    pub const fn virt_ns(self) -> u64 {
+        self.user_ticks.saturating_mul(TICK_NS)
+    }
+
+    /// What a clock of measure `kind` reads from this sample, in nanoseconds.
+    #[must_use]
+    pub fn value(self, kind: CpuClockKind) -> u64 {
+        match kind {
+            CpuClockKind::Prof => self.prof_ns(),
+            CpuClockKind::Virt => self.virt_ns(),
+            CpuClockKind::Sched => self.ns(),
+        }
+    }
+
+    /// The precise run time split into `(user, system)` nanoseconds in the
+    /// proportion the ticks saw -- Linux's `cputime_adjust`, which is what
+    /// `getrusage`, `times`, `wait4` and `/proc` report: all of it user while
+    /// no tick has found the kernel, all system while none has found user
+    /// code. `prev`, the split last given for the same thread or process,
+    /// keeps both halves from going back as the ratio shifts, and is updated.
+    #[must_use]
+    pub fn adjusted(self, prev: &mut PrevCputime) -> (u64, u64) {
+        adjust_cputime(self.ns(), self.user_ticks, self.sys_ticks, prev)
+    }
+}
+
+/// [`CpuSample::adjusted`]'s arithmetic, on a run time of `rtime`
+/// nanoseconds and the `user` and `sys` ticks that saw it -- apart, so it can
+/// be checked on chosen numbers (`proc::cputimer::self_test`).
+#[must_use]
+pub fn adjust_cputime(rtime: u64, user: u64, sys: u64, prev: &mut PrevCputime) -> (u64, u64) {
+    if prev.utime.saturating_add(prev.stime) >= rtime {
+        return (prev.utime, prev.stime);
+    }
+    let mut stime = if sys == 0 {
+        0
+    } else if user == 0 {
+        rtime
+    } else {
+        // stime = sys * rtime / (sys + user), in 128 bits so no product
+        // overflows; the quotient is at most rtime.
+        let total = u128::from(sys).saturating_add(u128::from(user));
+        u128::from(sys)
+            .saturating_mul(u128::from(rtime))
+            .checked_div(total)
+            .and_then(|s| u64::try_from(s).ok())
+            .unwrap_or(rtime)
+    };
+    // Neither half goes back: rtime does not, so holding one at its last
+    // value holds the other at or above its own.
+    stime = stime.max(prev.stime);
+    let mut utime = rtime.saturating_sub(stime);
+    if utime < prev.utime {
+        utime = prev.utime;
+        stime = rtime.saturating_sub(utime);
+    }
+    prev.utime = utime;
+    prev.stime = stime;
+    (utime, stime)
+}
+
+/// The `(user, system)` split [`CpuSample::adjusted`] last gave for a thread
+/// or a process -- Linux's `struct prev_cputime`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrevCputime {
+    /// User nanoseconds.
+    pub utime: u64,
+    /// System nanoseconds.
+    pub stime: u64,
+}
+
+/// Which of a task's CPU-time measures a CPU-time clock reads -- Linux's
+/// `CPUCLOCK_WHICH`, the low two bits of a negative clock id, in its order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuClockKind {
+    /// `CPUCLOCK_PROF` (0): user plus system time, sampled at the tick.
+    Prof = 0,
+    /// `CPUCLOCK_VIRT` (1): user time alone, sampled at the tick.
+    Virt = 1,
+    /// `CPUCLOCK_SCHED` (2): run time, measured at each context switch --
+    /// the precise measure, and the one `CLOCK_PROCESS_CPUTIME_ID` and
+    /// `CLOCK_THREAD_CPUTIME_ID` read.
+    Sched = 2,
+}
+
+impl CpuClockKind {
+    /// The three, in index order.
+    pub const ALL: [Self; 3] = [Self::Prof, Self::Virt, Self::Sched];
+
+    /// Its index (`CPUCLOCK_WHICH`).
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// No expiry: the value an empty slot of [`Task::cpu_timer_next`] or a
+/// [`ProcCpuAccount`] holds.
+pub const NO_CPU_EXPIRY: u64 = u64::MAX;
+
+/// What one of a [`ProcCpuAccount`]'s expiry slots belongs to. Each source
+/// keeps its own slot, so none can overwrite another's earliest expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcExpiry {
+    /// The POSIX timers on the process's `CPUCLOCK_PROF` clock.
+    TimerProf = 0,
+    /// The POSIX timers on its `CPUCLOCK_VIRT` clock.
+    TimerVirt = 1,
+    /// The POSIX timers on its `CPUCLOCK_SCHED` clock (and the sleeps on it).
+    TimerSched = 2,
+    /// `ITIMER_PROF`.
+    ItimerProf = 3,
+    /// `ITIMER_VIRTUAL`.
+    ItimerVirt = 4,
+    /// The `RLIMIT_CPU` limits.
+    RlimitCpu = 5,
+}
+
+impl ProcExpiry {
+    /// Every slot, in index order.
+    pub const ALL: [Self; 6] = [
+        Self::TimerProf,
+        Self::TimerVirt,
+        Self::TimerSched,
+        Self::ItimerProf,
+        Self::ItimerVirt,
+        Self::RlimitCpu,
+    ];
+
+    /// The POSIX-timer slot of measure `kind`.
+    #[must_use]
+    pub const fn timer(kind: CpuClockKind) -> Self {
+        match kind {
+            CpuClockKind::Prof => Self::TimerProf,
+            CpuClockKind::Virt => Self::TimerVirt,
+            CpuClockKind::Sched => Self::TimerSched,
+        }
+    }
+
+    /// The measure its expiries are in.
+    #[must_use]
+    pub const fn kind(self) -> CpuClockKind {
+        match self {
+            Self::TimerProf | Self::ItimerProf | Self::RlimitCpu => CpuClockKind::Prof,
+            Self::TimerVirt | Self::ItimerVirt => CpuClockKind::Virt,
+            Self::TimerSched => CpuClockKind::Sched,
+        }
+    }
+}
+
+/// A process's running processor-time totals, kept once a CPU-time timer has
+/// been armed on its clock, so the tick can tell when one is due without the
+/// process table -- Linux's `thread_group_cputimer`.
+///
+/// Every thread of the process holds it ([`Task::cpu_account`], set as the
+/// thread joins the process, `proc::pcb::add_thread`). While it is
+/// [`active`](Self::is_active), each switch-out adds the cycles the outgoing
+/// thread ran ([`account_cycles`]) and each tick its tick ([`timer_tick`]),
+/// both under `SCHED`; [`activate_cpu_account`] fills it from the process's
+/// totals under the same lock, so no charge is missed (and only the one
+/// overlap it describes is counted twice). It is never deactivated: an armed
+/// CPU timer is rare, and a running total that stops and restarts is a race
+/// between the arming and the stopping.
+///
+/// The totals lag the process's clock by the cycles its running threads on
+/// other CPUs have run since they were switched in -- the tick adds the
+/// current thread's -- so a timer checked against them fires late by at most
+/// that, never early. Alongside them, each source of CPU-time timers keeps the
+/// earliest expiry it has armed against the process ([`ProcExpiry`]), which
+/// the tick compares with them.
+#[derive(Debug)]
+pub struct ProcCpuAccount {
+    /// The process (`proc::pcb::ProcessId`).
+    pid: u64,
+    /// Whether the totals are being kept.
+    active: AtomicBool,
+    /// TSC cycles the process's threads have run, charged at switch-outs.
+    cycles: AtomicU64,
+    /// Ticks that found one of its threads in user mode.
+    user_ticks: AtomicU64,
+    /// Ticks that found one of them in the kernel.
+    sys_ticks: AtomicU64,
+    /// The earliest expiry of each source, in nanoseconds of its measure
+    /// ([`ProcExpiry::kind`]); [`NO_CPU_EXPIRY`] for none.
+    next: [AtomicU64; 6],
+    /// The process's `RLIMIT_RTTIME`, soft and hard, in microseconds of a
+    /// real-time thread's running without blocking; [`NO_CPU_EXPIRY`] for
+    /// infinite. Kept here, not just in the process table, for the tick
+    /// (`proc::cputimer::rlimit_rttime_changed` sets it).
+    rttime_us: [AtomicU64; 2],
+}
+
+impl ProcCpuAccount {
+    /// An inactive account for process `pid`.
+    #[must_use]
+    pub const fn new(pid: u64) -> Self {
+        Self {
+            pid,
+            active: AtomicBool::new(false),
+            cycles: AtomicU64::new(0),
+            user_ticks: AtomicU64::new(0),
+            sys_ticks: AtomicU64::new(0),
+            next: [const { AtomicU64::new(NO_CPU_EXPIRY) }; 6],
+            rttime_us: [const { AtomicU64::new(NO_CPU_EXPIRY) }; 2],
+        }
+    }
+
+    /// The process's `RLIMIT_RTTIME` as `(soft, hard)` microseconds,
+    /// [`NO_CPU_EXPIRY`] for infinite.
+    #[must_use]
+    pub fn rttime(&self) -> (u64, u64) {
+        let [soft, hard] = &self.rttime_us;
+        (soft.load(Ordering::Acquire), hard.load(Ordering::Acquire))
+    }
+
+    /// Set the process's `RLIMIT_RTTIME` (microseconds, [`NO_CPU_EXPIRY`]
+    /// for infinite).
+    pub fn set_rttime(&self, soft: u64, hard: u64) {
+        let [s, h] = &self.rttime_us;
+        h.store(hard, Ordering::Release);
+        s.store(soft, Ordering::Release);
+    }
+
+    /// Whether a real-time thread of the process is held to a limit: Linux
+    /// counts its running only while the soft limit is finite.
+    #[must_use]
+    pub fn rttime_limited(&self) -> bool {
+        self.rttime().0 != NO_CPU_EXPIRY
+    }
+
+    /// The process it counts for.
+    #[must_use]
+    pub const fn pid(&self) -> u64 {
+        self.pid
+    }
+
+    /// Whether the totals are being kept.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// The totals, with `inflight` cycles -- those the current thread has run
+    /// since it was switched in -- added.
+    #[must_use]
+    pub fn totals(&self, inflight: u64) -> CpuSample {
+        CpuSample {
+            cycles: self.cycles.load(Ordering::Relaxed).saturating_add(inflight),
+            user_ticks: self.user_ticks.load(Ordering::Relaxed),
+            sys_ticks: self.sys_ticks.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Source `slot`'s earliest expiry.
+    #[must_use]
+    pub fn next(&self, slot: ProcExpiry) -> u64 {
+        self.next
+            .get(slot as usize)
+            .map_or(NO_CPU_EXPIRY, |n| n.load(Ordering::Acquire))
+    }
+
+    /// Set source `slot`'s earliest expiry -- its owner's to compute, from
+    /// everything it has armed against the process.
+    pub fn set_next(&self, slot: ProcExpiry, expiry: u64) {
+        if let Some(n) = self.next.get(slot as usize) {
+            n.store(expiry, Ordering::Release);
+        }
+    }
+
+    /// Lower source `slot`'s earliest expiry to `expiry` if that is earlier.
+    pub fn lower_next(&self, slot: ProcExpiry, expiry: u64) {
+        if let Some(n) = self.next.get(slot as usize) {
+            n.fetch_min(expiry, Ordering::AcqRel);
+        }
+    }
+
+    /// Whether any source has an expiry that `totals` has reached.
+    #[must_use]
+    pub fn any_due(&self, totals: CpuSample) -> bool {
+        ProcExpiry::ALL
+            .iter()
+            .any(|&slot| self.next(slot) <= totals.value(slot.kind()))
+    }
+
+    /// Charge `cycles` a thread ran, if the totals are being kept. `SCHED` held.
+    fn charge_cycles(&self, cycles: u64) {
+        if self.active.load(Ordering::Relaxed) {
+            self.cycles.fetch_add(cycles, Ordering::Relaxed);
+        }
+    }
+
+    /// Charge one tick, if the totals are being kept. `SCHED` held.
+    fn charge_tick(&self, from_user: bool) {
+        if self.active.load(Ordering::Relaxed) {
+            let counter = if from_user {
+                &self.user_ticks
+            } else {
+                &self.sys_ticks
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Start keeping `account`'s running totals, if it is not already, from the
+/// process's: `exited`, what its exited threads ran (`Process::acct_*`), plus
+/// what the scheduler has charged its live threads `tids` (without the
+/// cycles a running one has run since it was switched in, which its
+/// switch-out charges). Under `SCHED`, as every charge is, so the totals are
+/// exact from here on. `proc::pcb::activate_cpu_account` calls it with
+/// `PROCESS_TABLE` held, so `exited` and `tids` agree.
+///
+/// One overlap is left: a thread that has just left the process (its time
+/// folded into `exited`, cycles in flight included) but not yet been
+/// switched out for the last time charges those in-flight cycles again at
+/// that switch-out. That is the microseconds of its exit path, once, and
+/// only for an activation that falls inside them.
+pub fn activate_cpu_account(account: &ProcCpuAccount, exited: CpuSample, tids: &[TaskId]) {
+    let state = SCHED.lock();
+    if account.active.load(Ordering::Relaxed) {
+        return;
+    }
+    let totals = tids
+        .iter()
+        .filter_map(|tid| state.tasks.get(tid))
+        .fold(exited, |sum, task| {
+            sum.plus(CpuSample {
+                cycles: task.total_cycles,
+                user_ticks: task.user_ticks,
+                sys_ticks: task.sys_ticks,
+            })
+        });
+    account.cycles.store(totals.cycles, Ordering::Relaxed);
+    account
+        .user_ticks
+        .store(totals.user_ticks, Ordering::Relaxed);
+    account.sys_ticks.store(totals.sys_ticks, Ordering::Relaxed);
+    account.active.store(true, Ordering::Release);
+}
+
+/// Give task `tid` its process's [`ProcCpuAccount`] (`proc::pcb::add_thread`,
+/// which a thread passes through once, while it is still suspended). A no-op
+/// if there is no such task, or if it already has one: a task is a thread of
+/// one process for life, so a second call can only be a self-test naming a
+/// made-up thread whose id a real task happens to have, and must not take
+/// that task's account away.
+pub fn set_cpu_account(tid: TaskId, account: Arc<ProcCpuAccount>) {
+    let mut state = SCHED.lock();
+    if let Some(task) = state.tasks.get_mut(&tid)
+        && task.cpu_account.is_none()
+    {
+        task.cpu_account = Some(account);
+    }
+}
+
+/// Lower task `tid`'s earliest thread-CPU-timer expiry of measure `kind` to
+/// `expiry`, if that is earlier -- a timer on its clock was armed
+/// (`proc::posix_timer`). Answers whether the task exists.
+pub fn lower_thread_cpu_expiry(tid: TaskId, kind: CpuClockKind, expiry: u64) -> bool {
+    let mut state = SCHED.lock();
+    let Some(task) = state.tasks.get_mut(&tid) else {
+        return false;
+    };
+    if let Some(next) = task.cpu_timer_next.get_mut(kind.index()) {
+        *next = (*next).min(expiry);
+    }
+    true
+}
+
+/// Set task `tid`'s earliest thread-CPU-timer expiries to `next` -- recomputed
+/// by `proc::posix_timer` after timers on its clocks fired or were
+/// disarmed. From the tick's own follow-up (interrupt context) it must not
+/// spin on `SCHED`, so `blocking` false only tries the lock: a cache left
+/// earlier than the truth costs a needless look at the next tick, never a
+/// missed expiry.
+pub fn set_thread_cpu_expiry(tid: TaskId, next: [u64; 3], blocking: bool) {
+    let state = if blocking {
+        Some(SCHED.lock())
+    } else {
+        SCHED.try_lock()
+    };
+    if let Some(mut state) = state
+        && let Some(task) = state.tasks.get_mut(&tid)
+    {
+        task.cpu_timer_next = next;
+    }
+}
+
+/// What the tick found due among the CPU-time timers of the task it
+/// interrupted: the task's sample and, if its process keeps running totals,
+/// those -- handed to `proc::cputimer::expire` once `SCHED` is let go.
+#[derive(Debug, Clone)]
+pub struct CpuTimerTick {
+    /// The process (0 for a kernel task, which has no process timers).
+    pub pid: u64,
+    /// The task.
+    pub tid: TaskId,
+    /// The task's own sample.
+    pub thread: CpuSample,
+    /// The process's running totals with the task's in-flight cycles, if it
+    /// keeps them.
+    pub process: Option<CpuSample>,
+    /// The process's account, to publish its new earliest expiries to. Never
+    /// the last reference: the running task holds one.
+    pub account: Option<Arc<ProcCpuAccount>>,
+    /// For a real-time thread past its process's `RLIMIT_RTTIME`, the ticks
+    /// it has run without blocking ([`Task::rt_run_ticks`]); else `None`.
+    pub rt_run_ticks: Option<u64>,
+}
+
+/// Whether a real-time thread that has run `ticks` ticks without blocking is
+/// past its process's `RLIMIT_RTTIME` (`account`) -- Linux's `watchdog`:
+/// more ticks than the earlier of the two limits, rounded up to ticks.
+fn rttime_due(account: &ProcCpuAccount, ticks: u64) -> bool {
+    let (soft, hard) = account.rttime();
+    let limit = soft.min(hard);
+    if limit == NO_CPU_EXPIRY {
+        return false;
+    }
+    let tick_us = TICK_NS.checked_div(1_000).unwrap_or(1).max(1);
+    ticks > limit.div_ceil(tick_us)
+}
+
+/// Whether a CPU-time timer of `task` -- one on its own clock, or one on its
+/// process's -- is due, and if so the samples to expire them against. `SCHED`
+/// held (from [`timer_tick`]). Cheap when nothing is armed: no sample is
+/// taken unless the task has a thread-timer expiry or an active account.
+fn cpu_timers_due(task: &Task) -> Option<CpuTimerTick> {
+    let rt_due = task.rt_run_ticks > 0
+        && task
+            .cpu_account
+            .as_ref()
+            .is_some_and(|a| rttime_due(a, task.rt_run_ticks));
+    let account = task.cpu_account.as_ref().filter(|a| a.is_active());
+    let thread_armed = task.cpu_timer_next.iter().any(|&n| n != NO_CPU_EXPIRY);
+    if account.is_none() && !thread_armed && !rt_due {
+        return None;
+    }
+    let thread = sample_locked(task);
+    let thread_due = CpuClockKind::ALL.iter().any(|&kind| {
+        task.cpu_timer_next
+            .get(kind.index())
+            .is_some_and(|&n| n <= thread.value(kind))
+    });
+    let process = account.map(|a| a.totals(thread.cycles.saturating_sub(task.total_cycles)));
+    let process_due = account
+        .zip(process)
+        .is_some_and(|(a, totals)| a.any_due(totals));
+    (thread_due || process_due || rt_due).then(|| CpuTimerTick {
+        pid: task.cpu_account.as_ref().map_or(0, |a| a.pid()),
+        tid: task.id,
+        thread,
+        process,
+        account: task.cpu_account.clone(),
+        rt_run_ticks: rt_due.then_some(task.rt_run_ticks),
+    })
+}
+
+/// Nanoseconds in one timer tick -- Linux's `TICK_NSEC`: what each tick a
+/// [`CpuSample`] counts is worth, and the resolution of the clocks that read
+/// them.
+#[allow(clippy::cast_lossless)] // `u64::from` is not callable in a const.
+pub const TICK_NS: u64 = match 1_000_000_000u64.checked_div(crate::apic::TICK_RATE_HZ as u64) {
+    Some(ns) => ns,
+    None => 0,
+};
+
+/// `task`'s [`CpuSample`] at this moment. Called with `SCHED` held, which is
+/// what makes it consistent: [`account_cycles`] adds a running task's cycles
+/// to `total_cycles` and moves its CPU's `LAST_SWITCH_TSC` on in one critical
+/// section, and dispatch marks the incoming task `Running` on that CPU in the
+/// same one, so `Running` here means `LAST_SWITCH_TSC[last_cpu]` is when it
+/// was switched in, and no cycle is counted twice or missed.
+///
+/// Read from another CPU, the in-flight part compares this CPU's TSC with the
+/// running one's; the TSCs of an invariant-TSC machine agree to within a few
+/// cycles, and a reading that would go negative counts nothing.
+fn sample_locked(task: &Task) -> CpuSample {
+    let mut cycles = task.total_cycles;
+    if task.state == TaskState::Running
+        && let Some(slot) = LAST_SWITCH_TSC.get(task.last_cpu)
+    {
+        // 0: no switch has been stamped on that CPU yet, so nothing is
+        // charged to anyone (`account_cycles` skips the same case).
+        let since = slot.load(Ordering::Relaxed);
+        if since != 0 {
+            cycles = cycles.saturating_add(crate::bench::rdtsc().saturating_sub(since));
+        }
+    }
+    CpuSample {
+        cycles,
+        user_ticks: task.user_ticks,
+        sys_ticks: task.sys_ticks,
+    }
+}
+
+/// The processor time task `tid` has used so far, or `None` if no such task
+/// is registered. Takes the global `SCHED` lock.
+#[must_use]
+pub fn cpu_sample(tid: TaskId) -> Option<CpuSample> {
+    let state = SCHED.lock();
+    state.tasks.get(&tid).map(|task| sample_locked(task))
+}
+
+/// Task `tid`'s run time as `(user, system)` nanoseconds, split as
+/// [`CpuSample::adjusted`] splits it, against the task's own last split;
+/// `None` if no such task is registered. What `getrusage(RUSAGE_THREAD)`
+/// and a thread's `/proc` `stat` report. Takes the global `SCHED` lock.
+#[must_use]
+pub fn thread_times(tid: TaskId) -> Option<(u64, u64)> {
+    let mut state = SCHED.lock();
+    let task = state.tasks.get_mut(&tid)?;
+    let sample = sample_locked(task);
+    Some(sample.adjusted(&mut task.prev_cputime))
+}
+
+/// Everything the scheduler counts for a task that its process goes on
+/// reporting once the task is gone: its processor time and its page-fault and
+/// context-switch counts. `proc::pcb` folds a thread's into its process as the
+/// thread exits, and sums the live threads' with them when asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskCounters {
+    /// Processor time ([`CpuSample`]).
+    pub cpu: CpuSample,
+    /// Minor page faults ([`Task::min_flt`]).
+    pub min_flt: u64,
+    /// Major page faults ([`Task::maj_flt`]).
+    pub maj_flt: u64,
+    /// Voluntary context switches ([`Task::nvcsw`]).
+    pub nvcsw: u64,
+    /// Involuntary context switches ([`Task::nivcsw`]).
+    pub nivcsw: u64,
+}
+
+impl TaskCounters {
+    /// The two sets' sum (saturating).
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            cpu: self.cpu.plus(other.cpu),
+            min_flt: self.min_flt.saturating_add(other.min_flt),
+            maj_flt: self.maj_flt.saturating_add(other.maj_flt),
+            nvcsw: self.nvcsw.saturating_add(other.nvcsw),
+            nivcsw: self.nivcsw.saturating_add(other.nivcsw),
+        }
+    }
+}
+
+/// `task`'s [`TaskCounters`], with `SCHED` held (see [`sample_locked`]).
+fn counters_locked(task: &Task) -> TaskCounters {
+    TaskCounters {
+        cpu: sample_locked(task),
+        min_flt: task.min_flt,
+        maj_flt: task.maj_flt,
+        nvcsw: task.nvcsw,
+        nivcsw: task.nivcsw,
+    }
+}
+
+/// Task `tid`'s [`TaskCounters`] at this moment, or `None` if no such task is
+/// registered. Takes the global `SCHED` lock; `proc::pcb` calls it with
+/// `PROCESS_TABLE` held (the documented order), to fold an exiting thread's
+/// counters into its process in the same critical section that removes it.
+#[must_use]
+pub fn task_counters(tid: TaskId) -> Option<TaskCounters> {
+    let state = SCHED.lock();
+    state.tasks.get(&tid).map(|task| counters_locked(task))
+}
+
+/// The [`TaskCounters`] of the tasks in `tids`, summed in one critical section
+/// so that every task is sampled at the same moment. An id that names no task
+/// counts nothing. Takes the global `SCHED` lock once; `proc::pcb` calls it
+/// with `PROCESS_TABLE` held, the documented order.
+#[must_use]
+pub fn counters_sum(tids: &[TaskId]) -> TaskCounters {
+    let state = SCHED.lock();
+    tids.iter()
+        .filter_map(|tid| state.tasks.get(tid))
+        .fold(TaskCounters::default(), |sum, task| {
+            sum.plus(counters_locked(task))
+        })
 }
 
 /// Preempt the current task (called from timer ISR after time slice
@@ -4992,6 +5631,41 @@ pub fn load_average_x100() -> u64 {
     LOAD_AVG_1.load(Ordering::Relaxed).saturating_mul(100) >> LOAD_FSHIFT
 }
 
+/// Whether task 0 -- the BSP's idle task, in which `kernel_main` runs the
+/// whole boot -- is still doing that work: true until it drops into the idle
+/// loop ([`boot_work_done`]).
+///
+/// The boot runs at the idle level, below every other task, so it runs only
+/// when they all block -- which every self-test relies on to let what it
+/// spawns run first. But two tasks that never both block keep it off the CPU
+/// for good, and [`check_starvation`] passes over idle-level tasks. That is
+/// how lane-a's boot of a35d7960c hung for its last twenty minutes: the ring
+/// bench's busy sender and the netstack daemon handed the CPU back and forth,
+/// and the boot -- ready to stop them -- waited 119 082 ticks. While this is
+/// set, the booster lifts task 0 as it lifts any starved task.
+static BOOT_TASK_WORKING: AtomicBool = AtomicBool::new(true);
+
+/// Task 0 has finished the boot and is the idle loop from here on: the
+/// booster leaves it be, as it leaves every idle task (`main::idle_loop`).
+pub fn boot_work_done() {
+    BOOT_TASK_WORKING.store(false, Ordering::Release);
+}
+
+/// Whether the booster passes task `id` over: an idle-level task -- task 0
+/// excepted while it is still the boot ([`BOOT_TASK_WORKING`]) -- a
+/// throttled one, which waits by design, and a real-time one, whose waiting
+/// is only for higher real-time levels. Split out so its rule can be checked
+/// on its own.
+fn starvation_exempt(
+    id: TaskId,
+    priority: u8,
+    throttled: bool,
+    realtime: bool,
+    boot_working: bool,
+) -> bool {
+    throttled || realtime || (priority >= task::IDLE_PRIORITY && !(id == 0 && boot_working))
+}
+
 /// Anti-starvation check: boost priority of tasks stuck in Ready too long.
 ///
 /// Called periodically by the BSP (every `STARVATION_CHECK_INTERVAL` ticks).
@@ -5035,19 +5709,18 @@ fn check_starvation() {
     let mut boost_list: [(TaskId, u8, usize); 8] = [(0, 0, 0); 8];
     let mut boost_count = 0usize;
 
+    let boot_working = BOOT_TASK_WORKING.load(Ordering::Acquire);
     for (&id, task) in state.tasks.iter() {
         if task.state != TaskState::Ready {
             continue;
         }
-        if task.throttled {
-            continue; // Throttled tasks wait by design.
-        }
-        if task.priority >= task::IDLE_PRIORITY {
-            continue; // Idle tasks don't need boosting.
-        }
-        if task.policy.is_realtime() {
-            // A real-time task waits only for higher real-time levels, by
-            // design; its waiting is not starvation.
+        if starvation_exempt(
+            id,
+            task.priority,
+            task.throttled,
+            task.policy.is_realtime(),
+            boot_working,
+        ) {
             continue;
         }
         if task.ready_since_tick == 0 {
@@ -5128,6 +5801,96 @@ fn check_starvation() {
         }
     }
     serial_println!("]");
+}
+
+/// Set to stop [`self_test_boot_not_starved`]'s spinners.
+static BOOT_STARVE_STOP: AtomicBool = AtomicBool::new(false);
+/// When the spinners stop by themselves ([`crate::hrtimer::now_ns`]), so a
+/// booster that has stopped lifting the boot fails the test instead of
+/// hanging the boot.
+static BOOT_STARVE_GIVE_UP_NS: AtomicU64 = AtomicU64::new(0);
+/// Spinners still running.
+static BOOT_STARVE_RUNNING: AtomicU64 = AtomicU64::new(0);
+
+/// [`self_test_boot_not_starved`]'s spinner: never blocks, until told to
+/// stop or its give-up time comes.
+extern "C" fn boot_starve_spinner(_arg: u64) {
+    while !BOOT_STARVE_STOP.load(Ordering::Acquire)
+        && crate::hrtimer::now_ns() < BOOT_STARVE_GIVE_UP_NS.load(Ordering::Acquire)
+    {
+        core::hint::spin_loop();
+    }
+    BOOT_STARVE_RUNNING.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// The boot -- task 0, at the idle level -- gets the CPU back while two tasks
+/// that never block hold its CPU ([`BOOT_TASK_WORKING`]): it sleeps behind
+/// them, and must be running again within the booster's threshold and check
+/// interval (two seconds and one), with room for QEMU, not when they give up
+/// at twelve. Run from `kernel_main` with interrupts enabled: the booster is
+/// the timer's.
+///
+/// # Errors
+///
+/// `InternalError` if the boot waited past the limit; a spawn's error.
+pub fn self_test_boot_not_starved() -> KernelResult<()> {
+    const GIVE_UP_NS: u64 = 12_000_000_000;
+    const LIMIT_NS: u64 = 6_000_000_000;
+    if current_task_id() != 0 {
+        serial_println!("[sched]   boot task not starved: not run from the boot -- skipped");
+        return Ok(());
+    }
+    BOOT_STARVE_STOP.store(false, Ordering::Release);
+    BOOT_STARVE_GIVE_UP_NS.store(
+        crate::hrtimer::now_ns().saturating_add(GIVE_UP_NS),
+        Ordering::Release,
+    );
+    BOOT_STARVE_RUNNING.store(0, Ordering::Release);
+    for name in [&b"boot-starve-a"[..], &b"boot-starve-b"[..]] {
+        // On the boot's CPU, at an ordinary level: what the ring bench's
+        // pair was.
+        BOOT_STARVE_RUNNING.fetch_add(1, Ordering::AcqRel);
+        if let Err(e) = spawn_with_affinity(name, 16, boot_starve_spinner, 0, 0, 1) {
+            BOOT_STARVE_RUNNING.fetch_sub(1, Ordering::AcqRel);
+            BOOT_STARVE_STOP.store(true, Ordering::Release);
+            return Err(e);
+        }
+    }
+    let t0 = crate::hrtimer::now_ns();
+    sleep_ms(10);
+    let waited = crate::hrtimer::now_ns().saturating_sub(t0);
+    BOOT_STARVE_STOP.store(true, Ordering::Release);
+    // Below both spinners, the boot runs again once they have seen the flag
+    // and gone.
+    while BOOT_STARVE_RUNNING.load(Ordering::Acquire) != 0 {
+        yield_now();
+    }
+    reap_dead_tasks();
+    // The rule on its own: task 0 is lifted only while it is the boot.
+    let rule = !starvation_exempt(0, task::IDLE_PRIORITY, false, false, true)
+        && starvation_exempt(0, task::IDLE_PRIORITY, false, false, false)
+        && starvation_exempt(7, task::IDLE_PRIORITY, false, false, true)
+        && !starvation_exempt(7, 16, false, false, true)
+        && starvation_exempt(7, 16, true, false, true)
+        && starvation_exempt(7, 3, false, true, true);
+    if !rule {
+        serial_println!("[sched]   FAIL: the booster's exemptions are not as documented");
+        return Err(KernelError::InternalError);
+    }
+    if waited > LIMIT_NS {
+        serial_println!(
+            "[sched]   FAIL: the boot waited {} ms behind two tasks that never block \
+             (the booster should have lifted it within ~3 s)",
+            waited / 1_000_000
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[sched]   boot task not starved: back on the CPU {} ms into a 10 ms sleep behind two \
+         tasks that never block: OK",
+        waited / 1_000_000
+    );
+    Ok(())
 }
 
 /// Move one starved task to its boost level ([`starvation_target`]) and
@@ -6544,15 +7307,10 @@ pub struct TaskInfo {
     /// Its policy, real-time priority and `SCHED_RESET_ON_FORK`:
     /// `/proc/<pid>/stat` fields 40 and 41.
     pub attr: task::SchedAttr,
-    /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz).
+    /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz). (Its
+    /// user/system split, `/proc/<pid>/stat` fields 14 and 15, is the precise
+    /// run time split by the tick ratio: [`thread_times`].)
     pub total_ticks: u64,
-    /// User-mode (ring 3) CPU time, in timer ticks.  `user_ticks +
-    /// sys_ticks == total_ticks`.  Exposed as `/proc/<pid>/stat` field
-    /// 14 (utime).
-    pub user_ticks: u64,
-    /// System (ring 0) CPU time, in timer ticks.  Exposed as
-    /// `/proc/<pid>/stat` field 15 (stime).
-    pub sys_ticks: u64,
     /// Minor page faults (resolved without I/O — demand-zero, CoW,
     /// stack growth).  Exposed as `/proc/<pid>/stat` field 10 (minflt).
     pub min_flt: u64,
@@ -6624,8 +7382,6 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             priority: task.priority,
             attr: task.sched_attr(),
             total_ticks: task.total_ticks,
-            user_ticks: task.user_ticks,
-            sys_ticks: task.sys_ticks,
             min_flt: task.min_flt,
             maj_flt: task.maj_flt,
             nvcsw: task.nvcsw,
@@ -6669,8 +7425,6 @@ pub fn task_info(task_id: TaskId) -> Option<TaskInfo> {
         priority: task.priority,
         attr: task.sched_attr(),
         total_ticks: task.total_ticks,
-        user_ticks: task.user_ticks,
-        sys_ticks: task.sys_ticks,
         min_flt: task.min_flt,
         maj_flt: task.maj_flt,
         nvcsw: task.nvcsw,
@@ -7916,6 +8670,10 @@ fn account_cycles(state: &mut SchedState, outgoing_id: TaskId, cpu: usize) {
             let delta = now.saturating_sub(prev);
             if let Some(task) = state.tasks.get_mut(&outgoing_id) {
                 task.total_cycles = task.total_cycles.saturating_add(delta);
+                // Its process's running totals, if a CPU timer keeps them.
+                if let Some(account) = &task.cpu_account {
+                    account.charge_cycles(delta);
+                }
             }
         }
     }

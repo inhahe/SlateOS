@@ -816,6 +816,7 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
         resource_type: ResourceType::Channel,
         resource_id: 0xDEAD_BEEF_0000_0001,
         rights: Rights::READ_WRITE,
+        suspended: Rights::NONE,
         valid: true,
     };
     let info = CapEntryInfo::from_entry(&entry);

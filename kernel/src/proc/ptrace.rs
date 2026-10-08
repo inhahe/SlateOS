@@ -38,6 +38,16 @@
 //! `WUNTRACED` ([`take_stop_report`]), and lets the thread go with
 //! `PTRACE_CONT`, `PTRACE_SINGLESTEP`, `PTRACE_DETACH` or `PTRACE_KILL`.
 //!
+//! ## Ends
+//!
+//! A traced thread's end is its tracer's to report, by `wait`, when the
+//! tracer waits for it apart from its process ([`on_thread_exit`]). A traced
+//! process whose tracer is not its parent -- a traced program's child, traced
+//! with `PTRACE_O_TRACEFORK` -- ends for its tracer first: its parent's
+//! `wait` does not see it, and the parent is sent no `SIGCHLD`, until the
+//! tracer has waited for it or has exited ([`on_process_zombie`],
+//! `pcb::Process::exit_held`), as on Linux.
+//!
 //! The stopping thread publishes its stop, wakes the tracer, and parks; the
 //! tracer's resume sets what the thread does next and unparks it. Both take
 //! the one lock here, and the thread marks itself suspended under it, so a
@@ -74,6 +84,15 @@
 //! into code -- and the tracee then gets its own copy of that page, as
 //! Linux's `FOLL_FORCE` gives it: the file and other processes mapping it are
 //! not changed.
+//!
+//! ## Signals
+//!
+//! A tracer reads and sets a stopped thread's signal mask
+//! (`PTRACE_GETSIGMASK`, `SETSIGMASK`) -- the mask the program set, which a
+//! `sigsuspend` it is in has put aside for the call's own -- and copies the
+//! signals pending for it without taking them (`PTRACE_PEEKSIGINFO`), its own
+//! or its process's: what CRIU dumps a process with. `signal`'s tracer view
+//! (`tracee_sigmask`, `set_tracee_sigmask`, `peek_pending`) does the work.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -127,6 +146,8 @@ pub mod request {
     pub const ATTACH: u64 = 16;
     /// Let the tracee go.
     pub const DETACH: u64 = 17;
+    /// [`SETOPTIONS`]'s first number, which x86-64 Linux still takes.
+    pub const OLDSETOPTIONS: u64 = 21;
     /// The tracee's `arch_prctl`: read or set its `%fs` or `%gs` base.
     pub const ARCH_PRCTL: u64 = 30;
     /// Set the `PTRACE_O_*` options.
@@ -143,8 +164,29 @@ pub mod request {
     pub const SETREGSET: u64 = 0x4205;
     /// Attach without stopping the process.
     pub const SEIZE: u64 = 0x4206;
+    /// Stop a seized tracee, with no signal.
+    pub const INTERRUPT: u64 = 0x4207;
+    /// Leave a seized tracee in its group-stop, reporting what happens.
+    pub const LISTEN: u64 = 0x4208;
+    /// Copy signals pending for the tracee, left pending:
+    /// `struct ptrace_peeksiginfo_args` at `addr`, `siginfo_t`s to `data`.
+    pub const PEEKSIGINFO: u64 = 0x4209;
+    /// Read the tracee's signal mask; `addr` the size of a `sigset_t`, 8.
+    pub const GETSIGMASK: u64 = 0x420a;
+    /// Replace it.
+    pub const SETSIGMASK: u64 = 0x420b;
+    /// One of the tracee's seccomp filters, as a BPF program.
+    pub const SECCOMP_GET_FILTER: u64 = 0x420c;
+    /// One of its filters' flags.
+    pub const SECCOMP_GET_METADATA: u64 = 0x420d;
     /// The system call the tracee is stopped in, `struct ptrace_syscall_info`.
     pub const GET_SYSCALL_INFO: u64 = 0x420e;
+    /// The tracee's rseq registration, `struct ptrace_rseq_configuration`.
+    pub const GET_RSEQ_CONFIGURATION: u64 = 0x420f;
+    /// Set the tracee's syscall user dispatch, `struct ptrace_sud_config`.
+    pub const SET_SYSCALL_USER_DISPATCH_CONFIG: u64 = 0x4210;
+    /// Read it.
+    pub const GET_SYSCALL_USER_DISPATCH_CONFIG: u64 = 0x4211;
 }
 
 /// The register sets `PTRACE_GETREGSET`/`SETREGSET` name, by their core-file
@@ -457,6 +499,12 @@ struct Tracee {
     /// It has exited: its wait status, for its tracer's `wait`
     /// ([`on_thread_exit`]).
     exited: Option<i32>,
+    /// Its exit is not reported yet: a process's first thread, gone while
+    /// its process has threads left. Reported once the process has ended,
+    /// with the process's status ([`on_process_zombie`]), as Linux holds a
+    /// zombie group leader back while its group has threads
+    /// (`delay_group_leader`).
+    held: bool,
     /// Counted in [`SYSCALL_WORK`].
     work: bool,
 }
@@ -478,6 +526,7 @@ impl Tracee {
             pending_event: None,
             exit_code: None,
             exited: None,
+            held: false,
             work: false,
         }
     }
@@ -1115,6 +1164,98 @@ fn resume_signal(data: u64) -> Result<u32, PtraceError> {
         .ok_or(PtraceError::Io)
 }
 
+/// `sizeof(struct ptrace_sud_config)`: a mode, a selector address, an offset
+/// and a length, a word each.
+const SUD_CONFIG_SIZE: u64 = 32;
+
+/// `PTRACE_GETSIGMASK`/`SETSIGMASK`'s `addr`: the size of the kernel's
+/// `sigset_t`, 8 bytes; `EINVAL` for any other.
+fn sigset_size(addr: u64) -> Result<(), PtraceError> {
+    if addr == 8 {
+        Ok(())
+    } else {
+        Err(PtraceError::Invalid)
+    }
+}
+
+/// `PTRACE_PEEKSIGINFO`: up to `nr` of the signals pending for thread `tid`
+/// of `pid` -- in its own queue, or with `PTRACE_PEEKSIGINFO_SHARED` its
+/// process's -- from position `off`, copied as `siginfo_t`s to `data` and
+/// left pending (`signal::peek_pending` says in what order). `args` holds
+/// `struct ptrace_peeksiginfo_args { u64 off; u32 flags; s32 nr; }`.
+///
+/// Returns how many were copied: 0 past the end. Linux's
+/// `ptrace_peek_siginfo`: `EINVAL` for an unknown flag or a negative `nr`,
+/// and `EFAULT` when the first copy fails -- a later one ends the copying,
+/// and the count so far is the answer.
+fn peek_siginfo(pid: ProcessId, tid: TaskId, args: u64, data: u64) -> Result<u64, PtraceError> {
+    /// The process's queue, not the thread's.
+    const SHARED: u32 = 1;
+    /// `sizeof(siginfo_t)`.
+    const SIGINFO_SIZE: u64 = 128;
+    let mut raw = [0u8; 16];
+    get_user(args, &mut raw)?;
+    let (off, rest) = raw.split_at(8);
+    let (flags, nr) = rest.split_at(4);
+    let off = u64::from_ne_bytes(off.try_into().map_err(|_| PtraceError::Fault)?);
+    let flags = u32::from_ne_bytes(flags.try_into().map_err(|_| PtraceError::Fault)?);
+    let nr = i32::from_ne_bytes(nr.try_into().map_err(|_| PtraceError::Fault)?);
+    if flags & !SHARED != 0 {
+        return Err(PtraceError::Invalid);
+    }
+    let nr = u64::try_from(nr).map_err(|_| PtraceError::Invalid)?;
+    let shared = flags == SHARED;
+    let mut copied: u64 = 0;
+    while copied < nr {
+        let Some(index) = off.checked_add(copied) else {
+            break;
+        };
+        let Some((sig, info)) = crate::proc::signal::peek_pending(pid, tid, shared, index) else {
+            break;
+        };
+        let siginfo = LinuxSiginfo::from_record(i32::try_from(sig).unwrap_or(0), &info);
+        let to = copied
+            .checked_mul(SIGINFO_SIZE)
+            .and_then(|o| data.checked_add(o));
+        let stored = to.map_or(Err(PtraceError::Fault), |to| {
+            put_user(to, &siginfo.to_bytes())
+        });
+        if let Err(e) = stored {
+            if copied == 0 {
+                return Err(e);
+            }
+            break;
+        }
+        copied = copied.saturating_add(1);
+    }
+    Ok(copied)
+}
+
+/// `PTRACE_GET_RSEQ_CONFIGURATION`: thread `tid`'s rseq registration as
+/// `struct ptrace_rseq_configuration { u64 rseq_abi_pointer; u32
+/// rseq_abi_size; u32 signature; u32 flags; u32 pad; }` -- all 0 for a thread
+/// with none -- of which the first `size` bytes are copied to `data`. Returns
+/// the structure's size, 24, however much was copied (Linux's
+/// `ptrace_get_rseq_configuration`), so a tracer can tell a newer, longer
+/// one.
+fn rseq_configuration(tid: TaskId, size: u64, data: u64) -> Result<u64, PtraceError> {
+    let (area, len, sig) = crate::proc::thread_clone::lookup_rseq(tid).unwrap_or((0, 0, 0));
+    let mut conf = [0u8; 24];
+    let fields = area
+        .to_ne_bytes()
+        .into_iter()
+        .chain(len.to_ne_bytes())
+        .chain(sig.to_ne_bytes());
+    for (dst, byte) in conf.iter_mut().zip(fields) {
+        *dst = byte;
+    }
+    let n = usize::try_from(size).unwrap_or(usize::MAX).min(conf.len());
+    if n > 0 {
+        put_user(data, conf.get(..n).ok_or(PtraceError::Fault)?)?;
+    }
+    u64::try_from(conf.len()).map_err(|_| PtraceError::Io)
+}
+
 /// `ptrace(request, id, addr, data)` from thread `caller_tid` of process
 /// `caller` -- both ABIs' call. Returns what the call returns: 0 for every
 /// request, the word a `PEEK*` read being stored at `data` as the raw Linux
@@ -1164,6 +1305,12 @@ pub fn ptrace(
         // already on its way out has nothing left to end.
         let _ = crate::syscall::handlers::post_kernel_signal(pid, SIGKILL);
         return Ok(0);
+    }
+    if request == request::INTERRUPT {
+        // Stopped or not, as `KILL`: only a tracee attached by
+        // `PTRACE_SEIZE` can be interrupted, and none is (see the module
+        // doc) -- Linux's `EIO` for every other.
+        return Err(PtraceError::Io);
     }
     if !is_trace_stopped(tid) {
         return Err(PtraceError::NoSuchThread);
@@ -1243,7 +1390,7 @@ pub fn ptrace(
             put_user(data, &msg.to_ne_bytes())?;
             Ok(0)
         }
-        request::SETOPTIONS => {
+        request::SETOPTIONS | request::OLDSETOPTIONS => {
             let options = u32::try_from(data)
                 .ok()
                 .filter(|o| o & !option::MASK == 0)
@@ -1253,6 +1400,50 @@ pub fn ptrace(
             t.options = options;
             Ok(0)
         }
+        request::GETSIGMASK => {
+            sigset_size(addr)?;
+            let mask = crate::proc::signal::tracee_sigmask(pid, tid);
+            put_user(data, &mask.to_ne_bytes())?;
+            Ok(0)
+        }
+        request::SETSIGMASK => {
+            sigset_size(addr)?;
+            let mut mask = [0u8; 8];
+            get_user(data, &mut mask)?;
+            crate::proc::signal::set_tracee_sigmask(pid, tid, u64::from_ne_bytes(mask));
+            Ok(0)
+        }
+        request::PEEKSIGINFO => peek_siginfo(pid, tid, addr, data),
+        request::GET_RSEQ_CONFIGURATION => rseq_configuration(tid, addr, data),
+        request::GET_SYSCALL_USER_DISPATCH_CONFIG => {
+            // Syscall user dispatch (`PR_SET_SYSCALL_USER_DISPATCH`) is not
+            // offered, so every thread's is off: `PR_SYS_DISPATCH_OFF` (0),
+            // and no selector, offset or length.
+            if addr != SUD_CONFIG_SIZE {
+                return Err(PtraceError::Invalid);
+            }
+            put_user(data, &[0u8; 32])?;
+            Ok(0)
+        }
+        request::SET_SYSCALL_USER_DISPATCH_CONFIG => {
+            if addr != SUD_CONFIG_SIZE {
+                return Err(PtraceError::Invalid);
+            }
+            let mut config = [0u8; 32];
+            get_user(data, &mut config)?;
+            // Off with nothing else set is every thread's already. Linux
+            // refuses off with a region or selector (`EINVAL`); and on, which
+            // is not offered, is refused as `prctl` refuses it.
+            if config.iter().any(|&b| b != 0) {
+                return Err(PtraceError::Invalid);
+            }
+            Ok(0)
+        }
+        // No thread has a seccomp filter: `seccomp(2)` installs none. Linux
+        // built without filters answers these `EINVAL`.
+        request::SECCOMP_GET_FILTER | request::SECCOMP_GET_METADATA => Err(PtraceError::Invalid),
+        // A seized tracee's request; none is (`INTERRUPT`, above).
+        request::LISTEN => Err(PtraceError::Io),
         request::CONT
         | request::SINGLESTEP
         | request::SYSCALL
@@ -2078,6 +2269,10 @@ pub fn take_stop_report(
         .filter(|(_, t)| t.tracer == tracer)
         .filter_map(|(&tid, t)| {
             if let Some(status) = t.exited {
+                // A first thread's end waits for its process's.
+                if t.held {
+                    return None;
+                }
                 return Some((tid, t.pid, TraceReport::Exited(status)));
             }
             t.stop
@@ -2140,6 +2335,12 @@ pub fn note_exit_code(tid: TaskId, code: i32) {
 /// thread's (`exit_notify`), with its status: its process's when the process
 /// ended as a whole -- a group exit, a fatal signal, a crash -- and its own
 /// `exit` code otherwise.
+///
+/// A first thread's is reported only once its whole process has ended
+/// ([`on_process_zombie`]), and the process's parent hears of the end only
+/// after the tracer has waited for it (`pcb::Process::exit_held`): Linux's
+/// `wait_consider_task` shows a traced zombie to its tracer alone, and
+/// `wait_task_zombie` passes it on to the real parent.
 pub fn on_thread_exit(tid: TaskId) {
     FPU.lock().remove(&tid);
     let Some((pid, tracer, own)) = TRACEES
@@ -2154,6 +2355,7 @@ pub fn on_thread_exit(tid: TaskId) {
         remove_record(&mut TRACEES.lock_irqsave(), tid);
         return;
     }
+    let leader = tid == pid;
     let status =
         pcb::group_exit_wstatus(pid).unwrap_or_else(|| (own.unwrap_or(0) & 0xff).wrapping_shl(8));
     {
@@ -2162,14 +2364,77 @@ pub fn on_thread_exit(tid: TaskId) {
             return;
         };
         t.exited = Some(status);
+        t.held = leader;
         t.stop = None;
         t.first_stop = false;
         t.syscall_trace = SyscallTrace::Off;
         t.pending_event = None;
         sync_work(t);
     }
-    // A `wait` its tracer is blocked in looks again, and the tracer has its
-    // `SIGCHLD` (Linux's `do_notify_parent` for a traced thread).
+    if !leader {
+        report_exit(tid, pid, tracer, status);
+    }
+}
+
+/// Process `pid` has ended: its last thread is gone, and it is a zombie. If
+/// its first thread's end was held for a tracer ([`on_thread_exit`]), that
+/// tracer is told now, with the process's status -- the group exit's, if it
+/// ended by one, and the first thread's own `exit` code otherwise, as Linux's
+/// `wait_task_zombie` reads a zombie leader's. Its parent is told once the
+/// tracer has waited for it (`thread::release_traced_exit`).
+///
+/// `held` is whether the process table held the end for the tracer, decided
+/// as the process became a zombie ([`holds_exit`]). When it did not -- the
+/// tracer has become the parent since, as init does for an orphan -- the
+/// parent's own `wait` reports the end, and the tracer's record of the first
+/// thread is dropped, so that the end is not reported twice.
+pub fn on_process_zombie(pid: ProcessId, held: bool) {
+    if !held {
+        let mut table = TRACEES.lock_irqsave();
+        if table.get(&pid).is_some_and(|t| t.pid == pid && t.held) {
+            remove_record(&mut table, pid);
+        }
+        return;
+    }
+    let Some((tracer, own)) = TRACEES
+        .lock_irqsave()
+        .get(&pid)
+        .filter(|t| t.pid == pid && t.held)
+        .map(|t| (t.tracer, t.exit_code))
+    else {
+        return;
+    };
+    let status =
+        pcb::group_exit_wstatus(pid).unwrap_or_else(|| (own.unwrap_or(0) & 0xff).wrapping_shl(8));
+    {
+        let mut table = TRACEES.lock_irqsave();
+        // Let go meanwhile: its tracer exited (`on_process_exit`), which
+        // handed the end to the parent.
+        let Some(t) = table.get_mut(&pid).filter(|t| t.held) else {
+            return;
+        };
+        t.exited = Some(status);
+        t.held = false;
+    }
+    report_exit(pid, pid, tracer, status);
+}
+
+/// Whether process `pid`'s end is its tracer's to report first: its first
+/// thread is traced -- live, or gone and not yet waited for -- by a process
+/// other than `parent`. Asked by `pcb` as the process becomes a zombie, under
+/// the process table's lock, which may be held around this module's.
+#[must_use]
+pub fn holds_exit(pid: ProcessId, parent: ProcessId) -> bool {
+    TRACEES
+        .lock_irqsave()
+        .get(&pid)
+        .is_some_and(|t| t.pid == pid && t.tracer != parent)
+}
+
+/// Tell `tracer` of the end of its tracee, thread `tid` of process `pid`,
+/// with wait status `status`: a `wait` it is blocked in looks again, and it
+/// has its `SIGCHLD` (Linux's `do_notify_parent` for a traced thread).
+fn report_exit(tid: TaskId, pid: ProcessId, tracer: ProcessId, status: i32) {
     let (child_waiter, any_waiter) = pcb::take_trace_waiters(pid, tracer);
     for waiter in [child_waiter, any_waiter].into_iter().flatten() {
         sched::wake(waiter);
@@ -2203,7 +2468,8 @@ fn notify_tracer(
     if stop && linux && !crate::syscall::linux::linux_wants_cldstop(tracer) {
         return;
     }
-    let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+    // The tracee's real uid, as Linux's `do_notify_parent_cldstop` gives it.
+    let uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
     let info = crate::proc::signal::SigInfo::child(
         u32::try_from(tid).unwrap_or(u32::MAX),
         uid,
@@ -2226,6 +2492,8 @@ fn notify_tracer(
 /// `PTRACE_O_EXITKILL`, ended.
 pub fn on_process_exit(pid: ProcessId) {
     let mut kill: Vec<ProcessId> = Vec::new();
+    // Processes whose end this one held: their parents' now.
+    let mut ended: Vec<ProcessId> = Vec::new();
     {
         let mut table = TRACEES.lock_irqsave();
         let mine: Vec<TaskId> = table
@@ -2238,7 +2506,13 @@ pub fn on_process_exit(pid: ProcessId) {
                 continue;
             };
             if t.exited.is_some() {
-                // An exit no one will wait for now.
+                // An exit no one will wait for now. A process's goes to its
+                // parent (Linux's `__ptrace_detach`) -- a no-op for one whose
+                // process runs on, or has not become a zombie yet: with the
+                // record gone, `pcb` finds no tracer to hold its end for.
+                if t.pid == tid {
+                    ended.push(tid);
+                }
                 remove_record(&mut table, tid);
                 continue;
             }
@@ -2271,6 +2545,9 @@ pub fn on_process_exit(pid: ProcessId) {
     for victim in kill {
         // Gone already: nothing left to end.
         let _ = crate::syscall::handlers::post_kernel_signal(victim, SIGKILL);
+    }
+    for pid in ended {
+        crate::proc::thread::release_traced_exit(pid);
     }
 }
 

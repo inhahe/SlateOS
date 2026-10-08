@@ -2458,7 +2458,7 @@ fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallRes
     if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
         return SyscallResult::err(e);
     }
-    if handle.end() != pipe::PipeEnd::Write {
+    if !handle.writes() {
         return SyscallResult::err(KernelError::InvalidHandle);
     }
     let (buf, len) = (args.arg1, args.arg2 as usize);
@@ -2479,6 +2479,11 @@ fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallRes
     // slice into a dangling pointer.  Copying first makes both impossible.
     // (Non-blocking calls are bounced too: `try_write` still touches the
     // buffer from supervisor mode, which SMAP forbids outside a STAC window.)
+    // A blocking write longer than one bounce takes every byte all the same,
+    // as POSIX asks of a blocking write (`write_all_blocking`).
+    if patience == pipe::Patience::Forever && len > PIPE_CALL_MAX {
+        return count_or_err(write_all_blocking(handle, buf, len));
+    }
     let data = match read_call_buffer(buf, len, PIPE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
@@ -2488,6 +2493,37 @@ fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallRes
         pipe::Patience::Never => pipe::try_write(handle, &data),
         pipe::Patience::Upto(ns) => pipe::write_timeout(handle, &data, ns),
     })
+}
+
+/// A blocking pipe write of `len` bytes at user `buf`, more than one bounce
+/// ([`PIPE_CALL_MAX`]) holds: every byte goes in, a bounce at a time, as
+/// POSIX asks of a blocking write and Linux's `pipe_write` does. A signal or
+/// a reader gone after some went in ends it with the count so far -- the
+/// bounce's own write answers that way -- and so does a buffer that cannot
+/// be read further on.
+fn write_all_blocking(handle: PipeHandle, buf: u64, len: usize) -> KernelResult<usize> {
+    let mut done = 0usize;
+    while done < len {
+        let at = buf
+            .checked_add(done as u64)
+            .ok_or(KernelError::InvalidAddress)?;
+        let data = match read_call_buffer(at, len.saturating_sub(done), PIPE_CALL_MAX) {
+            Ok(d) => d,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        };
+        match pipe::write(handle, &data) {
+            Ok(n) => {
+                done = done.saturating_add(n);
+                if n < data.len() {
+                    break;
+                }
+            }
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(done)
 }
 
 /// The body of the three pipe reads; `patience` says which.
@@ -2503,7 +2539,7 @@ fn pipe_read_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallResu
     if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
         return SyscallResult::err(e);
     }
-    if handle.end() != pipe::PipeEnd::Read {
+    if !handle.reads() {
         return SyscallResult::err(KernelError::InvalidHandle);
     }
     let (buf, cap) = (args.arg1, args.arg2 as usize);
@@ -4672,10 +4708,6 @@ pub const WAIT_INFO_SIZE: usize = 72;
 /// could only reach it through `copy_to_user` could not check it at all
 /// from a bare kernel task.
 pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; WAIT_INFO_SIZE] {
-    /// One tick is 10 ms at `USER_HZ == 100`; see `sys_getrusage`, which is
-    /// the other consumer of these same counters and must not disagree.
-    const US_PER_TICK: u64 = 10_000;
-
     let mut buf = [0u8; WAIT_INFO_SIZE];
     let mut put = |off: usize, v: u64| {
         if let Some(dst) = buf.get_mut(off..off.saturating_add(8)) {
@@ -4688,8 +4720,9 @@ pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; 
     let ws = found.to_wstatus() as u32;
     put(16, u64::from(ws)); // likewise: wstatus then zero pad
     let u = &found.usage;
-    put(24, u.user_ticks.saturating_mul(US_PER_TICK));
-    put(32, u.sys_ticks.saturating_mul(US_PER_TICK));
+    // Microseconds, truncated, of the precise split `ProcessUsage` holds.
+    put(24, u.utime_ns / 1_000);
+    put(32, u.stime_ns / 1_000);
     put(40, u.min_flt);
     put(48, u.maj_flt);
     put(56, u.nvcsw);
@@ -4938,10 +4971,13 @@ fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
     let pid = caller_pid().unwrap_or(0);
     let tid = sched::current_task_id();
 
-    let (user_ticks, sys_ticks) = match who {
-        rusage_who::THREAD => sched::cpu_ticks(tid).unwrap_or((0, 0)),
-        rusage_who::CHILDREN => pcb::process_child_ticks(pid),
-        _ => crate::proc::thread::process_cpu_ticks(pid),
+    // The precise run time split by the tick ratio (Linux's
+    // `cputime_adjust`): the thread's, the process's, or its reaped
+    // children's.
+    let (utime_ns, stime_ns) = match who {
+        rusage_who::THREAD => sched::thread_times(tid).unwrap_or((0, 0)),
+        rusage_who::CHILDREN => pcb::process_child_times(pid),
+        _ => pcb::process_times(pid).unwrap_or((0, 0)),
     };
     let (min_flt, maj_flt) = match who {
         rusage_who::THREAD => sched::fault_counts(tid).unwrap_or((0, 0)),
@@ -4966,8 +5002,8 @@ fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
 
     (
         crate::proc::thread::ProcessUsage {
-            user_ticks,
-            sys_ticks,
+            utime_ns,
+            stime_ns,
             min_flt,
             maj_flt,
             nvcsw,
@@ -4988,14 +5024,9 @@ pub(crate) fn rusage_info_image(
     usage: &crate::proc::thread::ProcessUsage,
     maxrss_kib: u64,
 ) -> [u8; RUSAGE_INFO_SIZE] {
-    /// One tick is 10 ms at `USER_HZ == 100`. Shared with `wait_info_image`
-    /// and `linux::sys_getrusage`, which consume the same counters and must
-    /// not disagree about what a tick is worth.
-    const US_PER_TICK: u64 = 10_000;
-
     let &crate::proc::thread::ProcessUsage {
-        user_ticks,
-        sys_ticks,
+        utime_ns,
+        stime_ns,
         min_flt,
         maj_flt,
         nvcsw,
@@ -5008,8 +5039,10 @@ pub(crate) fn rusage_info_image(
             dst.copy_from_slice(&v.to_le_bytes());
         }
     };
-    put(0, user_ticks.saturating_mul(US_PER_TICK));
-    put(8, sys_ticks.saturating_mul(US_PER_TICK));
+    // Microseconds, truncated, as `wait_info_image` and the Linux
+    // `getrusage` give them.
+    put(0, utime_ns / 1_000);
+    put(8, stime_ns / 1_000);
     put(16, min_flt);
     put(24, maj_flt);
     put(32, nvcsw);
@@ -7293,11 +7326,77 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Write both fields back in a single update so uid and gid change together;
-    // a half-applied identity would otherwise be observable.
-    creds.uid = want_uid;
-    creds.gid = want_gid;
+    // a half-applied identity would otherwise be observable. A change sets
+    // every id of its kind -- real, effective, saved, filesystem -- as a
+    // privileged `setuid` does; this call is for a process giving up or
+    // taking on an identity, `SYS_PROCESS_SET_IDS` for moving between ids.
+    if want_uid != creds.uid {
+        creds.set_all_uids(want_uid);
+    }
+    if want_gid != creds.gid {
+        creds.set_all_gids(want_gid);
+    }
 
     match pcb::change_credentials(pid, creds).map(|_| ()) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_SET_IDS` -- the native setuid family. See
+/// [`SYS_PROCESS_SET_IDS`](super::number::SYS_PROCESS_SET_IDS).
+pub fn sys_process_set_ids(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{SET_IDS_FSUID, SET_IDS_GROUP, SET_IDS_RESUID, SET_IDS_REUID, SET_IDS_UID};
+    use crate::proc::setid::{self, Authority, Which};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let (which, op) = if args.arg0 >= SET_IDS_GROUP {
+        (Which::Group, args.arg0.wrapping_sub(SET_IDS_GROUP))
+    } else {
+        (Which::User, args.arg0)
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let (a, b, c) = (args.arg1 as u32, args.arg2 as u32, args.arg3 as u32);
+    let done = match op {
+        SET_IDS_UID => setid::set_id(pid, which, Authority::Native, a),
+        SET_IDS_REUID => setid::set_re_id(pid, which, Authority::Native, a, b),
+        SET_IDS_RESUID => setid::set_res_id(pid, which, Authority::Native, a, b, c),
+        SET_IDS_FSUID => {
+            let old = setid::set_fs_id(pid, which, Authority::Native, a);
+            return SyscallResult::ok(i64::from(old));
+        }
+        _ => Err(KernelError::InvalidArgument),
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_IDS` -- the caller's eight ids. See
+/// [`SYS_PROCESS_GET_IDS`](super::number::SYS_PROCESS_GET_IDS).
+pub fn sys_process_get_ids(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::setid::{self, Which};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(creds) = crate::proc::pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let mut out = [0u8; 32];
+    let all = setid::ids(&creds, Which::User)
+        .into_iter()
+        .chain(setid::ids(&creds, Which::Group))
+        .flat_map(u32::to_ne_bytes);
+    for (dst, byte) in out.iter_mut().zip(all) {
+        *dst = byte;
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, out.len()) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: 32 bytes at `arg0`, validated writable just above.
+    match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) } {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -8235,6 +8334,47 @@ pub fn sys_posix_timer(args: &SyscallArgs) -> SyscallResult {
         Ok(v) => SyscallResult::ok(v),
         Err(e) => linux_err(e),
     }
+}
+
+/// `SYS_CPU_CLOCK(op, clockid)` (1156): read a CPU-time clock, or its
+/// resolution, for a native program -- the Linux ABI's decoding
+/// (`linux::cpu_clock`) and reading, so a clock id means the same through
+/// both doors. Linux errnos as `-errno`. See
+/// [`SYS_CPU_CLOCK`](super::number::SYS_CPU_CLOCK).
+pub fn sys_cpu_clock(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{self, errno, linux_err};
+    use super::number::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME, CPU_CLOCK_NANOSLEEP};
+    let op = args.arg0;
+    // clockid_t is an int: the register's low half.
+    #[allow(clippy::cast_possible_truncation)]
+    let clockid = args.arg1 as i32;
+    if op == CPU_CLOCK_NANOSLEEP {
+        return linux::cpu_nanosleep_native(clockid, args.arg2, args.arg3, args.arg4);
+    }
+    if op != CPU_CLOCK_GETTIME && op != CPU_CLOCK_GETRES {
+        return linux_err(errno::EINVAL);
+    }
+    let clock = match linux::cpu_clock(
+        clockid,
+        caller_pid(),
+        sched::current_task_id(),
+        op == CPU_CLOCK_GETTIME,
+    ) {
+        Ok(Some(clock)) => clock,
+        // Not a CPU-time clock: the other clocks have calls of their own.
+        Ok(None) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
+    };
+    let ns = if op == CPU_CLOCK_GETTIME {
+        match linux::read_cpu_clock(clock) {
+            Ok(ns) => ns,
+            Err(e) => return linux_err(e),
+        }
+    } else {
+        linux::cpu_clock_res(clock)
+    };
+    // Nanoseconds of CPU time fit an i64 for 292 years.
+    SyscallResult::ok(i64::try_from(ns).unwrap_or(i64::MAX))
 }
 
 /// `SYS_PROCESS_DUMPABLE(op, value)` (1142): read or set the caller's
@@ -10220,7 +10360,8 @@ fn notify_parent_of_job_control(
     {
         return;
     }
-    let uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+    // The child's real uid, as Linux's `do_notify_parent_cldstop` gives it.
+    let uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
     let info = crate::proc::signal::SigInfo::child(
         u32::try_from(pid).unwrap_or(u32::MAX),
         uid,
@@ -12547,6 +12688,124 @@ pub fn fs_open_kernel_path_mode(
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// What [`fs_open_node_kernel_path_mode`] came to.
+pub enum NodeOpen {
+    /// The open's answer: a file's handle, registered to the caller, or its
+    /// error -- what [`fs_open_kernel_path_mode`] answers.
+    Done(SyscallResult),
+    /// The path names a named pipe's node, at this resolved path, and every
+    /// check an open makes passed: the caller opens its pipe
+    /// (`ipc::fifo::open`).
+    Fifo(crate::fs::path::PathBuf),
+}
+
+/// [`fs_open_kernel_path_mode`], answering a named pipe's node with
+/// [`NodeOpen::Fifo`] rather than refusing it: the Linux `open`, which gives
+/// the opener the pipe.
+pub fn fs_open_node_kernel_path_mode(
+    path: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> NodeOpen {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return NodeOpen::Done(SyscallResult::err(e));
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_node_with_mode(path, flags, create_mode) {
+        Ok(crate::fs::handle::Opened::File(handle)) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            NodeOpen::Done(SyscallResult::ok(handle as i64))
+        }
+        Ok(crate::fs::handle::Opened::Fifo(node)) => NodeOpen::Fifo(node),
+        Err(e) => NodeOpen::Done(SyscallResult::err(e)),
+    }
+}
+
+/// `SYS_FS_MKFIFO` -- make a named pipe's node (`mkfifo`). See
+/// [`SYS_FS_MKFIFO`](super::number::SYS_FS_MKFIFO).
+pub fn sys_fs_mkfifo(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
+        return SyscallResult::err(e);
+    }
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Twelve bits, as a file's create takes them (`SYS_FS_OPEN_MODE`).
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = (args.arg2 as u16) & 0o7777;
+    match crate::fs::Vfs::mknod_fifo(&path, mode) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FIFO_OPEN` -- open a named pipe, for a pipe handle. See
+/// [`SYS_FIFO_OPEN`](super::number::SYS_FIFO_OPEN).
+pub fn sys_fifo_open(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::handle::{OpenFlags, Opened};
+    use crate::ipc::pipe::FifoAccess;
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let given = OpenFlags::from_bits(args.arg2 as u32);
+    // The access mode and the walk's flags; a FIFO is never made by an open.
+    let kept = [
+        OpenFlags::READ,
+        OpenFlags::WRITE,
+        OpenFlags::NOFOLLOW,
+        OpenFlags::NO_SYMLINKS,
+    ]
+    .into_iter()
+    .filter(|&f| given.contains(f))
+    .fold(OpenFlags::NONE, OpenFlags::union);
+    let access = match (kept.is_readable(), kept.is_writable()) {
+        (true, false) => FifoAccess::Read,
+        (false, true) => FifoAccess::Write,
+        (true, true) => FifoAccess::Both,
+        (false, false) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let node = match crate::fs::handle::open_node_with_mode(&path, kept, 0) {
+        Ok(Opened::Fifo(node)) => node,
+        Ok(Opened::File(handle)) => {
+            // Something else opened: not a FIFO, so the open the caller
+            // asked first answers as it did. Nothing was read through it.
+            let _ = crate::fs::handle::close(handle);
+            return SyscallResult::err(KernelError::NoSuchDeviceOrAddress);
+        }
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = match crate::ipc::fifo::open(&node, access, args.arg3 & 1 != 0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // One reference per process per pipe end, as `SYS_PIPE_CREATE`'s ends
+    // are held: an end the caller holds already is the one it gets.
+    if let Some(pid) = caller_pid() {
+        if pcb::owns_ipc_handle(pid, ResourceType::Pipe, handle.raw()) {
+            crate::ipc::pipe::close(handle);
+        } else {
+            pcb::register_ipc_handle(pid, ResourceType::Pipe, handle.raw());
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(handle.raw() as i64)
 }
 
 /// A file with no name in directory `dir` (`fs::handle::open_tmpfile`), its
@@ -16026,9 +16285,10 @@ fn defer_requester() -> Result<crate::fs::deferred_ops::Requester, KernelError> 
         });
     };
     let creds = crate::proc::pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    // File access is the filesystem ids' (`fs::vfs`), deferred or not.
     Ok(Requester {
-        uid: creds.uid,
-        gid: creds.gid,
+        uid: creds.fsuid,
+        gid: creds.fsgid,
         groups: creds.groups,
     })
 }
@@ -20612,7 +20872,9 @@ pub fn sys_process_chroot(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// The only interval timer this kernel keeps. Matches Linux's `ITIMER_REAL`.
+/// The wall-clock interval timer. Matches Linux's `ITIMER_REAL`; the CPU-time
+/// ones, `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2), are
+/// [`crate::proc::cputimer`]'s.
 const ITIMER_REAL: u64 = 0;
 
 /// Saturating `u64` nanoseconds → the `i64` a syscall returns in a register.
@@ -20626,16 +20888,16 @@ fn itimer_ns_to_reg(ns: u64) -> i64 {
     i64::try_from(ns).unwrap_or(i64::MAX)
 }
 
-/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm the calling process's real
-/// interval timer, reporting what it held before.
+/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm one of the calling
+/// process's interval timers, reporting what it held before.
 ///
 /// See [`crate::syscall::number::SYS_ITIMER_SET`] for the contract, and
 /// `design-decisions.md` §925 for why both previous values come back in
 /// registers rather than through a caller-supplied buffer.
 pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{cputimer, thread};
 
-    if args.arg0 != ITIMER_REAL {
+    if args.arg0 > u64::from(cputimer::ITIMER_PROF) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -20644,8 +20906,16 @@ pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    let (prev_value_ns, prev_interval_ns) =
-        crate::proc::itimer::set_real(pid, args.arg1, args.arg2);
+    let (prev_value_ns, prev_interval_ns) = if args.arg0 == ITIMER_REAL {
+        crate::proc::itimer::set_real(pid, args.arg1, args.arg2)
+    } else {
+        // ITIMER_VIRTUAL or ITIMER_PROF: below 3, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        match cputimer::set_itimer(pid, args.arg0 as u32, args.arg1, args.arg2) {
+            Ok(prev) => prev,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
 
     SyscallResult::ok2(
         itimer_ns_to_reg(prev_value_ns),
@@ -20653,14 +20923,14 @@ pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
     )
 }
 
-/// `SYS_ITIMER_GET` (1070) — report the calling process's real interval timer
-/// as `(remaining_ns, interval_ns)`, without disturbing it.
+/// `SYS_ITIMER_GET` (1070) — report one of the calling process's interval
+/// timers as `(remaining_ns, interval_ns)`, without disturbing it.
 ///
 /// See [`crate::syscall::number::SYS_ITIMER_GET`].
 pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{cputimer, thread};
 
-    if args.arg0 != ITIMER_REAL {
+    if args.arg0 > u64::from(cputimer::ITIMER_PROF) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -20669,6 +20939,15 @@ pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    let (value_ns, interval_ns) = crate::proc::itimer::get_real(pid);
+    let (value_ns, interval_ns) = if args.arg0 == ITIMER_REAL {
+        crate::proc::itimer::get_real(pid)
+    } else {
+        // ITIMER_VIRTUAL or ITIMER_PROF: below 3, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        match cputimer::get_itimer(pid, args.arg0 as u32) {
+            Ok(cur) => cur,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
     SyscallResult::ok2(itimer_ns_to_reg(value_ns), itimer_ns_to_reg(interval_ns))
 }

@@ -104,6 +104,14 @@ pub enum EntryType {
     /// whose socket has closed stays, and `connect` to it is refused.
     /// Opening one is `ENXIO`: it has no contents to read.
     Socket,
+
+    /// A named pipe's node (`S_IFIFO`), made by `mkfifo` or
+    /// `mknod(S_IFIFO)`.
+    ///
+    /// Like a socket's, the node holds nothing. Opening it attaches the opener
+    /// to the kernel pipe kept for the node while anyone has it open, found by
+    /// the node's identity ([`FileId`]): [`crate::ipc::fifo`].
+    Fifo,
 }
 
 impl EntryType {
@@ -125,6 +133,7 @@ impl EntryType {
             Self::CharDevice => 4,
             Self::BlockDevice => 5,
             Self::Socket => 6,
+            Self::Fifo => 7,
         }
     }
 }
@@ -740,6 +749,26 @@ pub trait FileSystem: Send {
     // cannot take the file from under the handle. The defaults answer
     // `NotSupported`, and such a filesystem's handles go by path.
 
+    /// What the file at `path` is bound to as it is opened, for a file whose
+    /// contents belong to something that can be replaced while it stays open
+    /// -- the address space `/proc/<pid>/mem` reads, which an exec replaces --
+    /// or `None`, as for every ordinary file. A handle keeps it and, before
+    /// each read or write by name, asks
+    /// [`binding_current`](Self::binding_current); one no longer current
+    /// reads end-of-file and writes nothing (`EIO`), as Linux's
+    /// `/proc/<pid>/mem`, which holds the `mm` it was opened on, does.
+    fn open_binding(&mut self, path: &Path) -> Option<u64> {
+        let _ = path;
+        None
+    }
+
+    /// Whether `binding`, which [`open_binding`](Self::open_binding) gave for
+    /// `path`, still holds.
+    fn binding_current(&mut self, path: &Path, binding: u64) -> bool {
+        let _ = (path, binding);
+        true
+    }
+
     /// Hold inode `ino` open. Its last name may then go without the file:
     /// it stays, unnamed, until the matching [`unpin_ino`](Self::unpin_ino).
     /// `NotSupported` for an inode the filesystem does not hold this way.
@@ -1164,6 +1193,17 @@ pub trait FileSystem: Send {
     /// Default: not supported -- a filesystem that cannot hold one makes
     /// `bind` there fail as Linux's does on, say, FAT (`EPERM`).
     fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        let _ = (path, mode);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Create a named pipe's node ([`EntryType::Fifo`]) at `path`, with
+    /// permission bits `mode`, and return its inode number -- as
+    /// [`mknod_socket`](Self::mknod_socket), whose rules it shares: what it
+    /// names is kept by [`crate::ipc::fifo`], by the node's identity.
+    ///
+    /// Default: not supported (`EPERM` from `mknod`, as Linux's on FAT).
+    fn mknod_fifo(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
         let _ = (path, mode);
         Err(KernelError::NotSupported)
     }
@@ -4183,6 +4223,26 @@ impl Vfs {
     /// Open file descriptors hold a resolved reference (Unix semantics — an fd
     /// is immune to later chroot/rename/symlink changes), so handle-backed I/O
     /// must use this entry point, never the path-based [`read_at`](Self::read_at).
+    /// [`FileSystem::open_binding`] of the file at `path` (a path already
+    /// resolved): what an open of it is bound to, or `None` -- also for a path
+    /// on no mount.
+    #[must_use]
+    pub fn open_binding(path: &Path) -> Option<u64> {
+        let (fs, _fs_id, _opts, relative) = resolve_mount(path).ok()?;
+        fs.lock().open_binding(&relative)
+    }
+
+    /// [`FileSystem::binding_current`]: whether `binding`, which
+    /// [`open_binding`](Self::open_binding) gave for `path`, still holds. A
+    /// path on no mount any more holds nothing.
+    #[must_use]
+    pub fn binding_current(path: &Path, binding: u64) -> bool {
+        match resolve_mount(path) {
+            Ok((fs, _fs_id, _opts, relative)) => fs.lock().binding_current(&relative, binding),
+            Err(_) => false,
+        }
+    }
+
     pub fn read_at_resolved(
         path: impl AsRef<Path>,
         offset: u64,
@@ -4557,6 +4617,50 @@ impl Vfs {
             Ok(None) | Err(KernelError::NotSupported) => {
                 release_mount_hold(fs_id);
                 Ok(None)
+            }
+            Err(e) => {
+                release_mount_hold(fs_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Hold the named pipe's node at already-resolved `path` -- what its pipe
+    /// keeps while anyone has it open ([`crate::ipc::fifo`]): the node is
+    /// pinned, so a name unlinked meanwhile leaves it, and its mount cannot
+    /// be unmounted, until the hold goes. Counted on the mount first, as
+    /// [`Vfs::open_object`] counts one.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` if `path` names something other than a FIFO, or one
+    /// with no stable inode; the lookup's and the pin's own.
+    pub fn hold_fifo(path: impl AsRef<Path>) -> KernelResult<FileHold> {
+        let path = path.as_ref();
+        let (fs, fs_id, relative) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.objects = mp.objects.saturating_add(1);
+            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+        };
+        let pinned = {
+            let mut guard = fs.lock();
+            match guard.metadata(&relative) {
+                Ok(meta) if meta.entry_type == EntryType::Fifo && meta.ino != 0 => {
+                    guard.pin_ino(meta.ino).map(|()| Some(meta.ino))
+                }
+                Ok(_) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        match pinned {
+            Ok(Some(ino)) => {
+                note_hold(FileId { fs_id, ino });
+                Ok(FileHold(FileObject { fs, fs_id, ino }))
+            }
+            Ok(None) => {
+                release_mount_hold(fs_id);
+                Err(KernelError::NotSupported)
             }
             Err(e) => {
                 release_mount_hold(fs_id);
@@ -7467,7 +7571,24 @@ impl Vfs {
     /// cannot hold a socket node, or reports no stable inode for it;
     /// otherwise what path resolution and the checks above report.
     pub fn mknod_socket(path: impl AsRef<Path>, mode: u16) -> KernelResult<FileId> {
-        let path = path.as_ref();
+        Self::mknod_node(path.as_ref(), mode, EntryType::Socket)
+    }
+
+    /// Create a named pipe's node at `path` (`mknod(S_IFIFO)`, `mkfifo`),
+    /// with permission bits `mode`, as [`Vfs::mknod_socket`] makes a socket's:
+    /// the same checks, the same refusals.
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::mknod_socket`]; `NotSupported` on a filesystem that cannot
+    /// hold one (FAT: `EPERM`).
+    pub fn mknod_fifo(path: impl AsRef<Path>, mode: u16) -> KernelResult<FileId> {
+        Self::mknod_node(path.as_ref(), mode, EntryType::Fifo)
+    }
+
+    /// The body of [`Vfs::mknod_socket`] and [`Vfs::mknod_fifo`]: a node of
+    /// `kind`, which is one of the two.
+    fn mknod_node(path: &Path, mode: u16, kind: EntryType) -> KernelResult<FileId> {
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -7491,7 +7612,11 @@ impl Vfs {
                 umask,
                 false,
             );
-            let ino = guard.mknod_socket(&relative, perm)?;
+            let ino = if kind == EntryType::Fifo {
+                guard.mknod_fifo(&relative, perm)?
+            } else {
+                guard.mknod_socket(&relative, perm)?
+            };
             init_new_owner(&mut **guard, &relative, creator, false)?;
             acls.store(
                 &mut **guard,
@@ -9614,7 +9739,8 @@ pub(crate) enum PathAccess {
 /// The set-group-ID bit of a mode.
 pub const S_ISGID: u16 = 0o2000;
 
-/// Who makes a node now: the calling process's uid and gid, or root's in
+/// Who makes a node now: the calling process's filesystem uid and gid --
+/// its effective ids, unless `setfsuid` set them apart -- or root's in
 /// kernel context.
 ///
 /// Read before a filesystem's lock is taken -- as [`check_path_access`]
@@ -9623,7 +9749,7 @@ pub const S_ISGID: u16 = 0o2000;
 fn creator_ids() -> (u32, u32) {
     let task = crate::sched::current_task_id();
     match crate::proc::thread::acting_process(task) {
-        Some(pid) if pid != 0 => crate::proc::pcb::process_uid_gid(pid).unwrap_or((0, 0)),
+        Some(pid) if pid != 0 => crate::proc::pcb::process_fs_ids(pid).unwrap_or((0, 0)),
         _ => (0, 0),
     }
 }
@@ -9818,15 +9944,16 @@ fn parent_of(path: &Path) -> &Path {
     path.parent().unwrap_or(Path::new("/"))
 }
 
-/// The calling process's uid and gid, or `None` for a kernel task (or a
-/// process being torn down), which the permission checks let pass.
+/// The calling process's filesystem uid and gid -- whom file access is
+/// decided for -- or `None` for a kernel task (or a process being torn
+/// down), which the permission checks let pass.
 fn caller_uid_gid() -> Option<(u32, u32)> {
     let task_id = crate::sched::current_task_id();
     let pid = match crate::proc::thread::acting_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return None,
     };
-    crate::proc::pcb::get_credentials(pid).map(|c| (c.uid, c.gid))
+    crate::proc::pcb::process_fs_ids(pid)
 }
 
 /// Whether `uid` may change a file owned by `owner` from attributes `old` to
@@ -10156,7 +10283,8 @@ pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<(
         None => return Ok(()), // No credentials — process being torn down.
     };
 
-    path_access_verdict(path, creds.uid, creds.gid, &creds.groups, want)
+    // The filesystem ids decide, as Linux's `fsuid`/`fsgid` do.
+    path_access_verdict(path, creds.fsuid, creds.fsgid, &creds.groups, want)
 }
 
 /// The gate's decision, with the caller's identity passed in rather than
@@ -10215,7 +10343,12 @@ pub(crate) fn check_object_access(
         Some(c) => c,
         None => return Ok(()), // No credentials -- process being torn down.
     };
-    check_acl(AclSubject::Held(obj.id(), meta), creds.uid, creds.gid, want)
+    check_acl(
+        AclSubject::Held(obj.id(), meta),
+        creds.fsuid,
+        creds.fsgid,
+        want,
+    )
 }
 
 /// What [`check_acl`] is asked about: the file a path names now, or a file

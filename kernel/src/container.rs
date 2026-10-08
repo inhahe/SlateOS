@@ -2719,6 +2719,21 @@ pub fn tar_tree<B: AsRef<Path> + ?Sized>(base: &B) -> KernelResult<Vec<u8>> {
                     // skip sockets for the same reason (GNU tar: "socket
                     // ignored").
                 }
+                EntryType::Fifo => {
+                    // A named pipe is a tar entry of its own (type '6'): the
+                    // name and the mode, no data -- what was in the pipe is
+                    // no file's contents. GNU tar keeps one the same way.
+                    entries.push(TarWriteEntry {
+                        name: rel_child,
+                        data: Vec::new(),
+                        kind: EntryKind::Fifo,
+                        link_target: PathBuf::new(),
+                        mode: if mode == 0 { 0o644 } else { mode },
+                        uid,
+                        gid,
+                        mtime,
+                    });
+                }
             }
         }
     }
@@ -2848,8 +2863,19 @@ pub fn untar_tree<B: AsRef<Path> + ?Sized>(base: &B, archive: &[u8]) -> KernelRe
                 // archive's view wins where it can be applied.
                 let _ = Vfs::symlink(dest, &entry.link_target);
             }
+            EntryKind::Fifo => {
+                if let Some(parent) = rel.parent() {
+                    ensure_dir_path(base, parent);
+                }
+                // A node already there is tolerated, as for a symlink: the
+                // archive's view wins where it can be applied. The mode is
+                // the permission bits (twelve, so they fit); a FIFO's type
+                // is the call's.
+                let mode = u16::try_from(entry.mode & 0o7777).unwrap_or(0o600);
+                let _ = Vfs::mknod_fifo(dest, mode);
+            }
             EntryKind::Other(_) => {
-                // Devices, FIFOs, hardlinks, etc. have no rootfs analogue here.
+                // Devices, hardlinks, etc. have no rootfs analogue here.
             }
         }
     }
@@ -6439,6 +6465,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let nested_payload = b"nested file body";
         Vfs::write_file("/tmp/exp-root/top.txt", top_payload).expect("write top.txt");
         Vfs::write_file("/tmp/exp-root/sub/hello.txt", nested_payload).expect("write hello.txt");
+        Vfs::mknod_fifo("/tmp/exp-root/sub/pipe", 0o640)?;
 
         let ct_exp = create(&ContainerConfig::new("test-export-ct")).expect("create");
         set_root_path(ct_exp, root).expect("set export rootfs");
@@ -6471,9 +6498,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             nested_payload,
             "sub/hello.txt bytes must survive export",
         );
+        // The named pipe is a FIFO entry with its mode and no data.
+        assert!(
+            parsed.iter().any(|e| e.name == PathBuf::from("sub/pipe")
+                && e.kind == crate::fs::tar::EntryKind::Fifo
+                && e.size == 0
+                && e.mode & 0o7777 == 0o640),
+            "exported archive must keep sub/pipe as a FIFO entry",
+        );
 
         // Cleanup.
         delete(ct_exp).expect("delete export container");
+        let _ = Vfs::remove("/tmp/exp-root/sub/pipe");
         let _ = Vfs::remove("/tmp/exp-root/sub/hello.txt");
         let _ = Vfs::remove("/tmp/exp-root/top.txt");
         let _ = Vfs::rmdir("/tmp/exp-root/sub");
@@ -6522,6 +6558,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 gid: 0,
                 mtime: 0,
             },
+            TarWriteEntry {
+                name: PathBuf::from("d/p"),
+                data: Vec::new(),
+                kind: EntryKind::Fifo,
+                link_target: PathBuf::new(),
+                mode: 0o600,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
         ]);
 
         let id = import_rootfs("test-import-ct", &archive, "/tmp/imp-root")
@@ -6534,6 +6580,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(
             Vfs::read_file("/tmp/imp-root/d/a.txt").expect("read d/a.txt"),
             alloc::vec![b'A'; 3],
+        );
+        // The FIFO entry is made a named pipe.
+        assert_eq!(
+            Vfs::metadata("/tmp/imp-root/d/p")
+                .map(|m| m.entry_type)
+                .ok(),
+            Some(crate::fs::vfs::EntryType::Fifo),
+            "a FIFO entry must be extracted as a named pipe",
         );
         // The new container is configured with the extracted rootfs.
         let ci = info(id).expect("imported container exists");
@@ -6569,6 +6623,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Cleanup.
         delete(id).expect("delete imported container");
         let _ = Vfs::remove("/tmp/imp-root/b.txt");
+        let _ = Vfs::remove("/tmp/imp-root/d/p");
         let _ = Vfs::remove("/tmp/imp-root/d/a.txt");
         let _ = Vfs::rmdir("/tmp/imp-root/d");
         let _ = Vfs::rmdir("/tmp/imp-root");

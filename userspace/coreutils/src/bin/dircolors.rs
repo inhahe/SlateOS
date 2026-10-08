@@ -492,8 +492,8 @@ fn main() -> std::process::ExitCode {
 fn run() -> std::process::ExitCode {
     use coreutils::diag;
     use coreutils::errmsg::strerror;
-    use coreutils::stdfd::{self, Stream};
-    use std::io::{BufRead, BufReader, Read, Write};
+    use coreutils::stdfd::{self, Reopen, Stream};
+    use std::io::{BufRead, BufReader, Write};
     use std::process::ExitCode;
 
     stdfd::restore();
@@ -578,30 +578,24 @@ fn run() -> std::process::ExitCode {
         }
         Some(name) => {
             let name_b = name_bytes.as_deref().unwrap_or_default();
-            // `freopen` for a name, the standard input for `-`: either way
-            // upstream reads `stdin`, and then `fclose`s it below.
-            let file = if name_b == b"-" {
-                None
-            } else {
-                match std::fs::File::open(name) {
-                    Ok(f) => Some(f),
-                    Err(e) => {
-                        diag!(
-                            "dircolors: {}: {}",
-                            coreutils::quote::quotef(name_b),
-                            strerror(&e)
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                }
-            };
-            // Descriptor 0 itself for `-`: `io::stdin()` reads a closed one
-            // as empty.
-            let reader: Box<dyn Read + '_> = match &file {
-                Some(f) => Box::new(f),
-                None => Box::new(stdfd::RawStdin),
-            };
-            let mut reader = BufReader::new(reader);
+            // `freopen (filename, "r", stdin)` for a name, the standard input
+            // for `-`: either way upstream reads `stdin`, and then `fclose`s it
+            // below. The name's file goes onto descriptor 0 itself, and a
+            // failure is reported with the `errno` glibc's `freopen` leaves:
+            // `dircolors nosuch <&-` is `dircolors: nosuch: Bad file
+            // descriptor` (see `stdfd::freopen`).
+            if name_b != b"-"
+                && let Err(e) = stdfd::freopen(name, Reopen::Read, 0)
+            {
+                diag!(
+                    "dircolors: {}: {}",
+                    coreutils::quote::quotef(name_b),
+                    strerror(&e)
+                );
+                return ExitCode::FAILURE;
+            }
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+            let mut reader = BufReader::new(stdfd::RawStdin);
             let mut line = Vec::new();
             loop {
                 line.clear();
@@ -635,11 +629,7 @@ fn run() -> std::process::ExitCode {
             // (filename)); return false; }`. Measured, `dircolors - <&-` says
             // `dircolors: -: read error: Bad file descriptor` and then
             // `dircolors: -: Bad file descriptor` for this.
-            let closed = match file {
-                Some(f) => stdfd::close(f),
-                None => stdfd::close_stdin(),
-            };
-            if let Err(e) = closed {
+            if let Err(e) = stdfd::close_stdin() {
                 diag!(
                     "dircolors: {}: {}",
                     coreutils::quote::quotef(name_b),

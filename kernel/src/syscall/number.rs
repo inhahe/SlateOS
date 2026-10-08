@@ -5408,15 +5408,20 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 /// Chosen number 1068, next free slot after 1067.
 pub const SYS_PROCESS_CHROOT: u64 = 1068;
 
-/// `SYS_ITIMER_SET` — arm, re-arm or disarm the calling process's real
-/// interval timer, and report what it held before.
+/// `SYS_ITIMER_SET` — arm, re-arm or disarm one of the calling process's
+/// interval timers, and report what it held before.
 ///
 /// `(which, value_ns, interval_ns) -> ok2(prev_value_ns, prev_interval_ns)`
 ///
-/// The timer counts wall-clock time and raises `SIGALRM` in the calling process
-/// when it expires. A non-zero `interval_ns` re-arms it to that period after
-/// each expiry; zero makes it one-shot. `value_ns == 0` disarms it regardless
-/// of `interval_ns`, matching `setitimer(2)`.
+/// `which` is Linux's: `ITIMER_REAL` (0) counts wall-clock time and raises
+/// `SIGALRM`; `ITIMER_VIRTUAL` (1) counts the process's user time and raises
+/// `SIGVTALRM`; `ITIMER_PROF` (2) counts its user plus system time and raises
+/// `SIGPROF` -- the two CPU-time ones checked at the 10 ms tick, a tick added
+/// to the value as Linux adds it ([`crate::proc::cputimer`]). A non-zero
+/// `interval_ns` re-arms the timer to that period after each expiry; zero
+/// makes it one-shot. `value_ns == 0` disarms it regardless of `interval_ns`,
+/// matching `setitimer(2)` (a CPU-time one keeps the interval, which it
+/// reports, as Linux's does).
 ///
 /// **Nanoseconds, not `struct itimerval`.** The native ABI does not carry
 /// Linux's four-field `{tv_sec, tv_usec}` pair: [`crate::proc::itimer`] stores
@@ -5441,11 +5446,9 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 ///
 /// # Errors
 ///
-/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
-///   `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) count CPU time consumed by the
-///   process, which this kernel does not account for per-process. Refusing is
-///   honest; accepting would reproduce, one layer down, the exact "reports
-///   success and arms nothing" defect this call exists to remove.
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is above 2.
+///   (Until 2026-10-08 `ITIMER_VIRTUAL` and `ITIMER_PROF` were refused here,
+///   the kernel keeping no per-process CPU time to count them on.)
 /// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// No capability is required: the timer belongs to the calling process and
@@ -5458,17 +5461,19 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 /// Chosen number 1069, next free slot after 1068.
 pub const SYS_ITIMER_SET: u64 = 1069;
 
-/// `SYS_ITIMER_GET` — report the calling process's real interval timer.
+/// `SYS_ITIMER_GET` — report one of the calling process's interval timers.
 ///
 /// `(which) -> ok2(value_ns, interval_ns)`
 ///
-/// `value_ns` is the time remaining until the next `SIGALRM`, not the value the
-/// timer was armed with, and is zero when the timer is disarmed. Reading does
-/// not disturb the timer.
+/// `which` as for [`SYS_ITIMER_SET`]. `value_ns` is the time remaining until
+/// the timer's next signal (for a CPU-time one, the process's CPU time still
+/// to use; a tick if it is already due), not the value the timer was armed
+/// with, and is zero when the timer is disarmed. Reading does not disturb the
+/// timer.
 ///
 /// # Errors
 ///
-/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is above 2.
 /// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// Chosen number 1070, next free slot after 1069.
@@ -6873,6 +6878,130 @@ pub const SYS_CAP_REQUEST_FOR: u64 = 1154;
 /// `timeout_ns` passes first (the request goes on); `WouldBlock` for 0 on a
 /// pending request; `Interrupted` for a signal.
 pub const SYS_CAP_REQUEST_WAIT: u64 = 1155;
+
+/// `SYS_CPU_CLOCK(op, clockid)` -- the CPU-time clocks for native programs:
+/// how much processor time a process or one of its threads has used. The
+/// Linux ABI's own clocks, named by Linux's clock ids and answering Linux's
+/// errnos as `-errno` (the convention of [`SYS_POSIX_TIMER`]), for the C
+/// library's `clock_gettime`, `clock_getres`, `clock()`,
+/// `clock_getcpuclockid` and `pthread_getcpuclockid`.
+///
+/// | `op` | call | answer |
+/// |---|---|---|
+/// | [`CPU_CLOCK_GETTIME`] | `clock_gettime` | the clock's value, in nanoseconds |
+/// | [`CPU_CLOCK_GETRES`] | `clock_getres` | its resolution, in nanoseconds |
+/// | [`CPU_CLOCK_NANOSLEEP`] | `clock_nanosleep` | 0 once the clock reads the time |
+///
+/// `CPU_CLOCK_NANOSLEEP` takes `arg2` the flags (`TIMER_ABSTIME` 1), `arg3`
+/// the request (`struct timespec *`) and `arg4` where to write the time left
+/// (or 0), and sleeps until the clock -- 2, or a process's or another of the
+/// caller's threads' by id -- has advanced by the request (or reads it, for
+/// `TIMER_ABSTIME`), as Linux's `clock_nanosleep` does: within a tick of it,
+/// and for ever if nothing advances it, a process sleeping on its own clock
+/// with no other thread running included. `-EOPNOTSUPP` for 3 and a CLOCKFD
+/// id, `-EINVAL` for the caller's own thread's clock (it could never
+/// advance) and anything that is not a CPU-time clock. Interrupted by a
+/// signal it answers `-EINTR`, the time left written for a relative sleep:
+/// there is no `restart_syscall` for native programs.
+///
+/// `clockid` is `CLOCK_PROCESS_CPUTIME_ID` (2), `CLOCK_THREAD_CPUTIME_ID`
+/// (3), or a process's or thread's clock as `clock_getcpuclockid` and
+/// `pthread_getcpuclockid` make them: `(~id << 3) | perthread << 2 | which`,
+/// `which` 0 for user plus system time sampled at the tick (`CPUCLOCK_PROF`),
+/// 1 for user time so sampled (`CPUCLOCK_VIRT`), 2 for the precise run time
+/// (`CPUCLOCK_SCHED`, what 2 and 3 read; resolution 1 ns, the sampled ones a
+/// tick, 10 ms), and id 0 meaning the caller. A thread's clock is readable by
+/// its own process alone, any process's by anyone, as on Linux; an id naming
+/// neither -- or a gone thread, a reaped process -- is `-EINVAL`, which is how
+/// `clock_getcpuclockid` tells a live pid from a dead one. Every other clock
+/// id is `-EINVAL` here (the others have native calls of their own). The
+/// clocks run on through `exec` and start at zero in a `fork`'s child; a
+/// process's counts its exited threads, not its children. An unknown `op` is
+/// `-EINVAL`. No capability.
+pub const SYS_CPU_CLOCK: u64 = 1156;
+/// [`SYS_CPU_CLOCK`] operation: read the clock.
+pub const CPU_CLOCK_GETTIME: u64 = 0;
+/// [`SYS_CPU_CLOCK`] operation: its resolution.
+pub const CPU_CLOCK_GETRES: u64 = 1;
+/// [`SYS_CPU_CLOCK`] operation: sleep until the clock reads a time.
+pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
+
+/// `SYS_FS_MKFIFO` (1157) -- make a named pipe's node: Linux's
+/// `mknod(path, S_IFIFO | mode, 0)`, which `mkfifo` is.
+///
+/// `arg0`/`arg1` the path, `arg2` the permission bits, already less the
+/// caller's umask (the native umask is the C library's). Returns 0.
+/// `AlreadyExists` for a name that exists, of any type; `NotSupported` on a
+/// filesystem that cannot hold one (FAT -- Linux's `EPERM`); otherwise what
+/// creating a file there answers. Needs the File capability with `CREATE`, as
+/// `SYS_FS_MKDIR_MODE` does.
+pub const SYS_FS_MKFIFO: u64 = 1157;
+
+/// `SYS_FIFO_OPEN` (1158) -- open a named pipe: Linux's `open` of a FIFO's
+/// node, which `SYS_FS_OPEN` answers `NoSuchDeviceOrAddress` (`ENXIO`), as it
+/// answers a socket's: there is nothing behind the node to read. A C library
+/// that meets that answer asks this call with the same path and flags.
+///
+/// `arg0`/`arg1` the path, `arg2` the native open flags -- `READ`, `WRITE` or
+/// both, and `NOFOLLOW`/`NO_SYMLINKS` for the walk; the others are ignored, a
+/// FIFO being made by [`SYS_FS_MKFIFO`] -- and `arg3` bit 0 nonblocking
+/// (`O_NONBLOCK`). Returns a pipe handle -- the read end, the write end, or
+/// for `READ | WRITE` both ends in one handle -- that `SYS_PIPE_READ`,
+/// `SYS_PIPE_WRITE`, `SYS_PIPE_POLL` and `SYS_PIPE_CLOSE` take as any pipe
+/// end's.
+///
+/// The open waits as POSIX says (`kernel/src/ipc/fifo.rs`): for reading,
+/// until a writer has opened; for writing, until a reader has; for both,
+/// never. Nonblocking, a reader opens at once and a writer with no reader is
+/// `NoSuchDeviceOrAddress`. A signal while it waits is `Interrupted`, with
+/// nothing left open. `NoSuchDeviceOrAddress` too for a path that names no
+/// FIFO; `InvalidArgument` for neither `READ` nor `WRITE`. Needs the File
+/// capability with `READ`, as `SYS_FS_OPEN` does.
+pub const SYS_FIFO_OPEN: u64 = 1158;
+
+/// `SYS_PROCESS_SET_IDS` (1159) -- move between user or group ids by
+/// Linux's rules: the native `setuid`, `seteuid`, `setreuid`, `setresuid`,
+/// `setfsuid` and their group twins (`kernel/src/proc/setid.rs`).
+///
+/// `arg0` the operation, `arg1`..`arg3` its ids, `0xFFFF_FFFF` leaving one as
+/// it is:
+///
+/// | op | Linux call | ids |
+/// |---|---|---|
+/// | [`SET_IDS_UID`] 0 | `setuid` | `arg1` |
+/// | [`SET_IDS_REUID`] 1 | `setreuid` | real, effective |
+/// | [`SET_IDS_RESUID`] 2 | `setresuid` | real, effective, saved |
+/// | [`SET_IDS_FSUID`] 3 | `setfsuid` | `arg1` |
+/// | 4..=7 | the same for group ids | |
+///
+/// Privileged -- holding `SET_CREDENTIALS` over processes -- a caller may
+/// set any id, and `SET_IDS_UID` sets all four. Unprivileged, it may move an
+/// id only to a value one of its ids holds: `NotPermitted` (`EPERM`)
+/// otherwise; `InvalidArgument` for `SET_IDS_UID` of `0xFFFF_FFFF` or an
+/// unknown op. `SET_IDS_FSUID` answers the old filesystem id and never
+/// fails, as `setfsuid` does; the rest answer 0. Root's authority follows the
+/// user ids: put aside while the effective id is not 0 but another is, back
+/// with it, gone when none is 0 -- so `seteuid(1000)` then `seteuid(0)` works
+/// and `setuid(1000)` is for good. No authority comes from an id of 0 here,
+/// unlike the Linux calls: a native program's privilege is its capability.
+pub const SYS_PROCESS_SET_IDS: u64 = 1159;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setuid`.
+pub const SET_IDS_UID: u64 = 0;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setreuid`.
+pub const SET_IDS_REUID: u64 = 1;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setresuid`.
+pub const SET_IDS_RESUID: u64 = 2;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setfsuid`.
+pub const SET_IDS_FSUID: u64 = 3;
+/// Added to a [`SYS_PROCESS_SET_IDS`] user operation: its group twin.
+pub const SET_IDS_GROUP: u64 = 4;
+
+/// `SYS_PROCESS_GET_IDS` (1160) -- the caller's ids: `arg0` a buffer of eight
+/// `u32`s, filled with the real, effective, saved and filesystem user ids,
+/// then the same group ids (`getresuid`, `getresgid`, and the filesystem
+/// ids Linux shows only in `/proc/<pid>/status`). Returns 0;
+/// `InvalidAddress` for a buffer that cannot be written.
+pub const SYS_PROCESS_GET_IDS: u64 = 1160;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

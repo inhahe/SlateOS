@@ -2,8 +2,9 @@
 
 **Status:** PARTLY FIXED 2026-10-08 (lane B): `tee`, the program whose
 difference corrupted data, opens its files as its upstream does now, and so
-do `csplit`, whose pieces kept a diagnostic inside them, and the digest
-programs, whose `--check` read its own list as a `-` line's input.
+do `csplit`, whose pieces kept a diagnostic inside them, the digest
+programs, whose `--check` read its own list as a `-` line's input, and `pr`,
+whose `-m` read a file twice -- once as itself and once as `-`.
 **OPEN** for the other programs whose upstream keeps its files off
 descriptors 0-2 (the list at the end): each is converted with the harness
 case that shows the difference, not all at once.
@@ -72,13 +73,11 @@ those has to be ported as upstream does it, which is not `fd_safer` either.
 **Still to do** -- each with a closed-descriptor case in its harness that
 fails before and agrees after:
 
-* `stdio--.h` (`fopen_safer`): `pr` (its inputs). `ptx` has no `fopen`
-  of its own: its input and word files are read by gnulib's `read_file`,
-  which opens plainly, so only its output operand's `freopen` is the safe
-  one.
 * `freopen`/`fd_reopen` (onto 0 or 1): `dircolors`, `du --files0-from`,
   `shuf`, `tsort`, `uniq`, `ptx`'s output, `csplit`'s and `split`'s input,
-  `stty -F`, `touch`, `dd`, `nohup`.
+  `stty -F`, `touch`, `dd`, `nohup`. (`ptx` has no `fopen` of its own: its
+  input and word files are read by gnulib's `read_file`, which opens
+  plainly, so only its output operand's `freopen` is the safe one.)
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
   `copy.c`), `split`'s output files.
 * `ln`'s target directory (`openat_safer`).
@@ -98,6 +97,23 @@ md5sum -c SUMS <&-       (SUMS lists a, then -)
 Both are `stdfd::open_read_safer` now. `digest-diff.sh` has seven
 closed-standard-input cases for each of the seven programs; three differed
 before.
+
+**`pr`, 2026-10-08.** Upstream's `open_file` is `fopen` under `stdio--.h`.
+Ours opened plainly, and `-m` opens every file before it reads any, so with
+standard input closed the first file became descriptor 0 and the `-` column
+read it as well:
+
+```
+pr -m -D x f1 - <&-
+  ours: every line of f1 beside an empty `-` column, status 0
+  GNU:  the header and "line 1", then
+        pr: 'standard input': Bad file descriptor   (status 1)
+```
+
+The `-` column came out empty only because `f1` was short enough for its own
+column to have buffered all of it first; a longer file would have been split
+between the two. `pr-diff.sh` has four closed-standard-input cases with `-`
+among other files; three differed before (`stdfd::open_read_safer` now).
 
 **`sort`'s temporary files, 2026-10-08.** `sort` had none until its
 external merge was written (`known-issues-resolved/TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG.md`);

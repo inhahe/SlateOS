@@ -1,7 +1,8 @@
 ## TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER (lane B, 2026-10-07)
 
 **Status:** PARTLY FIXED 2026-10-08 (lane B): `tee`, the program whose
-difference corrupted data, opens its files as its upstream does now.
+difference corrupted data, opens its files as its upstream does now, and so
+does `csplit`, whose pieces kept a diagnostic inside them.
 **OPEN** for the other programs whose upstream keeps its files off
 descriptors 0-2 (the list at the end): each is converted with the harness
 case that shows the difference, not all at once.
@@ -36,7 +37,7 @@ them include, carries none:
 
 | mechanism | programs |
 |---|---|
-| `stdio--.h`: `fopen` is `fopen_safer` | `comm`, `csplit`, `digest.c` (the `*sum` programs, `cksum`), `dircolors`, `du`, `join`, `pr`, `ptx`, `shuf`, `tee`, `tsort`, `uniq` |
+| `stdio--.h`: `fopen` is `fopen_safer`, `freopen` is `freopen_safer` | `fopen`: `comm`, `csplit`, `digest.c` (the `*sum` programs, `cksum`), `join`, `pr`, `tee`. `freopen` only: `dircolors`, `du`, `ptx`, `shuf`, `tsort`, `uniq` |
 | `fcntl--.h`: `open` is `open_safer` | `copy.c` (`cp`, `mv`, `install`), `shred`, `split`, `tail` |
 | `stdlib--.h`: `mkstemp` is `mkstemp_safer` | `sort`'s temporary files, `temp-stream.c` (`tac`'s) |
 | `unistd--.h`: `dup`, `pipe` | `nohup` |
@@ -71,15 +72,35 @@ those has to be ported as upstream does it, which is not `fd_safer` either.
 fails before and agrees after:
 
 * `stdio--.h` (`fopen_safer`): the `*sum` programs and `cksum` (their
-  inputs), `pr` (its inputs), `csplit` (its output files), `ptx` (its
-  `-b`/`-i`/`-o` word files).
+  inputs and `-c`'s list), `pr` (its inputs). `ptx` has no `fopen` of its
+  own: its input and word files are read by gnulib's `read_file`, which
+  opens plainly, so only its output operand's `freopen` is the safe one.
 * `freopen`/`fd_reopen` (onto 0 or 1): `dircolors`, `du --files0-from`,
   `shuf`, `tsort`, `uniq`, `ptx`'s output, `csplit`'s and `split`'s input,
   `stty -F`, `touch`, `dd`, `nohup`.
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
   `copy.c`), `split`'s output files.
-* `stdlib--.h`: `sort`'s temporary files.
+* `stdlib--.h`: `sort`'s temporary files -- none exist yet, since ours
+  sorts in memory (`TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG`);
+  they are made safe when they are made.
 * `ln`'s target directory (`openat_safer`).
+
+**`csplit`, 2026-10-08.** Its pieces were plain opens. With standard
+error closed a piece became descriptor 2, and a `match not found` said
+while the last piece was open went into it; `-k` kept it there:
+
+```
+csplit -k marks.txt '/MARK/' '/nomatch/' 2>&-
+  ours: xx01 holds MARK b c MARK d, a line each, and then the line
+        csplit: '/nomatch/': match not found
+  GNU:  xx01 holds MARK b c MARK d, a line each
+```
+
+`csplit-diff.sh` holds three such cases and seven more around them (1500
+pieces with standard output closed, both descriptors closed at once); the
+three differed before the fix. Its *input* is upstream's `fd_reopen` onto
+descriptor 0, and ours is a plain open, which cannot be seen: ours reads the
+whole input and closes it before the first piece is made.
 
 Already as upstream before this entry: `shred`, `comm`, `join`, `tail` and
 `randint` (each called `fd_safer` at its one site), and `tac`'s temporary

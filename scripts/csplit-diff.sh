@@ -86,6 +86,12 @@ printf 'x\ny\nz' > nonl.txt
 # Empty input. Every pattern is out of range against it.
 : > empty.txt
 
+# Enough pieces that the sizes printed overflow standard output's buffer
+# while pieces are still being written: 1500 two-line pieces, each size two
+# or three bytes and a newline, past the 4096 bytes after which it is
+# written out mid-run.
+seq 1 3000 > seq3000.txt
+
 # --- machinery ----------------------------------------------------------------
 
 # One invocation of one side, in that side's own directory. `$1` is `ours` or
@@ -483,6 +489,27 @@ raw_case - - '/x/' '{*}'
 REDIR='>&-'
 run_case seq20.txt 4
 run_case seq20.txt 21
+# Upstream opens each piece through `fopen_safer` (`stdio--.h`), so a closed
+# standard descriptor stays closed and no piece is ever descriptor 1 or 2.
+# Opened plainly, a piece took the lowest free descriptor -- the closed one --
+# and became that standard stream: the sizes, flushed once the buffer filled,
+# were written into whichever piece held descriptor 1, and with `-k` the
+# `match not found` written while the last piece held descriptor 2 was kept
+# inside it.
+run_case seq3000.txt -n 4 2 '{*}'
+run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
+REDIR='2>&-'
+run_case marks.txt -k '/MARK/' '/nomatch/'
+run_case marks.txt '/MARK/' '/nomatch/'
+run_case seq20.txt -k 4 '/nomatch/'
+run_case seq20.txt -k 4 25
+run_case seq20.txt -k '/5/' '{9}'
+REDIR='<&- 2>&-'
+run_case marks.txt -k '/MARK/' '/nomatch/'
+REDIR='<&- >&-'
+run_case seq3000.txt -n 4 2 '{*}'
+REDIR='>&- 2>&-'
+run_case seq3000.txt -n 4 -k 2 '{*}' '/nomatch/'
 REDIR=
 
 # --- not implemented ----------------------------------------------------------

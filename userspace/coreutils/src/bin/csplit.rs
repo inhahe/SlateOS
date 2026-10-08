@@ -777,7 +777,14 @@ impl Sink<'_> {
         // the "cannot open ... for writing" phrasing it uses for the *input*.
         // Measured, not assumed; the two openings really are worded
         // differently.
-        let file = File::create(&name)
+        //
+        // Kept off descriptors 0-2, as upstream's `fopen` under `stdio--.h`
+        // is `fopen_safer`. Opened plainly, a piece took a closed standard
+        // descriptor and became that stream: the sizes, once their buffer
+        // filled, went into the piece holding descriptor 1, and a `match not
+        // found` said while the last piece held descriptor 2 was kept inside
+        // it under `-k`.
+        let file = stdfd::create_safer(&name)
             .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
         self.open = Some((name, file, 0));
         Ok(())

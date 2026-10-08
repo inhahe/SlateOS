@@ -18,6 +18,22 @@ pub fn is_space(b: u8) -> bool {
     matches!(b, b' ' | 0x09..=0x0d)
 }
 
+/// The text a C string function sees in a buffer the library read and then
+/// NUL-terminated: everything before the first NUL, if there is one.
+#[must_use]
+pub fn c_str(s: &[u8]) -> &[u8] {
+    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+    s.get(..end).unwrap_or_default()
+}
+
+/// `strchr (s + from, c)`, as an index into `s` -- which the caller has cut
+/// with [`c_str`], so a NUL is never found.
+#[must_use]
+pub fn strchr_from(s: &[u8], from: usize, c: u8) -> Option<usize> {
+    let at = s.get(from..)?.iter().position(|&b| b == c)?;
+    from.checked_add(at)
+}
+
 /// The digits of a base-10 number after its sign: their magnitude, saturated
 /// at `u64::MAX` and flagged when it overflowed, and how many there were.
 fn digits(s: &[u8]) -> (u64, bool, usize) {
@@ -152,9 +168,8 @@ impl<'a> Scan<'a> {
     /// Start scanning `s`, which ends at its first NUL if it has one.
     #[must_use]
     pub fn new(s: &'a [u8]) -> Self {
-        let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
         Self {
-            s: s.get(..end).unwrap_or_default(),
+            s: c_str(s),
             at: 0,
             failed: false,
         }
@@ -242,6 +257,24 @@ impl<'a> Scan<'a> {
     /// `%*u`: one number, discarded.
     pub fn skip_uint(&mut self) -> Option<()> {
         self.number().map(|_| ())
+    }
+
+    /// `%Ns`: one whitespace-delimited word of at most `max` bytes, after the
+    /// whitespace before it. A longer word is cut at `max`, and the rest of it
+    /// is where the next conversion starts -- as glibc leaves it, so that a
+    /// name too long for its buffer makes the number after it fail.
+    pub fn word(&mut self, max: usize) -> Option<&'a [u8]> {
+        if self.failed {
+            return None;
+        }
+        self.ws();
+        let rest = self.rest();
+        let n = rest.iter().take(max).take_while(|&&b| !is_space(b)).count();
+        if n == 0 {
+            return self.fail();
+        }
+        self.at = self.at.saturating_add(n);
+        rest.get(..n)
     }
 
     /// A literal in the format, which must match the input byte for byte.

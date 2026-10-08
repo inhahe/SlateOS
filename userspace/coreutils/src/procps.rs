@@ -1,4 +1,5 @@
-//! procps-ng 4.0.4's library: the pieces `uptime`, `w`, `ps` and `pgrep` share.
+//! procps-ng 4.0.4's library: the pieces `uptime`, `w`, `ps`, `pgrep` and `free`
+//! share.
 //!
 //! procps' programs are thin over `libproc2`. The line `uptime` prints is the
 //! first line `w` prints, and both come from one function in
@@ -19,12 +20,14 @@
 //! | [`escape_str`], [`escape_command`] | `library/escape.c` |
 //! | [`Task`], [`tasks`] | `procps_pids_reap(…, PIDS_FETCH_TASKS_ONLY)` for the items `w` asks for |
 //! | [`readproc`] | `library/readproc.c`: `stat2proc`, `status2proc` and the rest, and the walks over `/proc` |
-//! | [`scanf`] | glibc's `strtol`, `strtoul`, `atoi` and `sscanf`, as `readproc.c` applies them |
+//! | [`scanf`] | glibc's `strtol`, `strtoul`, `atoi`, `sscanf` and `strchr`, as the library applies them to a NUL-terminated buffer |
 //! | [`devname`] | `library/devname.c`: a terminal's number to its name |
 //! | [`pwcache`] | `library/pwcache.c`: user and group names by number |
+//! | [`strutils`] | `local/strutils.c`: `strtol_or_err` and `strtod_nol_or_err`, for `free` |
 //! | [`sysinfo`] | `procps_pid_length`, `btime` from `procps_stat_new`, `MemTotal`, `procps_uptime`, `lookup_wchan` |
 //! | [`namespace`] | `library/namespace.c`: a process's namespaces, by inode |
 //! | [`cvt`] | C's `double`-to-integer casts as gcc compiles them for x86-64 |
+//! | [`meminfo`] | `library/meminfo.c`: `/proc/meminfo` and the figures derived from it, for `free` |
 //! | [`signals`] | `local/signals.c`'s `signal_name_to_number`, procps' own spellings of a signal |
 //!
 //! # Why `fscanf`, and not `str::parse`
@@ -43,11 +46,13 @@ use localtime::Tm;
 
 pub mod cvt;
 pub mod devname;
+pub mod meminfo;
 pub mod namespace;
 pub mod pwcache;
 pub mod readproc;
 pub mod scanf;
 pub mod signals;
+pub mod strutils;
 pub mod sysinfo;
 use procinfo::ProcFs;
 

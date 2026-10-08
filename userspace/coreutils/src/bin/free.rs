@@ -277,397 +277,16 @@ impl Default for CmdArgs {
 }
 
 // ---------------------------------------------------------------------------
-// The two number parsers, transcribed from procps' `local/strutils.c`
+// The two number parsers: `coreutils::procps::strutils`
 // ---------------------------------------------------------------------------
 
-/// Why a number was refused, which decides the `: …` suffix on the diagnostic.
-///
-/// Upstream passes an `errno` to `error(3)`, which appends `strerror` of it.
-/// The two values it can pass here are `ERANGE` and `EINVAL`; both are spelled
-/// out as the literals glibc prints, because `free.c` *chooses* them rather
-/// than receiving them from the OS — there is no host error to translate, and
-/// `coreutils::errmsg::strerror` maps `io::ErrorKind`s, of which neither has
-/// one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NumFault {
-    /// `ERANGE` — `Numerical result out of range`.
-    Range,
-    /// No suffix at all: upstream reached `error(…, errno, …)` with `errno`
-    /// still 0.
-    NoConversion,
-    /// `EINVAL` — `Invalid argument`.
-    Invalid,
-}
-
-impl NumFault {
-    /// The text `error(3)` appends, including its leading `: `.
-    fn suffix(self) -> &'static str {
-        match self {
-            NumFault::Range => ": Numerical result out of range",
-            NumFault::NoConversion => "",
-            NumFault::Invalid => ": Invalid argument",
-        }
-    }
-}
-
-/// `strtol_or_err` with base 10, returning the `long` upstream would.
-///
-/// Leading whitespace and a sign are accepted because that is `strtol`; a
-/// trailing byte that is not a digit is not, because `strtol_or_err` insists on
-/// `*end == '\0'`.
-fn strtol(text: &[u8]) -> Result<i64, NumFault> {
-    if text.is_empty() {
-        // Upstream's `str != NULL && *str != '\0'` guard skips the conversion
-        // entirely and reports with a stale `errno`; divergence 3.
-        return Err(NumFault::NoConversion);
-    }
-    let mut i = 0usize;
-    while matches!(text.get(i), Some(c) if c.is_ascii_whitespace()) {
-        i = i.saturating_add(1);
-    }
-    let negative = match text.get(i) {
-        Some(b'-') => {
-            i = i.saturating_add(1);
-            true
-        }
-        Some(b'+') => {
-            i = i.saturating_add(1);
-            false
-        }
-        _ => false,
-    };
-    let start = i;
-    let mut value: i64 = 0;
-    let mut overflow = false;
-    while let Some(&c) = text.get(i) {
-        if !c.is_ascii_digit() {
-            break;
-        }
-        let digit = i64::from(c.saturating_sub(b'0'));
-        // Accumulated with the sign already applied so that `-9223372036854775808`
-        // is reachable, as it is for `strtol`.
-        match value.checked_mul(10).and_then(|v| {
-            v.checked_add(if negative {
-                digit.saturating_neg()
-            } else {
-                digit
-            })
-        }) {
-            Some(v) => value = v,
-            // `strtol` keeps consuming digits after saturating, and so must
-            // this, or `999999999999999999999x` would report the wrong fault.
-            None => overflow = true,
-        }
-        i = i.saturating_add(1);
-    }
-    if i == start {
-        // `str == end`: no digits at all.
-        return Err(NumFault::NoConversion);
-    }
-    if i != text.len() {
-        // `*end != '\0'`: trailing junk. Upstream reports with `errno` 0.
-        return Err(NumFault::NoConversion);
-    }
-    if overflow {
-        return Err(NumFault::Range);
-    }
-    Ok(value)
-}
-
-/// `strtod_nol_or_err` — procps' locale-independent decimal reader.
-///
-/// It is not `strtod`: there is no exponent, no hex form, no infinity and no
-/// NaN, and the radix point may be `.` **or** `,` (the comment in `strutils.c`
-/// notes that this is why the other cannot be a thousands separator). The
-/// digits are accumulated by the same walk-forward-then-multiply-down loop
-/// upstream uses, because its rounding is what ends up in the `float` the
-/// caller compares against 1.
-fn strtod_nol(text: &[u8]) -> Result<f64, NumFault> {
-    if text.is_empty() {
-        return Err(NumFault::NoConversion);
-    }
-    let mut cp = 0usize;
-    while matches!(text.get(cp), Some(c) if c.is_ascii_whitespace()) {
-        cp = cp.saturating_add(1);
-    }
-    let negative = match text.get(cp) {
-        Some(b'-') => {
-            cp = cp.saturating_add(1);
-            true
-        }
-        Some(b'+') => {
-            cp = cp.saturating_add(1);
-            false
-        }
-        _ => false,
-    };
-
-    // Walk to the end of the integer part first so that `mult` starts at the
-    // right power of ten and the digits can be consumed most-significant first.
-    let mut num = 0.0f64;
-    let mut mult = 0.1f64;
-    let mut radix = cp;
-    while matches!(text.get(radix), Some(c) if c.is_ascii_digit()) {
-        radix = radix.saturating_add(1);
-        mult *= 10.0;
-    }
-    while let Some(&c) = text.get(cp) {
-        if !c.is_ascii_digit() {
-            break;
-        }
-        num += f64::from(c.saturating_sub(b'0')) * mult;
-        mult /= 10.0;
-        cp = cp.saturating_add(1);
-    }
-    if cp == text.len() {
-        return Ok(if negative { -num } else { num });
-    }
-    if !matches!(text.get(cp), Some(b'.' | b',')) {
-        return Err(NumFault::Invalid);
-    }
-    cp = cp.saturating_add(1);
-    mult = 0.1;
-    while let Some(&c) = text.get(cp) {
-        if !c.is_ascii_digit() {
-            break;
-        }
-        num += f64::from(c.saturating_sub(b'0')) * mult;
-        mult /= 10.0;
-        cp = cp.saturating_add(1);
-    }
-    if cp == text.len() {
-        return Ok(if negative { -num } else { num });
-    }
-    // Trailing junk after the fraction falls out of upstream's `if` block and
-    // reaches `error(…, errno, …)` with `errno` still 0: no suffix.
-    Err(NumFault::NoConversion)
-}
+use coreutils::procps::strutils::{strtod_nol, strtol};
 
 // ---------------------------------------------------------------------------
-// `/proc/meminfo`, transcribed from procps' `library/meminfo.c`
+// `/proc/meminfo`: `coreutils::procps::meminfo`, which `vmstat` reads too
 // ---------------------------------------------------------------------------
 
-/// The keys read straight out of the file, before any derivation.
-///
-/// Every field is the kibibyte figure the kernel printed. A key that is not in
-/// the file stays 0 — that is what procps' hash lookup does with an unknown
-/// name, and several of the derivations below exist precisely to notice it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Raw {
-    mem_total: u64,
-    mem_free: u64,
-    mem_available: u64,
-    buffers: u64,
-    cached: u64,
-    s_reclaimable: u64,
-    shmem: u64,
-    high_total: u64,
-    high_free: u64,
-    low_total: u64,
-    low_free: u64,
-    swap_total: u64,
-    swap_free: u64,
-    commit_limit: u64,
-    committed_as: u64,
-    /// SlateOS publishes this instead of `SwapFree`; see divergence 1.
-    swap_used: u64,
-    /// Whether a `SwapFree:` line was present at all. Keyed on presence rather
-    /// than on the value, so a Linux machine whose swap is genuinely full — a
-    /// real `SwapFree: 0` — is not rewritten.
-    swap_free_seen: bool,
-    /// Whether a `SwapUsed:` line was present, i.e. whether there is anything
-    /// to substitute *from*.
-    swap_used_seen: bool,
-}
-
-/// Read the `Key: <n> kB` lines, ignoring every key we have no field for.
-///
-/// procps splits on the first `:`, reads the remainder with `strtoul` and skips
-/// to the next newline, so a key it does not know costs nothing and a line
-/// without a `:` is skipped. Trailing units (`kB`) are ignored because
-/// `strtoul` stops at the first non-digit.
-/// Parse `/proc/meminfo` the way procps does.
-///
-/// # Deliberately not `procinfo::MemInfo`
-///
-/// On 2026-09-10 five of the six hand-written meminfo parsers in `userspace/`
-/// were replaced by the shared one. This is the sixth, and it stays, because
-/// the two have **opposite parsing policies and both are correct for their
-/// jobs**:
-///
-/// - [`read_ul`] below is a reimplementation of C's `strtoul`: skip leading
-///   whitespace, take digits, stop at the first non-digit, saturate on
-///   overflow. It accepts a bare number, ignores any suffix, and is what
-///   procps actually does.
-/// - `procinfo::parse_kib` **refuses a unit it does not recognise**, so that
-///   `16 MB` reads as absent rather than as `16` KiB -- the same number in the
-///   same font, off by 1024.
-///
-/// That refusal is the right default for a shared reader, and the wrong
-/// behaviour for this binary, whose entire purpose is to match upstream `free`
-/// including on malformed input. Converting it would be uniformity bought with
-/// fidelity, which is the trade this crate exists to refuse.
-///
-/// So if a later sweep for `/proc/meminfo` finds this file: it is not an
-/// oversight. Change it only if the goal changes from "behave like procps" to
-/// something else.
-fn parse_meminfo(text: &[u8]) -> Raw {
-    let mut raw = Raw::default();
-    for line in text.split(|&c| c == b'\n') {
-        let Some(colon) = line.iter().position(|&c| c == b':') else {
-            continue;
-        };
-        let (key, rest) = line.split_at(colon);
-        // `split_at` leaves the `:` at the head of `rest`.
-        let value = read_ul(rest.get(1..).unwrap_or_default());
-        let slot: &mut u64 = match key {
-            b"MemTotal" => &mut raw.mem_total,
-            b"MemFree" => &mut raw.mem_free,
-            b"MemAvailable" => &mut raw.mem_available,
-            b"Buffers" => &mut raw.buffers,
-            b"Cached" => &mut raw.cached,
-            b"SReclaimable" => &mut raw.s_reclaimable,
-            b"Shmem" => &mut raw.shmem,
-            b"HighTotal" => &mut raw.high_total,
-            b"HighFree" => &mut raw.high_free,
-            b"LowTotal" => &mut raw.low_total,
-            b"LowFree" => &mut raw.low_free,
-            b"SwapTotal" => &mut raw.swap_total,
-            b"SwapFree" => {
-                raw.swap_free_seen = true;
-                &mut raw.swap_free
-            }
-            b"SwapUsed" => {
-                raw.swap_used_seen = true;
-                &mut raw.swap_used
-            }
-            b"CommitLimit" => &mut raw.commit_limit,
-            b"Committed_AS" => &mut raw.committed_as,
-            _ => continue,
-        };
-        *slot = value;
-    }
-    raw
-}
-
-/// `strtoul(head, NULL, 10)` — leading whitespace, then digits, saturating.
-///
-/// Saturating rather than wrapping: `strtoul` clamps to `ULONG_MAX` on
-/// overflow, and a `/proc/meminfo` line that overflows 64 bits is corrupt
-/// rather than enormous, so the clamp is also the honest reading.
-fn read_ul(text: &[u8]) -> u64 {
-    let mut value: u64 = 0;
-    let mut i = 0usize;
-    while matches!(text.get(i), Some(c) if c.is_ascii_whitespace()) {
-        i = i.saturating_add(1);
-    }
-    while let Some(&c) = text.get(i) {
-        if !c.is_ascii_digit() {
-            break;
-        }
-        value = value
-            .saturating_mul(10)
-            .saturating_add(u64::from(c.saturating_sub(b'0')));
-        i = i.saturating_add(1);
-    }
-    value
-}
-
-/// Everything `free` actually prints, after procps' derivations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Mem {
-    total: u64,
-    free: u64,
-    available: u64,
-    buffers: u64,
-    /// `Cached + SReclaimable` — procps' `derived_mem_cached`.
-    cached_all: u64,
-    /// `Shmem`.
-    shared: u64,
-    /// `MemTotal - MemAvailable`, or `MemTotal - MemFree` if that went
-    /// negative. Stored as the `unsigned long` upstream stores it in, wrap and
-    /// all, because the wrap is visible: see the `-1` row in the table above.
-    used: u64,
-    high_total: u64,
-    high_free: u64,
-    high_used: u64,
-    low_total: u64,
-    low_free: u64,
-    low_used: u64,
-    swap_total: u64,
-    swap_free: u64,
-    swap_used: u64,
-    commit_limit: u64,
-    committed_as: u64,
-}
-
-/// procps' `meminfo_read_failed()` tail, in its original order.
-///
-/// The order matters at least twice: `derived_mem_cached` is computed *before*
-/// the `MemAvailable > MemTotal` guard rewrites `MemAvailable`, and the
-/// `LowTotal == 0` substitution happens *after* `derived_mem_hi_used`, so a
-/// kernel exporting neither still gets a `High:` row of zeroes.
-fn derive(raw: &Raw) -> Mem {
-    let mut m = Mem {
-        total: raw.mem_total,
-        free: raw.mem_free,
-        available: raw.mem_available,
-        buffers: raw.buffers,
-        shared: raw.shmem,
-        high_total: raw.high_total,
-        high_free: raw.high_free,
-        low_total: raw.low_total,
-        low_free: raw.low_free,
-        swap_total: raw.swap_total,
-        swap_free: raw.swap_free,
-        commit_limit: raw.commit_limit,
-        committed_as: raw.committed_as,
-        ..Mem::default()
-    };
-
-    // Divergence 1, applied before anything reads `swap_free`: without it the
-    // `SwapFree < SwapTotal` test below is `0 < SwapTotal` and swap reads full.
-    if !raw.swap_free_seen && raw.swap_used_seen {
-        m.swap_free = raw.swap_total.saturating_sub(raw.swap_used);
-    }
-
-    // "if (0 == MemAvailable) MemAvailable = MemFree" — kernels before 3.14.
-    if m.available == 0 {
-        m.available = m.free;
-    }
-    m.cached_all = raw.cached.wrapping_add(raw.s_reclaimable);
-    // The LXC guard: a container sees the host's MemAvailable against its own
-    // MemTotal, which can be larger.
-    if m.available > m.total {
-        m.available = m.free;
-    }
-    // `long mem_used`, deliberately signed, and deliberately allowed to stay
-    // negative on the second attempt.
-    let signed = (m.total as i64).wrapping_sub(m.available as i64);
-    let signed = if signed < 0 {
-        (m.total as i64).wrapping_sub(m.free as i64)
-    } else {
-        signed
-    };
-    m.used = signed as u64;
-
-    if m.high_free < m.high_total {
-        m.high_used = m.high_total.wrapping_sub(m.high_free);
-    }
-    // A 64-bit kernel exports no Low*/High*; procps reads the whole of memory
-    // as "low", which is the correct statement there.
-    if m.low_total == 0 {
-        m.low_total = m.total;
-        m.low_free = m.free;
-    }
-    if m.low_free < m.low_total {
-        m.low_used = m.low_total.wrapping_sub(m.low_free);
-    }
-    if m.swap_free < m.swap_total {
-        m.swap_used = m.swap_total.wrapping_sub(m.swap_free);
-    }
-    m
-}
+use coreutils::procps::meminfo::{self, Mem};
 
 // ---------------------------------------------------------------------------
 // Formatting, transcribed from `scale_size()` and `print_head_col()`
@@ -1137,7 +756,7 @@ fn print_all<W: Write, R: FnMut() -> io::Result<Vec<u8>>, S: FnMut(Duration)>(
                 "Unable to create meminfo structure".to_owned()
             })
         })?;
-        let mem = derive(&parse_meminfo(&text));
+        let mem = meminfo::derive(&meminfo::parse(&text));
 
         let written = if flags.line {
             // Upstream withholds the newline while more iterations are coming,
@@ -1215,7 +834,10 @@ fn run_main() -> ExitCode {
     let mut out = Stream::stdout();
     let mut err = Stream::stderr();
 
-    let mut read_meminfo = || std::fs::read(MEMINFO_PATH);
+    // As the library reads it -- one bounded `read`, an empty file `EIO` --
+    // so an empty `/proc/meminfo` is "Unable to create meminfo structure"
+    // here as it is upstream, and not a table of zeros.
+    let mut read_meminfo = || meminfo::read(MEMINFO_PATH);
     let mut sleep = std::thread::sleep;
 
     let status = run(&argv, &mut out, &mut err, &mut read_meminfo, &mut sleep);
@@ -1235,9 +857,9 @@ fn run_main() -> ExitCode {
 )]
 mod tests {
     use super::{
-        CmdArgs, Flags, MEMINFO_PATH, NumFault, Request, derive, parse_meminfo, run, scale_size,
-        scan, strtod_nol, strtol,
+        CmdArgs, Flags, MEMINFO_PATH, Request, meminfo, run, scale_size, scan, strtod_nol, strtol,
     };
+    use coreutils::procps::strutils::NumFault;
     use std::ffi::OsString;
     use std::io;
     use std::time::Duration;
@@ -1867,25 +1489,29 @@ mod tests {
         assert_eq!(err, b"free: Unable to create meminfo structure\n");
     }
 
-    /// A key with no field is skipped, a line with no colon is skipped, and the
-    /// `kB` suffix stops the number rather than joining it.
+    /// A key with no field is skipped, and the `kB` suffix stops the number
+    /// rather than joining it. A line with no colon is not skipped: it becomes
+    /// the front of the next line's key, as in procps, so `MemFree` is lost --
+    /// `coreutils::procps::meminfo::parse` says more.
     #[test]
-    fn unknown_keys_and_junk_lines_are_ignored() {
-        let raw = parse_meminfo(
+    fn unknown_keys_and_junk_lines() {
+        let raw = meminfo::parse(
             b"MemTotal:       1024 kB\n\
               ZeroPoolHits:      7\n\
               this line has no colon\n\
-              MemFree:         512 kB\n",
+              MemFree:         512 kB\n\
+              Buffers:         64 kB\n",
         );
         assert_eq!(raw.mem_total, 1024);
-        assert_eq!(raw.mem_free, 512);
+        assert_eq!(raw.mem_free, 0);
+        assert_eq!(raw.buffers, 64);
         assert!(!raw.swap_free_seen);
     }
 
     /// Every value the table prints, in one place, for the shape this OS has.
     #[test]
     fn derivation_of_the_slateos_shape() {
-        let mem = derive(&parse_meminfo(D.as_bytes()));
+        let mem = meminfo::derive(&meminfo::parse(D.as_bytes()));
         assert_eq!(mem.total, 1_000_000);
         assert_eq!(mem.free, 400_000);
         assert_eq!(mem.available, 400_000, "MemAvailable absent -> MemFree");

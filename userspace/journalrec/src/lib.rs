@@ -1,4 +1,5 @@
-//! One spelling of a journal record, shared by everything that writes one.
+//! One spelling of a journal record, shared by everything that writes one
+//! and everything that reads one.
 //!
 //! `journalctl` reads JSON-lines records: `ts`, `level`, `service`, `msg`
 //! and `pid`, from `/var/log/syslog.jsonl` (and from `/var/log/journal/`,
@@ -12,12 +13,20 @@
 //! can forge entries around it. There is one escaper here and `syslogd`'s
 //! private copy is gone.
 //!
+//! The reading half -- [`parse_object`] and [`Value`] -- is shared for the
+//! same reason the other way round: two readers of one format drift apart,
+//! and did (see the `read` module).
+//!
 //! No dependencies and a `&str`/`String` API, so this stays a formatter and
-//! not a second libc -- §768's exemption.
+//! a parser, not a second libc -- §768's exemption.
 
 #![no_std]
 
 extern crate alloc;
+
+mod read;
+
+pub use read::{Value, parse_object};
 
 use alloc::format;
 use alloc::string::String;

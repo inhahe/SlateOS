@@ -29475,10 +29475,13 @@ pub fn self_test_callmax_abi() -> KernelResult<()> {
     //
     // What fails is a probe that has *waited* -- blocked, the regression's
     // shape -- for 5 s, judged by its task's scheduler state rather than by
-    // the clock alone. A probe still running when 5 s are up is only slow:
-    // TCG with another lane compiling beside it, which debug boot 13 of
-    // lane-a (2026-10-08) reported as a failure (state Running) of a probe
-    // that had passed that morning. It gets up to 120 s, and still fails then.
+    // the clock alone. A probe still running when 5 s are up is only slow
+    // (TCG with another lane compiling beside it); it gets up to 120 s, and
+    // still fails then. The process's own state says nothing here: it reads
+    // `Running` while its only thread is blocked, which is how debug boot 13
+    // of lane-a (2026-10-08) reported a probe blocked in a 2 GiB blocking
+    // `pipe_write` -- whole since that morning's e0ed7bd41 -- as one still
+    // running; the probe writes with `pipe_try_write` now.
     const BLOCKED_NS: u64 = 5_000_000_000;
     const RUNNING_NS: u64 = 120_000_000_000;
     let start = crate::hrtimer::now_ns();

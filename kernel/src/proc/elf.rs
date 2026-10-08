@@ -29795,10 +29795,18 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
 /// past user space is `InvalidAddress` although the copy would stop at 1 MiB.
 /// Without that check the write would succeed and the read would block.
 ///
+/// The 2 GiB pipe write is `pipe_try_write`'s, which puts in what fits and
+/// returns. Since 2026-10-08 (e0ed7bd41, "whole pipe writes") a blocking
+/// `pipe_write` returns only once every byte is in, as POSIX asks -- a bounce
+/// at a time, so still bounded per copy -- and this probe, its pipe's only
+/// reader, would wait for itself; it did, in every boot from then until the
+/// probe was changed (debug boot 13 of lane-a reported it as a probe still
+/// `Running`, the process's state, while its thread was blocked).
+///
 /// | Code | Call | Length | Expect |
 /// |---|---|---|---|
 /// | `0x51` | `pipe_create` (220) | -- | two handles |
-/// | `0x52` | `pipe_write` (221) | 2 GiB | `65536` |
+/// | `0x52` | `pipe_try_write` (223) | 2 GiB | `65536` |
 /// | `0x53` | `pipe_read` (222) | 2 GiB | `65536`, what `0x52` wrote |
 /// | `0x54` | `pipe_write` | `2^63` | `-101` InvalidAddress |
 /// | `0x55` | `pipe_read` | `2^63` | `-101`, not a block on the empty pipe |
@@ -29918,11 +29926,14 @@ pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
     const RDI_FROM_R14: [u8; 3] = [0x4C, 0x89, 0xF7]; // mov rdi, r14
 
     // --- a pipe: rbx = read end, r12 = write end --------------------------
+    // The 2 GiB write is the nonblocking one: a blocking write returns only
+    // once every byte is in (POSIX), which needs a reader this one thread
+    // cannot be while it waits.
     create(&mut code, 220, [MOV_RBX_RAX, MOV_R12_RDX], 0x51);
     transfer(
         &mut code,
         RDI_FROM_R12,
-        221,
+        223,
         DATA_VADDR,
         TWO_GIB,
         ONE_BUFFER,

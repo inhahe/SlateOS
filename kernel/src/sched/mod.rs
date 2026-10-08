@@ -5631,6 +5631,41 @@ pub fn load_average_x100() -> u64 {
     LOAD_AVG_1.load(Ordering::Relaxed).saturating_mul(100) >> LOAD_FSHIFT
 }
 
+/// Whether task 0 -- the BSP's idle task, in which `kernel_main` runs the
+/// whole boot -- is still doing that work: true until it drops into the idle
+/// loop ([`boot_work_done`]).
+///
+/// The boot runs at the idle level, below every other task, so it runs only
+/// when they all block -- which every self-test relies on to let what it
+/// spawns run first. But two tasks that never both block keep it off the CPU
+/// for good, and [`check_starvation`] passes over idle-level tasks. That is
+/// how lane-a's boot of a35d7960c hung for its last twenty minutes: the ring
+/// bench's busy sender and the netstack daemon handed the CPU back and forth,
+/// and the boot -- ready to stop them -- waited 119 082 ticks. While this is
+/// set, the booster lifts task 0 as it lifts any starved task.
+static BOOT_TASK_WORKING: AtomicBool = AtomicBool::new(true);
+
+/// Task 0 has finished the boot and is the idle loop from here on: the
+/// booster leaves it be, as it leaves every idle task (`main::idle_loop`).
+pub fn boot_work_done() {
+    BOOT_TASK_WORKING.store(false, Ordering::Release);
+}
+
+/// Whether the booster passes task `id` over: an idle-level task -- task 0
+/// excepted while it is still the boot ([`BOOT_TASK_WORKING`]) -- a
+/// throttled one, which waits by design, and a real-time one, whose waiting
+/// is only for higher real-time levels. Split out so its rule can be checked
+/// on its own.
+fn starvation_exempt(
+    id: TaskId,
+    priority: u8,
+    throttled: bool,
+    realtime: bool,
+    boot_working: bool,
+) -> bool {
+    throttled || realtime || (priority >= task::IDLE_PRIORITY && !(id == 0 && boot_working))
+}
+
 /// Anti-starvation check: boost priority of tasks stuck in Ready too long.
 ///
 /// Called periodically by the BSP (every `STARVATION_CHECK_INTERVAL` ticks).
@@ -5674,19 +5709,18 @@ fn check_starvation() {
     let mut boost_list: [(TaskId, u8, usize); 8] = [(0, 0, 0); 8];
     let mut boost_count = 0usize;
 
+    let boot_working = BOOT_TASK_WORKING.load(Ordering::Acquire);
     for (&id, task) in state.tasks.iter() {
         if task.state != TaskState::Ready {
             continue;
         }
-        if task.throttled {
-            continue; // Throttled tasks wait by design.
-        }
-        if task.priority >= task::IDLE_PRIORITY {
-            continue; // Idle tasks don't need boosting.
-        }
-        if task.policy.is_realtime() {
-            // A real-time task waits only for higher real-time levels, by
-            // design; its waiting is not starvation.
+        if starvation_exempt(
+            id,
+            task.priority,
+            task.throttled,
+            task.policy.is_realtime(),
+            boot_working,
+        ) {
             continue;
         }
         if task.ready_since_tick == 0 {
@@ -5767,6 +5801,96 @@ fn check_starvation() {
         }
     }
     serial_println!("]");
+}
+
+/// Set to stop [`self_test_boot_not_starved`]'s spinners.
+static BOOT_STARVE_STOP: AtomicBool = AtomicBool::new(false);
+/// When the spinners stop by themselves ([`crate::hrtimer::now_ns`]), so a
+/// booster that has stopped lifting the boot fails the test instead of
+/// hanging the boot.
+static BOOT_STARVE_GIVE_UP_NS: AtomicU64 = AtomicU64::new(0);
+/// Spinners still running.
+static BOOT_STARVE_RUNNING: AtomicU64 = AtomicU64::new(0);
+
+/// [`self_test_boot_not_starved`]'s spinner: never blocks, until told to
+/// stop or its give-up time comes.
+extern "C" fn boot_starve_spinner(_arg: u64) {
+    while !BOOT_STARVE_STOP.load(Ordering::Acquire)
+        && crate::hrtimer::now_ns() < BOOT_STARVE_GIVE_UP_NS.load(Ordering::Acquire)
+    {
+        core::hint::spin_loop();
+    }
+    BOOT_STARVE_RUNNING.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// The boot -- task 0, at the idle level -- gets the CPU back while two tasks
+/// that never block hold its CPU ([`BOOT_TASK_WORKING`]): it sleeps behind
+/// them, and must be running again within the booster's threshold and check
+/// interval (two seconds and one), with room for QEMU, not when they give up
+/// at twelve. Run from `kernel_main` with interrupts enabled: the booster is
+/// the timer's.
+///
+/// # Errors
+///
+/// `InternalError` if the boot waited past the limit; a spawn's error.
+pub fn self_test_boot_not_starved() -> KernelResult<()> {
+    const GIVE_UP_NS: u64 = 12_000_000_000;
+    const LIMIT_NS: u64 = 6_000_000_000;
+    if current_task_id() != 0 {
+        serial_println!("[sched]   boot task not starved: not run from the boot -- skipped");
+        return Ok(());
+    }
+    BOOT_STARVE_STOP.store(false, Ordering::Release);
+    BOOT_STARVE_GIVE_UP_NS.store(
+        crate::hrtimer::now_ns().saturating_add(GIVE_UP_NS),
+        Ordering::Release,
+    );
+    BOOT_STARVE_RUNNING.store(0, Ordering::Release);
+    for name in [&b"boot-starve-a"[..], &b"boot-starve-b"[..]] {
+        // On the boot's CPU, at an ordinary level: what the ring bench's
+        // pair was.
+        BOOT_STARVE_RUNNING.fetch_add(1, Ordering::AcqRel);
+        if let Err(e) = spawn_with_affinity(name, 16, boot_starve_spinner, 0, 0, 1) {
+            BOOT_STARVE_RUNNING.fetch_sub(1, Ordering::AcqRel);
+            BOOT_STARVE_STOP.store(true, Ordering::Release);
+            return Err(e);
+        }
+    }
+    let t0 = crate::hrtimer::now_ns();
+    sleep_ms(10);
+    let waited = crate::hrtimer::now_ns().saturating_sub(t0);
+    BOOT_STARVE_STOP.store(true, Ordering::Release);
+    // Below both spinners, the boot runs again once they have seen the flag
+    // and gone.
+    while BOOT_STARVE_RUNNING.load(Ordering::Acquire) != 0 {
+        yield_now();
+    }
+    reap_dead_tasks();
+    // The rule on its own: task 0 is lifted only while it is the boot.
+    let rule = !starvation_exempt(0, task::IDLE_PRIORITY, false, false, true)
+        && starvation_exempt(0, task::IDLE_PRIORITY, false, false, false)
+        && starvation_exempt(7, task::IDLE_PRIORITY, false, false, true)
+        && !starvation_exempt(7, 16, false, false, true)
+        && starvation_exempt(7, 16, true, false, true)
+        && starvation_exempt(7, 3, false, true, true);
+    if !rule {
+        serial_println!("[sched]   FAIL: the booster's exemptions are not as documented");
+        return Err(KernelError::InternalError);
+    }
+    if waited > LIMIT_NS {
+        serial_println!(
+            "[sched]   FAIL: the boot waited {} ms behind two tasks that never block \
+             (the booster should have lifted it within ~3 s)",
+            waited / 1_000_000
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[sched]   boot task not starved: back on the CPU {} ms into a 10 ms sleep behind two \
+         tasks that never block: OK",
+        waited / 1_000_000
+    );
+    Ok(())
 }
 
 /// Move one starved task to its boost level ([`starvation_target`]) and

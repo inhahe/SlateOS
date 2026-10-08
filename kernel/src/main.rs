@@ -1966,6 +1966,16 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Integrity,
         || lockdep::self_test_lock_context(),
     );
+
+    // The boot runs in task 0, at the idle level: two tasks that never block
+    // would keep it off the CPU for good, but for the booster, which lifts it
+    // until `idle_loop` (`sched::BOOT_TASK_WORKING`). Here, because the
+    // booster is the timer's, just enabled.
+    selftest::dispatch(
+        "Boot task not starved",
+        selftest::Severity::Integrity,
+        || sched::self_test_boot_not_starved(),
+    );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     // The workqueue worker, as soon as tasks can be scheduled preemptively:
@@ -9711,6 +9721,9 @@ fn install_boot_file(path: &str, contents: &[u8], image_is_root: bool) {
 /// Maintenance (reap + refill) runs at reduced frequency to keep
 /// lock pressure low.
 fn idle_loop() -> ! {
+    // The boot is over: from here task 0 is the idle task alone, and the
+    // anti-starvation booster leaves it be (`sched::boot_work_done`).
+    sched::boot_work_done();
     let mut tick_counter = 0u32;
     loop {
         // Notify RCU that this CPU is entering idle.  An idle CPU is

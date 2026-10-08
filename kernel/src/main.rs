@@ -91,6 +91,7 @@ mod cpu;
 mod cpu_hotplug;
 mod cpu_topology;
 mod cpufreq;
+mod cpusync;
 mod cputime;
 mod crypto;
 mod devhotplug;
@@ -7537,6 +7538,12 @@ extern "C" fn kernel_main() -> ! {
     //                scheduler (per-CPU queues), page tables (identity mapping).
     smp::init();
     selftest::dispatch_debug("Smp", selftest::Severity::Integrity, || smp::self_test());
+
+    // Cross-CPU barriers (membarrier's expedited commands): every other CPU
+    // is interrupted and answers. Needs the APs that smp::init just started.
+    selftest::dispatch_debug("Cross-CPU barrier", selftest::Severity::Integrity, || {
+        cpusync::self_test()
+    });
 
     // Step 22b½: Validate SMP scheduler invariants.
     // Now that all APs are online with their idle tasks, verify

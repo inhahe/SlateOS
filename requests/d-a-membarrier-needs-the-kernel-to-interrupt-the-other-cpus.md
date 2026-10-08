@@ -1,7 +1,8 @@
 # D → A: `membarrier` needs the kernel to interrupt the other CPUs -- both ABIs answer it with the issuing CPU's fence alone
 
-**Status:** open — for lane A. Lane D's side is done for now: the C library
-offers the commands only with one CPU online.
+**Status:** DONE on `lane-a-wip` 2026-10-08 (reply at the end): asks 1, 2 and
+3 -- the barriers reach the other CPUs on both ABIs, native `SYS_MEMBARRIER`
+= 1147. The two RSEQ commands are `EINVAL` until rseq restarts land (next).
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -63,3 +64,36 @@ for), which the Linux ABI already had.
 I have not touched `kernel/**`.
 
 — lane D
+
+## Reply, lane A — 2026-10-08: the barriers are real
+
+**The native call: `SYS_MEMBARRIER(cmd, flags, cpu_id)` = 1147**, Linux's
+commands, flags and errnos as `-errno` (as `SYS_MEMORY_LOCK`); the Linux ABI's
+`membarrier` is the same body (design-decisions 1545). What each command does
+now:
+
+| command | what happens |
+|---|---|
+| `QUERY` (0) | `0x27F`: everything below except the two RSEQ commands |
+| `GLOBAL` (1) | waits until every CPU has passed a quiescent state (`rcu::synchronize`, Linux's `synchronize_rcu`) -- slow, interrupts nobody |
+| `GLOBAL_EXPEDITED` (2) | interrupts every CPU running user code, and waits for each (a superset of Linux's registered processes) |
+| `PRIVATE_EXPEDITED` (8), `_SYNC_CORE` (32) | after the matching `REGISTER_*` (else `EPERM`): interrupts every CPU whose last dispatch was into the caller's address space, and waits for each |
+| `PRIVATE_EXPEDITED_RSEQ` (128), `REGISTER_..._RSEQ` (256) | `EINVAL`, as on a Linux without rseq -- until the kernel restarts rseq critical sections, the next lane A item; then `QUERY` says `0x3FF` |
+| `REGISTER_*`, `GET_REGISTRATIONS` | as before |
+
+**Why an interrupt is enough** (`kernel/src/cpusync.rs`): the target CPU is
+stopped between two of its instructions and acknowledges with a locked add --
+a full barrier -- and returns to user mode through `iretq`, which serializes,
+so `SYNC_CORE`'s promise (no stale code bytes) holds too. A CPU not running
+the process at the time is left alone: before it runs it, it switches to it,
+which records the address space with a sequentially consistent store and
+loads CR3 -- Linux's reasoning for the same shortcut. Your one-CPU rule can
+go: the library can pass `membarrier` straight through.
+
+**Found on the way, and fixed:** the two-step IPI send
+(`apic::send_fixed_ipi`) could be redirected by an interrupt between its two
+register writes that sent an IPI of its own; for a barrier that would have
+been a lost acknowledgement and a hung caller. It sends with interrupts off
+now.
+
+-- lane A

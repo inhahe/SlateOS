@@ -740,28 +740,38 @@ pub unsafe fn send_ipi_all_excluding_self(vector: u8) {
 /// wake-ups such as reschedule IPIs (only wake the CPU that has new
 /// work, not all CPUs).
 ///
+/// The destination and the command are two register writes, so they are
+/// made with interrupts off: an interrupt between them whose handler sent an
+/// IPI of its own (a wake from a timer) left its destination in ICR_HIGH, and
+/// the second write then sent this IPI there instead -- harmless for a
+/// reschedule, which the right CPU picks up at its next tick, but a lost
+/// acknowledgement and a hung initiator for a barrier (`cpusync`). Linux
+/// sends with interrupts off for the same reason.
+///
 /// # Safety
 ///
 /// APIC must be initialized.  The vector must have a valid ISR in the IDT.
 /// Must not send to the current CPU (self-IPI has a different mechanism
 /// and could cause re-entrancy issues in ISR context).
 pub unsafe fn send_fixed_ipi(apic_id: u8, vector: u8) {
-    wait_icr_idle();
+    crate::cpu::without_interrupts(|| {
+        wait_icr_idle();
 
-    // ICR high: destination APIC ID in bits [31:24].
-    // SAFETY: Valid APIC register write.
-    unsafe {
-        apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
-    }
+        // ICR high: destination APIC ID in bits [31:24].
+        // SAFETY: Valid APIC register write.
+        unsafe {
+            apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
+        }
 
-    // ICR low: fixed delivery (000), physical dest, edge trigger.
-    // Bits 19:18 = 00 (no shorthand — use specific destination).
-    // SAFETY: Valid APIC register write, triggers the IPI.
-    unsafe {
-        apic_write(APIC_ICR_LOW, u32::from(vector));
-    }
+        // ICR low: fixed delivery (000), physical dest, edge trigger.
+        // Bits 19:18 = 00 (no shorthand — use specific destination).
+        // SAFETY: Valid APIC register write, triggers the IPI.
+        unsafe {
+            apic_write(APIC_ICR_LOW, u32::from(vector));
+        }
 
-    wait_icr_idle();
+        wait_icr_idle();
+    });
 }
 
 /// Reschedule IPI vector.

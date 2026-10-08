@@ -20013,6 +20013,12 @@ pub fn sys_thread_scheduler(args: &SyscallArgs) -> SyscallResult {
     super::linux::native_thread_scheduler(args.arg0, args.arg1, args.arg2, args.arg3)
 }
 
+/// `SYS_MEMBARRIER` (1147) — Linux's `membarrier`, its commands and errnos.
+/// See [`SYS_MEMBARRIER`](super::number::SYS_MEMBARRIER).
+pub fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
+    super::linux::native_membarrier(args.arg0, args.arg1, args.arg2)
+}
+
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem
 /// root directory.
 ///

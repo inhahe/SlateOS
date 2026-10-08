@@ -688,6 +688,47 @@ static CURRENT_LEVEL: [CachePadded<AtomicU8>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// The address space each CPU last dispatched a task into (its PML4's
+/// physical address; 0 for a kernel task): which CPUs a `membarrier` barrier
+/// interrupts (`cpusync`). A change is stored sequentially consistent, which
+/// on x86 is a full barrier -- the ordering `cpusync`'s module doc relies on
+/// to leave alone a CPU that is not running the process.
+static CURRENT_ASPACE: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// The CPUs whose last dispatch was into address space `pml4` (bit N = CPU
+/// N).
+#[must_use]
+pub fn cpus_running_aspace(pml4: u64) -> u64 {
+    CURRENT_ASPACE
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.load(Ordering::SeqCst) == pml4)
+        .fold(0, |mask, (cpu, _)| {
+            mask | u32::try_from(cpu)
+                .ok()
+                .and_then(|c| 1u64.checked_shl(c))
+                .unwrap_or(0)
+        })
+}
+
+/// The CPUs whose last dispatch was into any user address space.
+#[must_use]
+pub fn cpus_running_user() -> u64 {
+    CURRENT_ASPACE
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.load(Ordering::SeqCst) != 0)
+        .fold(0, |mask, (cpu, _)| {
+            mask | u32::try_from(cpu)
+                .ok()
+                .and_then(|c| 1u64.checked_shl(c))
+                .unwrap_or(0)
+        })
+}
+
 /// Ticks each CPU has spent in the real-time band in this bandwidth period.
 static RT_TICKS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
@@ -739,6 +780,13 @@ fn rt_budget_ticks() -> u64 {
 fn note_dispatch(cpu: usize, task: &Task) {
     if let Some(level) = CURRENT_LEVEL.get(cpu) {
         level.store(task.effective_priority(), Ordering::Relaxed);
+    }
+    // Only a change needs the barrier: a CPU staying in one address space was
+    // already counted as running it.
+    if let Some(aspace) = CURRENT_ASPACE.get(cpu)
+        && aspace.load(Ordering::Relaxed) != task.pml4_phys
+    {
+        aspace.store(task.pml4_phys, Ordering::SeqCst);
     }
     match task.policy {
         task::SchedPolicy::Fifo => PER_CPU_SCHED.set_current_remaining(cpu, u32::MAX),

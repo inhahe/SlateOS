@@ -60,7 +60,7 @@ use super::number::{
     SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
     SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
     SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
-    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
+    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MEMBARRIER,
     SYS_MEMORY_ADVISE, SYS_MEMORY_LOCK, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
     SYS_MMAP_FILE, SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE,
     SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO,
@@ -778,6 +778,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
+    handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -5600,6 +5601,46 @@ fn test_dispatch_thread_scheduler() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_THREAD_SCHEDULER: OK");
+    test_dispatch_membarrier()
+}
+
+/// `SYS_MEMBARRIER` is the Linux call's body: `QUERY` answers every command
+/// but the two RSEQ ones, which are `EINVAL`; a kernel caller's barriers
+/// succeed (this runs before the APs are up -- `cpusync::self_test`
+/// interrupts them later). The Linux ABI's own tests cover the gates.
+fn test_dispatch_membarrier() -> KernelResult<()> {
+    let membarrier = |cmd: u64, flags: u64| {
+        let args = SyscallArgs {
+            arg0: cmd,
+            arg1: flags,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_MEMBARRIER, &args).value
+    };
+    let einval = i64::from(super::linux::errno::EINVAL).wrapping_neg();
+    let checks = [
+        (membarrier(0, 0), 0x27F),
+        (membarrier(1, 0), 0),
+        (membarrier(2, 0), 0),
+        (membarrier(8, 0), 0),
+        (membarrier(32, 0), 0),
+        (membarrier(128, 0), einval),
+        (membarrier(256, 0), einval),
+        (membarrier(8, 1), einval),
+        (membarrier(1 << 12, 0), einval),
+    ];
+    if let Some((got, want)) = checks.iter().find(|(got, want)| got != want) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_MEMBARRIER answered {} where {} was due",
+            got,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_MEMBARRIER: OK");
     Ok(())
 }
 

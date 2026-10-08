@@ -6755,6 +6755,22 @@ pub const SCHEDULER_SET: u64 = 1;
 /// (`sched_rr_get_interval`).
 pub const SCHEDULER_RR_INTERVAL: u64 = 2;
 
+/// `SYS_MEMBARRIER(cmd, flags, cpu_id)` -- Linux's `membarrier(2)`, its
+/// commands, flags and errnos (as `-errno`), for native programs: the Linux
+/// ABI's call is the same body. A barrier command returns once every CPU
+/// running a thread of the caller's process (`PRIVATE_EXPEDITED` and its
+/// `SYNC_CORE` form, after the matching `REGISTER_*`, `EPERM` otherwise), or
+/// of any process (`GLOBAL_EXPEDITED`), has been interrupted -- so has passed
+/// a full memory barrier, and will pass a serializing instruction before it
+/// runs that code again (`cpusync`). `GLOBAL` waits instead for every CPU to
+/// pass a quiescent state (`rcu::synchronize`), as Linux's `synchronize_rcu`.
+/// The `RSEQ` commands are `EINVAL`, as on a Linux built without rseq, until
+/// the kernel restarts interrupted rseq critical sections; `QUERY` (0)
+/// answers the rest. Until 2026-10-07 a native program had no call, and the
+/// Linux ABI's fenced the calling CPU alone
+/// (requests/d-a-membarrier-needs-the-kernel-to-interrupt-the-other-cpus.md).
+pub const SYS_MEMBARRIER: u64 = 1147;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

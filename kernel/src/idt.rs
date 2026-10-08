@@ -45,8 +45,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// Sized for the **whole** vector space rather than for the vectors that
 /// looked interesting when this was written.  It was 48, on the reasoning that
 /// 32 exceptions plus 16 device IRQs was everything worth keeping — but the IDT
-/// installs handlers on 33–56 (24 IOAPIC inputs, not 16), and on 251, 252 and
-/// 255 for the two IPIs and the APIC spurious vector.  Every one of those past
+/// installs handlers on 33–56 (24 IOAPIC inputs, not 16), and on 250, 251,
+/// 252 and 255 for the three IPIs and the APIC spurious vector.  Every one of those past
 /// 47 landed outside the array, where `count_vector`'s `.get()` dropped it
 /// silently.  An array that cannot represent a third of the installed handlers
 /// is not a smaller version of this one, it is a wrong one; 2 KiB of `.bss` is
@@ -322,6 +322,7 @@ pub fn vector_name(vector: usize) -> &'static str {
             .unwrap_or("(exception)"),
         32 => "APIC Timer",
         33..=56 => "Device IRQ",
+        250 => "Cross-CPU Barrier IPI",
         251 => "TLB Shootdown IPI",
         252 => "Reschedule IPI",
         255 => "APIC Spurious",
@@ -464,7 +465,7 @@ fn deliver_signal_on_user_return(frame: *mut InterruptStackFrame) {
 // ---------------------------------------------------------------------------
 // Per-CPU hardware-IRQ stacks (B-DF1 / open-questions Q7, option A)
 //
-// Hardware IRQs (vectors 32–56, plus the 251/252/255 APIC IPIs) are
+// Hardware IRQs (vectors 32–56, plus the 250/251/252/255 APIC IPIs) are
 // configured with IST index 0, meaning the CPU does NOT switch stacks on
 // entry — the interrupt frame is pushed onto whatever stack the interrupted
 // code was using.  Heavy in-kernel code running on a near-full 64 KiB kernel
@@ -707,6 +708,7 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
 
     match vector {
         32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        250 => charged_to_irq(crate::cpusync::handle_cpu_sync_irq),
         251 => charged_to_irq(|| crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0)),
         252 => charged_to_irq(|| crate::apic::handle_reschedule_irq(frame_ref, 0)),
         255 => charged_to_irq(|| crate::apic::handle_spurious_irq(frame_ref, 0)),
@@ -1070,6 +1072,9 @@ macro_rules! irq_stub {
 
 // Timer (vector 32) — driven by the Local APIC timer.
 irq_stub!(isr_timer, 32);
+// Cross-CPU barrier IPI (vector 250) — membarrier's expedited commands
+// (`cpusync`).
+irq_stub!(isr_cpu_sync, 250);
 // TLB shootdown IPI (vector 251) — sent by other CPUs to request TLB flush.
 irq_stub!(isr_tlb_shootdown, 251);
 // Reschedule IPI (vector 252) — sent to wake idle CPUs when work is enqueued.
@@ -4391,6 +4396,8 @@ pub unsafe fn init() {
         // Hardware IRQ vectors.
         // Vector 32: APIC timer interrupt.
         idt.entries[32] = IdtEntry::new(isr_timer as *const () as u64, cs, 0, 0);
+        // Vector 250: cross-CPU barrier IPI (`cpusync`).
+        idt.entries[250] = IdtEntry::new(isr_cpu_sync as *const () as u64, cs, 0, 0);
         // Vector 251: TLB shootdown IPI.
         idt.entries[251] = IdtEntry::new(isr_tlb_shootdown as *const () as u64, cs, 0, 0);
         // Vector 252: Reschedule IPI (wake idle CPU when work enqueued).

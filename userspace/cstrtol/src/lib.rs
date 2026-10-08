@@ -13,7 +13,9 @@
 //!
 //! This was `libmagic`'s `cstd` until 2026-10-08, when `xxd` needed the same
 //! functions at base 0 and `hexdump` at base 16; `libmagic::cstd` re-exports
-//! it.
+//! it. `coreutils::procps::scanf` (procps' readers, at bases 10 and 16) and
+//! `autoopts` (option values and quoted strings) read through it too, in
+//! place of the private copies each had.
 
 /// `isspace` in the C locale: the six ASCII spaces.
 #[must_use]

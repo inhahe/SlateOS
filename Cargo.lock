@@ -191,6 +191,7 @@ dependencies = [
 name = "autoopts"
 version = "0.1.0"
 dependencies = [
+ "cstrtol",
  "errmsg",
  "localtime",
  "quoting",

@@ -384,6 +384,95 @@ run_stdin 'a\na\na\n' -R
 run_stdin '' -R
 run_stdin 'x\nx\n' -Ru
 
+# --- --debug: the notes and the underlines -------------------------------------
+# Here the stderr *text* is compared as well as stdout and the status: the
+# notes are half of what --debug is for. Its stdout is every output line with
+# its tabs drawn as `>`, then an underline per key and one for the whole line
+# (unless -s or -u), each in columns -- so wide and invalid bytes are cases.
+run_debug() {
+  local stdin=$1; shift
+  local o_err g_err o_bin g_bin o_rc g_rc label
+  o_err=$(mktemp); g_err=$(mktemp); o_bin=$(mktemp); g_bin=$(mktemp)
+  if [ "$stdin" = "-" ]; then
+    $OURS_RUN --debug "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    $GNU_RUN  --debug "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    label="sort --debug $*"
+  else
+    printf '%b' "$stdin" | $OURS_RUN --debug "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | $GNU_RUN  --debug "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    label="printf '$stdin' | sort --debug $*"
+  fi
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_bin" "$g_bin" && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
+      "$o_rc" "$(od -An -c <"$o_bin" | tr -s ' \n' ' ')" "$(tr '\n' '|' <"$o_err")" \
+      "$g_rc" "$(od -An -c <"$g_bin" | tr -s ' \n' ' ')" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err" "$o_bin" "$g_bin"
+  report "$label"
+}
+run_debug - cols.txt
+run_debug - -k2,2 cols.txt
+run_debug - -k2,2n cols.txt
+run_debug - -k2,1 cols.txt
+run_debug - -k3,3 cols.txt
+run_debug - -u -k1,1 cols.txt
+run_debug - -s -k2b,2 cols.txt
+run_debug - -n cols.txt
+run_debug - -r cols.txt
+run_debug - -r -k1,1 cols.txt
+run_debug - -r -k1,1n cols.txt
+run_debug - -r -s -k1,1n cols.txt
+run_debug - -r -u -k1,1n cols.txt
+run_debug - -b cols.txt
+run_debug - -k1b,1 cols.txt
+run_debug - -k1.2b cols.txt
+run_debug - -k1.2,1.3 cols.txt
+run_debug - -k1,1.2 cols.txt
+run_debug - -k1,1 -k2,2n cols.txt
+run_debug - -t ' ' -k2,2n cols.txt
+run_debug - -t . -k1n cols.txt
+run_debug - -t . -k2,2n cols.txt
+run_debug - -t - -k1n cols.txt
+run_debug - -t + -k1g cols.txt
+run_debug - -t + -k1n cols.txt
+run_debug - -t : -k2,2n colons.txt
+run_debug - -M months.txt
+run_debug - -k1,1M months.txt
+run_debug - -h human.txt
+run_debug - -g general.txt
+run_debug - -k1g,1 general.txt
+run_debug - -V versions.txt
+run_debug - -R --random-source=count.src cols.txt
+run_debug - -d -k1,1n cols.txt
+run_debug - -d -f -k1,1n cols.txt
+run_debug - -i -b -k1,1 cols.txt
+run_debug - -n -k1,1 cols.txt
+run_debug - +1 -2 cols.txt
+run_debug - +0 cols.txt
+run_debug - +1.2 -3.4 cols.txt
+run_debug - +1 cols.txt
+run_debug - -z nul.txt
+run_debug - bytes.txt
+run_debug - -u dupes.txt
+run_debug - -m merge1.txt merge2.txt
+run_debug - empty.txt
+run_debug - -c cols.txt
+run_debug - -C cols.txt
+run_debug - --check=quiet cols.txt
+run_debug - -o debug.out cols.txt
+run_debug - -c -o debug.out cols.txt
+run_debug 'a\tb\n\tx\n'
+run_debug 'a\tb\n\tx\n' -k2,2
+run_debug '\303\251 z\n\346\227\245\346\234\254 y\n' -k2,2
+run_debug '1.5K\n-2\nx\n1.\n.5\n-\n2k\n3m\n' -h
+run_debug '1.\n.5\n-.5\n-\nx1\n 1\n12a\n' -n
+run_debug '1e3\n0x10\nnan\n  -inf\n\v5\nx\n' -g
+run_debug 'jan 1\nxyz\n FEB\nJu\n' -M
+run_debug 'a b\n' -k2,2 -k1,1 -k3,3
+
 # --- -z ---------------------------------------------------------------------
 run_case -z nul.txt
 run_case -zu nul.txt

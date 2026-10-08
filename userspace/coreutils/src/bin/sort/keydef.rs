@@ -89,6 +89,9 @@ pub struct KeySpec {
     pub ignore: Option<Ignore>,
     pub fold: bool,
     pub reverse: bool,
+    /// Written in the obsolete `+POS1 [-POS2]` form -- upstream's
+    /// `traditional_used`, which `--debug` warns about.
+    pub traditional: bool,
 }
 
 impl KeySpec {
@@ -185,7 +188,7 @@ impl KeySpec {
 
     /// Where the key starts: past `sword` fields, past blanks if `b`, plus
     /// `schar` characters.
-    fn begfield(&self, line: &[u8], tab: Option<u8>) -> usize {
+    pub fn begfield(&self, line: &[u8], tab: Option<u8>) -> usize {
         let lim = line.len();
         let mut ptr = 0usize;
         let mut sword = self.sword.unwrap_or(0);
@@ -202,7 +205,7 @@ impl KeySpec {
     }
 
     /// Where the key ends.
-    fn limfield(&self, line: &[u8], tab: Option<u8>) -> usize {
+    pub fn limfield(&self, line: &[u8], tab: Option<u8>) -> usize {
         let lim = line.len();
         let mut ptr = 0usize;
         let echar = self.echar;
@@ -333,6 +336,14 @@ pub fn parse_key(spec: &[u8]) -> Result<KeySpec, String> {
         rest = after;
     }
 
+    // Upstream's `if (! (key->sword || key->schar)) key->sword = SIZE_MAX;`:
+    // a key that starts at the first character of the first field starts at
+    // the line, which is not quite the same thing -- a line-start key skips
+    // its blanks no further than its end -- and is what `--debug` reports.
+    if key.sword == Some(0) && key.schar == 0 {
+        key.sword = None;
+    }
+
     rest = set_ordering(rest, &mut key, Blanks::Start);
 
     if rest.first() == Some(&b',') {
@@ -383,6 +394,7 @@ pub fn parse_obsolete_start(spec: &[u8]) -> Option<KeySpec> {
         key.sword = None;
     }
     let rest = set_ordering(rest, &mut key, Blanks::Start);
+    key.traditional = true;
     if rest.is_empty() { Some(key) } else { None }
 }
 

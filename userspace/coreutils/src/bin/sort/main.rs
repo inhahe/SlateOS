@@ -72,6 +72,7 @@
 //! runs GNU under `LC_ALL=C.UTF-8`, so the comparison is against that ordering
 //! -- which differs from the `C` locale's in what `-R` hashes (`order::random`).
 
+mod debug;
 mod keydef;
 mod order;
 
@@ -131,6 +132,9 @@ Other:
   -u, --unique                  output only the first of each run of equal keys
   -z, --zero-terminated         lines end with NUL, not newline
       --files0-from=F           take the input names from F, NUL-separated
+      --debug                   underline the part of each line a key compares,
+                                and warn about options that do less than they
+                                seem to; not with -c, -C or -o
       --help                    print this and exit
       --version                 print the version and exit
 
@@ -184,6 +188,14 @@ struct Config {
     /// ([`salted_state`]), and a bare state, which no key hashes with,
     /// otherwise.
     salted: md5::Md5,
+    /// `--debug`: say how the keys are read, and underline them in the output.
+    debug: bool,
+    /// The options given outside any `-k`, after the command line is read:
+    /// upstream's `gkey`, which `--debug` reports the unused parts of.
+    global: KeySpec,
+    /// Whether the one key is the global options' own -- upstream's
+    /// `gkey_only`, under which `--debug` says less.
+    gkey_only: bool,
 }
 
 impl Default for Config {
@@ -202,6 +214,9 @@ impl Default for Config {
             files0_from: None,
             random_source: None,
             salted: md5::Md5::new(),
+            debug: false,
+            global: KeySpec::whole_line(),
+            gkey_only: false,
         }
     }
 }
@@ -637,8 +652,20 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> Result<(), ExitCode> {
             continue;
         }
         record.clear();
-        record.extend_from_slice(line);
-        record.push(cfg.delim);
+        if cfg.debug {
+            // `--debug` cannot be combined with `-o`, so this is standard
+            // output, as upstream's `write_line` requires.
+            debug::annotate(
+                &mut record,
+                line,
+                &cfg.keys,
+                cfg.tab,
+                !(cfg.unique || cfg.stable),
+            );
+        } else {
+            record.extend_from_slice(line);
+            record.push(cfg.delim);
+        }
         if let Err(e) = out.write(&record) {
             return Err(failed("write failed", &e));
         }
@@ -842,11 +869,16 @@ fn parse_args(
     }
     if cfg.keys.is_empty() && global.makes_a_key() {
         cfg.keys.push(global.clone());
+        cfg.gkey_only = true;
     }
     cfg.reverse = global.reverse;
     // Only now, with every key final -- upstream's
     // check_ordering_compatibility, and the reason it is not done per key.
     keydef::check_compatibility(&cfg.keys).map_err(fatal)?;
+    cfg.global = global;
+    if cfg.debug {
+        debug_notes(&cfg)?;
+    }
     // Upstream's `need_random`: the salt is read only when a key that will
     // be compared is random -- `sort -R -k1,1n` reads none, its one key
     // naming an ordering of its own -- and only now, after the check above
@@ -1014,7 +1046,7 @@ fn long_option(
             }
             cfg.random_source = Some(source);
         }
-        "debug" => return Err(fatal(DEBUG_UNIMPLEMENTED.to_string())),
+        "debug" => cfg.debug = true,
         // Accepted and ignored, as for their short forms.
         _ => {}
     }
@@ -1046,11 +1078,38 @@ fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
     SORT.argmatch(word, "--sort", SORT_WORDS)
 }
 
-/// The option we accept into the parser and then refuse, with the reason
-/// rather than a bare "unknown option" -- a user who typed it asked for
-/// something real and deserves to be told it is missing, not that it does not
-/// exist (`known-issues/TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG.md`).
-const DEBUG_UNIMPLEMENTED: &str = "--debug is not implemented";
+/// `--debug`'s checks and notes, where upstream makes them: after the keys
+/// are final and found compatible, before the random source is read.
+///
+/// It cannot be combined with `-c`, `-C` or `-o` -- there is no output to
+/// annotate in the first two, and the annotation is not data a file should
+/// hold -- and upstream names the first of them it finds in that order.
+/// Then it says which ordering is in force, and [`debug::notes`].
+fn debug_notes(cfg: &Config) -> Result<(), Fatal> {
+    let other = match (cfg.check, &cfg.output) {
+        (Some(Check::Diagnose), _) => Some('c'),
+        (Some(Check::Quiet), _) => Some('C'),
+        (None, Some(_)) => Some('o'),
+        (None, None) => None,
+    };
+    if let Some(letter) = other {
+        return Err(fatal(format!(
+            "options '-{letter} --debug' are incompatible"
+        )));
+    }
+    let settings = debug::Settings {
+        keys: &cfg.keys,
+        global: &cfg.global,
+        gkey_only: cfg.gkey_only,
+        tab: cfg.tab,
+        stable: cfg.stable,
+        unique: cfg.unique,
+    };
+    for note in debug::notes(&settings) {
+        diag!("sort: {note}");
+    }
+    Ok(())
+}
 
 /// Upstream's `random_md5_state_init`: sixteen bytes from the random source,
 /// absorbed into a fresh MD5 state that every random key is then hashed after.

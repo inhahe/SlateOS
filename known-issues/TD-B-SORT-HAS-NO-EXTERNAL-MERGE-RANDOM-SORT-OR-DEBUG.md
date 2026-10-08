@@ -1,29 +1,53 @@
 ## TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG (lane B, 2026-10-08)
 
-**Status:** PARTLY FIXED. `-R` works as of 2026-10-08 (below). **OPEN** for
-`--debug` and the external merge. Found while checking `sort` for the safer
-opens (`TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER`): three things
+**Status:** PARTLY FIXED. `-R` and `--debug` work as of 2026-10-08 (below).
+**OPEN** for the external merge, and the resource options it reads.
+
+Found while checking `sort` for the safer opens
+(`TD-B-GUARDED-PROGRAMS-OPEN-FILES-WITHOUT-OPEN-SAFER`): three things
 GNU's `sort` does that ours did not. They were written down on 2026-08-16 as
 "remaining limitations" inside an entry that was then moved to
 `known-issues-resolved/` (`B-b-sort-had-three-flags-and-got-all-three-wrong`),
 so nothing open tracked them since.
 
-**In short:** `sort --debug` is refused, and every input is sorted in memory,
-so a file larger than memory cannot be sorted at all and the options that
-steer GNU's temporary files are accepted and ignored.
+**In short:** every input is sorted in memory, so a file larger than memory
+cannot be sorted at all, and the options that steer GNU's temporary files
+are accepted and ignored -- not even checked: `sort -S x`, `--batch-size=1`
+and `--parallel=0` sort, where GNU refuses each with status 2.
 
 | what | ours | GNU coreutils 9.4 |
 |---|---|---|
-| `--debug` | `sort: --debug is not implemented`, status 2 | prints each line with its keys underlined, after warnings about the options |
 | inputs larger than the sort buffer | read whole into memory | sorted a buffer at a time into temporary files (`-T DIR`, `$TMPDIR`, `/tmp`), merged `--batch-size` at a time, compressed through `--compress-program` |
 | `-S`, `-T`, `--batch-size`, `--compress-program`, `--parallel` | accepted, ignored | obeyed; observable with a small `-S`, e.g. `sort -S 1k -T /nonexistent big` is `sort: cannot create temporary file in '/nonexistent': No such file or directory`, status 2 |
 
-**Where:** `userspace/coreutils/src/bin/sort/main.rs` (`DEBUG_UNIMPLEMENTED`,
-and the `b'S' | b'T' | b'y'` arm that discards the resource options).
+**Where:** `userspace/coreutils/src/bin/sort/main.rs` (the `b'S' | b'T' |
+b'y'` arm, and the long options that fall through to "accepted and
+ignored").
 
-**The fix:** port each from `sort.c`, held to GNU's by `sort-diff.sh`:
-`--debug`'s annotations and warnings, and the external merge -- whose
-temporary files are `mkstemp_safer`'s, as upstream's are.
+**The fix:** port it from `sort.c`, held to GNU's by `sort-diff.sh`: the
+resource options parsed and checked as `specify_sort_size`,
+`specify_nmerge` and `specify_nthreads` check them, and the external merge
+-- whose temporary files are `mkstemp_safer`'s, as upstream's are.
+
+### Done: `--debug`, 2026-10-08
+
+Upstream's `key_warnings` before the sort, and `debug_line`'s underlines
+beneath every line written (`userspace/coreutils/src/bin/sort/debug.rs`):
+the ordering in force (`text ordering performed using 'C.UTF-8' sorting
+rules`), obsolescent `+POS` keys rebuilt from their numbers as upstream
+rebuilds them, zero-width keys, significant leading blanks, numeric keys
+that span fields and the separators that would read as part of a number,
+unused global options, and `-r` reaching only the last resort; then each
+line with tabs drawn as `>`, an underline per key in columns (wide
+characters two, invalid bytes one, tabs one), tightened to a numeric or
+month key's number or name, `^ no match for key` where a key compares
+nothing, and the whole line's underline unless `-s` or `-u`. Refused with
+`-c`, `-C` and `-o` as upstream refuses it. To report what upstream
+reports, `-k1` and `-k1.1` are now stored as upstream stores them, a key
+from the start of the line.
+
+`sort-diff.sh` compares `--debug`'s stdout, status and its notes' text in
+59 cases; all agree, and 486 cases pass in all.
 
 ### Done: `-R`, 2026-10-08
 

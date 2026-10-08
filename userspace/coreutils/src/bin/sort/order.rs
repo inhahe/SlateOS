@@ -363,26 +363,66 @@ fn unit_order(key: &[u8]) -> i32 {
     if !nonzero {
         return 0;
     }
-    let order: i32 = match key.get(i).copied() {
-        Some(b'K' | b'k') => 1,
-        Some(b'M') => 2,
-        Some(b'G') => 3,
-        Some(b'T') => 4,
-        Some(b'P') => 5,
-        Some(b'E') => 6,
-        Some(b'Z') => 7,
-        Some(b'Y') => 8,
-        // Ronna and quetta, the SI prefixes of 2022, which coreutils 9.4's
-        // table carries: measured, GNU sorts `2Z 1Y 1R 1Q` in that order.
-        Some(b'R') => 9,
-        Some(b'Q') => 10,
-        _ => 0,
-    };
+    let order = key.get(i).copied().map_or(0, unit);
     if negative {
         order.saturating_neg()
     } else {
         order
     }
+}
+
+/// Upstream's `unit_order` table: the power of 1024 a suffix letter names, or
+/// 0 for a byte that is no unit. Lower-case `k` is the one lower-case unit.
+fn unit(c: u8) -> i32 {
+    match c {
+        b'K' | b'k' => 1,
+        b'M' => 2,
+        b'G' => 3,
+        b'T' => 4,
+        b'P' => 5,
+        b'E' => 6,
+        b'Z' => 7,
+        b'Y' => 8,
+        // Ronna and quetta, the SI prefixes of 2022, which coreutils 9.4's
+        // table carries: measured, GNU sorts `2Z 1Y 1R 1Q` in that order.
+        b'R' => 9,
+        b'Q' => 10,
+        _ => 0,
+    }
+}
+
+/// Where `--debug` ends the underline of a `-n` or `-h` key: upstream's
+/// `traverse_raw_number`, run from just past a leading `-` -- digits, then a
+/// `.` and more digits -- and one byte further under `-h` when a unit letter
+/// follows. `None` when there was no digit at all, and so no number.
+///
+/// The `.` is taken even with no digit after it (`1.` underlines both bytes),
+/// as upstream's scan takes it.
+pub fn number_end(key: &[u8], human: bool) -> Option<usize> {
+    let mut p = usize::from(key.first() == Some(&b'-'));
+    let mut digit = false;
+    while key.get(p).is_some_and(u8::is_ascii_digit) {
+        digit = true;
+        p = p.saturating_add(1);
+    }
+    if key.get(p) == Some(&b'.') {
+        p = p.saturating_add(1);
+        while key.get(p).is_some_and(u8::is_ascii_digit) {
+            digit = true;
+            p = p.saturating_add(1);
+        }
+    }
+    if !digit {
+        return None;
+    }
+    let unit_follows = human && key.get(p).is_some_and(|&c| unit(c) != 0);
+    Some(p.saturating_add(usize::from(unit_follows)))
+}
+
+/// How many bytes of `key` `strtold` reads: where `--debug` ends the underline
+/// of a `-g` key. Zero when it reads no number.
+pub fn general_end(key: &[u8]) -> usize {
+    extfloat::strtold(key).consumed
 }
 
 // ── -M, the ordering that knows the calendar ────────────────────────────────
@@ -394,6 +434,18 @@ fn unit_order(key: &[u8]) -> i32 {
 /// month. Anything else is month zero and ties with every other non-month.
 pub fn month(a: &[u8], b: &[u8]) -> Ordering {
     month_number(a).cmp(&month_number(b))
+}
+
+/// Where `--debug` ends the underline of a `-M` key: just past the month's
+/// three letters, the blanks before them included -- the end upstream's
+/// `getmonth` hands back -- or 0 when the key names no month.
+pub fn month_end(key: &[u8]) -> usize {
+    if month_number(key) == 0 {
+        return 0;
+    }
+    key.iter()
+        .position(|&c| !is_blank(c))
+        .map_or(0, |start| start.saturating_add(3))
 }
 
 fn month_number(key: &[u8]) -> u8 {

@@ -44,6 +44,7 @@ fn readings() -> LiveReadings {
         upcoming: crate::calendar::Upcoming::default(),
         world_clocks: Vec::new(),
         disks: crate::widgets::disks::Disks::default(),
+        network: crate::widgets::network::NetworkReading::default(),
     }
 }
 
@@ -604,6 +605,83 @@ fn the_world_clock_is_a_list_of_the_other_clocks() {
         content,
         "the clock outside"
     );
+}
+
+/// **The network widget shows tools its lines and, given the room, its
+/// graph**: each line a label named by what it is and described by what it
+/// says, where it is drawn inside the widget; the graph told as a system
+/// monitor's is.
+#[test]
+fn the_network_widget_shows_its_lines_and_graph() {
+    use crate::netlink::{Link, LinkState};
+    use crate::widgets::monitor::NetRate;
+    use crate::widgets::network::NetworkReading;
+    let (mut layer, id) = one(WidgetKind::NetworkMonitor);
+    let link = LinkState::Link(Link {
+        up: true,
+        address: Some(std::net::Ipv4Addr::new(10, 0, 2, 15)),
+        prefix: Some(24),
+        gateway: Some(std::net::Ipv4Addr::new(10, 0, 2, 2)),
+        dns: Some(std::net::Ipv4Addr::new(10, 0, 2, 3)),
+        mac: "52:54:00:12:34:56".to_owned(),
+    });
+    let live = LiveReadings {
+        network: NetworkReading {
+            link: Some(Ok(link)),
+            graphs: Graphs {
+                network: vec![2_000.0, 8_000.0],
+                network_now: Some(NetRate {
+                    down: 6_000,
+                    up: 2_000,
+                }),
+                ..Graphs::default()
+            },
+        },
+        ..readings()
+    };
+    let told = |layer: &DesktopWidgetManager| {
+        let widget = node_of(layer, &live, WidgetPart::Widget(id)).expect("seen");
+        widget
+            .children
+            .iter()
+            .map(|n| (n.id, n.name.clone(), n.description.clone()))
+            .collect::<Vec<_>>()
+    };
+    let line = |index: usize, name: &str, said: &str| {
+        (
+            WidgetPart::NetworkLine(id, index),
+            name.to_owned(),
+            Some(said.to_owned()),
+        )
+    };
+    assert_eq!(
+        told(&layer)[..3],
+        [
+            line(0, "Network", "Connected"),
+            line(1, "Address", "10.0.2.15/24"),
+            line(2, "Traffic", "6.0 kB/s in, 2.0 kB/s out"),
+        ]
+    );
+    assert!(
+        !told(&layer)
+            .iter()
+            .any(|(part, ..)| matches!(part, WidgetPart::Graph(..))),
+        "a graph in one row"
+    );
+    assert!(layer.resize_widget(id, WidgetSize::LARGE), "room for it");
+    let large = told(&layer);
+    assert_eq!(large.len(), 6, "{large:?}");
+    assert_eq!(
+        large[5].0,
+        WidgetPart::Graph(id, Graph::Network),
+        "the graph is not last"
+    );
+    let (x, y, w, h) = layer.content_rect(id).expect("placed");
+    let content = Rect::new(x, y, w, h);
+    let widget = node_of(&layer, &live, WidgetPart::Widget(id)).expect("seen");
+    for node in &widget.children {
+        assert!(within(node.bounds, content), "{} outside", node.name);
+    }
 }
 
 /// **The disk usage widget shows tools a list of the disks**: each a

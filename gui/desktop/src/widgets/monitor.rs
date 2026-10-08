@@ -459,20 +459,34 @@ fn heading_height() -> f32 {
 /// its disk-space meter -- and a gap.
 #[must_use]
 pub fn panels(content: Rect, foot: f32) -> Vec<Panel> {
-    let heading = heading_height();
-    let count = plotted(Graph::ALL.len() as u64);
     let room = (content.h - foot - PANEL_GAP).max(0.0);
-    let each = ((room - PANEL_GAP * (count - 1.0)) / count).max(0.0);
-    let mut top = content.y;
-    Graph::ALL
-        .into_iter()
-        .map(|graph| {
+    panels_of(
+        &Graph::ALL,
+        Rect::new(content.x, content.y, content.w, room),
+    )
+}
+
+/// Where `graphs` go in `area`, top to bottom, sharing its height a gap
+/// apart: each its heading, and its plot under it where there is room for
+/// one -- a system monitor's four, or the network widget's one.
+#[must_use]
+pub fn panels_of(graphs: &[Graph], area: Rect) -> Vec<Panel> {
+    if graphs.is_empty() {
+        return Vec::new();
+    }
+    let heading = heading_height();
+    let count = plotted(graphs.len() as u64);
+    let each = ((area.h - PANEL_GAP * (count - 1.0)) / count).max(0.0);
+    let mut top = area.y;
+    graphs
+        .iter()
+        .map(|&graph| {
             let plot_h = each - heading - PLOT_GAP;
             let panel = Panel {
                 graph,
-                heading: Rect::new(content.x, top, content.w, heading.min(each)),
+                heading: Rect::new(area.x, top, area.w, heading.min(each)),
                 plot: (plot_h >= MIN_PLOT)
-                    .then(|| Rect::new(content.x, top + heading + PLOT_GAP, content.w, plot_h)),
+                    .then(|| Rect::new(area.x, top + heading + PLOT_GAP, area.w, plot_h)),
             };
             top += each + PANEL_GAP;
             panel

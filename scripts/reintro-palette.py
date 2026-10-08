@@ -116,6 +116,9 @@ MON = "gui/desktop/src/widgets/monitor.rs"
 # The disk usage widget's drawing (design-decisions 1501): each disk's name and
 # share, its bar -- the disk's colour, red when nearly full -- and what is free.
 DISKS = "gui/desktop/src/widgets/disks.rs"
+# The network widget's lines (design-decisions 1502): "Connected" in green,
+# any other state in the quiet ink, the facts in the text's.
+NETW = "gui/desktop/src/widgets/network.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
 # The shortcut card's editor: its action list, and the card's foot -- the
 # line saying what the last edit did and the buttons that are its keys --
@@ -18410,6 +18413,57 @@ DEFECTS = [
         ["desktop"],
         [
             'every_colour_it_draws_comes_from_its_palette',
+        ],
+    ),
+    # ---- widgets/network.rs -------------------------------------------------
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: \"Connected\" is drawn in Mocha's own green, so a light theme still draws the dark one",
+        NETW,
+        [
+            ('            Some(Status::Connected) => p.ink(p.green),\n',
+             '            Some(Status::Connected) => Color::from_hex(0xA6E3A1),\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_it_draws_comes_from_its_palette',
+            'each_line_is_drawn_in_its_row',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: \"Connected\" follows the accent, which makes a measurement say what the user chose",
+        NETW,
+        [
+            ('            Some(Status::Connected) => p.ink(p.green),\n',
+             '            Some(Status::Connected) => p.ink(p.accent),\n'),
+        ],
+        ["desktop"],
+        [
+            'each_line_is_drawn_in_its_row',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the network's lines are drawn opaque over a translucent widget",
+        NETW,
+        [
+            ('                color: wash(ink),\n',
+             '                color: ink,\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_it_draws_is_under_the_widgets_veil',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a state other than connected keeps Mocha's own subtext0",
+        NETW,
+        [
+            ('            Some(Status::Other) => p.subtext0,\n',
+             '            Some(Status::Other) => Color::from_hex(0xA6ADC8),\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_it_draws_comes_from_its_palette',
+            'each_line_is_drawn_in_its_row',
         ],
     ),
 ]

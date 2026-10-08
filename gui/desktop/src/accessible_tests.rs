@@ -2068,6 +2068,51 @@ fn a_world_clock_shows_the_settings_other_clocks() {
     assert_eq!(names, ["Tokyo"]);
 }
 
+/// **The desktop's menu adds a network widget, which reads the link** --
+/// the kernel's files, here a scratch copy of them -- at its first tick,
+/// and not while none is out.
+#[test]
+fn a_network_widget_reads_the_link() {
+    let mut s = shell();
+    let dir = scratchdir::ScratchDir::new("shell-network");
+    let net = dir.path("net");
+    std::fs::create_dir_all(&net).expect("made");
+    for (name, value) in [
+        ("up", "1"),
+        ("ip", "192.168.1.20"),
+        ("subnet_mask", "255.255.255.0"),
+        ("gateway", "192.168.1.1"),
+        ("dns", "192.168.1.1"),
+        ("mac", "52:54:00:12:34:56"),
+    ] {
+        std::fs::write(net.join(name), format!("{value}\n")).expect("written");
+    }
+    s.read_link_from(net);
+    s.sample_network(1_000);
+    assert_eq!(
+        s.live_readings().network,
+        crate::widgets::network::NetworkReading::default(),
+        "the link read with no network widget out"
+    );
+    s.open_desktop_menu(900.0, 500.0);
+    assert!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_ADD_NETWORK)
+            .changed()
+    );
+    s.dismiss_popups();
+    let id = s
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| w.kind == WidgetKind::NetworkMonitor)
+        .map(|w| w.id)
+        .expect("added");
+    s.sample_network(2_000);
+    let address = node(&s, ShellPart::Widget(WidgetPart::NetworkLine(id, 1)));
+    assert_eq!(address.name, "Address");
+    assert_eq!(address.description.as_deref(), Some("192.168.1.20/24"));
+}
+
 /// **The desktop's menu adds a disk usage widget, which lists the disks
 /// mounted** -- the mount table's, less the kernel's own views -- read when
 /// the widget's tick comes and not before, and not while none is out.

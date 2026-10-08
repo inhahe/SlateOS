@@ -25,6 +25,7 @@ mod accessible;
 pub mod disks;
 pub mod listing;
 pub mod monitor;
+pub mod network;
 pub mod upcoming;
 pub mod worldclock;
 
@@ -422,7 +423,7 @@ impl WidgetKind {
             Self::WorldClock => WidgetSize::WIDE,
             Self::Reminders => WidgetSize::LARGE,
             Self::DiskUsage => WidgetSize::WIDE,
-            Self::NetworkMonitor => WidgetSize::SMALL,
+            Self::NetworkMonitor => WidgetSize::WIDE,
             Self::BatteryStatus => WidgetSize::SMALL,
             Self::Custom { .. } => WidgetSize::WIDE,
         }
@@ -456,6 +457,7 @@ impl WidgetKind {
             ],
             Self::WorldClock => &[WidgetSize::WIDE, WidgetSize::LARGE],
             Self::DiskUsage => &[WidgetSize::WIDE, WidgetSize::TALL, WidgetSize::LARGE],
+            Self::NetworkMonitor => &[WidgetSize::WIDE, WidgetSize::LARGE],
             Self::Notes | Self::PhotoFrame => &WidgetSize::ALL,
             _ => &[],
         }
@@ -995,6 +997,10 @@ pub struct LiveReadings {
     /// shows them -- the shell's last reading (`disks::Sampler`), taken
     /// every ten seconds while one is out; unread while none is drawn.
     pub disks: disks::Disks,
+    /// The network link as last read, and the traffic as the system monitor
+    /// sampled it, as the network widget shows them; empty while none is
+    /// drawn.
+    pub network: network::NetworkReading,
 }
 
 /// Manages all desktop widgets.
@@ -2322,6 +2328,13 @@ impl DesktopWidgetManager {
                 alpha,
                 commands,
             ),
+            WidgetKind::NetworkMonitor => network::render(
+                &live.network,
+                crate::Rect::new(x, y, width, height),
+                p,
+                alpha,
+                commands,
+            ),
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
                 // The battery as it is: missing, charging, nearly flat, or
@@ -2653,6 +2666,26 @@ mod tests {
             // Two disks, one nearly full, so a disk usage widget the fixture
             // shows draws a bar of each colour.
             disks: disks::Disks::Listed(sample_disks()),
+            // QEMU's user network, up, its traffic the graphs' above, so a
+            // network widget the fixture shows draws every line and a graph.
+            network: network::NetworkReading {
+                link: Some(Ok(crate::netlink::LinkState::Link(crate::netlink::Link {
+                    up: true,
+                    address: Some(std::net::Ipv4Addr::new(10, 0, 2, 15)),
+                    prefix: Some(24),
+                    gateway: Some(std::net::Ipv4Addr::new(10, 0, 2, 2)),
+                    dns: Some(std::net::Ipv4Addr::new(10, 0, 2, 3)),
+                    mac: "52:54:00:12:34:56".to_owned(),
+                }))),
+                graphs: monitor::Graphs {
+                    network: vec![2_000.0, 8_000.0],
+                    network_now: Some(monitor::NetRate {
+                        down: 6_000,
+                        up: 2_000,
+                    }),
+                    ..monitor::Graphs::default()
+                },
+            },
         }
     }
 
@@ -4298,6 +4331,7 @@ mod tests {
             upcoming: crate::calendar::Upcoming::default(),
             world_clocks: Vec::new(),
             disks: disks::Disks::default(),
+            network: network::NetworkReading::default(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -4362,6 +4396,7 @@ mod tests {
             upcoming: crate::calendar::Upcoming::default(),
             world_clocks: Vec::new(),
             disks: disks::Disks::default(),
+            network: network::NetworkReading::default(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds

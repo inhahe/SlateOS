@@ -2327,6 +2327,16 @@ live.
   ten seconds while one is out; one the kernel will not measure is listed as
   not measured. Tools see a list of progress bars.
 
+- `[x]` `[C]` **A network widget** (`design-decisions.md` §1502) -- done
+  2026-10-07. "Add widget > Network": whether the machine is connected, the
+  address it has with its prefix, the traffic in and out, the gateway and
+  the name server -- as many as fit, most wanted first -- and, given two
+  rows, the last minute's traffic graph, the system monitor's own sample.
+  The link is the kernel's (`/sys/devices/net`), read every five seconds
+  while one is out; with no adapter it says so. **Next:** the traffic on
+  SlateOS, which waits on the kernel's counters, as the system monitor's
+  does (`requests/c-a-the-system-monitor-reads-disk-and-network-counters-the-kernel-does-not-serve.md`).
+
 - `[x]` `[C]` **The desktop raises the calendar's reminders**
   (`design-decisions.md` §1498) -- done 2026-10-07. When an event's reminder
   is due, a notification from Calendar -- the event, when and where -- stays

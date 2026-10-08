@@ -12,6 +12,7 @@
 //! | upcoming events | a list of the events it shows, each named by its title and described by its day and time, the list said to have nothing coming or how many more there are |
 //! | world clock | a list of the user's other clocks, each named by its label and described by its time, its day and how far ahead or behind it is, the list said to have none or how many more there are |
 //! | disk usage | a list of the disks mounted, each a progress bar named by where it is mounted, at how much of it is in use and described by what is free of what it holds -- and "nearly full" past nine tenths -- or, for one not measured, no value and "Not measured"; the list said to have none, that they could not be listed and why, or how many more there are |
+//! | network | its lines, each a label named by what it is ("Address") and described by what it says ("10.0.2.15/24"), the first whether the machine is connected; and, given the room, the traffic graph, as a system monitor's |
 //! | the rest | the name they show where their content will be |
 //!
 //! A widget not drawn is not here: one hidden, and every one while the layer
@@ -27,6 +28,7 @@ use guitk::widget::automation::{Node, Role, Value};
 
 use super::disks::{self, Disks};
 use super::monitor::{Graph, Graphs, Panel};
+use super::network::{self, NetworkReading};
 use super::{
     BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_HEIGHT, Meter,
     NOT_MEASURED, PLACEHOLDER_SIZE, PROBLEM_SIZE, WidgetInstance, WidgetInstanceId, WidgetKind,
@@ -73,6 +75,9 @@ pub enum WidgetPart {
     OtherClock(WidgetInstanceId, usize),
     /// A disk usage widget's list of the disks mounted.
     Disks(WidgetInstanceId),
+    /// One of a network widget's lines, by its place among them -- the
+    /// first whether the machine is connected.
+    NetworkLine(WidgetInstanceId, usize),
     /// One of them, by its place in the list.
     Disk(WidgetInstanceId, usize),
     /// The name a widget with no content of its own yet shows in its place.
@@ -268,6 +273,38 @@ fn disks_node(
     list
 }
 
+/// A network widget's lines in its content `(x, y, width, height)`: each a
+/// label named by what it is -- "Network", "Address" -- and described by
+/// what it says, boxed where it is drawn ([`network::layout`]); and the
+/// traffic graph, told as a system monitor's is, when it has the room.
+fn network_nodes(
+    id: WidgetInstanceId,
+    reading: &NetworkReading,
+    (x, y, width, height): (f32, f32, f32, f32),
+) -> Vec<Node<WidgetPart>> {
+    let said = network::lines(reading);
+    let laid = network::layout(said.len(), Rect::new(x, y, width, height));
+    let mut nodes: Vec<Node<WidgetPart>> = laid
+        .lines
+        .iter()
+        .filter_map(|&(index, bounds)| {
+            let line = said.get(index)?;
+            let mut node = Node::new(
+                WidgetPart::NetworkLine(id, index),
+                Role::Label,
+                line.label,
+                bounds,
+            );
+            node.description = Some(line.value.clone());
+            Some(node)
+        })
+        .collect();
+    if let Some(panel) = laid.graph {
+        nodes.push(graph_node(id, &panel, &reading.graphs));
+    }
+    nodes
+}
+
 /// A system monitor's `meter`, its heading's line at `(x, top)`, `width`
 /// wide: a progress bar at its reading in `live`, or -- nothing having
 /// measured it -- none, and said so.
@@ -414,6 +451,7 @@ impl DesktopWidgetManager {
                 vec![world_clocks_node(id, &live.world_clocks, (cx, cy, cw, ch))]
             }
             WidgetKind::DiskUsage => vec![disks_node(id, &live.disks, (cx, cy, cw, ch))],
+            WidgetKind::NetworkMonitor => network_nodes(id, &live.network, (cx, cy, cw, ch)),
             WidgetKind::BatteryStatus => {
                 let mut charge = Node::new(
                     WidgetPart::Charge(id),

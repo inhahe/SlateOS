@@ -5,12 +5,17 @@
 //! on `str`: `sort` must put a file of arbitrary bytes in order, and a line
 //! that is not valid UTF-8 is a line to be sorted, not an error.
 //!
-//! All of this is C-locale ordering: bytes compare as bytes and the month
-//! names are English. SlateOS has no collation tables, so there is nothing
-//! else it could be; `scripts/sort-diff.sh` pins `LC_ALL=C` for the same
-//! reason. A locale-aware collation would change *every* comparison here and
-//! is a separate piece of work (`known-issues.md`).
+//! All of this is `C.UTF-8`'s ordering, GNU's in a UTF-8 locale with no
+//! collation tables: bytes compare as bytes -- its code-point collation is
+//! exactly that -- and the month names are English. SlateOS is UTF-8
+//! throughout (design-decisions §351) and has no collation tables, so there is
+//! nothing else it could be; `scripts/sort-diff.sh` runs GNU under
+//! `LC_ALL=C.UTF-8`, as the whole harness family does. The one place the UTF-8
+//! locale differs from `C` here is what `-R` hashes ([`random`]). A
+//! locale-aware collation would change *every* comparison here and is a
+//! separate piece of work (`known-issues/TD-SORT-C-LOCALE-ONLY-COLLATION.md`).
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 /// Which characters a key ignores before it is compared.
@@ -58,7 +63,8 @@ fn keep(c: u8, ignore: Option<Ignore>, fold: bool) -> Option<u8> {
     let dropped = match ignore {
         Some(Ignore::NonDictionary) => !(is_blank(c) || c.is_ascii_alphanumeric()),
         // `-i` keeps the printable ASCII range. A byte above 127 is not
-        // printable in the C locale, which is the locale we are in.
+        // printable alone -- upstream's table asks `isprint` of each byte, and
+        // under `C.UTF-8` as under `C` no byte above 127 is a character.
         Some(Ignore::NonPrinting) => !(0x20..0x7f).contains(&c),
         None => false,
     };
@@ -66,6 +72,71 @@ fn keep(c: u8, ignore: Option<Ignore>, fold: bool) -> Option<u8> {
         return None;
     }
     Some(if fold { c.to_ascii_uppercase() } else { c })
+}
+
+/// A key as every ordering but the default one receives it: upstream's
+/// `keycompare` copies the key with the characters `-d`/`-i` ignore dropped
+/// and the rest translated by `-f`, and hands the copy to `-n`, `-g`, `-h`,
+/// `-M`, `-R` and `-V`. Borrowed when there is nothing to drop or translate,
+/// which is every key with none of those letters.
+pub fn filtered(key: &[u8], ignore: Option<Ignore>, fold: bool) -> Cow<'_, [u8]> {
+    if ignore.is_none() && !fold {
+        return Cow::Borrowed(key);
+    }
+    Cow::Owned(
+        key.iter()
+            .copied()
+            .filter_map(|c| keep(c, ignore, fold))
+            .collect(),
+    )
+}
+
+// ── -R, the salted hash ─────────────────────────────────────────────────────
+
+/// `-R`: upstream's `compare_random`, as it runs in a UTF-8 locale -- the
+/// only kind SlateOS has (design-decisions §351).
+///
+/// `salted` is an MD5 state that has already absorbed sixteen random bytes
+/// -- from `--random-source`, or the system's -- so each key's digest is
+/// `MD5(salt, the key's bytes)`, and the digests are compared as bytes. Equal
+/// keys have equal digests, which is what keeps them together; different keys
+/// land in an order that a fixed source makes reproducible. Should two
+/// different keys share a digest, the hashed bytes themselves decide, as
+/// upstream's tiebreaker does (`memcmp` over the shorter, then the lengths --
+/// which is a slice's `cmp`).
+///
+/// Which bytes are hashed is [`hashed`]: not the key as it stands, but what
+/// upstream's locale path gives it.
+pub fn random(a: &[u8], b: &[u8], salted: &md5::Md5) -> Ordering {
+    let (a, b) = (hashed(a), hashed(b));
+    let digest = |key: &[u8]| {
+        let mut state = salted.clone();
+        state.update(key);
+        state.finalize()
+    };
+    digest(&a).cmp(&digest(&b)).then_with(|| a.cmp(&b))
+}
+
+/// The bytes `compare_random` hashes for a key in a UTF-8 locale.
+///
+/// There, upstream's `hard_LC_COLLATE` is true, and it hashes the key one
+/// NUL-terminated piece at a time, each piece run through `strxfrm` and
+/// hashed *with* its terminating NUL. Under `C.UTF-8` `strxfrm` is the
+/// identity -- measured for every byte, valid UTF-8 or not -- so what is
+/// hashed is the key with a NUL after each piece: the key and one NUL, or the
+/// key alone when it already ends in a NUL (the last piece's terminator is
+/// that NUL), or nothing for an empty key (there is no piece). In the `C`
+/// locale upstream hashes the bare key and orders differently; measured,
+/// `printf 'b\na\nc\n' | sort -R --random-source=<16 zero bytes>` is
+/// `a b c` under `LC_ALL=C` and `b c a` under `LC_ALL=C.UTF-8`.
+fn hashed(key: &[u8]) -> Cow<'_, [u8]> {
+    if key.is_empty() || key.last() == Some(&0) {
+        return Cow::Borrowed(key);
+    }
+    let mut bytes = Vec::with_capacity(key.len().saturating_add(1));
+    bytes.extend_from_slice(key);
+    bytes.push(0);
+    Cow::Owned(bytes)
 }
 
 // ── -n, the exact decimal ordering ──────────────────────────────────────────
@@ -575,5 +646,60 @@ mod tests {
         assert_eq!(general(b"+5", b"1"), Ordering::Greater);
         assert_eq!(general(b"abc", b"0"), Ordering::Equal);
         assert_eq!(general(b"-inf", b"0"), Ordering::Less);
+    }
+
+    /// The MD5 state after sixteen zero bytes: the salt a `--random-source`
+    /// file of zeros gives.
+    fn zero_salted() -> md5::Md5 {
+        let mut state = md5::Md5::new();
+        state.update(&[0u8; 16]);
+        state
+    }
+
+    #[test]
+    fn random_orders_keys_as_gnu_does_under_a_utf8_locale() {
+        // Measured: GNU sort 9.4, `LC_ALL=C.UTF-8`, a `--random-source` of
+        // sixteen zero bytes, puts these seven keys in this order.
+        let salted = zero_salted();
+        let mut keys: Vec<&[u8]> = vec![b"b", b"a", b"c", b"d", b"A", b"B", b" a"];
+        keys.sort_by(|a, b| random(a, b, &salted));
+        let want: Vec<&[u8]> = vec![b"b", b"c", b"a", b"B", b" a", b"A", b"d"];
+        assert_eq!(keys, want);
+    }
+
+    #[test]
+    fn random_ties_exactly_the_keys_that_hash_alike() {
+        let salted = zero_salted();
+        assert_eq!(random(b"x", b"x", &salted), Ordering::Equal);
+        assert_ne!(random(b"x", b"y", &salted), Ordering::Equal);
+        // A key ending in NUL is hashed as it stands, and any other gains
+        // one, so `a` and `a\0` are one key, as upstream's piece-by-piece
+        // hash makes them.
+        assert_eq!(random(b"a", b"a\0", &salted), Ordering::Equal);
+        // The empty key hashes nothing after the salt; `\0` hashes a NUL.
+        assert_ne!(random(b"", b"\0", &salted), Ordering::Equal);
+    }
+
+    #[test]
+    fn hashed_gives_each_piece_its_nul() {
+        assert_eq!(&*hashed(b""), b"");
+        assert_eq!(&*hashed(b"a"), b"a\0");
+        assert_eq!(&*hashed(b"a\0"), b"a\0");
+        assert_eq!(&*hashed(b"a\0b"), b"a\0b\0");
+        assert_eq!(&*hashed(b"\0"), b"\0");
+    }
+
+    #[test]
+    fn filtered_copies_only_when_a_letter_asks() {
+        assert!(matches!(filtered(b"a-b", None, false), Cow::Borrowed(_)));
+        assert_eq!(
+            &*filtered(b"a-b", Some(Ignore::NonDictionary), false),
+            b"ab"
+        );
+        assert_eq!(&*filtered(b"1m", None, true), b"1M");
+        assert_eq!(
+            &*filtered(b"a\x01b", Some(Ignore::NonPrinting), true),
+            b"AB"
+        );
     }
 }

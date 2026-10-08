@@ -40,7 +40,11 @@
 # we have deliberately not implemented. `C.UTF-8` is not a collating locale —
 # glibc gives it codepoint order, the same as `C`. Measured, not assumed: every
 # fixture in this file, under every ordering option it uses, produces
-# byte-identical output from glibc's sort under the two.
+# byte-identical output from glibc's sort under the two -- except `-R`. Under
+# `C.UTF-8` GNU hashes each key through `strxfrm` with its terminating NUL, and
+# under `C` the bare key, so a fixed `--random-source` shuffles differently in
+# the two; ours is the UTF-8 locale's, as SlateOS is UTF-8 throughout (§351),
+# and `order::random` in the sort crate says how it was found.
 #
 # What `C.UTF-8` additionally buys is the `argmatch` rows, which used to need a
 # reference of their own: gnulib's `quote()` prints U+2018/U+2019 under a UTF-8
@@ -274,6 +278,80 @@ run_case --version-sort versions.txt
 run_case --human-numeric-sort human.txt
 run_case --month-sort months.txt
 run_case --general-numeric-sort general.txt
+
+# Every ordering but the default one is handed a *copy* of the key, with what
+# -d/-i ignore dropped and the rest translated by -f (upstream's keycompare).
+# So -f makes `1m` a mebi-number for -h -- `m` is no unit, `M` is -- and -d
+# takes the punctuation out of a version before -V reads it.
+printf '1m\n2K\n1k\n3g\n1M\n900\n'                      > humancase.txt
+printf 'v1.10\nV1.9\nv1-2\n1.10a\nv1_9\n'               > vcase.txt
+run_case -h humancase.txt
+run_case -hf humancase.txt
+run_case -k1,1hf humancase.txt
+run_case -Vf vcase.txt
+run_case -Vd vcase.txt
+run_case -Vi control.txt
+run_case -Vdf vcase.txt
+run_case -gf general.txt
+run_case -Mf months.txt
+run_case -nf spellings.txt
+
+# --- -R: shuffled by a salted MD5 of the key ---------------------------------
+# With a fixed --random-source the "random" order is a function of the salt
+# (the source's first sixteen bytes) and the keys, so it compares byte for
+# byte. Equal keys hash equally, which is what keeps them together.
+head -c 16 /dev/zero                                    > zero.src
+printf '\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020' > count.src
+printf 'abc'                                            > short.src
+seq 1 30                                                > thirty.txt
+printf 'b\na\nc\nb\na\nd\nA\nB\n a\n'                   > shuffle.txt
+run_case -R --random-source=zero.src shuffle.txt
+run_case -R --random-source=count.src shuffle.txt
+run_case -R --random-source=count.src thirty.txt
+run_case --random-sort --random-source=count.src thirty.txt
+run_case --sort=random --random-source=count.src thirty.txt
+run_case -Rr --random-source=count.src thirty.txt
+run_case -Ru --random-source=count.src shuffle.txt
+run_case -Rs --random-source=count.src shuffle.txt
+run_case -Rf --random-source=count.src shuffle.txt
+run_case -Rfu --random-source=count.src shuffle.txt
+run_case -Rb --random-source=count.src shuffle.txt
+run_case -Rd --random-source=count.src punct.txt
+run_case -Ri --random-source=count.src control.txt
+run_case -RV --random-source=count.src versions.txt
+run_case -VR --random-source=count.src versions.txt
+run_case -k2,2R --random-source=count.src cols.txt
+run_case -k2,2R -k1,1 --random-source=count.src ties.txt
+run_case -k1,1 -k2,2R --random-source=count.src cols.txt
+run_case -k2bR,2 --random-source=count.src cols.txt
+run_case -R -k2,2 --random-source=count.src cols.txt
+run_case -R -k2,2n --random-source=count.src cols.txt
+run_case -t: -k2,2R --random-source=count.src colons.txt
+run_case -c -R --random-source=count.src thirty.txt
+run_case -C -R --random-source=count.src thirty.txt
+run_case -m -R --random-source=count.src merge1.txt merge2.txt
+run_case -z -R --random-source=count.src nul.txt
+run_case -R --random-source=count.src bytes.txt
+run_case -R --random-source=count.src empty.txt
+# A longer source: only its first sixteen bytes are the salt.
+run_case -R --random-source=thirty.txt shuffle.txt
+# The source is opened only when a key will be compared at random.
+run_case --random-source=nosuchfile cols.txt
+run_case -R -k1,1n --random-source=nosuchfile cols.txt
+run_case -R --random-source=nosuchfile cols.txt
+run_case -R --random-source=short.src cols.txt
+run_case -R --random-source=. cols.txt
+run_case -R --random-source=count.src --random-source=count.src cols.txt
+run_case -R --random-source=count.src --random-source=zero.src cols.txt
+run_case -R --random-source=count.src --random-source=./count.src cols.txt
+run_case -nR cols.txt
+run_case -k1MR cols.txt
+run_case -k1RV --random-source=count.src cols.txt
+# Without a source the order cannot be known, but a run of equal lines reads
+# the same in any order, and the status and the silence are there to compare.
+run_stdin 'a\na\na\n' -R
+run_stdin '' -R
+run_stdin 'x\nx\n' -Ru
 
 # --- -z ---------------------------------------------------------------------
 run_case -z nul.txt
@@ -534,6 +612,18 @@ xfail_msg() {
   rm -f "$o_err" "$g_err"
   return 0
 }
+
+# -R's failures, worded: an unopenable, a short and an unreadable source, two
+# different sources, and the orderings it cannot be combined with.
+run_msg -R --random-source=nosuchfile
+run_msg -R --random-source=short.src
+run_msg -R --random-source=.
+run_msg -R --random-source=count.src --random-source=zero.src
+run_msg --random-source=count.src --random-source=zero.src
+run_msg -nR
+run_msg -k1MR
+run_msg -k1,1Rh
+run_msg --sort=random -g
 
 # Abbreviation: unambiguous ones resolve, ambiguous ones are refused, and an
 # exact match wins even when it is a prefix of a longer option.

@@ -1,7 +1,7 @@
 //! sort — sort, merge or check lines of text.
 //!
 //! ```text
-//! sort [-bcCdfghimMnrsuVz] [-k KEYDEF]... [-t SEP] [-o FILE] [FILE...]
+//! sort [-bcCdfghimMnRrsuVz] [-k KEYDEF]... [-t SEP] [-o FILE] [FILE...]
 //! ```
 //!
 //! | | |
@@ -10,6 +10,7 @@
 //! | `-c` / `-C` | check that the input is sorted; report / stay quiet |
 //! | `-d` `-f` `-i` | compare only alphanumerics+blanks / fold case / drop unprintables |
 //! | `-g` `-h` `-M` `-n` `-V` | numeric through a double / SI suffixes / month names / exact decimal / version numbers |
+//! | `-R` | shuffle, keeping equal keys together; `--random-source=FILE` makes the order reproducible |
 //! | `-k SPEC` | sort on this part of the line; may be repeated |
 //! | `-m` | merge already-sorted inputs |
 //! | `-o FILE` | write here, which may be an input file |
@@ -62,11 +63,14 @@
 //! so it inherits nothing else — including `-r`, which is why `sort -r -k2,2n`
 //! does not reverse. That surprises people, and it is GNU's behaviour.
 //!
-//! ## C locale only
+//! ## One locale
 //!
-//! Bytes compare as bytes and the month names are English. SlateOS has no
-//! collation tables yet; see `known-issues.md`. `scripts/sort-diff.sh` pins
-//! `LC_ALL=C` so the comparison against GNU is against the same ordering.
+//! Bytes compare as bytes and the month names are English: GNU's ordering
+//! under `C.UTF-8`, whose code-point collation is byte order. SlateOS is UTF-8
+//! throughout (design-decisions §351) and has no collation tables yet
+//! (`known-issues/TD-SORT-C-LOCALE-ONLY-COLLATION.md`). `scripts/sort-diff.sh`
+//! runs GNU under `LC_ALL=C.UTF-8`, so the comparison is against that ordering
+//! -- which differs from the `C` locale's in what `-R` hashes (`order::random`).
 
 mod keydef;
 mod order;
@@ -83,6 +87,7 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
 use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef, quotef_os};
+use coreutils::randint::{RandError, RandRead};
 use coreutils::stdio::StdioFile;
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
@@ -104,10 +109,13 @@ Ordering:
   -i, --ignore-nonprinting      compare only printable characters
   -M, --month-sort              compare as a month name (unknown < JAN < DEC)
   -n, --numeric-sort            compare as a decimal number, exactly
+  -R, --random-sort             shuffle, but keep equal keys together
+      --random-source=FILE      take -R's random bytes from FILE, which makes
+                                the order the same every time
   -V, --version-sort            compare as a file name holding version numbers
   -r, --reverse                 reverse the result
       --sort=WORD               one of general-numeric, human-numeric, month,
-                                numeric, version
+                                numeric, random, version
 
 Which part of the line:
   -k, --key=KEYDEF              sort on this key; KEYDEF is F[.C][OPTS][,F[.C][OPTS]]
@@ -129,14 +137,14 @@ Other:
 Accepted and ignored, because this sort holds the whole input in memory:
   -S, --buffer-size=SIZE        -T, --temporary-directory=DIR
       --parallel=N                  --compress-program=PROG
-      --batch-size=N                --random-source=FILE
+      --batch-size=N
 
 A long option may be abbreviated to any unambiguous prefix, and takes its value
 either as --key=2 or as --key 2.
 
 KEYDEF's F is a field number and C a character within it, both starting at 1;
 an omitted .C is the start of the field for a start position and the end of it
-for an end position. OPTS is any of bdfgiMnRrV, applying to that key alone --
+for an end position. OPTS is any of bdfghiMnRrV, applying to that key alone --
 a key that names any ordering of its own inherits none of the global ones.
 
 Exit status: 0 if all went well, 1 if -c or -C found the input out of order,
@@ -168,6 +176,14 @@ struct Config {
     /// Kept separate from `files` because it is read after the whole command
     /// line is parsed, and because combining it with an operand is an error.
     files0_from: Option<OsString>,
+    /// `--random-source=FILE`: where `-R`'s salt comes from, when it is not
+    /// the system's random numbers.
+    random_source: Option<OsString>,
+    /// The MD5 state `-R` hashes each key after ([`order::random`]): sixteen
+    /// bytes of salt already absorbed once a key is random
+    /// ([`salted_state`]), and a bare state, which no key hashes with,
+    /// otherwise.
+    salted: md5::Md5,
 }
 
 impl Default for Config {
@@ -184,6 +200,8 @@ impl Default for Config {
             output: None,
             files: Vec::new(),
             files0_from: None,
+            random_source: None,
+            salted: md5::Md5::new(),
         }
     }
 }
@@ -385,7 +403,7 @@ fn compare(cfg: &Config, a: &[u8], b: &[u8]) -> Ordering {
     if !cfg.keys.is_empty() {
         let mut diff = Ordering::Equal;
         for key in &cfg.keys {
-            diff = key.compare(a, b, cfg.tab);
+            diff = key.compare(a, b, cfg.tab, &cfg.salted);
             if diff != Ordering::Equal {
                 break;
             }
@@ -766,7 +784,7 @@ fn parse_args(
                 Ok(arg_bytes(value))
             };
             match flag {
-                b'b' | b'd' | b'f' | b'g' | b'h' | b'i' | b'M' | b'n' | b'V' => {
+                b'b' | b'd' | b'f' | b'g' | b'h' | b'i' | b'M' | b'n' | b'R' | b'V' => {
                     keydef::set_ordering(&[flag], &mut global, Blanks::Both);
                 }
                 // `-r` lands on the global key like every other ordering
@@ -791,7 +809,6 @@ fn parse_args(
                 b'S' | b'T' | b'y' => {
                     let _ = take_value(&mut rest)?;
                 }
-                b'R' => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
                 // `other` is a byte, not a `char`: `other as char` would map
                 // 0xC3 to `Ã` and re-encode it as two bytes, so a bundle like
                 // `-é` would be reported as an option nobody typed.
@@ -830,6 +847,14 @@ fn parse_args(
     // Only now, with every key final -- upstream's
     // check_ordering_compatibility, and the reason it is not done per key.
     keydef::check_compatibility(&cfg.keys).map_err(fatal)?;
+    // Upstream's `need_random`: the salt is read only when a key that will
+    // be compared is random -- `sort -R -k1,1n` reads none, its one key
+    // naming an ordering of its own -- and only now, after the check above
+    // and before the `-c` operand check below, which is where upstream reads
+    // it. So `--random-source=/nonexistent` costs nothing without `-R`.
+    if cfg.keys.iter().any(|key| key.kind == Kind::Random) {
+        cfg.salted = salted_state(cfg.random_source.as_ref())?;
+    }
 
     if cfg.check.is_some() && cfg.files.len() > 1 {
         let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
@@ -853,8 +878,8 @@ const SORT: Program = Program::new("sort", 2);
 
 /// Every long option `sort` knows, with what it takes.
 ///
-/// The table must list options we do *not* implement (`--debug`, `--random-sort`)
-/// as well, because it is also what decides whether an abbreviation is
+/// The table must list the option we do *not* implement (`--debug`) as well,
+/// because it is also what decides whether an abbreviation is
 /// ambiguous: without `--debug` in it, `--d` would resolve to
 /// `--dictionary-order` instead of being refused, and a user who typed `--d`
 /// meaning `--debug` would silently get a dictionary sort.
@@ -975,7 +1000,20 @@ fn long_option(
         "field-separator" => cfg.tab = Some(parse_tab(&need(), cfg.tab).map_err(fatal)?),
         "output" => cfg.output = Some(os_from_bytes(&need())),
         "files0-from" => cfg.files0_from = Some(os_from_bytes(&need())),
-        "random-sort" => return Err(fatal(RANDOM_UNIMPLEMENTED.to_string())),
+        "random-sort" => global.name(Kind::Random),
+        // Named twice, it must be the same file both times: upstream compares
+        // the names, as given.
+        "random-source" => {
+            let source = os_from_bytes(&need());
+            if cfg
+                .random_source
+                .as_ref()
+                .is_some_and(|known| *known != source)
+            {
+                return Err(fatal("multiple random sources specified".to_string()));
+            }
+            cfg.random_source = Some(source);
+        }
         "debug" => return Err(fatal(DEBUG_UNIMPLEMENTED.to_string())),
         // Accepted and ignored, as for their short forms.
         _ => {}
@@ -993,31 +1031,61 @@ const CHECK_WORDS: &[(&str, Check)] = &[
     ("diagnose-first", Check::Diagnose),
 ];
 
-/// `--sort`'s words. `random` is spelled `None` because we recognise it — it is
-/// a real ordering and must not be reported as an invalid argument — but cannot
-/// perform it yet.
-const SORT_WORDS: &[(&str, Option<Kind>)] = &[
-    ("general-numeric", Some(Kind::General)),
-    ("human-numeric", Some(Kind::Human)),
-    ("month", Some(Kind::Month)),
-    ("numeric", Some(Kind::Numeric)),
-    ("random", None),
-    ("version", Some(Kind::Version)),
+/// `--sort`'s words.
+const SORT_WORDS: &[(&str, Kind)] = &[
+    ("general-numeric", Kind::General),
+    ("human-numeric", Kind::Human),
+    ("month", Kind::Month),
+    ("numeric", Kind::Numeric),
+    ("random", Kind::Random),
+    ("version", Kind::Version),
 ];
 
 /// `--sort=WORD`, the long spelling of the ordering options.
 fn parse_sort_word(word: &[u8]) -> Result<Kind, Fatal> {
-    SORT.argmatch(word, "--sort", SORT_WORDS)?
-        .ok_or_else(|| fatal(RANDOM_UNIMPLEMENTED.to_string()))
+    SORT.argmatch(word, "--sort", SORT_WORDS)
 }
 
-/// The two options we accept into the parser and then refuse, each with the
-/// reason rather than a bare "unknown option" — a user who typed one asked for
+/// The option we accept into the parser and then refuse, with the reason
+/// rather than a bare "unknown option" -- a user who typed it asked for
 /// something real and deserves to be told it is missing, not that it does not
-/// exist.
-const RANDOM_UNIMPLEMENTED: &str =
-    "random sort is not implemented: it needs a keyed hash this system does not have yet";
+/// exist (`known-issues/TD-B-SORT-HAS-NO-EXTERNAL-MERGE-RANDOM-SORT-OR-DEBUG.md`).
 const DEBUG_UNIMPLEMENTED: &str = "--debug is not implemented";
+
+/// Upstream's `random_md5_state_init`: sixteen bytes from the random source,
+/// absorbed into a fresh MD5 state that every random key is then hashed after.
+///
+/// The source is `--random-source`'s file, read as gnulib's `randread` reads
+/// it, or the system's random numbers. Its failures are upstream's: a file
+/// that cannot be opened is `open failed: FILE: <errno>`, one shorter than
+/// sixteen bytes is `'FILE': end of file`, one that cannot be read is
+/// `'FILE': read error: <errno>` -- each status 2, as everything `sort` dies
+/// of is.
+fn salted_state(source: Option<&OsString>) -> Result<md5::Md5, Fatal> {
+    let name = source.map(arg_bytes);
+    let mut random = RandRead::open(name.as_deref()).map_err(|e| {
+        fatal(format!(
+            "open failed: {}: {}",
+            quotef(name.as_deref().unwrap_or(b"getrandom")),
+            strerror(&e)
+        ))
+    })?;
+    let mut salt = [0u8; 16];
+    random.read(&mut salt).map_err(|e| {
+        fatal(match e {
+            RandError::EndOfFile(name) => format!("{}: end of file", quote(&name)),
+            RandError::Read(name, err) => {
+                format!("{}: read error: {}", quote(&name), strerror(&err))
+            }
+            RandError::System => {
+                "getrandom: the system random number generator is unavailable".to_string()
+            }
+        })
+    })?;
+    let mut state = md5::Md5::new();
+    state.update(&salt);
+    Ok(state)
+}
 
 /// `-t`'s argument: one byte, or the two characters `\0` for NUL.
 fn parse_tab(value: &[u8], existing: Option<u8>) -> Result<u8, String> {

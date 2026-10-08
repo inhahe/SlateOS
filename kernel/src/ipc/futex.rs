@@ -3767,10 +3767,18 @@ static PID_FAIL: AtomicU32 = AtomicU32::new(0);
 /// Driver sets this to release the owner worker after the handoff.
 static PID_EXIT: AtomicU32 = AtomicU32::new(0);
 
-/// Owner worker: acquires the PI mutex, then spins until released.  It does
-/// NOT unlock — the driver simulates its death by transferring ownership
-/// away with `exit_pi_owned_futexes`, so by exit time it no longer owns the
-/// lock.
+/// Owner worker: acquires the PI mutex, then waits -- alive -- until the
+/// driver releases it. It does NOT unlock: the driver simulates its death by
+/// transferring ownership away with `exit_pi_owned_futexes`, so by exit time
+/// it no longer owns the lock.
+///
+/// It waits on a plain futex rather than spinning with `yield_now`: the
+/// driver runs below this task's level, so a yielding owner kept the CPU,
+/// ran its spin out and exited before the driver had started the waiter --
+/// and a word naming a task that has exited is `ESRCH` to the next locker
+/// (Linux's `handle_exit_race`), which is what the first release boot after
+/// the lock path learned that rule found (2026-10-08). The owner must be
+/// alive while the waiter queues, as a real holder is.
 extern "C" fn pi_death_owner(_arg: u64) {
     let addr = (&raw const PID_PI) as u64;
     if futex_lock_pi(addr).is_err() {
@@ -3779,13 +3787,23 @@ extern "C" fn pi_death_owner(_arg: u64) {
         return;
     }
     PID_OWNED.store(1, Ordering::SeqCst);
-    // Bounded spin so a missed signal can never hang the self-test.
-    for _ in 0..100_000 {
+    let exit_addr = (&raw const PID_EXIT) as u64;
+    // Bounded, so a lost wake can never hang the self-test: each round is a
+    // wait the driver ends, or returns at once once PID_EXIT is set.
+    for _ in 0..1_000 {
         if PID_EXIT.load(Ordering::SeqCst) != 0 {
             break;
         }
-        sched::yield_now();
+        // Either answer -- woken, or the word already moved on -- sends it
+        // round to look at PID_EXIT again; an error would too.
+        let _ = futex_wait(exit_addr, 0);
     }
+}
+
+/// Let the owner worker of the death test go: set [`PID_EXIT`] and wake it.
+fn release_pi_death_owner() {
+    PID_EXIT.store(1, Ordering::SeqCst);
+    let _ = futex_wake((&raw const PID_EXIT) as u64, 1);
 }
 
 /// Waiter worker: blocks on the PI mutex the owner holds.  When the owner
@@ -3836,12 +3854,17 @@ fn test_pi_owner_death_handoff() -> KernelResult<()> {
         sched::yield_now();
     }
     if PID_OWNED.load(Ordering::SeqCst) != 1 {
+        release_pi_death_owner();
         serial_println!("[futex]   FAIL: PI-death owner never acquired");
         return Err(KernelError::InternalError);
     }
 
-    // Spawn the waiter; let it register as a PI waiter and block.
-    sched::spawn(b"pi-death-wait", 16, pi_death_waiter, 0, 0)?;
+    // Spawn the waiter; let it register as a PI waiter and block. The owner
+    // is waiting on PID_EXIT meanwhile, alive, as a holder is.
+    if let Err(e) = sched::spawn(b"pi-death-wait", 16, pi_death_waiter, 0, 0) {
+        release_pi_death_owner();
+        return Err(e);
+    }
     for _ in 0..50 {
         if PID_W_PARKED.load(Ordering::SeqCst) >= 1 {
             break;
@@ -3867,7 +3890,7 @@ fn test_pi_owner_death_handoff() -> KernelResult<()> {
     }
 
     // Release the owner worker and let it (and the waiter) finish.
-    PID_EXIT.store(1, Ordering::SeqCst);
+    release_pi_death_owner();
     for _ in 0..100 {
         if PID_OWNED.load(Ordering::SeqCst) == 1 && PID_RECOVERED.load(Ordering::SeqCst) != 0 {
             // Both progressed; a few more yields lets them return.
@@ -4721,107 +4744,138 @@ extern "C" fn pi_fast_path_waiter_task(addr: u64) {
     PI_FP_WAITED.store(outcome, Ordering::SeqCst);
 }
 
+/// The fast-path test's word. A static, not a local: the workers use it
+/// for as long as they run, which a failing check does not shorten.
+static PI_FP_WORD: AtomicU32 = AtomicU32::new(0);
+
 /// A PI holder that took its word by the userspace fast path is recorded by
 /// its first waiter (Linux's `attach_to_pi_owner`), is lent the waiter's
 /// priority, and gives it back when the waiter times out -- the case of
 /// requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md
 /// that left the loan with the holder for good. `FUTEX_WAITERS` stays set,
 /// so the holder's unlock comes through the kernel and removes the record.
+///
+/// Whatever a check finds, the holder is told to let go and both workers are
+/// waited for before the test returns: a failing check that returned at once
+/// left the holder blocked for good, and the waiter -- whose word was on this
+/// function's stack until 2026-10-08 -- still timing out on it.
 fn test_lock_pi_fast_path_owner() -> KernelResult<()> {
-    fn fail(what: &str) -> KernelResult<()> {
-        serial_println!("[futex]   FAIL: PI holder taken in userspace: {}", what);
-        Err(KernelError::InternalError)
-    }
     PI_FP_STAGE.store(0, Ordering::SeqCst);
     PI_FP_CONTROL.store(1, Ordering::SeqCst);
     PI_FP_WAITED.store(0, Ordering::SeqCst);
+    PI_FP_WORD.store(0, Ordering::SeqCst);
 
-    let word = AtomicU32::new(0);
-    let addr = (&raw const word) as u64;
+    let addr = (&raw const PI_FP_WORD) as u64;
     let wait_key = futex_key(addr).to_pi_wait();
+    let control = (&raw const PI_FP_CONTROL) as u64;
 
     let owner_id = sched::spawn(b"pi-fp-own", 24, pi_fast_path_owner_task, addr, 0)?;
-    for _ in 0..50 {
-        if PI_FP_STAGE.load(Ordering::SeqCst) != 0 {
-            break;
+    let mut waiter_started = false;
+    let outcome = (|| -> Result<(), &'static str> {
+        for _ in 0..50 {
+            if PI_FP_STAGE.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            sched::yield_now();
         }
-        sched::yield_now();
-    }
-    if PI_FP_STAGE.load(Ordering::SeqCst) != 1 {
-        return fail("the holder did not take the word");
-    }
-    if find_pi_owner(wait_key).is_some() {
-        return fail("a take without the kernel made a record");
-    }
-
-    // The waiter records the holder and lends it priority 8 before it parks.
-    sched::spawn(b"pi-fp-wait", 8, pi_fast_path_waiter_task, addr, 0)?;
-    let mut recorded = false;
-    for _ in 0..50 {
-        if find_pi_owner(wait_key) == Some(owner_id) {
-            recorded = true;
-            break;
+        if PI_FP_STAGE.load(Ordering::SeqCst) != 1 {
+            return Err("the holder did not take the word");
         }
-        sched::yield_now();
-    }
-    if !recorded {
-        return fail("the waiter did not record the holder");
-    }
-    let lent = sched::get_effective_priority(owner_id);
-    if lent != Some(8) {
-        serial_println!("[futex]   the holder's priority while lent: {:?}", lent);
-        return fail("the holder was not lent the waiter's priority");
-    }
+        if find_pi_owner(wait_key).is_some() {
+            return Err("a take without the kernel made a record");
+        }
 
-    // The waiter times out -- and takes its loan back.
-    for _ in 0..400 {
-        if PI_FP_WAITED.load(Ordering::SeqCst) != 0 {
+        // The waiter records the holder and lends it priority 8 before it
+        // parks.
+        sched::spawn(b"pi-fp-wait", 8, pi_fast_path_waiter_task, addr, 0)
+            .map_err(|_| "could not spawn the waiter")?;
+        waiter_started = true;
+        let mut recorded = false;
+        for _ in 0..50 {
+            if find_pi_owner(wait_key) == Some(owner_id) {
+                recorded = true;
+                break;
+            }
+            sched::yield_now();
+        }
+        if !recorded {
+            return Err("the waiter did not record the holder");
+        }
+        let lent = sched::get_effective_priority(owner_id);
+        if lent != Some(8) {
+            serial_println!("[futex]   the holder's priority while lent: {:?}", lent);
+            return Err("the holder was not lent the waiter's priority");
+        }
+
+        // The waiter times out -- and takes its loan back.
+        for _ in 0..400 {
+            if PI_FP_WAITED.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            sched::sleep_ms(10);
+        }
+        if PI_FP_WAITED.load(Ordering::SeqCst) != 1 {
+            return Err("the waiter did not time out");
+        }
+        // Its base, or that less the interactive boost (see the inheritance
+        // test); not the lent 8.
+        let base_min = 24u8.saturating_sub(sched::task::INTERACTIVE_BOOST);
+        match sched::get_effective_priority(owner_id) {
+            Some(p) if (base_min..=24).contains(&p) => {}
+            other => {
+                serial_println!(
+                    "[futex]   the holder's priority after the waiter left: {:?}",
+                    other
+                );
+                return Err("the timed-out waiter's priority stayed with the holder");
+            }
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
+        if PI_FP_WORD.load(Ordering::SeqCst) != owner_tid | FUTEX_WAITERS_BIT
+            || find_pi_owner(wait_key) != Some(owner_id)
+        {
+            return Err("the record or FUTEX_WAITERS did not stay with the holder");
+        }
+
+        // The holder lets go: its compare-and-swap fails on FUTEX_WAITERS, so
+        // the unlock comes through the kernel and takes the record with it.
+        PI_FP_CONTROL.store(0, Ordering::SeqCst);
+        let _ = futex_wake(control, 1);
+        for _ in 0..50 {
+            if PI_FP_STAGE.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            sched::yield_now();
+        }
+        if PI_FP_STAGE.load(Ordering::SeqCst) != 2 {
+            return Err("the holder did not let go");
+        }
+        if PI_FP_WORD.load(Ordering::SeqCst) != 0 || find_pi_owner(wait_key).is_some() {
+            return Err("the unlock left the word held or the record behind");
+        }
+        Ok(())
+    })();
+
+    // Whatever was found: the holder lets go, and both workers are finished
+    // with before the statics are used again. (Woken twice is harmless: the
+    // second finds no one waiting.)
+    PI_FP_CONTROL.store(0, Ordering::SeqCst);
+    let _ = futex_wake(control, 1);
+    for _ in 0..100 {
+        let holder_done = matches!(PI_FP_STAGE.load(Ordering::SeqCst), 2 | 9);
+        let waiter_done = !waiter_started || PI_FP_WAITED.load(Ordering::SeqCst) != 0;
+        if holder_done && waiter_done {
             break;
         }
         sched::sleep_ms(10);
     }
-    if PI_FP_WAITED.load(Ordering::SeqCst) != 1 {
-        return fail("the waiter did not time out");
-    }
-    // Its base, or that less the interactive boost (see the inheritance
-    // test); not the lent 8.
-    let base_min = 24u8.saturating_sub(sched::task::INTERACTIVE_BOOST);
-    match sched::get_effective_priority(owner_id) {
-        Some(p) if (base_min..=24).contains(&p) => {}
-        other => {
-            serial_println!(
-                "[futex]   the holder's priority after the waiter left: {:?}",
-                other
-            );
-            return fail("the timed-out waiter's priority stayed with the holder");
-        }
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
-    if word.load(Ordering::SeqCst) != owner_tid | FUTEX_WAITERS_BIT
-        || find_pi_owner(wait_key) != Some(owner_id)
-    {
-        return fail("the record or FUTEX_WAITERS did not stay with the holder");
-    }
-
-    // The holder lets go: its compare-and-swap fails on FUTEX_WAITERS, so the
-    // unlock comes through the kernel and takes the record with it.
-    PI_FP_CONTROL.store(0, Ordering::SeqCst);
-    futex_wake((&raw const PI_FP_CONTROL) as u64, 1);
-    for _ in 0..50 {
-        if PI_FP_STAGE.load(Ordering::SeqCst) == 2 {
-            break;
-        }
-        sched::yield_now();
-    }
-    if PI_FP_STAGE.load(Ordering::SeqCst) != 2 {
-        return fail("the holder did not let go");
-    }
-    if word.load(Ordering::SeqCst) != 0 || find_pi_owner(wait_key).is_some() {
-        return fail("the unlock left the word held or the record behind");
-    }
-
     sched::reap_dead_tasks();
+
+    if let Err(what) = outcome {
+        serial_println!("[futex]   FAIL: PI holder taken in userspace: {}", what);
+        return Err(KernelError::InternalError);
+    }
     serial_println!(
         "[futex]   PI holder taken in userspace: recorded by its waiter, lent priority, \
          given it back on the timeout, unlocked through the kernel: OK"

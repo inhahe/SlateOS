@@ -4683,6 +4683,176 @@ pub fn ctxsw_counts(tid: TaskId) -> Option<(u64, u64)> {
     Some((task.nvcsw, task.nivcsw))
 }
 
+/// The processor time one task -- or several, summed -- has used, as the
+/// CPU-time clocks read it ([`cpu_sample`], [`cpu_sample_sum`]).
+///
+/// Two measures, as Linux keeps them. `cycles` is the precise one: TSC
+/// cycles, charged to the task at each switch-out ([`account_cycles`]) and,
+/// while it is running, those since it was switched in. It is what
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and every
+/// `CPUCLOCK_SCHED` clock read. The ticks are the sampled one: each timer
+/// tick charges a whole tick to whichever mode it found the task in
+/// ([`Task::tick_burst`]); the `CPUCLOCK_PROF` clocks read user plus system
+/// ticks and the `CPUCLOCK_VIRT` ones user ticks alone, as Linux's do under
+/// tick accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuSample {
+    /// TSC cycles run: [`Task::total_cycles`] plus, for a running task, the
+    /// cycles since it was switched in.
+    pub cycles: u64,
+    /// Timer ticks that found it running user code ([`Task::user_ticks`]).
+    pub user_ticks: u64,
+    /// Timer ticks that found it in the kernel ([`Task::sys_ticks`]).
+    pub sys_ticks: u64,
+}
+
+impl CpuSample {
+    /// The two samples' sum (saturating; the counters are 64-bit and cannot
+    /// in practice overflow).
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            cycles: self.cycles.saturating_add(other.cycles),
+            user_ticks: self.user_ticks.saturating_add(other.user_ticks),
+            sys_ticks: self.sys_ticks.saturating_add(other.sys_ticks),
+        }
+    }
+
+    /// The precise measure in nanoseconds.
+    #[must_use]
+    pub fn ns(self) -> u64 {
+        crate::bench::cycles_to_ns(self.cycles)
+    }
+
+    /// User plus system ticks in nanoseconds: what a `CPUCLOCK_PROF` clock
+    /// reads.
+    #[must_use]
+    pub const fn prof_ns(self) -> u64 {
+        self.user_ticks
+            .saturating_add(self.sys_ticks)
+            .saturating_mul(TICK_NS)
+    }
+
+    /// User ticks in nanoseconds: what a `CPUCLOCK_VIRT` clock reads.
+    #[must_use]
+    pub const fn virt_ns(self) -> u64 {
+        self.user_ticks.saturating_mul(TICK_NS)
+    }
+}
+
+/// Nanoseconds in one timer tick -- Linux's `TICK_NSEC`: what each tick a
+/// [`CpuSample`] counts is worth, and the resolution of the clocks that read
+/// them.
+#[allow(clippy::cast_lossless)] // `u64::from` is not callable in a const.
+pub const TICK_NS: u64 = match 1_000_000_000u64.checked_div(crate::apic::TICK_RATE_HZ as u64) {
+    Some(ns) => ns,
+    None => 0,
+};
+
+/// `task`'s [`CpuSample`] at this moment. Called with `SCHED` held, which is
+/// what makes it consistent: [`account_cycles`] adds a running task's cycles
+/// to `total_cycles` and moves its CPU's `LAST_SWITCH_TSC` on in one critical
+/// section, and dispatch marks the incoming task `Running` on that CPU in the
+/// same one, so `Running` here means `LAST_SWITCH_TSC[last_cpu]` is when it
+/// was switched in, and no cycle is counted twice or missed.
+///
+/// Read from another CPU, the in-flight part compares this CPU's TSC with the
+/// running one's; the TSCs of an invariant-TSC machine agree to within a few
+/// cycles, and a reading that would go negative counts nothing.
+fn sample_locked(task: &Task) -> CpuSample {
+    let mut cycles = task.total_cycles;
+    if task.state == TaskState::Running
+        && let Some(slot) = LAST_SWITCH_TSC.get(task.last_cpu)
+    {
+        // 0: no switch has been stamped on that CPU yet, so nothing is
+        // charged to anyone (`account_cycles` skips the same case).
+        let since = slot.load(Ordering::Relaxed);
+        if since != 0 {
+            cycles = cycles.saturating_add(crate::bench::rdtsc().saturating_sub(since));
+        }
+    }
+    CpuSample {
+        cycles,
+        user_ticks: task.user_ticks,
+        sys_ticks: task.sys_ticks,
+    }
+}
+
+/// The processor time task `tid` has used so far, or `None` if no such task
+/// is registered. Takes the global `SCHED` lock.
+#[must_use]
+pub fn cpu_sample(tid: TaskId) -> Option<CpuSample> {
+    let state = SCHED.lock();
+    state.tasks.get(&tid).map(|task| sample_locked(task))
+}
+
+/// Everything the scheduler counts for a task that its process goes on
+/// reporting once the task is gone: its processor time and its page-fault and
+/// context-switch counts. `proc::pcb` folds a thread's into its process as the
+/// thread exits, and sums the live threads' with them when asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskCounters {
+    /// Processor time ([`CpuSample`]).
+    pub cpu: CpuSample,
+    /// Minor page faults ([`Task::min_flt`]).
+    pub min_flt: u64,
+    /// Major page faults ([`Task::maj_flt`]).
+    pub maj_flt: u64,
+    /// Voluntary context switches ([`Task::nvcsw`]).
+    pub nvcsw: u64,
+    /// Involuntary context switches ([`Task::nivcsw`]).
+    pub nivcsw: u64,
+}
+
+impl TaskCounters {
+    /// The two sets' sum (saturating).
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            cpu: self.cpu.plus(other.cpu),
+            min_flt: self.min_flt.saturating_add(other.min_flt),
+            maj_flt: self.maj_flt.saturating_add(other.maj_flt),
+            nvcsw: self.nvcsw.saturating_add(other.nvcsw),
+            nivcsw: self.nivcsw.saturating_add(other.nivcsw),
+        }
+    }
+}
+
+/// `task`'s [`TaskCounters`], with `SCHED` held (see [`sample_locked`]).
+fn counters_locked(task: &Task) -> TaskCounters {
+    TaskCounters {
+        cpu: sample_locked(task),
+        min_flt: task.min_flt,
+        maj_flt: task.maj_flt,
+        nvcsw: task.nvcsw,
+        nivcsw: task.nivcsw,
+    }
+}
+
+/// Task `tid`'s [`TaskCounters`] at this moment, or `None` if no such task is
+/// registered. Takes the global `SCHED` lock; `proc::pcb` calls it with
+/// `PROCESS_TABLE` held (the documented order), to fold an exiting thread's
+/// counters into its process in the same critical section that removes it.
+#[must_use]
+pub fn task_counters(tid: TaskId) -> Option<TaskCounters> {
+    let state = SCHED.lock();
+    state.tasks.get(&tid).map(|task| counters_locked(task))
+}
+
+/// The [`TaskCounters`] of the tasks in `tids`, summed in one critical section
+/// so that every task is sampled at the same moment. An id that names no task
+/// counts nothing. Takes the global `SCHED` lock once; `proc::pcb` calls it
+/// with `PROCESS_TABLE` held, the documented order.
+#[must_use]
+pub fn counters_sum(tids: &[TaskId]) -> TaskCounters {
+    let state = SCHED.lock();
+    tids.iter()
+        .filter_map(|tid| state.tasks.get(tid))
+        .fold(TaskCounters::default(), |sum, task| {
+            sum.plus(counters_locked(task))
+        })
+}
+
 /// Preempt the current task (called from timer ISR after time slice
 /// expiry).
 ///

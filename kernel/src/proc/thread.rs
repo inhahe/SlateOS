@@ -965,29 +965,12 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         pcb::note_killed_on_cpu(pid, task_id);
     }
 
-    // Capture the exiting thread's accumulated counters while its Task is
-    // still alive in the scheduler — `remove_thread` folds them into the
-    // owning process's accumulators so they survive the Task's destruction.
-    // (Lock ordering: read SCHED here, before taking PROCESS_TABLE inside
-    // remove_thread, to avoid nesting the two locks.)
-    let (exit_user, exit_sys) = sched::cpu_ticks(task_id).unwrap_or((0, 0));
-    let (exit_min, exit_maj) = sched::fault_counts(task_id).unwrap_or((0, 0));
-    let (exit_nv, exit_niv) = sched::ctxsw_counts(task_id).unwrap_or((0, 0));
-    let acct = pcb::ThreadExitAccounting {
-        user_ticks: exit_user,
-        sys_ticks: exit_sys,
-        min_flt: exit_min,
-        maj_flt: exit_maj,
-        nvcsw: exit_nv,
-        nivcsw: exit_niv,
-    };
-
     // The first thread -- the one whose id is the process's -- leaves its last
     // snapshot with the process: the scheduler frees its task at the next reap
     // pass, but `/proc/<pid>` goes on describing it until the process itself
-    // is reaped, as Linux's zombie group leader does. Taken here for the same
-    // reason as the counters above: SCHED is read before PROCESS_TABLE is
-    // taken, never inside it.
+    // is reaped, as Linux's zombie group leader does. Taken before
+    // `remove_exiting_thread`, which reads the thread's counters from the
+    // scheduler itself, under PROCESS_TABLE (`pcb::process_counters`).
     if task_id == pid
         && let Some(leader) = sched::task_info(task_id)
     {
@@ -1003,7 +986,7 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     let guarded_pgrps = pcb::guarded_child_pgrps(pid);
 
     // Remove from the process's thread list.
-    match pcb::remove_thread(pid, task_id, acct) {
+    match pcb::remove_exiting_thread(pid, task_id) {
         Ok((is_zombie, wake_task, any_waiter)) => {
             if is_zombie {
                 serial_println!("[thread] Process {} has no threads left — now zombie", pid);
@@ -1229,12 +1212,13 @@ pub(crate) fn self_test_with_thread<R>(tid: TaskId, pid: ProcessId, body: impl F
 /// its **live** threads and its **already-exited** threads.
 ///
 /// Each thread's CPU time is charged tick-by-tick by the scheduler
-/// (Linux tick-sampling model).  When a thread exits, `on_thread_exit`
+/// (Linux tick-sampling model).  When a thread exits, `remove_exiting_thread`
 /// folds its ticks into the per-process accumulator
 /// (`Process::acct_user_ticks`/`acct_sys_ticks`) before the scheduler
 /// destroys the Task, so the total here is
-/// `accumulator + Σ(live thread ticks)`.  Returns `(0, 0)` if the process
-/// is unknown.  Ticks are at `USER_HZ` (100 Hz).
+/// `accumulator + Σ(live thread ticks)`, read as one snapshot
+/// ([`pcb::process_counters`]).  Returns `(0, 0)` if the process is
+/// unknown.  Ticks are at `USER_HZ` (100 Hz).
 ///
 /// This makes the result exact for multi-threaded processes even after
 /// worker threads have exited — not just single-threaded ones.
@@ -1246,21 +1230,17 @@ pub(crate) fn self_test_with_thread<R>(tid: TaskId, pid: ProcessId, body: impl F
 /// [`crate::proc::pcb::process_child_ticks`].
 #[must_use]
 pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
-    // Exited-thread accumulator (also serves as the existence check:
-    // `None` means the process is unknown).
-    let Some((mut user, mut sys)) = pcb::process_acct_ticks(pid) else {
-        return (0, 0);
-    };
-    // Add live threads' in-flight ticks.
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((u, s)) = sched::cpu_ticks(tid) {
-                user = user.saturating_add(u);
-                sys = sys.saturating_add(s);
-            }
-        }
-    }
-    (user, sys)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.cpu.user_ticks, c.cpu.sys_ticks))
+}
+
+/// The processor time process `pid` has used -- its live threads' and its
+/// exited ones', precise cycles and sampled ticks ([`sched::CpuSample`]) --
+/// or `None` if the process is unknown. What its CPU-time clocks read
+/// (`CLOCK_PROCESS_CPUTIME_ID` and the per-process `CPUCLOCK_*` ids); a
+/// zombie's is its final total.
+#[must_use]
+pub fn process_cpu_sample(pid: ProcessId) -> Option<sched::CpuSample> {
+    pcb::process_counters(pid).map(|c| c.cpu)
 }
 
 /// Sum the `(min_flt, maj_flt)` page-fault counts of a process across both
@@ -1277,18 +1257,7 @@ pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
 /// [`crate::proc::pcb::process_child_faults`].
 #[must_use]
 pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
-    let Some((mut min_flt, mut maj_flt)) = pcb::process_acct_faults(pid) else {
-        return (0, 0);
-    };
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((mn, mj)) = sched::fault_counts(tid) {
-                min_flt = min_flt.saturating_add(mn);
-                maj_flt = maj_flt.saturating_add(mj);
-            }
-        }
-    }
-    (min_flt, maj_flt)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.min_flt, c.maj_flt))
 }
 
 /// Sum the `(nvcsw, nivcsw)` context-switch counts of a process across both
@@ -1302,18 +1271,7 @@ pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
 /// separately — see [`crate::proc::pcb::process_child_ctxsw`].
 #[must_use]
 pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
-    let Some((mut nvcsw, mut nivcsw)) = pcb::process_acct_ctxsw(pid) else {
-        return (0, 0);
-    };
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((nv, niv)) = sched::ctxsw_counts(tid) {
-                nvcsw = nvcsw.saturating_add(nv);
-                nivcsw = nivcsw.saturating_add(niv);
-            }
-        }
-    }
-    (nvcsw, nivcsw)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.nvcsw, c.nivcsw))
 }
 
 /// Everything the wait family reports about one process's resource use.
@@ -1357,19 +1315,17 @@ pub struct ProcessUsage {
 /// degradation the `getrusage` surfaces already take.
 #[must_use]
 pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
-    let (user, sys) = process_cpu_ticks(pid);
+    let own = pcb::process_counters(pid).unwrap_or_default();
     let (cuser, csys) = pcb::process_child_ticks(pid);
-    let (min_flt, maj_flt) = process_fault_counts(pid);
     let (cmin, cmaj) = pcb::process_child_faults(pid);
-    let (nvcsw, nivcsw) = process_ctxsw_counts(pid);
     let (cnv, cniv) = pcb::process_child_ctxsw(pid);
     ProcessUsage {
-        user_ticks: user.saturating_add(cuser),
-        sys_ticks: sys.saturating_add(csys),
-        min_flt: min_flt.saturating_add(cmin),
-        maj_flt: maj_flt.saturating_add(cmaj),
-        nvcsw: nvcsw.saturating_add(cnv),
-        nivcsw: nivcsw.saturating_add(cniv),
+        user_ticks: own.cpu.user_ticks.saturating_add(cuser),
+        sys_ticks: own.cpu.sys_ticks.saturating_add(csys),
+        min_flt: own.min_flt.saturating_add(cmin),
+        maj_flt: own.maj_flt.saturating_add(cmaj),
+        nvcsw: own.nvcsw.saturating_add(cnv),
+        nivcsw: own.nivcsw.saturating_add(cniv),
     }
 }
 

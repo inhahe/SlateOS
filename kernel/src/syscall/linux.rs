@@ -19693,20 +19693,47 @@ fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
+    let tp = args.arg1;
+    // A negative id has a .clock_set -- the CPU-time clocks'
+    // `posix_cpu_clock_set`, and a CLOCKFD id's `pc_clock_settime` -- so the
+    // time is copied in first (EFAULT), and then neither can be set: a CPU
+    // clock that names something is EPERM ("you can never reset a CPU
+    // clock"), one that names nothing EINVAL, and a CLOCKFD id EINVAL (no
+    // clock is ever behind a file descriptor here). Neither checks the
+    // time's shape.
+    if clockid_i32 < 0 {
+        if tp == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(tp, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+        return match cpu_clock(
+            clockid_i32,
+            caller_pid(),
+            crate::sched::current_task_id(),
+            false,
+        ) {
+            Ok(Some(_)) => linux_err(errno::EPERM),
+            Ok(None) => linux_err(errno::EINVAL),
+            Err(e) => linux_err(e),
+        };
+    }
     if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
         return linux_err(errno::EINVAL);
     }
     // Linux clocks whose k_clock entry has .clock_set == NULL:
-    //   MONOTONIC(1), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
-    //   REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
-    //   REALTIME_ALARM(8), BOOTTIME_ALARM(9).
-    // Clocks with .clock_set: REALTIME(0), PROCESS_CPUTIME_ID(2), TAI(11).
+    //   MONOTONIC(1), PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3),
+    //   MONOTONIC_RAW(4), REALTIME_COARSE(5), MONOTONIC_COARSE(6),
+    //   BOOTTIME(7), REALTIME_ALARM(8), BOOTTIME_ALARM(9).
+    // Clocks with .clock_set: REALTIME(0), TAI(11).
     // Linux folds these into the same -EINVAL as the unknown-clockid
-    // case (single `if (!kc || !kc->clock_set)` gate).
-    if matches!(clockid_i32, 1 | 3..=9) {
+    // case (single `if (!kc || !kc->clock_set)` gate). PROCESS_CPUTIME_ID
+    // was taken to have one until 2026-10-08; Linux 6.6.87 answers EINVAL
+    // (its `clock_process` has no `.clock_set`).
+    if matches!(clockid_i32, 1..=9) {
         return linux_err(errno::EINVAL);
     }
-    let tp = args.arg1;
     if tp == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -37274,34 +37301,141 @@ fn timer_clock_kind(clockid: i32) -> Result<TimerClockKind, i32> {
     }
 }
 
-/// Whether CPU-time clock `clockid` names something a timer of `caller`'s
-/// could measure -- Linux's `pid_for_clock(clock, false)`: a valid clock kind,
-/// and for a nonzero pid a thread of the caller's own (per-thread clocks) or a
-/// live process.
-fn cpu_clock_target_ok(clockid: i32, caller: Option<u64>) -> bool {
-    // CPUCLOCK_WHICH: PROF 0, VIRT 1, SCHED 2; 3 is no clock.
+/// Which of a task's CPU-time measures a CPU-time clock reads -- Linux's
+/// `CPUCLOCK_WHICH`, the low two bits of a negative clock id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CpuClockKind {
+    /// `CPUCLOCK_PROF` (0): user plus system time, sampled at the tick.
+    Prof,
+    /// `CPUCLOCK_VIRT` (1): user time alone, sampled at the tick.
+    Virt,
+    /// `CPUCLOCK_SCHED` (2): run time, measured at each context switch --
+    /// the precise measure, and the one `CLOCK_PROCESS_CPUTIME_ID` and
+    /// `CLOCK_THREAD_CPUTIME_ID` read.
+    Sched,
+}
+
+/// Whose processor time a CPU-time clock reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CpuClockTarget {
+    /// One thread's (a scheduler task id).
+    Thread(u64),
+    /// A whole process's: every thread it has, and every one it had.
+    Process(u64),
+}
+
+/// A CPU-time clock, decoded ([`cpu_clock`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CpuClock {
+    /// What it measures.
+    pub kind: CpuClockKind,
+    /// Whose.
+    pub target: CpuClockTarget,
+}
+
+/// What `clockid` names as a CPU-time clock, for a call made by task `tid`
+/// of process `pid` (`None`: a kernel task, which counts as a process of one
+/// thread) -- Linux's `clockid_to_kclock` and `pid_for_clock`:
+///
+/// - `Ok(None)`: not a CPU-time clock at all -- an id of 0 or more other than
+///   `CLOCK_PROCESS_CPUTIME_ID` (2) and `CLOCK_THREAD_CPUTIME_ID` (3), or a
+///   negative one whose low three bits are 3 (`CLOCKFD`, a clock behind a
+///   file descriptor);
+/// - `Err(EINVAL)`: a CPU-time clock that names nothing: `CPUCLOCK_WHICH` 3,
+///   a thread that is not one of the caller's own, or a pid that is not a
+///   process's;
+/// - otherwise the clock. A negative id is `~pid << 3 | perthread << 2 |
+///   which`; pid 0 is the caller (its thread, or its process).
+///
+/// Any process's clock may be read, as on Linux, where `/proc/<pid>/stat`
+/// tells anyone the same thing to the tick (design-decisions §1516 keeps
+/// `stat` open to all); a thread's only by its own process. `gettime` is
+/// Linux's one allowance for `clock_gettime`: the process clock named by a
+/// thread of the caller's own that is not the first one (whose id is the
+/// process's) is the caller's process; for anything else -- a resolution,
+/// a timer, a sleep -- the pid must be a process's.
+pub(crate) fn cpu_clock(
+    clockid: i32,
+    pid: Option<u64>,
+    tid: u64,
+    gettime: bool,
+) -> Result<Option<CpuClock>, i32> {
     const CPUCLOCK_CLOCK_MASK: i32 = 3;
-    const CPUCLOCK_MAX: i32 = 3;
     const CPUCLOCK_PERTHREAD_MASK: i32 = 4;
-    if clockid >= 0 {
-        // CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID: the caller's.
-        return true;
+    const CLOCKFD: i32 = 3;
+    const CLOCKFD_MASK: i32 = 7;
+    // The caller's own process: a kernel task's is itself.
+    let own_process = pid.map_or(CpuClockTarget::Thread(tid), CpuClockTarget::Process);
+    match clockid {
+        2 => {
+            return Ok(Some(CpuClock {
+                kind: CpuClockKind::Sched,
+                target: own_process,
+            }));
+        }
+        3 => {
+            return Ok(Some(CpuClock {
+                kind: CpuClockKind::Sched,
+                target: CpuClockTarget::Thread(tid),
+            }));
+        }
+        c if c >= 0 || c & CLOCKFD_MASK == CLOCKFD => return Ok(None),
+        _ => {}
     }
-    if clockid & CPUCLOCK_CLOCK_MASK >= CPUCLOCK_MAX {
-        return false;
-    }
-    // CPUCLOCK_PID: the pid is the id's complement, shifted down three.
-    let upid = !(clockid >> 3);
-    if upid == 0 {
-        return true;
-    }
-    let Ok(target) = u64::try_from(upid) else {
-        return false;
+    let kind = match clockid & CPUCLOCK_CLOCK_MASK {
+        0 => CpuClockKind::Prof,
+        1 => CpuClockKind::Virt,
+        2 => CpuClockKind::Sched,
+        _ => return Err(errno::EINVAL),
     };
-    if clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
-        caller.is_some() && crate::proc::thread::owner_process(target) == caller
+    // CPUCLOCK_PID: the id's complement, shifted down three -- never negative
+    // for a negative id.
+    let upid = u64::try_from(!(clockid >> 3)).map_err(|_| errno::EINVAL)?;
+    let target = if clockid & CPUCLOCK_PERTHREAD_MASK != 0 {
+        if upid == 0 || upid == tid {
+            CpuClockTarget::Thread(tid)
+        } else if pid.is_some() && crate::proc::thread::owner_process(upid) == pid {
+            CpuClockTarget::Thread(upid)
+        } else {
+            return Err(errno::EINVAL);
+        }
+    } else if upid == 0 || (gettime && upid == tid) {
+        own_process
+    } else if crate::proc::pcb::state(upid).is_some() {
+        CpuClockTarget::Process(upid)
     } else {
-        crate::proc::pcb::state(target).is_some()
+        return Err(errno::EINVAL);
+    };
+    Ok(Some(CpuClock { kind, target }))
+}
+
+/// Read CPU-time clock `clock`, in nanoseconds, or `EINVAL` if what it
+/// measures has gone (a thread that exited, a process reaped).
+///
+/// `CPUCLOCK_SCHED` reads the precise run time; `CPUCLOCK_PROF` and
+/// `CPUCLOCK_VIRT` the ticks, each worth a whole tick -- what Linux's read
+/// under tick accounting, so a PROF or VIRT clock moves in steps of the tick
+/// as its timers (`ITIMER_PROF`, `ITIMER_VIRTUAL`) are charged.
+pub(crate) fn read_cpu_clock(clock: CpuClock) -> Result<u64, i32> {
+    let sample = match clock.target {
+        CpuClockTarget::Thread(t) => crate::sched::cpu_sample(t),
+        CpuClockTarget::Process(p) => crate::proc::thread::process_cpu_sample(p),
+    }
+    .ok_or(errno::EINVAL)?;
+    Ok(match clock.kind {
+        CpuClockKind::Sched => sample.ns(),
+        CpuClockKind::Prof => sample.prof_ns(),
+        CpuClockKind::Virt => sample.virt_ns(),
+    })
+}
+
+/// The resolution of CPU-time clock `clock`, in nanoseconds -- Linux's
+/// `posix_cpu_clock_getres`: 1 for `CPUCLOCK_SCHED`, a tick for the sampled
+/// ones.
+pub(crate) const fn cpu_clock_res(clock: CpuClock) -> u64 {
+    match clock.kind {
+        CpuClockKind::Sched => 1,
+        CpuClockKind::Prof | CpuClockKind::Virt => crate::sched::TICK_NS,
     }
 }
 
@@ -37411,11 +37545,12 @@ pub(crate) fn timer_create_common(clock_arg: u64, sevp: u64, out: Option<u64>) -
         TimerClockKind::Timeable(clock) => clock,
         TimerClockKind::Alarm => return refuse(errno::EPERM),
         TimerClockKind::CpuTime(c) => {
-            return refuse(if cpu_clock_target_ok(c, caller) {
-                errno::EOPNOTSUPP
-            } else {
-                errno::EINVAL
-            });
+            return refuse(
+                match cpu_clock(c, caller, crate::sched::current_task_id(), false) {
+                    Ok(_) => errno::EOPNOTSUPP,
+                    Err(e) => e,
+                },
+            );
         }
     };
     let Some((pid, id)) = reserved else {
@@ -50848,11 +50983,10 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
     // MONOTONIC_COARSE(6), BOOTTIME(7), REALTIME_ALARM(8),
     // BOOTTIME_ALARM(9), TAI(11).  Pre-batch we returned EINVAL for
     // ALARM(8), ALARM(9), and TAI(11), diverging from Linux which fills
-    // them all in.
+    // them all in.  So do the negative ids of the per-process and
+    // per-thread CPU-time clocks (`cpu_clock`).
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
-    const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
-    const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
     const CLOCK_MONOTONIC_RAW: u64 = 4;
     const CLOCK_REALTIME_COARSE: u64 = 5;
     const CLOCK_MONOTONIC_COARSE: u64 = 6;
@@ -50874,6 +51008,29 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
     let clockid: u64 = u64::from(clockid_i32 as u32);
     let tp_ptr = args.arg1;
 
+    // The CPU-time clocks: CLOCK_PROCESS_CPUTIME_ID (2),
+    // CLOCK_THREAD_CPUTIME_ID (3), and a process's or thread's by id. The
+    // value is read before the pointer is tried, as Linux does.
+    match cpu_clock(
+        clockid_i32,
+        caller_pid(),
+        crate::sched::current_task_id(),
+        true,
+    ) {
+        Ok(Some(clock)) => {
+            let ns = match read_cpu_clock(clock) {
+                Ok(ns) => ns,
+                Err(e) => return linux_err(e),
+            };
+            if let Err(e) = write_timespec(tp_ptr, LinuxTimespec::from_nanos(ns)) {
+                return linux_err(linux_errno_for(e));
+            }
+            return SyscallResult::ok(0);
+        }
+        Ok(None) => {}
+        Err(e) => return linux_err(e),
+    }
+
     let ns: u64 = match clockid {
         // Wall-clock family.  TAI is realtime + TAI offset; our offset
         // is 0 so it coincides with realtime.  REALTIME_ALARM mirrors
@@ -50887,11 +51044,11 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
         | CLOCK_MONOTONIC_RAW
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
-        | CLOCK_BOOTTIME_ALARM
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID => crate::hrtimer::now_ns(),
-        // Anything else (out-of-range or SGI_CYCLE=10) -> EINVAL,
-        // matching Linux's clockid_to_kclock NULL return.
+        | CLOCK_BOOTTIME_ALARM => crate::hrtimer::now_ns(),
+        // Anything else (out-of-range, SGI_CYCLE=10, or a CLOCKFD id: no
+        // clock is ever behind a file descriptor here) -> EINVAL, matching
+        // Linux's clockid_to_kclock NULL return and its answer for an fd
+        // that is not a clock's.
         _ => return linux_err(errno::EINVAL),
     };
 
@@ -50941,6 +51098,11 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
 ///     `posix_get_coarse_res`, which reports `KTIME_LOW_RES = TICK_NSEC`
 ///     — 10ms at our HZ=100.  `sys_clock_gettime` floors these clockids
 ///     to the same 10ms grid, so getres/gettime stay consistent.
+///   * A process's or thread's CPU-time clock by id (negative) is checked
+///     as `posix_cpu_clock_getres` checks it -- `EINVAL` unless it names a
+///     thread of the caller's or a process (`cpu_clock`, which glibc's
+///     `clock_getcpuclockid` relies on to tell a live pid from a dead one)
+///     -- and reports 1ns for `CPUCLOCK_SCHED`, a tick for PROF and VIRT.
 fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
     // Linux's `SYSCALL_DEFINE2(clock_getres)` (kernel/time/posix-timers.c):
     //   kc = clockid_to_kclock(which_clock);
@@ -50956,11 +51118,21 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
+    let cpu = match cpu_clock(
+        clockid_i32,
+        caller_pid(),
+        crate::sched::current_task_id(),
+        false,
+    ) {
+        Ok(cpu) => cpu,
+        Err(e) => return linux_err(e),
+    };
     // Valid posix clockids: 0..=9, 11. SGI_CYCLE(10) is reserved-
-    // not-implemented (clockid_to_kclock returns NULL).  Negative
-    // clockids encode dynamic-CPU/posix-fd clocks in Linux; we don't
-    // implement any of those, so reject them as EINVAL.
-    if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
+    // not-implemented (clockid_to_kclock returns NULL).  The negative ids
+    // other than the CPU-time clocks name a clock behind a file descriptor
+    // (CLOCKFD), and none is ever one here: EINVAL, Linux's answer for an fd
+    // that is not a clock's.
+    if cpu.is_none() && (!(0..=11).contains(&clockid_i32) || clockid_i32 == 10) {
         return linux_err(errno::EINVAL);
     }
     let res_ptr = args.arg1;
@@ -50968,15 +51140,16 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
         // Linux permits NULL — succeed without writing.
         return SyscallResult::ok(0);
     }
-    // Coarse clocks report TICK_NSEC (10ms at HZ=100); every other
-    // (high-res / well-known CPU-SCHED) clock reports 1ns.
-    let tv_nsec: i64 =
-        if clockid_i32 == CLOCK_REALTIME_COARSE || clockid_i32 == CLOCK_MONOTONIC_COARSE {
-            10_000_000 // 1e9 / HZ(100)
-        } else {
-            1
-        };
-    let ts = LinuxTimespec { tv_sec: 0, tv_nsec };
+    // Coarse clocks report TICK_NSEC (10ms at HZ=100); the CPU-time ones
+    // theirs (`cpu_clock_res`); every other (high-res) clock 1ns.
+    let tv_nsec: u64 = if let Some(clock) = cpu {
+        cpu_clock_res(clock)
+    } else if clockid_i32 == CLOCK_REALTIME_COARSE || clockid_i32 == CLOCK_MONOTONIC_COARSE {
+        crate::sched::TICK_NS
+    } else {
+        1
+    };
+    let ts = LinuxTimespec::from_nanos(tv_nsec);
     if let Err(e) = write_timespec(res_ptr, ts) {
         return linux_err(linux_errno_for(e));
     }
@@ -73819,10 +73992,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: clock_settime TAI not EPERM");
                 return Err(KernelError::InternalError);
             }
-            // clock_settime(CLOCK_PROCESS_CPUTIME_ID=2, ts_ok) -> falls past
-            // EINVAL gate; PROCESS_CPUTIME_ID has .clock_set in Linux's
-            // posix_clocks[] entry that ultimately fails with EPERM in our
-            // model (no CAP_SYS_TIME).  Probe verifies the gate path.
+            // clock_settime(CLOCK_PROCESS_CPUTIME_ID=2, ts_ok) -> EINVAL:
+            // Linux's `clock_process` has no .clock_set (6.6.87 answers
+            // EINVAL; this probe expected EPERM until 2026-10-08).
             let a = SyscallArgs {
                 arg0: 2,
                 arg1: cts_ok_ptr,
@@ -73831,9 +74003,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::CLOCK_SETTIME, &a).value != -i64::from(errno::EPERM) {
+            if dispatch_linux(nr::CLOCK_SETTIME, &a).value != -i64::from(errno::EINVAL) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: clock_settime PROCESS_CPUTIME_ID not EPERM"
+                    "[syscall/linux]   FAIL: clock_settime PROCESS_CPUTIME_ID not EINVAL"
                 );
                 return Err(KernelError::InternalError);
             }

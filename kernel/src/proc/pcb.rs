@@ -1195,24 +1195,30 @@ pub struct Process {
     /// Number of write-family syscalls issued (`syscw`).
     pub io_syscw: u64,
 
-    // --- Per-process CPU-time accounting (Linux tick-sampling model) ---
+    // --- Per-process CPU-time accounting ---
     //
-    // Live threads' CPU ticks are charged tick-by-tick on the scheduler
-    // (`Task::user_ticks`/`sys_ticks`).  When a thread exits it is removed
-    // from the scheduler, so its ticks would vanish; instead `on_thread_exit`
-    // folds the exiting thread's `(user_ticks, sys_ticks)` into these two
-    // accumulators.  A process's total CPU time is therefore
-    // `acct_user_ticks + Σ(live threads' user_ticks)` (and likewise for sys);
-    // see `proc::thread::process_cpu_ticks`.  This makes the self/thread CPU
-    // surfaces exact even for multi-threaded processes that have already
-    // reaped worker threads.  Reset to 0 for a freshly-forked child (Linux
-    // resets per-task CPU accounting on fork).
+    // Live threads' CPU time is kept on the scheduler: ticks charged
+    // tick-by-tick (`Task::user_ticks`/`sys_ticks`, Linux's tick sampling)
+    // and TSC cycles charged at each switch-out (`Task::total_cycles`). When
+    // a thread exits it is removed from the scheduler, so its time would
+    // vanish; instead `remove_thread` folds it into these accumulators, under
+    // this table's lock, in the same critical section that takes the thread
+    // off `threads`. A process's total is therefore the accumulator plus its
+    // live threads' (`process_cpu_sample`, which reads both under the same
+    // lock, so a thread's time is counted exactly once whichever side of its
+    // exit a reader falls). Reset to 0 for a freshly-forked child (Linux
+    // resets per-task CPU accounting on fork); kept across exec, as Linux's
+    // CPU clocks run on through it.
     /// Accumulated user-mode ticks from this process's already-exited
     /// threads (live threads are summed separately at query time).
     pub acct_user_ticks: u64,
     /// Accumulated kernel-mode ticks from this process's already-exited
     /// threads.
     pub acct_sys_ticks: u64,
+    /// Accumulated TSC cycles run by this process's already-exited threads
+    /// -- the precise counterpart of the two above, which the CPU-time
+    /// clocks read (`sched::CpuSample`).
+    pub acct_cycles: u64,
 
     // --- Children CPU-time accounting (POSIX cutime/cstime) ---
     //
@@ -1508,6 +1514,7 @@ impl Process {
             // accounting for a freshly-forked child).
             acct_user_ticks: 0,
             acct_sys_ticks: 0,
+            acct_cycles: 0,
             child_user_ticks: 0,
             child_sys_ticks: 0,
             acct_min_flt: 0,
@@ -2042,6 +2049,7 @@ pub fn fork_create(
         // time from this point, and has reaped no children of its own.
         acct_user_ticks: 0,
         acct_sys_ticks: 0,
+        acct_cycles: 0,
         child_user_ticks: 0,
         child_sys_ticks: 0,
         // Page-fault accounting also resets on fork.
@@ -2120,21 +2128,24 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     Ok(())
 }
 
-/// Per-thread accounting totals captured at thread-exit time.
+/// Per-thread accounting totals folded into a process as the thread leaves it.
 ///
-/// When a thread exits it is removed from the scheduler, so the
-/// per-task counters it carried (`Task::user_ticks`/`sys_ticks` and
-/// `Task::min_flt`/`maj_flt`) would otherwise vanish.  The caller
-/// (`proc::thread::on_thread_exit`) snapshots them from the scheduler
-/// while the task is still alive and passes them to [`remove_thread`],
-/// which folds them into the owning process's `acct_*` accumulators so
-/// a process's totals stay exact across thread reaping.
+/// When a thread exits it is removed from the scheduler, so the per-task
+/// counters it carried (`Task::user_ticks`/`sys_ticks`, `total_cycles`,
+/// `min_flt`/`maj_flt`, `nvcsw`/`nivcsw`) would otherwise vanish.
+/// [`remove_exiting_thread`] reads them from the scheduler itself, under the
+/// table's lock (see [`process_counters`] for why there); [`remove_thread`]
+/// folds the ones its caller gives -- zero for a thread that never ran, or a
+/// self-test's synthetic values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ThreadExitAccounting {
     /// User-mode (ring 3) CPU time of the exiting thread, in timer ticks.
     pub user_ticks: u64,
     /// Kernel-mode (ring 0) CPU time of the exiting thread, in timer ticks.
     pub sys_ticks: u64,
+    /// TSC cycles the exiting thread ran (`Task::total_cycles`, and those
+    /// since it was last switched in).
+    pub cycles: u64,
     /// Minor page faults charged to the exiting thread.
     pub min_flt: u64,
     /// Major page faults charged to the exiting thread.
@@ -2143,6 +2154,20 @@ pub struct ThreadExitAccounting {
     pub nvcsw: u64,
     /// Involuntary context switches charged to the exiting thread.
     pub nivcsw: u64,
+}
+
+impl From<crate::sched::TaskCounters> for ThreadExitAccounting {
+    fn from(c: crate::sched::TaskCounters) -> Self {
+        Self {
+            user_ticks: c.cpu.user_ticks,
+            sys_ticks: c.cpu.sys_ticks,
+            cycles: c.cpu.cycles,
+            min_flt: c.min_flt,
+            maj_flt: c.maj_flt,
+            nvcsw: c.nvcsw,
+            nivcsw: c.nivcsw,
+        }
+    }
 }
 
 /// What a parent's `SIGCHLD` disposition makes of a child that exits now --
@@ -2206,22 +2231,60 @@ pub fn note_killed_on_cpu(pid: ProcessId, task: TaskId) {
 /// When a process becomes a zombie, all its living children are
 /// reparented to PID 1 (init) and registered as orphans so init
 /// can reap them when they eventually exit.
+///
+/// Folds the counters `acct` gives: zero for a thread that never ran, or a
+/// self-test's synthetic values. A thread that ran leaves through
+/// [`remove_exiting_thread`], which reads its counters from the scheduler.
 pub fn remove_thread(
     pid: ProcessId,
     task_id: TaskId,
     acct: ThreadExitAccounting,
 ) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
+    remove_thread_counting(pid, task_id, Some(acct))
+}
+
+/// [`remove_thread`] for a thread that has run and is exiting
+/// (`thread::on_thread_exit`): the counters folded into the process are the
+/// thread's own, read from the scheduler under this table's lock, in the same
+/// critical section that takes it off `threads` -- which is what lets
+/// [`process_counters`] count it exactly once. Its task must still be in the
+/// scheduler; the scheduler frees it later.
+pub fn remove_exiting_thread(
+    pid: ProcessId,
+    task_id: TaskId,
+) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
+    remove_thread_counting(pid, task_id, None)
+}
+
+/// The body of [`remove_thread`] and [`remove_exiting_thread`]: `given` is
+/// the counters to fold, or `None` to read them from the scheduler.
+fn remove_thread_counting(
+    pid: ProcessId,
+    task_id: TaskId,
+    given: Option<ThreadExitAccounting>,
+) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
+    let was_thread = proc.threads.contains(&task_id);
     proc.threads.retain(|&t| t != task_id);
 
     // Fold the exiting thread's per-task counters into the per-process
-    // accumulators so they survive the thread's removal from the scheduler.
-    // The caller captured these from the scheduler while the task was still
-    // alive (the scheduler frees the Task after this point).
+    // accumulators so they survive the thread's removal from the scheduler
+    // (which frees the Task after this point). Read here, under the lock
+    // and after the thread has left `threads`, so no reader of
+    // `process_counters` can see it both live and folded, or neither. Only
+    // a thread that was the process's: a stray id names someone else's task.
+    let acct = match given {
+        Some(acct) => acct,
+        None if was_thread => crate::sched::task_counters(task_id)
+            .map(ThreadExitAccounting::from)
+            .unwrap_or_default(),
+        None => ThreadExitAccounting::default(),
+    };
     proc.acct_user_ticks = proc.acct_user_ticks.saturating_add(acct.user_ticks);
     proc.acct_sys_ticks = proc.acct_sys_ticks.saturating_add(acct.sys_ticks);
+    proc.acct_cycles = proc.acct_cycles.saturating_add(acct.cycles);
     proc.acct_min_flt = proc.acct_min_flt.saturating_add(acct.min_flt);
     proc.acct_maj_flt = proc.acct_maj_flt.saturating_add(acct.maj_flt);
     proc.acct_nvcsw = proc.acct_nvcsw.saturating_add(acct.nvcsw);
@@ -8853,6 +8916,36 @@ pub fn process_acct_ticks(pid: ProcessId) -> Option<(u64, u64)> {
         .map(|p| (p.acct_user_ticks, p.acct_sys_ticks))
 }
 
+/// What process `pid`'s threads have used and counted -- the exited ones'
+/// accumulators plus every live thread's [`crate::sched::TaskCounters`] --
+/// or `None` if the process is unknown. A zombie's is its final total.
+///
+/// One snapshot: the table's lock is held while the live threads are summed
+/// (`PROCESS_TABLE` → `SCHED`, the documented order), and [`remove_thread`]
+/// folds an exiting thread's counters into the accumulators and takes it off
+/// `threads` under the same lock. So each thread is counted exactly once,
+/// whichever side of its exit a reader falls -- read separately, a thread
+/// that exited between the two reads was missed entirely -- and a CPU-time
+/// clock read from it never runs backwards: what an exiting thread folds
+/// in is sampled at the fold, after anything a reader saw of it live.
+#[must_use]
+pub fn process_counters(pid: ProcessId) -> Option<crate::sched::TaskCounters> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    let exited = crate::sched::TaskCounters {
+        cpu: crate::sched::CpuSample {
+            cycles: proc.acct_cycles,
+            user_ticks: proc.acct_user_ticks,
+            sys_ticks: proc.acct_sys_ticks,
+        },
+        min_flt: proc.acct_min_flt,
+        maj_flt: proc.acct_maj_flt,
+        nvcsw: proc.acct_nvcsw,
+        nivcsw: proc.acct_nivcsw,
+    };
+    Some(exited.plus(crate::sched::counters_sum(&proc.threads)))
+}
+
 /// Get a process's accumulated children CPU ticks (from reaped descendants)
 /// as `(child_user_ticks, child_sys_ticks)`.  Returns `(0, 0)` if the
 /// process is unknown.
@@ -11128,6 +11221,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 2,
             sys_ticks: 1,
+            cycles: 0,
             min_flt: 3,
             maj_flt: 1,
             nvcsw: 6,
@@ -11250,6 +11344,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 5,
             sys_ticks: 3,
+            cycles: 0,
             min_flt: 4,
             maj_flt: 2,
             nvcsw: 7,

@@ -8237,6 +8237,44 @@ pub fn sys_posix_timer(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_CPU_CLOCK(op, clockid)` (1156): read a CPU-time clock, or its
+/// resolution, for a native program -- the Linux ABI's decoding
+/// (`linux::cpu_clock`) and reading, so a clock id means the same through
+/// both doors. Linux errnos as `-errno`. See
+/// [`SYS_CPU_CLOCK`](super::number::SYS_CPU_CLOCK).
+pub fn sys_cpu_clock(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{self, errno, linux_err};
+    use super::number::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME};
+    let op = args.arg0;
+    if op != CPU_CLOCK_GETTIME && op != CPU_CLOCK_GETRES {
+        return linux_err(errno::EINVAL);
+    }
+    // clockid_t is an int: the register's low half.
+    #[allow(clippy::cast_possible_truncation)]
+    let clockid = args.arg1 as i32;
+    let clock = match linux::cpu_clock(
+        clockid,
+        caller_pid(),
+        sched::current_task_id(),
+        op == CPU_CLOCK_GETTIME,
+    ) {
+        Ok(Some(clock)) => clock,
+        // Not a CPU-time clock: the other clocks have calls of their own.
+        Ok(None) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
+    };
+    let ns = if op == CPU_CLOCK_GETTIME {
+        match linux::read_cpu_clock(clock) {
+            Ok(ns) => ns,
+            Err(e) => return linux_err(e),
+        }
+    } else {
+        linux::cpu_clock_res(clock)
+    };
+    // Nanoseconds of CPU time fit an i64 for 292 years.
+    SyscallResult::ok(i64::try_from(ns).unwrap_or(i64::MAX))
+}
+
 /// `SYS_PROCESS_DUMPABLE(op, value)` (1142): read or set the caller's
 /// dumpable flag -- the one `prctl(PR_SET_DUMPABLE)` sets for Linux programs,
 /// so the two ABIs share it. Setting takes 0 or 1 only, `-EINVAL` otherwise,

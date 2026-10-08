@@ -6874,6 +6874,38 @@ pub const SYS_CAP_REQUEST_FOR: u64 = 1154;
 /// pending request; `Interrupted` for a signal.
 pub const SYS_CAP_REQUEST_WAIT: u64 = 1155;
 
+/// `SYS_CPU_CLOCK(op, clockid)` -- the CPU-time clocks for native programs:
+/// how much processor time a process or one of its threads has used. The
+/// Linux ABI's own clocks, named by Linux's clock ids and answering Linux's
+/// errnos as `-errno` (the convention of [`SYS_POSIX_TIMER`]), for the C
+/// library's `clock_gettime`, `clock_getres`, `clock()`,
+/// `clock_getcpuclockid` and `pthread_getcpuclockid`.
+///
+/// | `op` | call | answer |
+/// |---|---|---|
+/// | [`CPU_CLOCK_GETTIME`] | `clock_gettime` | the clock's value, in nanoseconds |
+/// | [`CPU_CLOCK_GETRES`] | `clock_getres` | its resolution, in nanoseconds |
+///
+/// `clockid` is `CLOCK_PROCESS_CPUTIME_ID` (2), `CLOCK_THREAD_CPUTIME_ID`
+/// (3), or a process's or thread's clock as `clock_getcpuclockid` and
+/// `pthread_getcpuclockid` make them: `(~id << 3) | perthread << 2 | which`,
+/// `which` 0 for user plus system time sampled at the tick (`CPUCLOCK_PROF`),
+/// 1 for user time so sampled (`CPUCLOCK_VIRT`), 2 for the precise run time
+/// (`CPUCLOCK_SCHED`, what 2 and 3 read; resolution 1 ns, the sampled ones a
+/// tick, 10 ms), and id 0 meaning the caller. A thread's clock is readable by
+/// its own process alone, any process's by anyone, as on Linux; an id naming
+/// neither -- or a gone thread, a reaped process -- is `-EINVAL`, which is how
+/// `clock_getcpuclockid` tells a live pid from a dead one. Every other clock
+/// id is `-EINVAL` here (the others have native calls of their own). The
+/// clocks run on through `exec` and start at zero in a `fork`'s child; a
+/// process's counts its exited threads, not its children. An unknown `op` is
+/// `-EINVAL`. No capability.
+pub const SYS_CPU_CLOCK: u64 = 1156;
+/// [`SYS_CPU_CLOCK`] operation: read the clock.
+pub const CPU_CLOCK_GETTIME: u64 = 0;
+/// [`SYS_CPU_CLOCK`] operation: its resolution.
+pub const CPU_CLOCK_GETRES: u64 = 1;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

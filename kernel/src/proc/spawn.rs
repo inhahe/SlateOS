@@ -24280,6 +24280,209 @@ pub fn self_test_linux_ignored_at_send() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of the CPU-time clocks through the Linux ABI:
+/// [`elf::build_linux_cpu_clocks_test_elf`] (`build/cpuclocktest.c`).
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the clocks
+/// `clock_getcpuclockid` and `pthread_getcpuclockid` make
+/// (`syscall::linux::cpu_clock`): their resolutions and refusals, that they
+/// measure processor time -- advancing with a spin, not with a sleep -- that
+/// a worker thread's is readable by its process and stays in the process's
+/// after it exits (`pcb::process_counters`), that the process clock never
+/// goes back while threads come and go, and that a forked child's starts from
+/// zero and is readable until the child is reaped.
+pub fn self_test_linux_cpu_clocks() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!("[spawn] Running Linux CPU-time clocks (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_cpu_clocks_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-clocks"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-cpu-clocks",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: CPU-time clocks spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: CPU-time clocks (ring 3) — the program did not finish in 120 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox mmap failed",
+            Some(0x31..=0x33) => "a CPUCLOCK_SCHED clock's resolution is not 1 ns",
+            Some(0x34) => "the PROF or VIRT resolution is not one tick",
+            Some(0x35..=0x37) => "clock_getres took a clock id that names nothing",
+            Some(0x38) => "clock_getres refused a NULL result pointer",
+            Some(0x39 | 0x3A) => "clock_settime of clock 2 or 3 was not EINVAL",
+            Some(0x3B) => "clock_settime of a process's clock was not EPERM",
+            Some(0x3C) => "clock_settime with a NULL time was not EFAULT",
+            Some(0x3D) => "clock_settime of a pid that is no process's was not EINVAL",
+            Some(0x3E | 0x3F) => "clock_gettime took a clock id that names nothing",
+            Some(0x40) => "the thread clock was ahead of the process clock",
+            Some(0x41) => "the thread clock did not advance with a 200 ms spin",
+            Some(0x42) => "the thread clock advanced far more than the wall clock",
+            Some(0x43) => "the process clock fell behind the thread clock",
+            Some(0x44) => "the process clock advanced while it slept",
+            Some(0x45 | 0x46) => "the PROF/VIRT clocks did not move in whole ticks",
+            Some(0x47) => "the thread's PROF clock was ahead of the process's",
+            Some(0x50) => "the worker thread did not start",
+            Some(0x51) => "the worker's clock did not advance while it spun",
+            Some(0x52) => "another thread's tid named the process clock",
+            Some(0x53) => "the worker could not read its own clocks",
+            Some(0x54) => "the process clock did not cover both threads",
+            Some(0x55) => "the exited worker's clock was still readable",
+            Some(0x56) => "the exited worker's time left the process clock",
+            Some(0x57) => "a brief worker did not start",
+            Some(0x58) => "the process clock went back while threads came and went",
+            Some(0x60) => "fork failed",
+            Some(0x61) => "the forked child's clock did not start from zero",
+            Some(0x62) => "the parent could read the child's thread clock",
+            Some(0x63) => "the parent could not read the running child's process clock",
+            Some(0x64) => "the zombie child's process clock was unreadable or short",
+            Some(0x65) => "wait4 failed",
+            Some(0x66) => "the reaped child's process clock was still readable",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: CPU-time clocks (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux CPU-time clocks (ring 3: resolutions and refusals; a spin advances the \
+         thread and process clocks and a sleep does not; PROF/VIRT in whole ticks; a worker's \
+         clock readable and its time kept after it exits; never back; a child's from zero until \
+         reaped): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `SYS_CPU_CLOCK`, the CPU-time clocks through the native
+/// door: [`elf::build_native_cpu_clock_test_elf`] (`build/cpuclocknative.c`).
+/// The same clock ids and answers as the Linux ABI's (`handlers::sys_cpu_clock`
+/// decodes them with `syscall::linux::cpu_clock`): resolutions, a spin
+/// advances the clocks and a sleep does not, the refusals, and a forked
+/// child's clock from zero, readable by its parent as a process's but not as
+/// a thread's.
+pub fn self_test_native_cpu_clock() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running native CPU-time clocks (ring 3) integration test...");
+    let exe_elf = elf::build_native_cpu_clock_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-cpu-clock"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-cpu-clock",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: native CPU-time clocks spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: native CPU-time clocks (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "SYS_PROCESS_ID failed",
+            Some(0x31 | 0x32) => "a CPUCLOCK_SCHED clock's resolution is not 1 ns",
+            Some(0x33 | 0x34) => "the PROF or VIRT resolution is not one tick",
+            Some(0x40) => "the thread clock was ahead of the process clock",
+            Some(0x41) => "the thread clock did not advance with a 200 ms spin",
+            Some(0x42) => "the thread clock advanced far more than the wall clock",
+            Some(0x43) => "the process clock fell behind the thread clock",
+            Some(0x44) => "the process clock advanced while it slept",
+            Some(0x45) => "the PROF clock did not move in whole ticks",
+            Some(0x50) => "an unknown op was not -EINVAL",
+            Some(0x51) => "a clock that is not a CPU-time one was not -EINVAL",
+            Some(0x52 | 0x53) => "a CLOCKFD id or CPUCLOCK_WHICH 3 was not -EINVAL",
+            Some(0x54) => "a pid that is no process's was not -EINVAL",
+            Some(0x55) => "another process's thread clock was not -EINVAL",
+            Some(0x60) => "fork failed",
+            Some(0x61) => "the forked child's clock did not start from zero",
+            Some(0x62) => "the parent could not read the child's process clock",
+            Some(0x63) => "the parent could read the child's thread clock",
+            Some(0x64) => "the child's exit code was lost",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: native CPU-time clocks (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native CPU-time clocks (ring 3: SYS_CPU_CLOCK reads and resolves the Linux \
+         clock ids, a spin advances them and a sleep does not, refusals, a child's from zero): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

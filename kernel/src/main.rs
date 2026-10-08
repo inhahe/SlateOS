@@ -3627,6 +3627,19 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_ignored_at_send(),
     );
+    // The CPU-time clocks measure processor time, precisely, per thread and
+    // per process (crate::syscall::linux::cpu_clock, pcb::process_counters).
+    selftest::dispatch_debug(
+        "Linux CPU-time clocks (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_cpu_clocks(),
+    );
+    // The same clocks through the native door (handlers::sys_cpu_clock).
+    selftest::dispatch_debug(
+        "native CPU-time clocks (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_native_cpu_clock(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

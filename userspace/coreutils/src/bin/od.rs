@@ -1843,8 +1843,9 @@ fn finish_run<W: Write>(sink: &mut Sink<W>, ok: bool, input: &Input) -> ExitCode
     }
     if let Some(e) = sink.error.take() {
         // Upstream dies of `SIGPIPE` when the reader goes away, printing
-        // nothing; Rust masks that signal, so it arrives as `EPIPE`, and the
-        // run keeps the status it had earned (design-decisions 377).
+        // nothing, and so does this since `stdfd::restore` put the signal
+        // back. Where it could not, the signal arrives as `EPIPE`, and the run
+        // keeps the status it had earned (design-decisions 377).
         if !stdfd::reader_gone(&e) {
             diagnose_str(&format!("write error: {}", strerror(&e)));
             return ExitCode::from(1);

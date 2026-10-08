@@ -3,11 +3,14 @@
 **Status:** OPEN — waiting on
 `requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`
 (path-bound `AF_UNIX` sockets). Found 2026-09-26 while fixing `logger`'s
-timestamps. Steps 3 and 4 below are done: `logger`'s messages reach
+timestamps. Steps 2, 3 and 4 below are done: `syslogd daemon` reads
+`/dev/log` into the journal (2026-10-07; it works wherever the socket can
+exist, which on SlateOS waits for step 1), `logger`'s messages reach
 `journalctl` (413e56f1d), and `ntpdate -s`, `crond` and `anacron` log through
 the libc's `syslog()` (the step-5 route) instead of losing their messages or
-printing them to stderr themselves. Steps 1, 2 and 5 remain, with lanes A
-and D.
+printing them to stderr themselves. Steps 1 and 5 remain, with lanes A and D,
+and then `syslogd daemon`'s line in the image's `/etc/startup.conf` (lane D's
+file), which lane D asked to be told of when the daemon listens.
 
 **In short:** there is no system log on SlateOS in the sense a Unix program
 means. A program that logs the POSIX way sends a datagram to `/dev/log` and
@@ -28,7 +31,7 @@ word (`read_all_entries` -> `JournalEntry::from_json_line`):
 | `ntpd` (the daemon) | the libc's `syslog()`, or the file its `logfile` directive names -- since 2026-09-26; before, nothing at all outside `-d`, and its clock and drift-file failures were discarded |
 | `systemd-cat` (`systemctl`) | a `journalrec` record in `/var/log/syslog.jsonl` |
 | `syslogd log` | the same file |
-| `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |
+| `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") -- until 2026-10-07; it now binds `/dev/log` (step 2 below), which on SlateOS still cannot exist |
 
 So `logger`'s lines, which were RFC 3164 text, were never shown by
 `journalctl` at all (fixed by step 3), and `ntpdate -s`'s are simply lost. (Corrected
@@ -38,9 +41,14 @@ reads both; it is the parser that drops the text lines.)
 
 **The proper fix:**
 1. Lanes A and D: path-bound `AF_UNIX` sockets (the request above).
-2. `syslogd daemon` binds `/dev/log` (`SOCK_DGRAM`), parses each frame — the
-   local form `<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG`, RFC 3164 with a hostname,
-   and RFC 5424 — and writes it as a `journalrec` record.
+2. **DONE 2026-10-07 (design-decisions §1063).** `syslogd daemon` binds
+   `/dev/log` (`SOCK_DGRAM`, mode 0666, `SO_PASSCRED`) and files each frame as
+   systemd-journald files it -- not, as this step first planned, with a
+   hostname and RFC 5424 taken apart too: measured, journald takes apart only
+   the local form, and rsyslog, which takes apart the rest, guesses and
+   rewrites. Bytes that are not text are kept as bytes, and `journalctl`
+   reads them. `scripts/syslogd-diff.sh` holds it to a private journald run in
+   a user namespace: 32 frames, every field agreeing.
 3. **DONE 2026-09-26 (413e56f1d, design-decisions §1033).** `logger` is a
    faithful port of util-linux 2.39.3's `logger.c`, sending to `/dev/log`
    exactly as upstream does, verified by `scripts/logger-diff.sh` (138 cases)

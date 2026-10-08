@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -155,16 +155,18 @@ struct JournalEntry {
     timestamp_usec: u64,
     /// Severity / priority level.
     priority: Priority,
-    /// Service or unit name (e.g. "net.dhcp", "kernel").
-    unit: String,
-    /// Log message text.
-    message: String,
+    /// Service or unit name (e.g. "net.dhcp", "kernel"). Bytes, as the
+    /// record gave them: a sender's name need not be text.
+    unit: Vec<u8>,
+    /// Log message, as the record gave it -- any bytes (design-decisions
+    /// §1063), shown as they are.
+    message: Vec<u8>,
     /// Boot identifier string.
     boot_id: String,
     /// Process ID (0 if unknown).
     pid: u64,
     /// All key-value fields from the original JSON (preserves extras).
-    fields: BTreeMap<String, String>,
+    fields: BTreeMap<String, Value>,
 }
 
 impl JournalEntry {
@@ -176,30 +178,28 @@ impl JournalEntry {
         }
 
         let fields = parse_json_object(trimmed)?;
+        // A field read as text: a string or a scalar, not bytes.
+        let text = |key: &str| fields.get(key).and_then(Value::text);
 
-        let timestamp = fields
-            .get("ts")
+        let timestamp = text("ts")
             .and_then(|v| v.parse::<u64>().ok())
             .or_else(|| {
-                fields
-                    .get("__REALTIME_TIMESTAMP")
+                text("__REALTIME_TIMESTAMP")
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(|us| us / 1_000_000)
             })
             .unwrap_or(0);
 
-        let timestamp_usec = fields
-            .get("ts_usec")
+        let timestamp_usec = text("ts_usec")
             .and_then(|v| v.parse::<u64>().ok())
             .or_else(|| {
-                fields
-                    .get("__REALTIME_TIMESTAMP")
+                text("__REALTIME_TIMESTAMP")
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(|us| us % 1_000_000)
             })
             .unwrap_or(0);
 
-        let priority_str = fields.get("level").or_else(|| fields.get("PRIORITY"));
+        let priority_str = text("level").or_else(|| text("PRIORITY"));
         let priority = priority_str
             .and_then(|s| {
                 Priority::from_name(s).or_else(|| s.parse::<u8>().ok().map(Priority::from_u8))
@@ -211,24 +211,22 @@ impl JournalEntry {
             .or_else(|| fields.get("_SYSTEMD_UNIT"))
             .or_else(|| fields.get("SYSLOG_IDENTIFIER"))
             .or_else(|| fields.get("unit"))
-            .cloned()
+            .map(|v| v.bytes().to_vec())
             .unwrap_or_default();
 
         let message = fields
             .get("msg")
             .or_else(|| fields.get("MESSAGE"))
-            .cloned()
+            .map(|v| v.bytes().to_vec())
             .unwrap_or_default();
 
-        let boot_id = fields
-            .get("boot_id")
-            .or_else(|| fields.get("_BOOT_ID"))
-            .cloned()
+        let boot_id = text("boot_id")
+            .or_else(|| text("_BOOT_ID"))
+            .map(str::to_string)
             .unwrap_or_default();
 
-        let pid = fields
-            .get("pid")
-            .or_else(|| fields.get("_PID"))
+        let pid = text("pid")
+            .or_else(|| text("_PID"))
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
@@ -256,9 +254,12 @@ impl JournalEntry {
             json_escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
-            parts.push(format!("\"service\":\"{}\"", json_escape(&self.unit)));
+            parts.push(format!(
+                "\"service\":{}",
+                journalrec::json_value(&self.unit)
+            ));
         }
-        parts.push(format!("\"msg\":\"{}\"", json_escape(&self.message)));
+        parts.push(format!("\"msg\":{}", journalrec::json_value(&self.message)));
         if !self.boot_id.is_empty() {
             parts.push(format!("\"boot_id\":\"{}\"", json_escape(&self.boot_id)));
         }
@@ -286,7 +287,7 @@ impl JournalEntry {
         ];
         for (k, v) in &self.fields {
             if !known_keys.contains(&k.as_str()) {
-                parts.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+                parts.push(format!("\"{}\":{}", json_escape(k), v.to_json()));
             }
         }
         format!("{{{}}}", parts.join(","))
@@ -305,9 +306,15 @@ impl JournalEntry {
             json_escape(self.priority.name())
         ));
         if !self.unit.is_empty() {
-            lines.push(format!("    \"service\": \"{}\",", json_escape(&self.unit)));
+            lines.push(format!(
+                "    \"service\": {},",
+                journalrec::json_value(&self.unit)
+            ));
         }
-        lines.push(format!("    \"msg\": \"{}\",", json_escape(&self.message)));
+        lines.push(format!(
+            "    \"msg\": {},",
+            journalrec::json_value(&self.message)
+        ));
         if !self.boot_id.is_empty() {
             lines.push(format!(
                 "    \"boot_id\": \"{}\",",
@@ -341,11 +348,7 @@ impl JournalEntry {
             .filter(|(k, _)| !known_keys.contains(&k.as_str()))
             .collect();
         for (k, v) in &extras {
-            lines.push(format!(
-                "    \"{}\": \"{}\",",
-                json_escape(k),
-                json_escape(v)
-            ));
+            lines.push(format!("    \"{}\": {},", json_escape(k), v.to_json()));
         }
         // Remove trailing comma from last field line.
         if let Some(last) = lines.last_mut()
@@ -362,9 +365,53 @@ impl JournalEntry {
 // Minimal JSON parser (no external deps)
 // ============================================================================
 
-/// Parse a flat JSON object into key-value pairs.
-/// Handles string and numeric values. Does not handle nested objects or arrays.
-fn parse_json_object(json: &str) -> Option<BTreeMap<String, String>> {
+/// One field's value, as the record wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Value {
+    /// A JSON string, decoded.
+    Text(String),
+    /// A JSON array of byte values: a field that is not text, as `syslogd`
+    /// writes one and as `journalctl -o json` prints one on Linux
+    /// (design-decisions §1063).
+    Bytes(Vec<u8>),
+    /// Anything else -- a number, `true`, `false`, `null`, or an array that
+    /// is not bytes -- as it was written.
+    Scalar(String),
+}
+
+impl Value {
+    /// The value's bytes: a string's UTF-8, an array's bytes, a scalar's
+    /// text.
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Value::Text(s) | Value::Scalar(s) => s.as_bytes(),
+            Value::Bytes(b) => b,
+        }
+    }
+
+    /// The value as text, when it is: a string or a scalar.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Value::Text(s) | Value::Scalar(s) => Some(s),
+            Value::Bytes(_) => None,
+        }
+    }
+
+    /// The value as JSON, spelled as it was: a string escaped, bytes as
+    /// their array, a scalar as written.
+    fn to_json(&self) -> String {
+        match self {
+            Value::Text(s) => format!("\"{}\"", json_escape(s)),
+            Value::Bytes(b) => journalrec::json_value(b),
+            Value::Scalar(s) => s.clone(),
+        }
+    }
+}
+
+/// Parse a flat JSON object into key-value pairs: strings, numbers and the
+/// other scalars, and arrays -- a field that is not text is an array of its
+/// byte values. Does not handle nested objects.
+fn parse_json_object(json: &str) -> Option<BTreeMap<String, Value>> {
     let trimmed = json.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return None;
@@ -412,24 +459,47 @@ fn parse_json_object(json: &str) -> Option<BTreeMap<String, String>> {
             break;
         }
 
-        // Parse value (string or number/bool/null).
+        // Parse value: a string, an array, or a scalar (number/bool/null).
         let value = if bytes[pos] == b'"' {
             match parse_json_string_value(inner, &mut pos) {
-                Some(v) => v,
+                Some(v) => Value::Text(v),
                 None => break,
             }
+        } else if bytes[pos] == b'[' {
+            // To the closing bracket: a flat array, as every writer here
+            // spells one, so no bracket is nested inside it.
+            let start = pos;
+            while pos < bytes.len() && bytes[pos] != b']' {
+                pos += 1;
+            }
+            let end = (pos + 1).min(bytes.len());
+            let text = &inner[start..end];
+            pos = end;
+            byte_array(text).map_or_else(|| Value::Scalar(text.to_string()), Value::Bytes)
         } else {
             let start = pos;
             while pos < bytes.len() && bytes[pos] != b',' && bytes[pos] != b'}' {
                 pos += 1;
             }
-            inner[start..pos].trim().to_string()
+            Value::Scalar(inner[start..pos].trim().to_string())
         };
 
         map.insert(key, value);
     }
 
     Some(map)
+}
+
+/// `[98,97,255]` as the bytes it lists, or `None` when it is not an array of
+/// numbers each 0 to 255 -- kept then as written rather than half-read.
+fn byte_array(text: &str) -> Option<Vec<u8>> {
+    let body = text.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if body.is_empty() {
+        return Some(Vec::new());
+    }
+    body.split(',')
+        .map(|n| n.trim().parse::<u8>().ok())
+        .collect()
 }
 
 /// Parse a JSON string starting at `pos` (which should point to the opening `"`).
@@ -1078,10 +1148,24 @@ fn journal_disk_usage() -> (usize, u64) {
 
 /// Check if `haystack` contains `pattern` (case-insensitive simple substring match).
 /// Supports basic patterns: literal substring matching.
-fn pattern_matches(haystack: &str, pattern: &str) -> bool {
+/// Whether `pattern` occurs in `haystack`, ASCII letters matched in either
+/// case. Over bytes, so a message that is not text is searched as it is.
+fn pattern_matches(haystack: &[u8], pattern: &str) -> bool {
     let h = haystack.to_ascii_lowercase();
-    let p = pattern.to_ascii_lowercase();
-    h.contains(&p)
+    let p = pattern.as_bytes().to_ascii_lowercase();
+    p.is_empty() || h.windows(p.len()).any(|w| w == p.as_slice())
+}
+
+/// Whether `unit` names a unit `wanted` picks out: a substring, ASCII
+/// letters in either case.
+fn unit_matches(unit: &[u8], wanted: &str) -> bool {
+    pattern_matches(unit, wanted)
+}
+
+/// Whether `unit` is the kernel's, for `-k`.
+fn is_kernel_unit(unit: &[u8]) -> bool {
+    let u = unit.to_ascii_lowercase();
+    u == b"kernel" || u == b"kern" || u == b"dmesg"
 }
 
 // ============================================================================
@@ -1345,12 +1429,10 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
         .iter()
         .filter(|e| {
             // Unit filter.
-            if let Some(ref unit) = cfg.unit_filter {
-                let u_lower = unit.to_ascii_lowercase();
-                let entry_unit = e.unit.to_ascii_lowercase();
-                if !entry_unit.contains(&u_lower) {
-                    return false;
-                }
+            if let Some(ref unit) = cfg.unit_filter
+                && !unit_matches(&e.unit, unit)
+            {
+                return false;
             }
 
             // Priority filter: show entries at this level or more severe.
@@ -1385,11 +1467,8 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             // collecting entries (we pick the most recent boot_id).
 
             // Dmesg: only kernel messages.
-            if cfg.dmesg {
-                let u = e.unit.to_ascii_lowercase();
-                if u != "kernel" && u != "kern" && u != "dmesg" {
-                    return false;
-                }
+            if cfg.dmesg && !is_kernel_unit(&e.unit) {
+                return false;
             }
 
             // Grep filter.
@@ -1448,81 +1527,85 @@ fn find_latest_boot_id(entries: &[JournalEntry]) -> Option<String> {
 // Output rendering
 // ============================================================================
 
-fn render_entry(entry: &JournalEntry, cfg: &Config) {
+/// Write one entry to `out` in the configured format. The unit and the
+/// message go out as their bytes, whatever they are.
+///
+/// # Errors
+///
+/// The write's: the caller stops there.
+fn render_entry(out: &mut dyn Write, entry: &JournalEntry, cfg: &Config) -> io::Result<()> {
     match cfg.output_format {
-        OutputFormat::Short => render_short(entry, cfg.color),
-        OutputFormat::ShortPrecise => render_short_precise(entry, cfg.color),
-        OutputFormat::Json => println!("{}", entry.to_json()),
-        OutputFormat::JsonPretty => println!("{}", entry.to_json_pretty()),
-        OutputFormat::Cat => println!("{}", entry.message),
-        OutputFormat::Verbose => render_verbose(entry, cfg.color),
+        OutputFormat::Short => render_short(out, entry, cfg.color, false),
+        OutputFormat::ShortPrecise => render_short(out, entry, cfg.color, true),
+        OutputFormat::Json => writeln!(out, "{}", entry.to_json()),
+        OutputFormat::JsonPretty => writeln!(out, "{}", entry.to_json_pretty()),
+        OutputFormat::Cat => {
+            out.write_all(&entry.message)?;
+            out.write_all(b"\n")
+        }
+        OutputFormat::Verbose => render_verbose(out, entry, cfg.color),
     }
 }
 
-fn render_short(entry: &JournalEntry, color: bool) {
-    let ts = format_timestamp(entry.timestamp);
-    let unit_str = if entry.unit.is_empty() {
-        "unknown".to_string()
+/// `short` and `short-precise`: `TIME UNIT[PID]: MESSAGE`.
+fn render_short(
+    out: &mut dyn Write,
+    entry: &JournalEntry,
+    color: bool,
+    precise: bool,
+) -> io::Result<()> {
+    let ts = if precise {
+        format_timestamp_precise(entry.timestamp, entry.timestamp_usec)
     } else {
-        entry.unit.clone()
+        format_timestamp(entry.timestamp)
     };
-    let pid_str = if entry.pid != 0 {
-        format!("[{}]", entry.pid)
+    write!(out, "{ts} ")?;
+    if entry.unit.is_empty() {
+        out.write_all(b"unknown")?;
     } else {
-        String::new()
-    };
-
-    if color {
-        let c = entry.priority.ansi_color();
-        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
-        println!("{ts} {unit_str}{pid_str}: {c}{}{reset}", entry.message);
-    } else {
-        println!("{ts} {unit_str}{pid_str}: {}", entry.message);
-    }
-}
-
-fn render_short_precise(entry: &JournalEntry, color: bool) {
-    let ts = format_timestamp_precise(entry.timestamp, entry.timestamp_usec);
-    let unit_str = if entry.unit.is_empty() {
-        "unknown".to_string()
-    } else {
-        entry.unit.clone()
-    };
-    let pid_str = if entry.pid != 0 {
-        format!("[{}]", entry.pid)
-    } else {
-        String::new()
-    };
-
-    if color {
-        let c = entry.priority.ansi_color();
-        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
-        println!("{ts} {unit_str}{pid_str}: {c}{}{reset}", entry.message);
-    } else {
-        println!("{ts} {unit_str}{pid_str}: {}", entry.message);
-    }
-}
-
-fn render_verbose(entry: &JournalEntry, color: bool) {
-    let ts = format_timestamp_precise(entry.timestamp, entry.timestamp_usec);
-    if color {
-        let c = entry.priority.ansi_color();
-        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
-        println!("{c}{ts} [{:<8}] {}{reset}", entry.priority.label(), ts);
-    } else {
-        println!("{ts} [{:<8}]", entry.priority.label());
-    }
-    println!("    _PRIORITY={}", entry.priority as u8);
-    if !entry.unit.is_empty() {
-        println!("    _UNIT={}", entry.unit);
+        out.write_all(&entry.unit)?;
     }
     if entry.pid != 0 {
-        println!("    _PID={}", entry.pid);
+        write!(out, "[{}]", entry.pid)?;
+    }
+    out.write_all(b": ")?;
+    let c = if color {
+        entry.priority.ansi_color()
+    } else {
+        ""
+    };
+    out.write_all(c.as_bytes())?;
+    out.write_all(&entry.message)?;
+    if !c.is_empty() {
+        out.write_all(b"\x1b[0m")?;
+    }
+    out.write_all(b"\n")
+}
+
+fn render_verbose(out: &mut dyn Write, entry: &JournalEntry, color: bool) -> io::Result<()> {
+    let ts = format_timestamp_precise(entry.timestamp, entry.timestamp_usec);
+    if color {
+        let c = entry.priority.ansi_color();
+        let reset = if c.is_empty() { "" } else { "\x1b[0m" };
+        writeln!(out, "{c}{ts} [{:<8}] {}{reset}", entry.priority.label(), ts)?;
+    } else {
+        writeln!(out, "{ts} [{:<8}]", entry.priority.label())?;
+    }
+    writeln!(out, "    _PRIORITY={}", entry.priority as u8)?;
+    if !entry.unit.is_empty() {
+        out.write_all(b"    _UNIT=")?;
+        out.write_all(&entry.unit)?;
+        out.write_all(b"\n")?;
+    }
+    if entry.pid != 0 {
+        writeln!(out, "    _PID={}", entry.pid)?;
     }
     if !entry.boot_id.is_empty() {
-        println!("    _BOOT_ID={}", entry.boot_id);
+        writeln!(out, "    _BOOT_ID={}", entry.boot_id)?;
     }
-    println!("    MESSAGE={}", entry.message);
+    out.write_all(b"    MESSAGE=")?;
+    out.write_all(&entry.message)?;
+    out.write_all(b"\n")?;
 
     let known_keys: &[&str] = &[
         "ts",
@@ -1544,10 +1627,45 @@ fn render_verbose(entry: &JournalEntry, color: bool) {
     ];
     for (k, v) in &entry.fields {
         if !known_keys.contains(&k.as_str()) {
-            println!("    {k}={v}");
+            write!(out, "    {k}=")?;
+            out.write_all(v.bytes())?;
+            out.write_all(b"\n")?;
         }
     }
-    println!();
+    out.write_all(b"\n")
+}
+
+/// Write `entries` to standard output, stopping at the first write that
+/// fails. A reader that has gone (`EPIPE`) is an ordinary end to a pipeline
+/// such as `journalctl | head`, and is `Ok(false)`, said nothing about; any
+/// other failure is the caller's to report.
+///
+/// # Errors
+///
+/// A failed write other than `EPIPE`.
+fn render_all<'a>(
+    entries: impl IntoIterator<Item = &'a JournalEntry>,
+    cfg: &Config,
+) -> io::Result<bool> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    let written = || -> io::Result<()> {
+        for entry in entries {
+            render_entry(&mut out, entry, cfg)?;
+            // In follow mode a record must not wait in the buffer for the
+            // next one; flushing per record costs a short listing nothing
+            // that matters.
+            if cfg.follow {
+                out.flush()?;
+            }
+        }
+        out.flush()
+    };
+    match written() {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 // ============================================================================
@@ -1855,8 +1973,14 @@ fn cmd_follow(cfg: &Config) {
         &filtered
     };
 
-    for entry in display_entries {
-        render_entry(entry, cfg);
+    match render_all(display_entries, cfg) {
+        Ok(true) => {}
+        // The reader has gone: nothing left to follow for.
+        Ok(false) => process::exit(0),
+        Err(e) => {
+            write_error(&e);
+            process::exit(1);
+        }
     }
 
     let mut tails = journal.tails;
@@ -1885,12 +2009,18 @@ fn cmd_follow(cfg: &Config) {
                     continue;
                 }
             };
-            for line in &lines {
-                if let Some(entry) = record_of(line) {
-                    // Apply filters except reverse and num_entries.
-                    if entry_passes_filters(&entry, cfg) {
-                        render_entry(&entry, cfg);
-                    }
+            // Apply filters except reverse and num_entries.
+            let fresh: Vec<JournalEntry> = lines
+                .iter()
+                .filter_map(|line| record_of(line))
+                .filter(|entry| entry_passes_filters(entry, cfg))
+                .collect();
+            match render_all(&fresh, cfg) {
+                Ok(true) => {}
+                Ok(false) => process::exit(0),
+                Err(e) => {
+                    write_error(&e);
+                    process::exit(1);
                 }
             }
         }
@@ -1899,11 +2029,10 @@ fn cmd_follow(cfg: &Config) {
 
 /// Check if a single entry passes the configured filters (for follow mode).
 fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
-    if let Some(ref unit) = cfg.unit_filter {
-        let u_lower = unit.to_ascii_lowercase();
-        if !entry.unit.to_ascii_lowercase().contains(&u_lower) {
-            return false;
-        }
+    if let Some(ref unit) = cfg.unit_filter
+        && !unit_matches(&entry.unit, unit)
+    {
+        return false;
     }
     if let Some(max_prio) = cfg.priority_filter
         && (entry.priority as u8) > (max_prio as u8)
@@ -1920,11 +2049,8 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
     {
         return false;
     }
-    if cfg.dmesg {
-        let u = entry.unit.to_ascii_lowercase();
-        if u != "kernel" && u != "kern" && u != "dmesg" {
-            return false;
-        }
+    if cfg.dmesg && !is_kernel_unit(&entry.unit) {
+        return false;
     }
     if let Some(ref pattern) = cfg.grep_pattern
         && !pattern_matches(&entry.message, pattern)
@@ -2049,11 +2175,23 @@ fn run(args: &[String]) -> i32 {
         return i32::from(failed);
     }
 
-    for entry in &filtered {
-        render_entry(entry, &cfg);
+    match render_all(&filtered, &cfg) {
+        Ok(_) => i32::from(failed),
+        Err(e) => {
+            write_error(&e);
+            1
+        }
     }
+}
 
-    i32::from(failed)
+/// `journalctl: write error: REASON`, for output that could not be written.
+fn write_error(e: &io::Error) {
+    // Standard error may be gone as well; there is nowhere left to say so.
+    let _ = writeln!(
+        io::stderr().lock(),
+        "journalctl: write error: {}",
+        errmsg::strerror(e)
+    );
 }
 
 // ============================================================================
@@ -2090,26 +2228,70 @@ mod tests {
     ) -> JournalEntry {
         let priority = Priority::from_name(level).unwrap_or(Priority::Info);
         let mut fields = BTreeMap::new();
-        fields.insert("ts".to_string(), ts.to_string());
-        fields.insert("level".to_string(), level.to_string());
-        fields.insert("service".to_string(), unit.to_string());
-        fields.insert("msg".to_string(), msg.to_string());
+        fields.insert("ts".to_string(), Value::Scalar(ts.to_string()));
+        fields.insert("level".to_string(), Value::Text(level.to_string()));
+        fields.insert("service".to_string(), Value::Text(unit.to_string()));
+        fields.insert("msg".to_string(), Value::Text(msg.to_string()));
         if !boot_id.is_empty() {
-            fields.insert("boot_id".to_string(), boot_id.to_string());
+            fields.insert("boot_id".to_string(), Value::Text(boot_id.to_string()));
         }
         if pid != 0 {
-            fields.insert("pid".to_string(), pid.to_string());
+            fields.insert("pid".to_string(), Value::Scalar(pid.to_string()));
         }
         JournalEntry {
             timestamp: ts,
             timestamp_usec: 0,
             priority,
-            unit: unit.to_string(),
-            message: msg.to_string(),
+            unit: unit.as_bytes().to_vec(),
+            message: msg.as_bytes().to_vec(),
             boot_id: boot_id.to_string(),
             pid,
             fields,
         }
+    }
+
+    /// A value compared with text: equal when it is that text -- a string
+    /// or a scalar spelled so.
+    impl PartialEq<str> for Value {
+        fn eq(&self, other: &str) -> bool {
+            self.text() == Some(other)
+        }
+    }
+
+    /// A record whose message is not text: read as its bytes, shown as
+    /// them, and written back as the same array (design-decisions §1063).
+    #[test]
+    fn a_message_that_is_not_text_is_its_bytes_both_ways() {
+        let line =
+            r#"{"ts":5,"level":"notice","service":"t","msg":[98,97,100,32,255],"facility":"user"}"#;
+        let entry = JournalEntry::from_json_line(line).unwrap();
+        assert_eq!(entry.message, b"bad \xff");
+        assert_eq!(entry.unit, b"t");
+        assert!(entry.to_json().contains(r#""msg":[98,97,100,32,255]"#));
+        let mut out = Vec::new();
+        let mut cfg = Config::new();
+        cfg.color = false;
+        render_entry(&mut out, &entry, &cfg).unwrap();
+        assert!(out.ends_with(b": bad \xff\n"), "{out:?}");
+        // An array that is not bytes is kept as it was, not half-read.
+        let odd = r#"{"ts":1,"msg":"m","list":[1,2,300]}"#;
+        let entry = JournalEntry::from_json_line(odd).unwrap();
+        assert_eq!(
+            entry.fields.get("list"),
+            Some(&Value::Scalar("[1,2,300]".into()))
+        );
+        assert_eq!(entry.message, b"m");
+    }
+
+    /// A grep or a unit filter looks at the bytes, letters matched in
+    /// either case.
+    #[test]
+    fn filters_match_bytes() {
+        assert!(pattern_matches(b"bad \xff byte", "BYTE"));
+        assert!(pattern_matches(b"\xff", ""));
+        assert!(!pattern_matches(b"abc", "abcd"));
+        assert!(is_kernel_unit(b"Kernel"));
+        assert!(unit_matches(b"net.DHCP", "dhcp"));
     }
 
     fn sample_entries() -> Vec<JournalEntry> {
@@ -2310,8 +2492,8 @@ mod tests {
         let entry = JournalEntry::from_json_line(&line).unwrap();
         assert_eq!(entry.timestamp, 1716000000);
         assert_eq!(entry.priority, Priority::Info);
-        assert_eq!(entry.unit, "net.dhcp");
-        assert_eq!(entry.message, "lease renewed");
+        assert_eq!(entry.unit, b"net.dhcp");
+        assert_eq!(entry.message, b"lease renewed");
         assert_eq!(entry.boot_id, "abc");
         assert_eq!(entry.pid, 42);
     }
@@ -2347,8 +2529,8 @@ mod tests {
         let entry = JournalEntry::from_json_line(line).unwrap();
         assert_eq!(entry.timestamp, 1716000000);
         assert_eq!(entry.priority, Priority::Error);
-        assert_eq!(entry.unit, "sshd");
-        assert_eq!(entry.message, "auth failed");
+        assert_eq!(entry.unit, b"sshd");
+        assert_eq!(entry.message, b"auth failed");
         assert_eq!(entry.boot_id, "xyz");
         assert_eq!(entry.pid, 123);
     }
@@ -2361,8 +2543,8 @@ mod tests {
         let reparsed = JournalEntry::from_json_line(&serialized).unwrap();
         assert_eq!(reparsed.timestamp, 5000);
         assert_eq!(reparsed.priority, Priority::Warning);
-        assert_eq!(reparsed.unit, "net.tcp");
-        assert_eq!(reparsed.message, "retransmit");
+        assert_eq!(reparsed.unit, b"net.tcp");
+        assert_eq!(reparsed.message, b"retransmit");
         assert_eq!(reparsed.boot_id, "boot99");
         assert_eq!(reparsed.pid, 777);
     }
@@ -2539,7 +2721,7 @@ mod tests {
         cfg.unit_filter = Some("net.dhcp".to_string());
         let filtered = apply_filters(&entries, &cfg);
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|e| e.unit.contains("net.dhcp")));
+        assert!(filtered.iter().all(|e| unit_matches(&e.unit, "net.dhcp")));
     }
 
     #[test]
@@ -2620,7 +2802,7 @@ mod tests {
         let filtered = apply_filters(&entries, &cfg);
         assert!(filtered.iter().all(|e| {
             let u = e.unit.to_ascii_lowercase();
-            u == "kernel" || u == "kern" || u == "dmesg"
+            u == b"kernel" || u == b"kern" || u == b"dmesg"
         }));
     }
 
@@ -2706,15 +2888,15 @@ mod tests {
 
     #[test]
     fn test_pattern_matches_basic() {
-        assert!(pattern_matches("hello world", "hello"));
-        assert!(pattern_matches("hello world", "world"));
-        assert!(!pattern_matches("hello world", "xyz"));
+        assert!(pattern_matches(b"hello world", "hello"));
+        assert!(pattern_matches(b"hello world", "world"));
+        assert!(!pattern_matches(b"hello world", "xyz"));
     }
 
     #[test]
     fn test_pattern_matches_case_insensitive() {
-        assert!(pattern_matches("Hello World", "hello"));
-        assert!(pattern_matches("hello", "HELLO"));
+        assert!(pattern_matches(b"Hello World", "hello"));
+        assert!(pattern_matches(b"hello", "HELLO"));
     }
 
     // =========================================================================
@@ -3185,8 +3367,8 @@ mod tests {
         fs::write(&file, &bytes).unwrap();
 
         let j = read_files(std::slice::from_ref(&file), Vec::new(), false);
-        let msgs: Vec<&str> = j.entries.iter().map(|e| e.message.as_str()).collect();
-        assert_eq!(msgs, ["a", "b"]);
+        let msgs: Vec<&[u8]> = j.entries.iter().map(|e| e.message.as_slice()).collect();
+        assert_eq!(msgs, [&b"a"[..], &b"b"[..]]);
         assert_eq!(j.not_records, [(file, 1)]);
         assert!(j.unreadable.is_empty());
     }
@@ -3277,7 +3459,10 @@ mod tests {
         let len = fs::metadata(&file).unwrap().len();
         let lines = tail.advance(&file, len).unwrap();
         assert_eq!(lines.len(), 1);
-        assert_eq!(record_of(&lines[0]).unwrap().message, "caf\u{e9}");
+        assert_eq!(
+            record_of(&lines[0]).unwrap().message,
+            "caf\u{e9}".as_bytes()
+        );
     }
 
     /// A file that got shorter was truncated or replaced, and is read again

@@ -143,7 +143,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-window-wiring.py` | Find GUI programs whose `main` never opens a window. |
 | `scripts/check-workspace-lints.py` | Find crates that are not subject to the project's own lint policy. |
 | `scripts/chgrp-diff.sh` | Differential test: our `chgrp` against GNU `chgrp`. |
+| `scripts/chmod-diff.sh` | Differential test: our `chmod` against GNU coreutils 9.4's. |
 | `scripts/chown-diff.sh` | Differential test: our `chown` against GNU `chown`. |
+| `scripts/chpasswd-diff.sh` | Differential test: our `chpasswd` against Ubuntu 24.04's (shadow-utils 4.13). |
 | `scripts/chroot-diff.sh` | Differential test: our `chroot` against GNU coreutils 9.4's. |
 | `scripts/cksum-diff.sh` | cksum-diff.sh — compare our `cksum` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/clippy-diff.py` | Compare two clippy logs by diagnostic *kind*, so a refactor can be cleared. |
@@ -250,6 +252,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/hostid-diff.sh` | hostid-diff.sh — compare our `hostid` against GNU's, inside WSL. |
 | `scripts/hostload.py` | How much CPU this host will give a process right now -- measured, not assumed. |
 | `scripts/hostname-diff.sh` | Differential test: our `hostname` against net-tools `hostname`. |
+| `scripts/iconv-diff.sh` | Differential test: our `iconv` against Ubuntu 24.04's (glibc 2.39's |
 | `scripts/id-diff.sh` | id-diff.sh — compare our `id` and `groups` against GNU's, inside WSL. |
 | `scripts/install-diff.sh` | Differential test: our `install` against GNU coreutils 9.4's. |
 | `scripts/install-hooks.sh` | Install this repo's git hooks into the shared .git dir, as trampolines. |
@@ -437,6 +440,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
+| `scripts/syslogd-diff.sh` | Differential test: `syslogd daemon` against systemd-journald, the program |
 | `scripts/tac-diff.sh` | tac-diff.sh — compare our `tac` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
@@ -534,4 +538,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_524 scripts._
+_528 scripts._

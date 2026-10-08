@@ -65,6 +65,18 @@ chmod 0755 dir
 chmod 0600 empty.txt
 chmod 4755 dir/sub 2>/dev/null || true
 
+# Names made to measure stdio's 4096-byte buffer: `m/a` and twelve digits is 15
+# bytes, so a `-c %n` line is 16; `m/b` and thirteen is 16, a `--printf %n`
+# piece. 256 of either fill the buffer exactly. See "the standard descriptors"
+# below.
+mkdir -p m
+for i in $(seq 1 257); do
+  printf -v name 'm/a%012d' "$i"; : > "$name"
+  printf -v name 'm/b%013d' "$i"; : > "$name"
+done
+m15=(m/a*)
+m16=(m/b*)
+
 # One fixed instant for every path, so %y/%Y and the rest are a function of the
 # fixture. Done last, because creating a file updates its parent's mtime.
 touch -h -d '2020-01-02 03:04:05 UTC' file.txt empty.txt big.txt link dangling \
@@ -109,13 +121,36 @@ run_side() {
 SCRATCH=/dev/shm
 [ -d "$SCRATCH" ] && [ -w "$SCRATCH" ] || SCRATCH=${TMPDIR:-/tmp}
 
-compare() {
-  local o_out g_out o_err g_err o_rc g_rc
+# `compare_with REDIR ARGS...`: both sides with one descriptor as REDIR says.
+# '' is the ordinary case, standard input from /dev/null. '<&-' closes
+# standard input and '<NAME' reads it from NAME; '>&-' closes standard output
+# and '>/dev/full' fills it; '2>&1' sends standard error into standard
+# output, where the order of the two shows; '2>&-' closes standard error --
+# inside the command, since `diff_run` itself writes through descriptor 2.
+compare_with() {
+  local redir=$1; shift
+  local o_out g_out o_err g_err o_rc g_rc side bin err rc
   o_err=$(mktemp -p "$SCRATCH"); g_err=$(mktemp -p "$SCRATCH")
   local o_bin g_bin
   o_bin=$(mktemp -p "$SCRATCH"); g_bin=$(mktemp -p "$SCRATCH")
-  run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-  run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  for side in ours gnu; do
+    bin=$o_bin; err=$o_err
+    if [ "$side" = gnu ]; then bin=$g_bin; err=$g_err; fi
+    case $redir in
+      '')           run_side "$side" "$@" </dev/null >"$bin" 2>"$err" ;;
+      '<&-')        run_side "$side" "$@" <&- >"$bin" 2>"$err" ;;
+      '<'*)         run_side "$side" "$@" <"${redir#<}" >"$bin" 2>"$err" ;;
+      '>&-')        run_side "$side" "$@" </dev/null >&- 2>"$err" ;;
+      '>/dev/full') run_side "$side" "$@" </dev/null >/dev/full 2>"$err" ;;
+      '2>&1')       run_side "$side" "$@" </dev/null >"$bin" 2>&1 ;;
+      '2>&-')
+        diff_run timeout -k 2 20 env TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" \
+          /bin/sh -c 'exec 2>&-; exec stat "$@"' sh "$@" </dev/null >"$bin" ;;
+      *) echo "stat-diff: no such redirection: $redir" >&2; exit 2 ;;
+    esac
+    rc=$?
+    if [ "$side" = ours ]; then o_rc=$rc; else g_rc=$rc; fi
+  done
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   local o_msg g_msg
   o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
@@ -142,7 +177,19 @@ report() {
   return 0
 }
 
+compare() { compare_with '' "$@"; }
+
 run_case() { compare "$@"; report "stat $*"; }
+
+# `fd_case REDIR ARGS...`: run_case with a descriptor changed; see
+# [`compare_with`]. `fd_many LABEL REDIR ARGS...` is the same for a command
+# line too long to print, named by LABEL instead.
+fd_case() { local redir=$1; shift; compare_with "$redir" "$@"; report "stat $* $redir"; }
+fd_many() {
+  local label=$1 redir=$2; shift 2
+  compare_with "$redir" "$@"
+  report "stat $label $redir"
+}
 
 # The built-in human-readable report carries a `File:` line, and ours quotes the
 # name there where GNU does not. That is DESIGN DECISION §371, not a defect, and
@@ -235,6 +282,9 @@ run_case -c %N dangling
 run_case -f .
 run_case --file-system .
 run_case -f file.txt
+# `-` refused in this mode, named with shell quotes (`quoteaf`), never the
+# locale's curly ones.
+run_case -f -
 for f in %a %b %c %d %f %i %l %n %s %S %t %T; do
   run_case -f -c "$f" .
 done
@@ -273,6 +323,55 @@ run_case --form='%n' file.txt
 report_case --deref link
 run_case --ters file.txt
 run_case --file-sys .
+
+# --- the standard descriptors ---------------------------------------------------------------------------
+# `-` is descriptor 0 itself -- upstream's `statx (0, "", AT_EMPTY_PATH)` -- as
+# the program was given it: closed, it is `cannot stat standard input: Bad file
+# descriptor`, not the facts of the /dev/null Rust's runtime would put there.
+fd_case '<&-' -c %s -
+fd_case '<&-' -c '%F %s %h' -
+fd_case '<&-' -t -
+fd_case '<&-' -c %n file.txt - empty.txt
+fd_case '<file.txt' -c '%s %F %h' -
+fd_case '<dir' -c '%F' -
+fd_case '<&-' -f -
+# Standard output closed or full: gnulib's `close_stdout` -- `write error:` and
+# the reason when the close still had something to write, status 1.
+fd_case '>&-' -c %n file.txt
+fd_case '>&-' file.txt
+fd_case '>&-' -c %n file.txt empty.txt
+fd_case '>&-' --version
+fd_case '>/dev/full' -c %n file.txt
+fd_case '>/dev/full' file.txt
+fd_case '>/dev/full' --printf %n file.txt
+fd_case '>/dev/full' -f .
+fd_case '>/dev/full' --version
+fd_case '>/dev/full' --help
+# An invalid directive is fatal where it is met, after the output before it,
+# which the diagnostic's flush finds the disk full for: two sentences.
+fd_case '>/dev/full' -c 'x%5%' file.txt
+fd_case '>/dev/full' -c '%5%' file.txt
+# More than a buffer. Which call meets the full disk decides whether the close
+# has anything left, so these hold the granularity: a `putchar` per literal
+# byte, a `printf` per directive. 256 lines of 16 bytes fill the 4096-byte
+# buffer exactly and leave it for the close (the reason); a 257th line's name
+# finds it full and goes with it, and its newline is left (the reason again).
+# 256 `--printf %n` pieces of 16 bytes leave a full buffer too; 257 end with
+# the piece that goes with the failed flush, leaving nothing (no reason).
+fd_many '-c %n (256 names of 15 bytes)' '>/dev/full' -c %n "${m15[@]:0:256}"
+fd_many '-c %n (257 names of 15 bytes)' '>/dev/full' -c %n "${m15[@]}"
+fd_many '--printf %n (256 names of 16 bytes)' '>/dev/full' --printf %n "${m16[@]:0:256}"
+fd_many '--printf %n (257 names of 16 bytes)' '>/dev/full' --printf %n "${m16[@]}"
+fd_many "--printf '%n\\n' (257 names of 16 bytes)" '>/dev/full' --printf '%n\n' "${m16[@]}"
+fd_many '-c %n%n (257 names twice)' '>/dev/full' -c '%n%n' "${m15[@]}"
+# A diagnostic follows the output before it: `error()` flushes standard output
+# first, and a warning is said where the format reaches the escape.
+fd_case '2>&1' --printf 'abc\qdef\n' file.txt
+fd_case '2>&1' --printf '%n\q\n' file.txt empty.txt
+fd_case '2>&1' -c 'x%5%' file.txt
+# Standard error closed: a warning that could not be said makes the status 1.
+fd_case '2>&-' --printf 'a\qb\n' file.txt
+fd_case '2>&-' -c %n file.txt
 
 # --- the two whose text is ours ------------------------------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help

@@ -216,9 +216,61 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Twenty-one programs still lack it: `bc chmod chown cmp csplit
-date df dir du ed find install kill ls more patch stat tail vdir awk hostname`.
-(`sort` was converted on 2026-10-03, its output moved onto
+all. Twelve programs still lack it: `bc df dir ed find hostname install
+kill ls more patch vdir`. That list is now
+pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
+a program is added without the guard, when one is converted without being
+taken off the list, and when a program has only one half of it. Two had
+exactly that until 2026-10-07: `ps` expanded the macro and never called
+`restore`, and `chown` called `restore` without the macro. Both were
+silent successes with their standard output closed. Both are fixed, and
+`ps` also reports a lost diagnostic, as procps' `close_stdout` does.
+Since 2026-10-07 the guard also puts `SIGPIPE` back (design-decisions §1060),
+so each of these is also still the old exception there: a reader leaving
+ends it quietly with status 0 or the status it had earned, where GNU's dies
+of the signal with 141. (`awk` was converted on 2026-10-07 as gawk 5.2.1
+starts -- `init_fds`, then `SIGPIPE` ignored and handled: standard output's
+reader going is `die_via_sigpipe`, 141 whatever the disposition, a command's
+is `fatal: print to "CMD" failed: Broken pipe` -- with glibc's buffer for
+standard output and for redirections, so a full disk is met at the record
+gawk's message names, and with no `close_stderr` funnel, since a lost
+diagnostic never changes gawk's status; 691 rows agree with `gawk --posix`.
+`du`, `date` and `csplit` were converted on
+2026-10-07, each with its closed-standard-input fix: `du` flushes after every
+row, as upstream's `print_size` does, so a full disk's `write error` comes
+with no reason; `date` keeps one stdio buffer for the run, so the same failure
+comes with one.
+`tail` was converted on 2026-10-07, its output
+moved onto `stdio::StdioFile` with upstream's two ways of writing it -- file
+data through `xwrite_stdout`, which ends the run at its first failure, and
+the banners through `printf`, whose failure waits for `close_stdout` -- and
+every diagnostic flushing standard output first, as `error()` does, which
+decides whether the last word is `write error` with a reason or without one.
+Under `-f` it watches a piped standard output as upstream's
+`check_output_alive` does, and dies of `SIGPIPE` when the reader goes. The
+conversion took upstream's routes for reading a file with it, which fixed
+three bugs on the way: files in `/proc` said `error reading ...: Invalid
+argument`, `tail -n0 -f` began by printing an unterminated last line, and
+`printf x | tail -f` never ended. `tail-diff.sh` gained the cases.
+`stat` followed the same day: `-` is descriptor 0 as given (`cannot stat
+standard input: Bad file descriptor` where it described the `/dev/null`
+Rust's runtime had put there), its output goes through standard output's
+`Stream` to `close_stdout` (it was a locked `io::stdout()`, which answers a
+closed descriptor's `EBADF` with success, so `stat f >&-` exited 0), and it
+is written a call at a time where GNU's makes one -- a `putchar` per literal
+byte, a `printf` per directive -- so that a full disk leaves the same
+sentence, and a warning lands after the output before it.
+`chmod` followed, with the first harness it has had (`chmod-diff.sh`, every
+case comparing the tree left behind as well as the words): its `-v` and `-c`
+lines were `println!`, which panicked on the first one a full disk refused --
+status 101, with the rest of a `-R` tree never visited -- and a closed
+standard output was a quiet success. They go through standard output's
+`Stream` now, a write per upstream `printf`, to `close_stdout`, and a dangling
+symbolic link named on the command line is `cannot operate on dangling
+symlink`, as `fts` makes upstream say, where it was `cannot access`.
+`cmp` was converted on 2026-10-07 with diffutils'
+`xstdopen` and its own stdout checks: 163 rows agree with GNU 3.10, 10 differ
+on purpose. `sort` was converted on 2026-10-03, its output moved onto
 `stdio::StdioFile` so that a failure is upstream's `write failed` or `fflush
 failed` -- whichever glibc's buffer makes it -- followed by `close_stdout`'s
 `write error`; 32 of 35 descriptor rows agree, the rest `--help`'s text.

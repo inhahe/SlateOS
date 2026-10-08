@@ -423,6 +423,37 @@ du --threshold=-0 t
 du -X nosuchfile t
 du -X nosuchfile -d zz t
 
+# --- standard descriptors that cannot be used ---
+# GNU du flushes standard output after every line, so a closed or full one
+# fails at the first, and `close_stdout` reports it at the end: `write error`
+# with the reason a closed descriptor's close gives, and with none for a full
+# disk, whose close succeeds. A closed standard input is a read error of the
+# `--files0-from` list, and one that is a directory is another. A diagnostic
+# that cannot be written is the run's failure.
+du t >&-
+du t >/dev/full
+du -s t >&-
+du -c t nosuchfile >&-
+du -c t nosuchfile >/dev/full
+du -0 t >/dev/full
+du --help >&-
+du --help >/dev/full
+du --version >/dev/full
+du --nosuchoption >&-
+du nosuchfile 2>&-
+du t 2>/dev/full
+du nosuchfile 2>/dev/full
+du t <&-
+du --files0-from=- <&-
+du -c --files0-from=- <&-
+du --files0-from=- < t
+du -c --files0-from=- < t
+du -c --files0-from=t
+du -c --files0-from=- <&- >&-
+# `-X -` reads standard input too, and its failure is a refusal.
+du -X - t <&-
+du -X - t < t
+
 # --- deliberate differences ---
 !our --help omits --time/--time-style, which we do not implement|du --help
 !our version string is ours|du --version

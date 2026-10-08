@@ -18,6 +18,7 @@
 //! value of `i`, and each keeps its own position.
 
 use crate::value::Str;
+use coreutils::stdio::StdioFile;
 use ere::Regex;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -236,7 +237,9 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 enum Sink {
     /// A file, and whether it is a terminal: gawk's `RED_NOBUF`, which flushes
     /// it after every print so a redirection to `/dev/tty` is seen at once.
-    File(BufWriter<File>, bool),
+    /// glibc's buffer, as standard output's is: which record a full disk is
+    /// first met at depends on it being the file's block size.
+    File(StdioFile, bool),
     /// A command reading our output. The child is kept so `close` can wait for
     /// it and report its status, as awk's `close` is specified to.
     Pipe(BufWriter<std::process::ChildStdin>, Child),
@@ -246,7 +249,12 @@ enum Sink {
 
 /// The redirections a program has open, and the standard streams.
 pub struct Outputs {
-    stdout: BufWriter<io::Stdout>,
+    /// glibc's `stdout`: a buffer the size of the destination's block, and
+    /// failures that are seen. The size decides where a full disk is first
+    /// met, and so which record gawk's `print to "standard output" failed`
+    /// names; and `io::stdout()` would answer a closed descriptor's `EBADF`
+    /// with success.
+    stdout: StdioFile,
     /// Standard output is a terminal: gawk's `output_is_tty`, which flushes it
     /// after every print, so a line typed at an interactive `awk` comes back
     /// when it is processed rather than when 8 KiB have built up.
@@ -283,7 +291,7 @@ impl Outputs {
     #[must_use]
     pub fn new() -> Outputs {
         Outputs {
-            stdout: BufWriter::new(io::stdout()),
+            stdout: StdioFile::stdout(),
             stdout_tty: coreutils::stdfd::is_tty(1),
             sinks: HashMap::new(),
             order: Vec::new(),
@@ -296,7 +304,7 @@ impl Outputs {
     /// Propagates the write failure. awk cannot carry on after one — a report
     /// with a hole in it is worse than no report — so callers make it fatal.
     pub fn write_stdout(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stdout.write_all(bytes)?;
+        self.stdout.write(bytes)?;
         if self.stdout_tty {
             self.stdout.flush()?;
         }
@@ -326,7 +334,7 @@ impl Outputs {
         }
         let written = match self.sinks.get_mut(name) {
             Some(Sink::File(f, tty)) => f
-                .write_all(bytes)
+                .write(bytes)
                 .and_then(|()| if *tty { f.flush() } else { Ok(()) }),
             Some(Sink::Pipe(w, _)) => w.write_all(bytes),
             Some(Sink::Stdout) => self.write_stdout(bytes),
@@ -499,7 +507,7 @@ fn open_sink(name: &[u8], mode: crate::ast::RedirMode) -> io::Result<Sink> {
         .truncate(mode == crate::ast::RedirMode::Truncate)
         .open(path)?;
     let tty = is_terminal(&f);
-    Ok(Sink::File(BufWriter::new(f), tty))
+    Ok(Sink::File(StdioFile::from_file(f), tty))
 }
 
 /// Whether an open file is a terminal, which decides whether output to it is
@@ -533,7 +541,9 @@ impl Inputs {
     pub fn file(&mut self, name: &[u8]) -> io::Result<&mut Records> {
         if !self.files.contains_key(name) {
             let src: Box<dyn Read> = if name == b"-" || name == b"/dev/stdin" {
-                Box::new(io::stdin())
+                // Descriptor 0 itself: `io::stdin()` would answer a closed one
+                // with end of file, where gawk's `getline` returns -1.
+                Box::new(coreutils::stdfd::RawStdin)
             } else {
                 Box::new(File::open(os_path(name))?)
             };

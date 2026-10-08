@@ -46,7 +46,6 @@ userspace/bootctl  # bare deny(clippy::all)
 userspace/cgroup  # bare deny(clippy::all)
 userspace/chage  # bare deny(clippy::all)
 userspace/chattr  # bare deny(clippy::all)
-userspace/chpasswd
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
 userspace/crond

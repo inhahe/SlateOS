@@ -2614,13 +2614,26 @@ fn run_main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let mut parsed = match parse_args(&args) {
         Ok(Request::Run(p)) => p,
+        // Through standard output's stream and gnulib's `close_stdout`, as
+        // upstream ends both: a full disk is `grep: write error: No space
+        // left on device`, a closed standard output `Bad file descriptor`,
+        // status 2 either way -- measured, as `println!` had them a panic and
+        // a silent 0. The help a line per write, as `usage` prints it in
+        // pieces, so that what is still held at the close is upstream's too.
         Ok(Request::Help) => {
-            println!("{HELP}");
-            return ExitCode::SUCCESS;
+            let mut out = stdfd::Stream::stdout();
+            for line in format!("{HELP}\n").split_inclusive('\n') {
+                // A `Stream` records a failed write for `close_stdout_with`
+                // and never returns one.
+                let _ = out.write_all(line.as_bytes());
+            }
+            return stdfd::close_stdout_with("grep", out, ExitCode::SUCCESS, 2);
         }
         Ok(Request::Version) => {
-            println!("grep (SlateOS coreutils) 0.1.0");
-            return ExitCode::SUCCESS;
+            let mut out = stdfd::Stream::stdout();
+            // As above: recorded, and reported at the close.
+            let _ = out.write_all(b"grep (SlateOS coreutils) 0.1.0\n");
+            return stdfd::close_stdout_with("grep", out, ExitCode::SUCCESS, 2);
         }
         // No diagnostic above it: upstream's `usage (EXIT_TROUBLE)` for a
         // pattern-less command line prints these two lines and nothing else.

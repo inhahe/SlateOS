@@ -576,9 +576,17 @@ fn split_lines(data: &[u8], delim: u8) -> Vec<&[u8]> {
 /// has moved onto descriptor 1. Either way upstream then dies, and the
 /// `close_stdout` in its `exit_cleanup` adds a `write error` with no reason:
 /// measured, `sort f >&-` and `sort f >/dev/full` both print the pair and exit
-/// 2. A reader that went away is the exception: upstream died of `SIGPIPE`,
-/// saying nothing, and the run keeps its status (design-decisions 377). Before
-/// this, every failure was one `write failed: REASON` and a broken pipe was 2.
+/// 2. A reader that went away ends both at that write by `SIGPIPE`, which
+/// `stdfd::restore` put back; inherited ignored, the `EPIPE` is reported as
+/// any other failure is, as upstream reports it. Where the signal could not be
+/// put back (`stdfd::reader_gone`), upstream would have died saying nothing,
+/// so nothing is said and the run keeps its status (design-decisions 377).
+/// Before this, every failure was one `write failed: REASON` and a broken pipe
+/// was 2.
+///
+/// Upstream traps `SIGPIPE` to delete its temporary files before dying of it.
+/// This sort keeps the whole input in memory and makes none, so it has
+/// nothing to clean up and dies of the signal directly.
 fn write_out(cfg: &Config, lines: &[&[u8]]) -> Result<(), ExitCode> {
     let (mut out, name) = match &cfg.output {
         None => (StdioFile::stdout(), quotef(b"standard output")),

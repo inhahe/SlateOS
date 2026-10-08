@@ -28,25 +28,18 @@
 #
 # ## Cases that differ on purpose
 #
-# Three kinds, each recorded as `xfail`:
+# One kind, recorded as `xfail`: `--help` omits the GNU project's `Report bugs
+# to:` block, and `--version` names SlateOS. As everywhere here.
 #
-#   * `--help` omits the GNU project's `Report bugs to:` block, and `--version`
-#     names SlateOS. As everywhere here.
-#   * A broken stdout under the *default* mode. GNU leaves SIGPIPE fatal and
-#     dies of it, status 141; SlateOS has no signals, so our default mode is
-#     upstream's own ignored-SIGPIPE path — drop the write, keep copying to
-#     whatever outputs are left, exit with the status so far. That is also what
-#     `cut`, `head`, `tail` and `uniq` in this tree already do. See the header
-#     of `tee.rs`.
-#   * `tee out <&-` — stdin closed. GNU diagnoses twice (`read error: Bad file
-#     descriptor`, then gnulib's `close_stdin` atexit hook adding `standard
-#     input: Bad file descriptor`) and exits 1. We say nothing and exit 0,
-#     because by the time `main` runs there is no closed descriptor left to
-#     notice: Rust's std reopens any missing standard descriptor onto
-#     `/dev/null` before `main`, so our stdin is an empty file and the copy
-#     genuinely succeeds. Measured, not assumed — `tee /proc/self/fd/0 <&-`
-#     opens successfully for us and is `No such file or directory` for GNU,
-#     which is the descriptor table answering the question directly.
+# Two more were listed here once, and both now agree:
+#
+#   * A broken stdout under the *default* mode. GNU leaves SIGPIPE as it found
+#     it and dies of it, status 141. Ours used to drop the write and carry on,
+#     because SlateOS raised no SIGPIPE to die of. Lane D's libc raises it now
+#     (`design-decisions.md` §1176), and `stdfd::restore` puts back the
+#     disposition tee inherited (§1060), so the pipe cases below run under both
+#     dispositions and expect agreement under each.
+#   * `tee out <&-`, stdin closed. See the cases at the end of the file.
 #
 # Note what is *not* on that list: how a file name is rendered into a
 # diagnostic. `cmp-diff.sh` has a whole family of xfails for it, because
@@ -96,10 +89,16 @@ mkdir -p "$scratch"
 #
 # `PARTIAL` names files — as `find` prints them, so `./out` — whose *length* is
 # not specified by anything and so must not be compared. See `render`.
+#
+# `PIPE_IGNORED` runs a pipe case with SIGPIPE ignored (`trap '' PIPE`), which
+# tee inherits. Without it the case runs with SIGPIPE at its default, so it kills
+# tee, unless tee's mode ignores it.
 SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; PARTIAL=
+PIPE_IGNORED=
 
 reset_knobs() {
   SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; PARTIAL=
+  PIPE_IGNORED=
 }
 
 # --- what a directory looks like afterwards ----------------------------------
@@ -275,7 +274,8 @@ pipe_compare() {
   for side in ours gnu; do
     if [ "$side" = ours ]; then dir=$od; err=$o_err; else dir=$gd; err=$g_err; fi
     ( cd "$dir" && eval "$SETUP" ) >/dev/null 2>&1
-    ( cd "$dir" \
+    ( [ -n "$PIPE_IGNORED" ] && trap '' PIPE
+      cd "$dir" \
       && head -c "$PIPE_INPUT" /dev/zero \
          | timeout -k 2 60 env PATH="$bindir/$side" tee "$@" 2>"$err" \
          | head -c 1 >/dev/null
@@ -300,19 +300,12 @@ pipe_compare() {
   reset_knobs
 }
 
-pipe_case() { pipe_compare "$@"; report "yes | tee $* | head -c1"; }
-
-xfail_pipe() {
-  local why="$1"; shift
+pipe_case() {
+  # Named before the comparison runs, because `pipe_compare` resets the knobs.
+  local label="yes | tee $* | head -c1"
+  [ -n "$PIPE_IGNORED" ] && label="trap '' PIPE; $label"
   pipe_compare "$@"
-  if [ "$AGREED" = yes ]; then
-    xpass=$((xpass+1))
-    printf 'XPASS %s  (expected to differ: %s)\n' "yes | tee $* | head -c1" "$why"
-  else
-    xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'xfail %s  (%s)\n' "yes | tee $* | head -c1" "$why"
-  fi
-  return 0
+  report "$label"
 }
 
 # =============================================================================
@@ -406,6 +399,22 @@ done
 STDIN='x\n'; run_case -p good1 nodir/bad good2
 # An open failure is not a broken pipe, so even the `nopipe` modes report it.
 STDIN='x\n'; run_case --output-error=exit-nopipe nodir/bad good
+
+# --- the default mode, against a broken stdout --------------------------------
+# No `--output-error`, so tee leaves SIGPIPE as it found it. At its default, the
+# first write after the reader leaves kills tee: status 141, no diagnostic, and
+# `out` holds whatever was copied before that write, which is scheduling (hence
+# `PARTIAL`). Ignored, the write fails with EPIPE instead, and the default mode
+# treats that as `warn-nopipe` does: it drops stdout without a word, copies the
+# rest to `out`, and exits 0. With no file left to copy to, it stops there.
+PARTIAL=./out; pipe_case out
+pipe_case
+PIPE_IGNORED=1; pipe_case out
+PIPE_IGNORED=1; pipe_case
+# Every other mode ignores SIGPIPE itself, so an inherited disposition must not
+# change anything.
+PIPE_IGNORED=1; pipe_case --output-error=warn out
+PIPE_IGNORED=1; pipe_case --output-error=exit-nopipe
 
 # --- --output-error, against a broken stdout ---------------------------------
 # Here the `nopipe` modes finally diverge from the others: same failure, same
@@ -507,12 +516,6 @@ STDIN='x\n'; run_case 'sp ace/bad' good
 # --- differences on purpose --------------------------------------------------
 STDIN='x\n'; xfail_case 'our --help omits the GNU project ancillary block' --help
 STDIN='x\n'; xfail_case 'our --version names SlateOS' --version
-
-# The default mode. GNU leaves SIGPIPE fatal and is killed by it (status 141,
-# no diagnostic); we have no signals, so the default takes upstream's own
-# ignored-SIGPIPE path — drop the write, keep copying to the file, exit 0.
-xfail_pipe 'GNU dies of SIGPIPE (141); SlateOS has no signals' out
-xfail_pipe 'GNU dies of SIGPIPE (141); SlateOS has no signals'
 
 # Closed stdin. GNU diagnoses twice — `tee: read error: Bad file descriptor`
 # from the failed read, then `tee: standard input: Bad file descriptor` from

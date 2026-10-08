@@ -531,8 +531,13 @@ dependencies = [
 name = "chpasswd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
  "posix",
  "quoting",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -1711,6 +1716,9 @@ dependencies = [
 name = "iconv"
 version = "0.1.0"
 dependencies = [
+ "coreutils",
+ "errmsg",
+ "getoptlong",
  "quoting",
 ]
 
@@ -1846,7 +1854,9 @@ version = "0.1.0"
 name = "journalctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "journalio",
+ "journalrec",
  "quoting",
  "scratchdir",
 ]
@@ -2176,6 +2186,7 @@ dependencies = [
  "authlib",
  "guitk",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 
@@ -4162,6 +4173,7 @@ dependencies = [
 name = "syslogd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "journalio",
  "journalrec",
  "quoting",

@@ -44,7 +44,7 @@ two disagree.
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |
-| `chpasswd` | Batch password change (chpasswd/passwd) | yes |  |  |
+| `chpasswd` | Set many passwords at once, from standard input. | yes |  |  |
 | `chroot` | Run a command with its root directory changed. | yes | `coreutils` |  |
 | `cksum` | Print or verify checksums, by default POSIX's 32-bit CRC. | yes | `coreutils` |  |
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |
@@ -118,7 +118,7 @@ two disagree.
 | `htop` | Interactive Process Viewer | yes |  |  |
 | `hwclock` | Hardware clock and time management utility for SlateOS. | yes |  |  |
 | `hwinfo` | Hardware information utility: `hwinfo`, a comprehensive hardware inventory. | yes |  |  |
-| `iconv` | Character encoding conversion utility. | yes |  |  |
+| `iconv` | Convert text from one character encoding to another. | yes |  |  |
 | `id` | Print user and group information for each specified USER, or (when USER is omitted) for the current process. | yes | `coreutils` |  |
 | `ifconfig` | Classic network interface configuration utility. | yes |  |  |
 | `indexer` | Background File Indexer | yes |  |  |

@@ -68,7 +68,7 @@ use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
 use coreutils::stdfd;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 // Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
 coreutils::guard_std_fds!();
@@ -1129,11 +1129,12 @@ fn freopen_errno(fd: i32, open_error: io::Error) -> io::Error {
 }
 
 /// A failed write. GNU dies of `SIGPIPE` when the reader goes away, printing
-/// nothing; Rust masks that signal, so the same situation arrives as `EPIPE`
-/// and has to be recognised and kept quiet. Any other write failure is
-/// upstream's `write_error()`.
+/// nothing, and so does this since `stdfd::restore` put the signal back; an
+/// `EPIPE` is quiet only where it could not (see `stdfd::reader_gone`). Any
+/// other write failure -- `EPIPE` included, with `SIGPIPE` inherited ignored --
+/// is upstream's `write_error()`.
 fn write_failure(e: &io::Error) -> ExitCode {
-    if e.kind() == ErrorKind::BrokenPipe {
+    if stdfd::reader_gone(e) {
         return ExitCode::SUCCESS;
     }
     diag!("uniq: write error: {}", strerror(e));

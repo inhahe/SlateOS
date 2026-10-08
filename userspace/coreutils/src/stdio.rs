@@ -19,6 +19,13 @@
 //!   the next buffer. A write that exactly fills the buffer does not flush it;
 //!   the next write does. Where the buffer is under 128 bytes, glibc does not
 //!   bother keeping the writes aligned, and all of the rest goes directly.
+//! * **Line-buffered, a newline writes the buffer through itself.** A write
+//!   the buffer has room for is copied through its last newline and the
+//!   buffer written there; the rest of it is held. A write it has *no* room
+//!   for goes as above -- filling the buffer past any newline in the way --
+//!   and its remainder is written through each newline in it, a line per
+//!   `write(2)`, since `_IO_default_xsputn` feeds it to `__overflow` a byte at
+//!   a time.
 //! * **The first write finds no buffer at all**, so nothing "fits": the
 //!   buffer is allocated empty and the write goes straight to the second step.
 //!   A first write of a whole block or more therefore reaches the descriptor at
@@ -28,7 +35,16 @@
 //!   its first 4096-byte piece, not its second.
 //! * **A failed flush discards the buffer**, as `new_do_write` resets the
 //!   pointers whether or not `write(2)` succeeded, and sets the error flag
-//!   (`ferror`) until [`StdioFile::clear_error`] (`clearerr`).
+//!   (`ferror`) until [`StdioFile::clear_error`] (`clearerr`). The rest of the
+//!   write that needed it is dropped too: `fwrite` returns there.
+//!
+//! That arithmetic is [`xsputn`], and [`crate::stdfd::Stream`] -- the writer
+//! most utilities use -- runs on it as well, because its verdict depends on it
+//! as much as sed's messages do. gnulib's `close_stdout` reports a full disk
+//! with the reason (`write error: No space left on device`) when the close
+//! still had bytes to write, and without one (`write error`) when an earlier
+//! flush had already failed and nothing was left; which of the two a program
+//! ends with is decided by what glibc's buffer still holds.
 //!
 //! Reading is [`StdioReader`]: a block at a time (one byte unbuffered),
 //! `getdelim`, a one-byte look-ahead, sticky end of file, and the seek back
@@ -186,14 +202,20 @@ impl StdioFile {
         if first {
             self.buffering = self.choose_buffering();
         }
-        match self.buffering {
-            Buffering::Unbuffered => self.write_out(data),
-            Buffering::Line(size) => self.write_line_buffered(data, size, first),
-            Buffering::Full(size) => self.write_fully_buffered(data, size, first),
+        let (size, line) = match self.buffering {
+            Buffering::Unbuffered => return self.write_out(data),
+            Buffering::Line(size) => (size, true),
+            Buffering::Full(size) => (size, false),
             // Just chosen above, so never still unallocated; `BUFSIZ` is what
             // it would have been chosen as had nothing been known.
-            Buffering::Unallocated => self.write_fully_buffered(data, BUFSIZ, first),
-        }
+            Buffering::Unallocated => (BUFSIZ, false),
+        };
+        let mut held = std::mem::take(&mut self.buf);
+        let result = xsputn(&mut held, size, first, line, data, &mut |bytes| {
+            self.write_out(bytes)
+        });
+        self.buf = held;
+        result
     }
 
     /// `fflush`: write out whatever is held.
@@ -206,13 +228,9 @@ impl StdioFile {
     ///
     /// The failed `write(2)`'s error; the buffer is discarded either way.
     pub fn flush(&mut self) -> io::Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-        let held = std::mem::take(&mut self.buf);
-        let result = self.write_out(&held);
+        let mut held = std::mem::take(&mut self.buf);
+        let result = write_held(&mut held, &mut |bytes| self.write_out(bytes));
         self.buf = held;
-        self.buf.clear();
         result
     }
 
@@ -251,11 +269,7 @@ impl StdioFile {
             #[cfg(test)]
             Sink::Memory(_) => None,
         };
-        let size = meta
-            .as_ref()
-            .map(block_size)
-            .filter(|&b| b > 0 && b < BUFSIZ)
-            .unwrap_or(BUFSIZ);
+        let size = buffer_size(meta.as_ref());
         let tty = match &self.sink {
             Sink::Descriptor(fd) => meta.as_ref().is_some_and(is_char_device) && stdfd::is_tty(*fd),
             Sink::File(_) | Sink::Closed => false,
@@ -266,54 +280,6 @@ impl StdioFile {
             Buffering::Line(size)
         } else {
             Buffering::Full(size)
-        }
-    }
-
-    /// `_IO_new_file_xsputn` for a fully buffered stream. `first` is the write
-    /// that allocates the buffer, which finds no room in it.
-    fn write_fully_buffered(&mut self, data: &[u8], size: usize, first: bool) -> io::Result<()> {
-        let room = if first {
-            0
-        } else {
-            size.saturating_sub(self.buf.len())
-        };
-        let take = room.min(data.len());
-        let (head, rest) = data.split_at(take);
-        self.buf.extend_from_slice(head);
-        if rest.is_empty() {
-            return Ok(());
-        }
-        // The buffer is full and there is more: out it goes. (On the first
-        // write it is empty, and this writes nothing.)
-        self.flush()?;
-        // Whole buffers' worth of what is left go straight to the descriptor,
-        // keeping the writes block-aligned; the remainder starts a new buffer.
-        // A buffer under 128 bytes is not worth aligning to, and glibc sends
-        // everything.
-        let direct = if size >= 128 {
-            rest.len()
-                .saturating_sub(rest.len().checked_rem(size).unwrap_or(0))
-        } else {
-            rest.len()
-        };
-        let (whole, tail) = rest.split_at(direct);
-        if !whole.is_empty() {
-            self.write_out(whole)?;
-        }
-        self.buf.extend_from_slice(tail);
-        Ok(())
-    }
-
-    /// A line-buffered stream: held until a newline, then written through it.
-    fn write_line_buffered(&mut self, data: &[u8], size: usize, first: bool) -> io::Result<()> {
-        match data.iter().rposition(|&b| b == b'\n') {
-            Some(end) => {
-                let (through, rest) = data.split_at(end.saturating_add(1));
-                self.buf.extend_from_slice(through);
-                self.flush()?;
-                self.write_fully_buffered(rest, size, false)
-            }
-            None => self.write_fully_buffered(data, size, first),
         }
     }
 
@@ -343,6 +309,115 @@ impl StdioFile {
         }
         Ok(())
     }
+}
+
+/// glibc's `_IO_new_file_xsputn` for a stream that has a buffer, apart from
+/// where the bytes go: the one copy of the rules in the module docs, shared by
+/// [`StdioFile`] and [`crate::stdfd::Stream`] so that the two cannot drift.
+///
+/// `held` is what the stream is holding and `size` its buffer's size. `first`
+/// says nothing has been written to the stream yet, so its buffer does not
+/// exist and nothing fits in it; `line` is line buffering. `deliver` is
+/// `write(2)` until done.
+///
+/// # Errors
+///
+/// The first failed delivery's. The buffer is empty afterwards, as glibc
+/// leaves it whether or not `write(2)` succeeded, and the rest of `data` is
+/// dropped, as `fwrite` returns there.
+pub(crate) fn xsputn(
+    held: &mut Vec<u8>,
+    size: usize,
+    first: bool,
+    line: bool,
+    data: &[u8],
+    deliver: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    // What goes into the buffer before anything is written: what fits --
+    // nothing, before the buffer exists -- or, line-buffered with room for all
+    // of it, the data through its last newline, which then has to go out.
+    let room = if first {
+        0
+    } else {
+        size.saturating_sub(held.len())
+    };
+    let mut take = room.min(data.len());
+    let mut must_flush = false;
+    if line
+        && !first
+        && room >= data.len()
+        && let Some(end) = data.iter().rposition(|&b| b == b'\n')
+    {
+        take = end.saturating_add(1);
+        must_flush = true;
+    }
+    let (head, rest) = data.split_at(take);
+    held.extend_from_slice(head);
+    if rest.is_empty() && !must_flush {
+        return Ok(());
+    }
+    // The buffer is full, or ends in a newline, and goes. (Before the first
+    // write it is empty, and this writes nothing.)
+    write_held(held, deliver)?;
+    // Whole buffers' worth of what is left go straight to the descriptor,
+    // keeping the writes block-aligned. A buffer under 128 bytes is not worth
+    // aligning to, and glibc sends everything.
+    let direct = if size >= 128 {
+        rest.len()
+            .saturating_sub(rest.len().checked_rem(size).unwrap_or(0))
+    } else {
+        rest.len()
+    };
+    let (whole, mut tail) = rest.split_at(direct);
+    if !whole.is_empty() {
+        deliver(whole)?;
+    }
+    // The remainder starts the next buffer: `_IO_default_xsputn`, which for a
+    // line-buffered stream goes a byte at a time through `__overflow`, and
+    // that writes the buffer at each newline. Less than a buffer is left, so
+    // nothing else can fill it.
+    if line {
+        while let Some(end) = tail.iter().position(|&b| b == b'\n') {
+            let (through, after) = tail.split_at(end.saturating_add(1));
+            held.extend_from_slice(through);
+            write_held(held, deliver)?;
+            tail = after;
+        }
+    }
+    held.extend_from_slice(tail);
+    Ok(())
+}
+
+/// `_IO_do_write` of everything held -- `fflush` -- after which nothing is,
+/// delivered or not. Nothing held writes nothing and succeeds, whatever the
+/// descriptor is.
+///
+/// # Errors
+///
+/// The delivery's.
+pub(crate) fn write_held(
+    held: &mut Vec<u8>,
+    deliver: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    let result = deliver(held);
+    held.clear();
+    result
+}
+
+/// `_IO_file_doallocate`'s buffer size for a stream onto a file with this
+/// metadata: `st_blksize` when it is positive and below `BUFSIZ`, and `BUFSIZ`
+/// otherwise -- including when `fstat` failed, `None`. 4096 for a file on
+/// ext4, a pipe, `/dev/null` and `/dev/full` on Linux; 1024 for a terminal.
+pub(crate) fn buffer_size(meta: Option<&std::fs::Metadata>) -> usize {
+    meta.map(block_size)
+        .filter(|&b| b > 0 && b < BUFSIZ)
+        .unwrap_or(BUFSIZ)
 }
 
 // ------------------------------------------------------------------ reading
@@ -883,6 +958,132 @@ mod tests {
         // And the failed flush took the byte with it.
         assert_eq!(f.pending(), 0);
         f.flush().unwrap();
+    }
+
+    /// One [`super::xsputn`] onto a disk with `room` bytes free: what it
+    /// wrote, each `write(2)` as its bytes, and how it ended.
+    struct Put {
+        writes: Vec<Vec<u8>>,
+        result: std::io::Result<()>,
+    }
+
+    fn put(
+        held: &mut Vec<u8>,
+        size: usize,
+        first: bool,
+        line: bool,
+        data: &[u8],
+        room: usize,
+    ) -> Put {
+        let mut writes = Vec::new();
+        let mut room = room;
+        let result = super::xsputn(held, size, first, line, data, &mut |bytes| {
+            writes.push(bytes.to_vec());
+            if bytes.len() > room {
+                room = 0;
+                return Err(std::io::Error::from_raw_os_error(28));
+            }
+            room = room.saturating_sub(bytes.len());
+            Ok(())
+        });
+        Put { writes, result }
+    }
+
+    #[test]
+    fn line_buffered_with_room_writes_through_the_last_newline() {
+        let mut held = b"ab".to_vec();
+        let p = put(&mut held, 128, false, true, b"c\nd\ne", 1000);
+        p.result.unwrap();
+        // One write, through the last newline -- not one per line.
+        assert_eq!(p.writes, vec![b"abc\nd\n".to_vec()]);
+        assert_eq!(held, b"e");
+    }
+
+    #[test]
+    fn line_buffered_without_room_fills_the_buffer_past_its_newlines() {
+        let mut held = vec![b'a'; 120];
+        let mut data = b"bb\ncc".to_vec();
+        data.extend_from_slice(&[b'x'; 300]);
+        data.extend_from_slice(b"\nyy\nz");
+        let p = put(&mut held, 128, false, true, &data, 10_000);
+        p.result.unwrap();
+        // The 8 bytes that fit fill the buffer, newline and all, and it goes;
+        // two whole blocks of the 302 left go directly; the 46 after them are
+        // written a line at a time, and what follows the last newline is held.
+        let sizes: Vec<usize> = p.writes.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![128, 256, 42, 3]);
+        assert_eq!(p.writes[3], b"yy\n");
+        assert_eq!(held, b"z");
+    }
+
+    #[test]
+    fn a_first_line_buffered_write_finds_no_room_either() {
+        let mut held = Vec::new();
+        let p = put(&mut held, 128, true, true, b"a\nb", 1000);
+        p.result.unwrap();
+        assert_eq!(p.writes, vec![b"a\n".to_vec()]);
+        assert_eq!(held, b"b");
+    }
+
+    #[test]
+    fn a_line_that_fails_takes_the_rest_of_its_write_with_it() {
+        let mut held = Vec::new();
+        let p = put(&mut held, 128, false, true, b"a\nb\nc", 0);
+        assert_eq!(p.result.unwrap_err().raw_os_error(), Some(28));
+        // `fwrite` stops at the failure: nothing is left for the close to
+        // write, so gnulib's verdict will have no reason to give.
+        assert_eq!(p.writes, vec![b"a\nb\n".to_vec()]);
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn a_line_without_a_newline_is_held_even_when_it_fills_the_buffer() {
+        let mut held = vec![b'a'; 100];
+        let p = put(&mut held, 128, false, true, &[b'b'; 28], 1000);
+        p.result.unwrap();
+        assert!(p.writes.is_empty());
+        assert_eq!(held.len(), 128);
+        // ...until a byte needs room.
+        let p = put(&mut held, 128, false, true, b"c", 1000);
+        p.result.unwrap();
+        assert_eq!(p.writes.iter().map(Vec::len).collect::<Vec<_>>(), vec![128]);
+        assert_eq!(held, b"c");
+    }
+
+    #[test]
+    fn a_small_line_buffer_sends_the_rest_directly() {
+        let mut held = Vec::new();
+        let mut data = b"abc\n".to_vec();
+        data.extend_from_slice(&[b'd'; 20]);
+        let p = put(&mut held, 16, false, true, &data, 1000);
+        p.result.unwrap();
+        // 16 fill the buffer and go; under 128 bytes, all 8 of the rest follow.
+        assert_eq!(
+            p.writes.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![16, 8]
+        );
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn a_whole_block_written_directly_that_fails_drops_the_remainder() {
+        // Fully buffered, the first write's whole blocks go at once; when
+        // that write fails the remainder is not kept for later.
+        let mut held = Vec::new();
+        let p = put(&mut held, 128, true, false, &[b'a'; 300], 0);
+        assert!(p.result.is_err());
+        assert_eq!(p.writes.iter().map(Vec::len).collect::<Vec<_>>(), vec![256]);
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn the_buffer_size_is_st_blksize_below_bufsiz_and_bufsiz_otherwise() {
+        assert_eq!(super::buffer_size(None), super::BUFSIZ);
+        #[cfg(target_os = "linux")]
+        {
+            let null = std::fs::metadata("/dev/null").unwrap();
+            assert_eq!(super::buffer_size(Some(&null)), 4096);
+        }
     }
 
     // ------------------------------------------------------------ reading

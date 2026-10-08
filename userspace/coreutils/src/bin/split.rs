@@ -1673,6 +1673,13 @@ fn run(
             .usage_referring("--filter does not process a chunk extracted to stdout".to_string())
             .into());
     }
+    // `default_SIGPIPE = signal (SIGPIPE, SIG_IGN) == SIG_DFL;` when filtering:
+    // a command that stops reading early is not a failure, so the write into
+    // its pipe must return `EPIPE` rather than end this process. Otherwise
+    // `SIGPIPE` stays as `stdfd::restore` put it back -- fatal, as upstream's.
+    if options.filter.is_some() {
+        stdfd::ignore_sigpipe();
+    }
     let (width, start, widen) = suffix_plan(options)?;
     let input = read_input(file, options.kind)?;
     let data: &[u8] = &input.data;

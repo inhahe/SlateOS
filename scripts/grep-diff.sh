@@ -1351,6 +1351,21 @@ grep -l a abc >&-
 grep -o a abc >&-
 grep -r foo sub >&-
 grep a /nonexistent 2>&-
+# --help and --version end as a search does, through `close_stdout` with status
+# 2: a full disk and a closed standard output name their reason, and a reader
+# already gone kills grep by default and is `write error: Broken pipe` when the
+# signal is ignored. Ours panicked on the first and said nothing on the second
+# until 2026-10-07. The text differs (below); with standard output elsewhere,
+# only what is said and the status are compared.
+grep --help >/dev/full
+grep --help >&-
+grep --version >/dev/full
+grep --version >&-
+grep -V >/dev/full
+{ sleep 0.3; grep --help; echo "rc=$?" >&2; } | true
+(trap '' PIPE; { sleep 0.3; grep --help; echo "rc=$?" >&2; } | true)
+{ sleep 0.3; grep --version; echo "rc=$?" >&2; } | true
+(trap '' PIPE; { sleep 0.3; grep --version; echo "rc=$?" >&2; } | true)
 
 # Standard input closed, or a directory. Both name it `(standard input)` (or
 # `--label`'s name), unquoted, with status 2; but `fstat` failing ends the file

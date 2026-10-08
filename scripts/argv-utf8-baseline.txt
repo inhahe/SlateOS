@@ -55,7 +55,6 @@ userspace/hostnamectl/src/main.rs:argv-as-string
 userspace/htop/src/main.rs:argv-as-string
 userspace/hwclock/src/main.rs:argv-as-string
 userspace/hwinfo/src/main.rs:argv-as-string
-userspace/iconv/src/main.rs:argv-as-string
 userspace/ifconfig/src/main.rs:argv-as-string
 userspace/indexer/src/main.rs:argv-as-string
 userspace/inetd/src/main.rs:argv-as-string
@@ -116,7 +115,6 @@ userspace/ssh/src/lib.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
 userspace/sysctl/src/main.rs:argv-as-string
 userspace/sysinfo/src/main.rs:argv-as-string
-userspace/syslogd/src/main.rs:argv-as-string
 userspace/sysstat/src/main.rs:argv-as-string
 userspace/systemctl/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string

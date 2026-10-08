@@ -474,14 +474,19 @@ done <<'CASES'
 ~df -a /proc
 
 # --- diagnostics -------------------------------------------------------------
+# The two with `/` beside the bad operand are masked, as the table cases are:
+# `/` is WSL's own disk, and anything writing to it between the two runs moves
+# its free space. It did, during a full `all-diff.sh` whose builds were
+# writing there: `df / nosuchfile` differed in nothing but the used and
+# available counts, by 36 KB.
 df nosuchfile
-df / nosuchfile
+~df / nosuchfile
 df nosuchfile nosuchfile
 df --total nosuchfile
 df -i nosuchfile
 df --output=target nosuchfile
 df ""
-df / ""
+~df / ""
 df --output=nosuch
 df --output=size,size
 df --output=size,

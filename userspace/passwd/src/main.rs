@@ -97,6 +97,9 @@ const MIN_PASSWORD_LEN: usize = 8;
 struct Accounts {
     db: UserDb,
     path: std::path::PathBuf,
+    /// Held from before the read until this is dropped, after the save, for a
+    /// command that changes the database: see [`Accounts::load_held`].
+    _lock: Option<userdb::Lock>,
 }
 
 impl Accounts {
@@ -106,12 +109,36 @@ impl Accounts {
     /// empty would make `passwd alice` report "user does not exist" for every
     /// account on the machine, and -- worse -- a subsequent save would write
     /// that empty database out over the real one.
+    ///
+    /// For a command that only reads (`-S`). One that changes the database
+    /// uses [`Accounts::load_held`].
     fn load(path: &std::path::Path) -> Result<Self, String> {
-        let db =
-            UserDb::load(path).map_err(|e| format!("cannot read `{}': {e}", path.display()))?;
         Ok(Self {
-            db,
+            db: Self::read(path)?,
             path: path.to_path_buf(),
+            _lock: None,
+        })
+    }
+
+    /// The read itself, worded for the person running the command.
+    fn read(path: &std::path::Path) -> Result<UserDb, String> {
+        UserDb::load(path).map_err(|e| format!("cannot read `{}': {e}", path.display()))
+    }
+
+    /// [`Accounts::load`], holding the database (`userdb::Lock`) from before
+    /// the read until the [`Accounts`] is dropped.
+    ///
+    /// Without the hold, a `passwd` and any other account tool run at once
+    /// both read the same database, and the second save erases the first's
+    /// change. shadow-utils' `passwd` locks `/etc/passwd` for the same reason,
+    /// and says so in the same words when it cannot.
+    fn load_held(path: &std::path::Path) -> Result<Self, String> {
+        let lock = UserDb::lock(path)
+            .map_err(|_| format!("cannot lock {}; try again later.", path.display()))?;
+        Ok(Self {
+            db: Self::read(path)?,
+            path: path.to_path_buf(),
+            _lock: Some(lock),
         })
     }
 
@@ -990,8 +1017,15 @@ fn main() {
     // The database is read once, here, and handed to whichever command runs.
     // Reading it inside each command would mean a `-S` that reports one file
     // and a `-x` that writes another, and — worse — the read-modify-write
-    // sequence that made `find_or_create_shadow` necessary.
-    let mut accounts = match Accounts::load(std::path::Path::new(userdb::DEFAULT_PATH)) {
+    // sequence that made `find_or_create_shadow` necessary. Every command
+    // but `-S` changes it, and holds it while it does.
+    let db_path = std::path::Path::new(userdb::DEFAULT_PATH);
+    let loaded = if matches!(parsed.action, Action::ShowStatus) {
+        Accounts::load(db_path)
+    } else {
+        Accounts::load_held(db_path)
+    };
+    let mut accounts = match loaded {
         Ok(accounts) => accounts,
         Err(e) => {
             eprintln!("passwd: {e}");
@@ -1791,6 +1825,23 @@ mod tests {
     /// Reread the database from disk, as the next program to run would.
     fn reread(accounts: &Accounts) -> Accounts {
         Accounts::load(&accounts.path).expect("reload")
+    }
+
+    /// A command that changes the database holds it until it is done, and a
+    /// read (`-S`) does not wait for the hold. If the hold outlived its
+    /// `Accounts`, the second `load_held` would wait out `userdb::LOCK_TRIES`
+    /// and fail.
+    #[test]
+    fn a_change_holds_the_database_and_lets_go_when_done() {
+        let scratch = scratchdir::ScratchDir::new("passwd-held");
+        let path = accounts_with(&scratch, "correct horse").path;
+        {
+            let mut held = Accounts::load_held(&path).expect("the first hold");
+            assert!(Accounts::load(&path).is_ok(), "a read waits for no one");
+            assert_eq!(cmd_lock(&mut held, "dave"), 0);
+        }
+        let again = Accounts::load_held(&path).expect("held again, once released");
+        assert!(again.find("dave").is_some_and(Record::is_locked));
     }
 
     #[test]

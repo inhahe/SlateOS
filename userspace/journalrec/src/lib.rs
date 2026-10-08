@@ -48,6 +48,36 @@ pub fn escape(s: &str) -> String {
     }
     out
 }
+/// A field's value as JSON: a string when the bytes are UTF-8, its control
+/// characters escaped as [`escape`] escapes them, and otherwise an array of
+/// the byte values -- the spelling `journalctl -o json` uses on Linux for a
+/// field that is not text (design-decisions §1063). Nothing is replaced or
+/// lost either way: a message of any bytes reads back as those bytes.
+#[must_use]
+pub fn json_value(bytes: &[u8]) -> String {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => {
+            let mut out = String::with_capacity(text.len().saturating_add(2));
+            out.push('"');
+            out.push_str(&escape(text));
+            out.push('"');
+            out
+        }
+        Err(_) => {
+            let mut out = String::with_capacity(bytes.len().saturating_mul(4).saturating_add(2));
+            out.push('[');
+            for (i, b) in bytes.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!("{b}"));
+            }
+            out.push(']');
+            out
+        }
+    }
+}
+
 /// The eight syslog priorities, in the spellings `journalctl` prints.
 ///
 /// Indexed by the numeric priority, so `PRIORITY_NAMES[3]` is `err`.
@@ -132,6 +162,49 @@ impl Record {
     }
 }
 
+/// A record whose text may be any bytes: what a syslog daemon files, since a
+/// datagram from `/dev/log` is whatever its sender wrote. Written as
+/// [`Record`] is, field for field -- each value through [`json_value`], so a
+/// record whose text happens to be UTF-8 is byte for byte the one [`Record`]
+/// would write.
+#[derive(Debug, Clone, Copy)]
+pub struct ByteRecord<'a> {
+    /// Seconds since the epoch.
+    pub ts: u64,
+    /// `emerg`..`debug`.
+    pub level: &'a str,
+    /// The originating identifier.
+    pub service: &'a [u8],
+    /// The line itself.
+    pub msg: &'a [u8],
+    /// The process the line is attributed to, when one is known.
+    pub pid: Option<u32>,
+}
+
+impl ByteRecord<'_> {
+    /// The record as one JSON-lines entry, without the trailing newline, with
+    /// `extra` after the fields above, in order, as
+    /// [`Record::to_json_line_with`] writes its own.
+    #[must_use]
+    pub fn to_json_line_with(&self, extra: &[(&str, &[u8])]) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("\"ts\":{}", self.ts));
+        parts.push(format!("\"level\":\"{}\"", escape(self.level)));
+        parts.push(format!("\"service\":{}", json_value(self.service)));
+        parts.push(format!("\"msg\":{}", json_value(self.msg)));
+        if let Some(pid) = self.pid {
+            parts.push(format!("\"pid\":{pid}"));
+        }
+        for (key, value) in extra {
+            parts.push(format!("\"{}\":{}", escape(key), json_value(value)));
+        }
+        let mut out = String::from("{");
+        out.push_str(&parts.join(","));
+        out.push('}');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +249,54 @@ mod tests {
         assert_eq!(
             r.to_json_line(),
             r#"{"ts":1716000000,"level":"info","service":"net.dhcp","msg":"lease renewed","pid":42}"#
+        );
+    }
+
+    #[test]
+    fn a_value_that_is_text_is_a_string_and_one_that_is_not_is_its_bytes() {
+        assert_eq!(json_value(b"plain"), "\"plain\"");
+        assert_eq!(json_value(b"a\"b\n"), "\"a\\\"b\\n\"");
+        // Valid UTF-8 with a control character is still text: escaped.
+        assert_eq!(json_value(b"\x01x"), "\"\\u0001x\"");
+        assert_eq!(json_value(b"bad \xff"), "[98,97,100,32,255]");
+        assert_eq!(json_value(b""), "\"\"");
+    }
+
+    #[test]
+    fn a_byte_record_of_text_is_the_record_a_record_would_write() {
+        let text = Record {
+            ts: 1_716_000_000,
+            level: "info".to_string(),
+            service: "net.dhcp".to_string(),
+            msg: "lease renewed".to_string(),
+            pid: Some(42),
+        };
+        let bytes = ByteRecord {
+            ts: 1_716_000_000,
+            level: "info",
+            service: b"net.dhcp",
+            msg: b"lease renewed",
+            pid: Some(42),
+        };
+        assert_eq!(bytes.to_json_line_with(&[]), text.to_json_line());
+        assert_eq!(
+            bytes.to_json_line_with(&[("facility", b"daemon")]),
+            text.to_json_line_with(&[("facility".to_string(), "daemon".to_string())])
+        );
+    }
+
+    #[test]
+    fn a_byte_record_keeps_a_message_that_is_not_text() {
+        let r = ByteRecord {
+            ts: 1,
+            level: "notice",
+            service: b"t",
+            msg: b"\xff\x00",
+            pid: None,
+        };
+        assert_eq!(
+            r.to_json_line_with(&[]),
+            r#"{"ts":1,"level":"notice","service":"t","msg":[255,0]}"#
         );
     }
 

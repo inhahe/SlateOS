@@ -539,6 +539,12 @@ pub struct Task {
     /// watchpoints its debugger set (`sched::debugreg`): loaded when it is
     /// switched in, none for a new thread and after an exec.
     pub debug_regs: super::debugreg::DebugRegs,
+    /// The thread is ending itself (`proc::thread::on_thread_exit`, run by
+    /// the thread for itself): a killer leaves it to finish
+    /// ([`super::kill_task_from`] refuses it) rather than switch it out
+    /// half-way through its exit, which would leave the exit unfinished --
+    /// its process never a zombie (`super::claim_thread_exit`).
+    pub exiting: bool,
     /// Saved CPU register state.
     pub context: Context,
     /// Physical address of the stack's backing frame(s).
@@ -1230,6 +1236,7 @@ impl Task {
             reset_on_fork: false,
             rseq_registered: false,
             debug_regs: super::debugreg::DebugRegs::NONE,
+            exiting: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,
@@ -1324,6 +1331,7 @@ impl Task {
             reset_on_fork: false,
             rseq_registered: false,
             debug_regs: super::debugreg::DebugRegs::NONE,
+            exiting: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
@@ -1485,6 +1493,7 @@ impl Task {
             reset_on_fork: false,
             rseq_registered: false,
             debug_regs: super::debugreg::DebugRegs::NONE,
+            exiting: false,
             context,
             stack_phys,
             stack_bottom,

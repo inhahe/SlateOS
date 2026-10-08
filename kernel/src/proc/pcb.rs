@@ -445,6 +445,11 @@ pub struct Process {
     /// [`set_killed_by_signal`]; an explicit exit ([`set_exit_code`]) clears
     /// it, so the two always describe the same ending.
     pub term_signal: Option<u8>,
+    /// The process is ending as a whole -- a group exit (`exit_group`, the
+    /// native `SYS_EXIT`) or a fatal signal -- and its status is decided:
+    /// Linux's `SIGNAL_GROUP_EXIT`. A later group exit, fatal signal or
+    /// thread's `exit` does not change it ([`begin_group_exit`]).
+    pub group_exit: bool,
     /// Process credentials (uid, gid, supplementary groups).
     pub credentials: ProcessCredentials,
     /// PML4 physical address for this process's address space.
@@ -1383,6 +1388,7 @@ impl Process {
             cap_table: CapTable::new(),
             exit_code: None,
             term_signal: None,
+            group_exit: false,
             credentials: ProcessCredentials::root(),
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
@@ -1854,6 +1860,7 @@ pub fn fork_create(
         cap_table,
         exit_code: None,
         term_signal: None,
+        group_exit: false,
         credentials,
         pml4_phys: child_pml4,
         wait_task: None,
@@ -4609,8 +4616,50 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
 pub fn set_killed_by_signal(pid: ProcessId, sig: u8) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
-    proc.exit_code = Some(128i32.saturating_add(i32::from(sig)));
-    proc.term_signal = Some(sig);
+    // A process already ending as a whole keeps the status that began it
+    // (Linux's `complete_signal` makes a fatal signal a group exit only when
+    // none is under way).
+    if !proc.group_exit {
+        proc.exit_code = Some(128i32.saturating_add(i32::from(sig)));
+        proc.term_signal = Some(sig);
+        proc.group_exit = true;
+    }
+    Ok(())
+}
+
+/// Begin the group exit of process `pid` with exit status `code` (Linux's
+/// `do_group_exit`): `true` for the first, whose caller then ends the other
+/// threads; `false` if the process is already ending as a whole -- an earlier
+/// group exit, or a fatal signal -- whose status stands, or is gone.
+pub fn begin_group_exit(pid: ProcessId, code: i32) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    if proc.group_exit {
+        return false;
+    }
+    proc.group_exit = true;
+    proc.exit_code = Some(code);
+    proc.term_signal = None;
+    true
+}
+
+/// A thread's own `exit` (Linux's `exit`, not `exit_group`) with `code`: the
+/// process's status, as the last thread's code is when no group exit decided
+/// one (measured on Linux 6.6) -- unless one has. `NoSuchProcess` if `pid` is
+/// gone.
+///
+/// # Errors
+///
+/// `NoSuchProcess` if `pid` is not in the process table.
+pub fn set_thread_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    if !proc.group_exit {
+        proc.exit_code = Some(code);
+        proc.term_signal = None;
+    }
     Ok(())
 }
 
@@ -4878,7 +4927,13 @@ pub fn set_crash_info(pid: ProcessId, info: CrashInfo) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
-    proc.exit_code = Some(crash_exit_code(info.exception_code));
+    // The crash ends the process as a whole -- unless it is ending already
+    // (a group exit, a fatal signal), whose status stands; the details are
+    // kept either way.
+    if !proc.group_exit {
+        proc.exit_code = Some(crash_exit_code(info.exception_code));
+        proc.group_exit = true;
+    }
     proc.crash_info = Some(info);
     Ok(())
 }

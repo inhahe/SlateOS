@@ -3575,6 +3575,21 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_ptrace(),
     );
 
+    // exit_group ends every thread of the process, exit the calling one
+    // (crate::proc::thread::exit_group_current), from both threads' side.
+    selftest::dispatch_debug(
+        "Linux exit_group (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_exit_group(),
+    );
+    // An exec ends every other thread of the process first (Linux's
+    // de_thread; crate::proc::spawn::exec_process).
+    selftest::dispatch_debug(
+        "Linux exec with threads (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_exec_threads(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

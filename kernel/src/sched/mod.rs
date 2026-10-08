@@ -2628,6 +2628,37 @@ pub fn set_task_gs_base(task_id: TaskId, gs_base: u64) {
     }
 }
 
+/// Claim the exit of thread `task_id` for whoever runs it now: the thread
+/// itself (`by_self`), or a killer that has just marked it dead
+/// ([`kill_task_from`]). `false` when the exit is someone else's -- the
+/// thread already ending itself, or, for the thread, a killer that got there
+/// first -- and must not be run again: run twice, or by a killer that
+/// switched the thread out half-way through it, an exit is left half done.
+///
+/// A task the scheduler no longer has is any caller's (`true`): what is left
+/// of its exit is the process's bookkeeping, which is idempotent.
+pub fn claim_thread_exit(task_id: TaskId, by_self: bool) -> bool {
+    let mut state = SCHED.lock();
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        return true;
+    };
+    if task.exiting || (by_self && task.state == TaskState::Dead) {
+        return false;
+    }
+    task.exiting = true;
+    true
+}
+
+/// Whether thread `task_id` is ending itself ([`claim_thread_exit`]).
+#[must_use]
+pub fn is_exiting(task_id: TaskId) -> bool {
+    SCHED
+        .lock()
+        .tasks
+        .get(&task_id)
+        .is_some_and(|task| task.exiting)
+}
+
 /// Task `task_id`'s debug registers (`debugreg`). `None` if it is gone.
 #[must_use]
 pub fn task_debug_regs(task_id: TaskId) -> Option<debugreg::DebugRegs> {
@@ -5938,7 +5969,8 @@ pub fn kill_task(task_id: TaskId) -> bool {
 }
 
 /// [`kill_task`], answering the state the task was killed *from* -- `None`
-/// when the kill was refused (the current task, a dead or unknown one).
+/// when the kill was refused (the current task, a dead or unknown one, or one
+/// ending itself, [`claim_thread_exit`]).
 ///
 /// `Some(Running)` means another CPU was running it: that CPU has been asked
 /// to reschedule at once ([`request_preempt_on`]), and a killer that must not
@@ -5960,6 +5992,13 @@ pub fn kill_task_from(task_id: TaskId) -> Option<TaskState> {
     let task = state.tasks.get_mut(&task_id)?;
 
     if task.state == TaskState::Dead {
+        return None;
+    }
+    // A thread ending itself finishes its own exit: switched out half-way,
+    // it would leave that exit undone -- its process never a zombie -- and the
+    // killer's own run of the exit would find it half done
+    // ([`claim_thread_exit`]).
+    if task.exiting {
         return None;
     }
     // Every other state ends the same way:

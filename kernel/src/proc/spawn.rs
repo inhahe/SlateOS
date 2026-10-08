@@ -2460,6 +2460,13 @@ pub fn exec_process(
     // the process, and has nothing registered.
     let current = crate::sched::current_task_id();
     if crate::proc::thread::owner_process(current) == Some(pid) {
+        // Every other thread of the process ends first, off its CPU before
+        // the address space it runs in is torn down (Linux's `de_thread`):
+        // left behind, it went on in the new program's address space, where
+        // nothing it was running is mapped. Until 2026-10-08 nothing ended
+        // them. (Linux also gives a non-leader thread that execs the leader's
+        // id; here it keeps its own -- `known-issues/A-ptrace-tier-2-*.md`.)
+        crate::proc::thread::kill_other_threads(pid, current);
         crate::proc::thread_clone::release_for_exec(current);
         // So are its hardware breakpoints: their addresses were in it.
         crate::sched::clear_current_debug_regs();
@@ -23576,7 +23583,10 @@ pub fn self_test_linux_rseq() -> KernelResult<()> {
 /// has an `int3` written into its read-only text through `/proc/<pid>/mem`,
 /// stops at it, is single-stepped twice, stops for a `SIGUSR1` the tracer
 /// suppresses, and exits 7. A second child stops at `PTRACE_EVENT_EXEC` and
-/// is ended by `PTRACE_KILL` (`crate::proc::ptrace`, design-decisions 1547).
+/// is ended by `PTRACE_KILL`. A third, which runs on in the test program, has
+/// its debug and FPU registers read and written, then stops at a hardware
+/// execution breakpoint and a write watchpoint (`crate::proc::ptrace`,
+/// `crate::sched::debugreg`, design-decisions 1547).
 pub fn self_test_linux_ptrace() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 60_000_000_000;
@@ -23703,7 +23713,190 @@ pub fn self_test_linux_ptrace() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux ptrace (ring 3: TRACEME and the exec stop, Linux's registers, an int3 \
          through /proc/<pid>/mem into read-only text, a breakpoint, single steps, a suppressed \
-         signal, PTRACE_EVENT_EXEC, PTRACE_KILL): OK"
+         signal, PTRACE_EVENT_EXEC, PTRACE_KILL, the debug and FPU registers, a hardware \
+         breakpoint and a watchpoint): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `exit_group` and `exit` with threads, through the Linux ABI:
+/// [`elf::build_linux_exit_group_test_elf`] (`build/exitgrouptest.c`). A
+/// child's `exit_group` from either thread ends the other, waiting for ever,
+/// with the caller's status; a first thread's `exit` leaves the process
+/// running until its last thread's `exit`, whose code is the status; two
+/// racing `exit_group`s end it with one of their codes
+/// (`crate::proc::thread::exit_group_current`).
+pub fn self_test_linux_exit_group() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 120_000_000_000;
+
+    serial_println!("[spawn] Running Linux exit_group (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_exit_group_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-exit-group"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-exit-group",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: exit_group spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: exit_group (ring 3) — the program did not finish in 120 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x31) => "mmap of a thread stack failed",
+            Some(0x32 | 0x34) => "the first child's clone or fork failed",
+            Some(0x33) => "exit_group returned",
+            Some(0x35) => {
+                "the first thread's exit_group did not end the process: the second thread, \
+                 waiting on a futex, lived on (20 s)"
+            }
+            Some(0x36) => "the first child's status was not exit_group's 5",
+            Some(0x37 | 0x38) => "the second child's clone or fork failed",
+            Some(0x39) => {
+                "the second thread's exit_group did not end the process: the first, waiting on \
+                 a futex, lived on (20 s)"
+            }
+            Some(0x3a) => "the second child's status was not exit_group's 6",
+            Some(0x3b..=0x3d) => "the third child's pipe, clone or fork failed",
+            Some(0x3e) => "the first thread's exit ended the process while the second still ran",
+            Some(0x3f) => "the write that releases the third child's second thread failed",
+            Some(0x42) => "the third child did not end after its last thread's exit (20 s)",
+            Some(0x43) => "the third child's status was not its last thread's 9",
+            Some(0x40 | 0x41 | 0x45) => "a racing thread's exit_group returned",
+            Some(0x44 | 0x46) => "the fourth child's clone or fork failed",
+            Some(0x47) => "two racing exit_groups did not end the process (20 s)",
+            Some(0x48) => "the fourth child's status was neither 11 nor 12",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: exit_group (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux exit_group (ring 3: either thread's exit_group ends the other, a first \
+         thread's exit leaves the process running and its last thread's code is the status, two \
+         racing exit_groups): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `execve` in a process with more than one thread, through
+/// the Linux ABI: [`elf::build_linux_exec_threads_test_elf`]
+/// (`build/execthreadstest.c`). Three children exec a program that exits 7
+/// -- from the first thread while a second spins, from the second while the
+/// first spins, from the first while a second waits for ever -- and each
+/// status is 7: the exec ended every other thread first (Linux's
+/// `de_thread`; `exec_process`).
+pub fn self_test_linux_exec_threads() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 90_000_000_000;
+
+    serial_println!("[spawn] Running Linux exec with threads (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_exec_threads_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-exec-threads"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-exec-threads",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: exec with threads spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: exec with threads (ring 3) — the program did not finish in 90 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x31) => "mmap of a thread stack failed",
+            Some(0x32) => "execveat of the memfd failed",
+            Some(0x33 | 0x34) => "the program could not be put in a memfd",
+            Some(0x35 | 0x36 | 0x39 | 0x3a | 0x3d | 0x3e) => "a child's clone or fork failed",
+            Some(0x37 | 0x3b | 0x3f) => "an exec'd child did not end (20 s)",
+            Some(0x38) => {
+                "the first thread's exec, with a second spinning, did not end in the new \
+                 program's exit 7 -- the second ran on in the new address space"
+            }
+            Some(0x3c) => {
+                "the second thread's exec, with the first spinning, did not end in exit 7"
+            }
+            Some(0x40) => {
+                "the first thread's exec, with a second waiting for ever, did not end in exit 7"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: exec with threads (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux exec with threads (ring 3: an exec from either thread, the other \
+         spinning or waiting, ends it first): OK"
     );
     Ok(())
 }

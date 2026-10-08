@@ -9214,19 +9214,17 @@ fn sys_getpid(_args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(pid as i64)
 }
 
-/// `exit(status)` — terminate the calling task with the given exit code.
+/// `exit(status)` — end the calling thread alone
+/// ([`handlers::sys_exit_thread`]). Never returns.
 fn sys_exit(args: &SyscallArgs) -> SyscallResult {
-    handlers::sys_exit(args);
-    // sys_exit never returns; placate the type checker.
-    SyscallResult::ok(0)
+    handlers::sys_exit_thread(args)
 }
 
-/// `exit_group(status)` — terminate all threads of the calling process.
-///
-/// We have no thread-group concept yet; this is identical to `exit`.
+/// `exit_group(status)` — end every thread of the calling process, with
+/// `status` the process's (`handlers::sys_exit`, the native `SYS_EXIT`).
+/// Never returns. Until 2026-10-08 it ended the calling thread alone.
 fn sys_exit_group(args: &SyscallArgs) -> SyscallResult {
-    handlers::sys_exit(args);
-    SyscallResult::ok(0)
+    handlers::sys_exit(args)
 }
 
 /// `kill(pid, sig)` — send a signal.

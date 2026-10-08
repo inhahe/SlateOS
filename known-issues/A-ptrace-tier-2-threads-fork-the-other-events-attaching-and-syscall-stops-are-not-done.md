@@ -28,9 +28,13 @@ is lane D's Tier 1, and the registers of its Tier 2
   wait path in `syscall::wait` still asks `pcb::peek_exit` first, which
   refuses a non-child). Thread-directed `SIGSTOP` to another process's
   thread (GDB's all-stop) needs `tgkill` to reach it.
-- **Exec of a multi-threaded process.** Linux's `de_thread` ends every other
-  thread before the new image runs; this kernel's exec does not, so a
-  traced exec from a non-leader thread is not modelled.
+- **Exec from a thread that is not the first.** The exec ends every other
+  thread first, as Linux's `de_thread` does (since 2026-10-08), but the
+  thread that exec'd keeps its own id, where Linux gives it the process's:
+  `gettid` after such an exec is not `getpid`, and a traced one's
+  `PTRACE_EVENT_EXEC` message, its former id, is its id still. The fix: the
+  exec'ing thread takes the leader's task id (`pcb::claim_leader_id`'s id),
+  which needs the scheduler to re-key a live task.
 - **Attaching** (`PTRACE_ATTACH`, `SEIZE`, `INTERRUPT`, `LISTEN`): `EPERM`,
   because the right to debug a process one did not start comes from
   design-decisions 24's broker, which does not exist. The broker's design

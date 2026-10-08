@@ -470,27 +470,33 @@ pub fn sys_yield(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `SYS_EXIT` — exit the current task.
+/// `SYS_EXIT` — end the calling process, every thread of it, with exit
+/// status `arg0`: the native `_exit` (and Linux's `exit_group`). See
+/// [`crate::proc::thread::exit_group_current`]. Never returns.
 ///
-/// Notifies the thread/process system before terminating.  If this
-/// was the last thread in a process, the process becomes a zombie.
+/// Until 2026-10-08 this ended the calling thread alone, so a program whose
+/// other threads were alive at its `exit` never ended.
 pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let exit_code = args.arg0 as i32;
+    crate::proc::thread::exit_group_current(exit_code)
+}
+
+/// Linux `exit` (60): end the calling thread alone -- the rest of its process
+/// runs on. Its code is the process's status if it is the last thread and no
+/// group exit decided one (the last thread's code, measured on Linux 6.6:
+/// not the first thread's). Never returns.
+pub fn sys_exit_thread(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
     let exit_code = args.arg0 as i32;
     let task_id = sched::current_task_id();
-
-    // Store exit code in the PCB before on_thread_exit transitions
-    // the process to Zombie.  remove_thread() has a guard that only
-    // sets exit_code=0 when None, so our explicit code wins.
-    // Bare kernel tasks (no owning process) simply skip this.
+    // A kernel task has no process to give a status to. A process that is
+    // gone cannot be told one.
     if let Some(pid) = crate::proc::thread::owner_process(task_id) {
-        let _ = crate::proc::pcb::set_exit_code(pid, exit_code);
+        let _ = crate::proc::pcb::set_thread_exit_code(pid, exit_code);
     }
-
-    // Notify the thread system so the owning process can transition
-    // to Zombie when its last thread exits.  For bare kernel tasks
-    // (not owned by any process), this is a harmless no-op.
+    // The process becomes a zombie when its last thread has gone.
     crate::proc::thread::on_thread_exit(task_id);
-
     sched::task_exit()
 }
 

@@ -856,6 +856,15 @@ fn outcome_to_result(task_id: TaskId, outcome: ThreadOutcome) -> KernelResult<i6
 /// thread was not registered (e.g., a bare kernel task not owned by any
 /// process).
 pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
+    // One run of this per thread, by whoever owns the exit: the thread ending
+    // itself, or the killer that marked it dead -- never both, and never a
+    // killer that switched the thread out half-way through its own run
+    // (`sched::claim_thread_exit`). A thread whose exit is someone else's
+    // just goes (`task_exit`, its caller's next step).
+    if !sched::claim_thread_exit(task_id, task_id == sched::current_task_id()) {
+        return None;
+    }
+
     // A thread killed from elsewhere (`kill_process_threads`, `kill_thread`)
     // has only been *marked* dead: a CPU that was running it runs it on, on
     // its process's page tables, until that CPU next switches. Asked now,
@@ -1401,6 +1410,46 @@ pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
     Some(old)
 }
 
+/// End the calling thread's whole process with exit status `code`: every
+/// other thread of it killed, then this one -- Linux's `exit_group` and
+/// `do_group_exit`, and the native `SYS_EXIT`, which a program's `exit` and
+/// `_exit` call. Never returns.
+///
+/// Only the first group exit of a process decides its status and ends the
+/// other threads ([`pcb::begin_group_exit`]): a second -- another thread's
+/// racing it, or one made after a fatal signal began ending the process --
+/// ends only its own thread, which the first is ending anyway. Until
+/// 2026-10-08 a group exit ended the calling thread alone: a program whose
+/// other threads were alive at its `exit` -- a worker blocked on a queue, a
+/// pool waiting for work -- never ended.
+pub fn exit_group_current(code: i32) -> ! {
+    let task_id = sched::current_task_id();
+    if let Some(pid) = owner_process(task_id)
+        && pcb::begin_group_exit(pid, code)
+    {
+        kill_other_threads(pid, task_id);
+    }
+    // A thread with no process is a kernel task: it just ends.
+    on_thread_exit(task_id);
+    sched::task_exit()
+}
+
+/// Kill every thread of process `pid` but `keep` -- the group exit's own
+/// thread, which ends itself after -- as [`kill_process_threads`] kills them
+/// all: every one marked dead and off its CPU before any exit is run, so none
+/// runs on in user mode after its process is declared dead. A thread already
+/// ending itself is left to finish (`sched::claim_thread_exit`). Returns the
+/// number killed.
+pub fn kill_other_threads(pid: ProcessId, keep: TaskId) -> usize {
+    let others: alloc::vec::Vec<TaskId> = pcb::get_threads(pid)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&t| t != keep)
+        .collect();
+    kill_threads(pid, &others)
+}
+
+/// Force-kill all threads in a process.
 /// Force-kill all threads in a process.
 ///
 /// For each thread belonging to the process:
@@ -1414,7 +1463,12 @@ pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
 /// Returns the number of threads killed.
 pub fn kill_process_threads(pid: ProcessId) -> usize {
     let task_ids = pcb::get_threads(pid).unwrap_or_default();
+    kill_threads(pid, &task_ids)
+}
 
+/// The body of [`kill_process_threads`] and [`kill_other_threads`]: kill
+/// threads `task_ids` of process `pid`.
+fn kill_threads(pid: ProcessId, task_ids: &[TaskId]) -> usize {
     // Kill every thread first, and only then run their exit paths, the last
     // of which publishes the process as dead -- with every thread another CPU
     // was running gone from that CPU in between. Killing and exiting one
@@ -1423,15 +1477,24 @@ pub fn kill_process_threads(pid: ProcessId) -> usize {
     // dead, its handles closed and its parent told
     // (A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES).
     let mut running_elsewhere = alloc::vec::Vec::new();
-    for &task_id in &task_ids {
-        // Record the involuntary death *before* `on_thread_exit`, which
-        // releases any parked joiner — see `record_killed`.
-        record_killed(task_id);
+    let mut to_exit = alloc::vec::Vec::with_capacity(task_ids.len());
+    for &task_id in task_ids {
         // Mark the scheduler task Dead and dequeue it; a running one's CPU is
         // asked to switch away from it at once.
-        if sched::kill_task_from(task_id) == Some(sched::task::TaskState::Running) {
+        let prior = sched::kill_task_from(task_id);
+        if prior.is_none() && sched::is_exiting(task_id) {
+            // Ending itself: its exit is its own to finish, and so is its
+            // outcome (`sched::claim_thread_exit`).
+            continue;
+        }
+        // The involuntary death, recorded before `on_thread_exit` releases
+        // any parked joiner (see `record_killed`). Nothing else runs this
+        // thread's exit now: it is dead, or was dead before.
+        record_killed(task_id);
+        if prior == Some(sched::task::TaskState::Running) {
             running_elsewhere.push(task_id);
         }
+        to_exit.push(task_id);
     }
     let stuck = sched::wait_off_cpu(&running_elsewhere);
     if stuck != 0 {
@@ -1446,11 +1509,12 @@ pub fn kill_process_threads(pid: ProcessId) -> usize {
     }
 
     let mut killed: usize = 0;
-    for &task_id in &task_ids {
+    for task_id in to_exit {
         // Remove the thread→process mapping and update the PCB.
         // This may trigger the zombie transition for the last thread.
-        on_thread_exit(task_id);
-        killed = killed.saturating_add(1);
+        if on_thread_exit(task_id).is_some() {
+            killed = killed.saturating_add(1);
+        }
     }
     killed
 }

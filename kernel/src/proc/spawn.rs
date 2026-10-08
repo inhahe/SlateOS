@@ -25355,11 +25355,17 @@ pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
     let exe_elf = elf::build_linux_cpu_timers_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-cpu-timers"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // `RLIMIT_RTTIME` (step 8) needs a real-time thread: its child takes
+    // SCHED_FIFO, which a root program has by CAP_SYS_NICE on Linux and here
+    // by `IO_REALTIME` on a Thread capability (`priority::may_set_scheduler`).
+    // It had none, and the first boot to reach the step (a fast diagnostic
+    // boot of lane-a-wip, 2026-10-08) failed there with 0x81.
+    let capabilities = [(ResourceType::Thread, 0u64, Rights::IO_REALTIME)];
     let options = SpawnOptions {
         name: "spawn-test-linux-cpu-timers",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &capabilities,
         fd_map: &[],
         argv,
         envp,

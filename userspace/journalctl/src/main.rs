@@ -421,11 +421,11 @@ fn parse_datetime(s: &str) -> Option<u64> {
     if s.eq_ignore_ascii_case("today") {
         let now = now_secs();
         // Round down to midnight.
-        return Some(now - (now % 86400));
+        return Some(now.saturating_sub(now % 86400));
     }
     if s.eq_ignore_ascii_case("yesterday") {
         let now = now_secs();
-        return Some((now - (now % 86400)).saturating_sub(86400));
+        return Some(now.saturating_sub(now % 86400).saturating_sub(86400));
     }
 
     // Relative: -Nd, -Nh, -Nm, -Ns
@@ -438,7 +438,7 @@ fn parse_datetime(s: &str) -> Option<u64> {
             _ => return None,
         };
         // The unit is one ASCII byte, so this cut is between characters.
-        let n: u64 = rest.get(..rest.len() - 1)?.parse().ok()?;
+        let n: u64 = rest.get(..rest.len().saturating_sub(1))?.parse().ok()?;
         return Some(now_secs().saturating_sub(n.checked_mul(per)?));
     }
 
@@ -479,51 +479,49 @@ fn parse_datetime(s: &str) -> Option<u64> {
 // ============================================================================
 
 /// Parse a duration string like "2d", "1w", "3h", "30m", "7200s", "1M", "1y"
-/// into seconds.
+/// into seconds; a bare number is seconds.
+///
+/// `None` for a duration too long to count in seconds. It used to be
+/// multiplied out unchecked, wrapping round to a short one, so a vast enough
+/// `--vacuum-time` removed nearly every record; and a unit that was a
+/// multi-byte character was cut through, which panicked.
 fn parse_duration_secs(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let last = s.as_bytes()[s.len() - 1];
-    let num_str = &s[..s.len() - 1];
-    let n: u64 = num_str.parse().ok()?;
-
-    match last {
-        b's' => Some(n),
-        b'm' => Some(n * 60),
-        b'h' => Some(n * 3600),
-        b'd' => Some(n * 86400),
-        b'w' => Some(n * 7 * 86400),
-        b'M' => Some(n * 30 * 86400),
-        b'y' => Some(n * 365 * 86400),
-        _ => {
-            // Maybe the whole string is just a number (seconds).
-            s.parse::<u64>().ok()
-        }
-    }
+    let per: u64 = match s.as_bytes().last()? {
+        b's' => 1,
+        b'm' => 60,
+        b'h' => 3_600,
+        b'd' => 86_400,
+        b'w' => 604_800,
+        b'M' => 2_592_000,
+        b'y' => 31_536_000,
+        // Maybe the whole string is just a number (seconds).
+        _ => return s.parse().ok(),
+    };
+    // The unit is one ASCII byte, so this cut is between characters.
+    let n: u64 = s.get(..s.len().saturating_sub(1))?.parse().ok()?;
+    n.checked_mul(per)
 }
 
-/// Parse a size string like "100M", "1G", "500K" into bytes.
+/// Parse a size string like "100M", "1G", "500K" into bytes; a bare number
+/// is bytes.
+///
+/// `None` for a size too large to count in bytes. It used to be multiplied
+/// out unchecked: `--vacuum-size 17179869184G` is 2^64 bytes, which wrapped
+/// round to 0 and so removed the whole journal.
 fn parse_size_bytes(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let last = s.as_bytes()[s.len() - 1];
-    if last.is_ascii_digit() {
-        return s.parse::<u64>().ok();
-    }
-    let num_str = &s[..s.len() - 1];
-    let n: u64 = num_str.parse().ok()?;
-
-    match last {
-        b'B' | b'b' => Some(n),
-        b'K' | b'k' => Some(n * 1024),
-        b'M' => Some(n * 1024 * 1024),
-        b'G' | b'g' => Some(n * 1024 * 1024 * 1024),
-        _ => None,
-    }
+    let per: u64 = match s.as_bytes().last()? {
+        b'0'..=b'9' => return s.parse().ok(),
+        b'B' | b'b' => 1,
+        b'K' | b'k' => 1_024,
+        b'M' => 1_048_576,
+        b'G' | b'g' => 1_073_741_824,
+        _ => return None,
+    };
+    // The unit is one ASCII byte, so this cut is between characters.
+    let n: u64 = s.get(..s.len().saturating_sub(1))?.parse().ok()?;
+    n.checked_mul(per)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -803,8 +801,8 @@ fn journal_disk_usage() -> (usize, u64) {
 
     for file in &files {
         if let Ok(meta) = fs::metadata(file) {
-            total_bytes += meta.len();
-            count += 1;
+            total_bytes = total_bytes.saturating_add(meta.len());
+            count = count.saturating_add(1);
         }
     }
 
@@ -943,111 +941,114 @@ fn parse_args<S: AsRef<OsStr>>(args: &[S]) -> Result<Config, String> {
     while let Some(arg) = word(i) {
         match arg.as_encoded_bytes() {
             b"-u" | b"--unit" => {
-                let unit = word(i + 1).ok_or("-u requires a unit name")?;
+                let unit = word(i.saturating_add(1)).ok_or("-u requires a unit name")?;
                 cfg.unit_filter = Some(os_bytes(unit).into_owned());
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"-p" | b"--priority" => {
-                let level = word(i + 1).ok_or("-p requires a priority level")?;
+                let level = word(i.saturating_add(1)).ok_or("-p requires a priority level")?;
                 let prio = level
                     .to_str()
                     .and_then(Priority::from_name)
                     .ok_or_else(|| format!("unknown priority: {}", quotef_os(level)))?;
                 cfg.priority_filter = Some(prio);
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"--since" => {
-                let (ts, taken) = datetime_at(args, i + 1, "--since")?;
+                let (ts, taken) = datetime_at(args, i.saturating_add(1), "--since")?;
                 cfg.since = Some(ts);
-                i += 1 + taken;
+                i = i.saturating_add(1).saturating_add(taken);
             }
             b"--until" => {
-                let (ts, taken) = datetime_at(args, i + 1, "--until")?;
+                let (ts, taken) = datetime_at(args, i.saturating_add(1), "--until")?;
                 cfg.until = Some(ts);
-                i += 1 + taken;
+                i = i.saturating_add(1).saturating_add(taken);
             }
             b"-f" | b"--follow" => {
                 cfg.follow = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"-r" | b"--reverse" => {
                 cfg.reverse = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"-o" | b"--output" => {
-                let name = word(i + 1).ok_or("-o requires a format name")?;
+                let name = word(i.saturating_add(1)).ok_or("-o requires a format name")?;
                 cfg.output_format = name
                     .to_str()
                     .and_then(OutputFormat::from_name)
                     .ok_or_else(|| format!("unknown output format: {}", quotef_os(name)))?;
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"-b" | b"--boot" => {
-                if let Some(id) = word(i + 1).filter(|w| !w.as_encoded_bytes().starts_with(b"-")) {
+                if let Some(id) =
+                    word(i.saturating_add(1)).filter(|w| !w.as_encoded_bytes().starts_with(b"-"))
+                {
                     cfg.boot_filter = Some(os_bytes(id).into_owned());
-                    i += 2;
+                    i = i.saturating_add(2);
                 } else {
                     // Current boot: empty means "latest boot_id"
                     cfg.boot_filter = Some(Vec::new());
-                    i += 1;
+                    i = i.saturating_add(1);
                 }
             }
             b"-k" | b"--dmesg" => {
                 cfg.dmesg = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"-n" | b"--lines" => {
-                let count = word(i + 1).ok_or("-n requires a count")?;
+                let count = word(i.saturating_add(1)).ok_or("-n requires a count")?;
                 let n: usize = count
                     .to_str()
                     .and_then(|c| c.parse().ok())
                     .ok_or_else(|| format!("invalid count: {}", quotef_os(count)))?;
                 cfg.num_entries = Some(n);
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"--grep" => {
-                let pattern = word(i + 1).ok_or("--grep requires a pattern")?;
+                let pattern = word(i.saturating_add(1)).ok_or("--grep requires a pattern")?;
                 cfg.grep_pattern = Some(os_bytes(pattern).into_owned());
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"--no-color" | b"--nocolor" => {
                 cfg.color = false;
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"--no-pager" => {
                 // We don't implement a pager; accept and ignore.
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"--list-fields" => {
                 cfg.list_fields = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"--disk-usage" => {
                 cfg.disk_usage = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
             b"--vacuum-time" => {
-                let duration =
-                    word(i + 1).ok_or("--vacuum-time requires a duration (e.g. 2d, 1w)")?;
+                let duration = word(i.saturating_add(1))
+                    .ok_or("--vacuum-time requires a duration (e.g. 2d, 1w)")?;
                 let secs = duration
                     .to_str()
                     .and_then(parse_duration_secs)
                     .ok_or_else(|| format!("invalid duration: {}", quotef_os(duration)))?;
                 cfg.vacuum_time = Some(secs);
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"--vacuum-size" => {
-                let size = word(i + 1).ok_or("--vacuum-size requires a size (e.g. 100M, 1G)")?;
+                let size = word(i.saturating_add(1))
+                    .ok_or("--vacuum-size requires a size (e.g. 100M, 1G)")?;
                 let bytes = size
                     .to_str()
                     .and_then(parse_size_bytes)
                     .ok_or_else(|| format!("invalid size: {}", quotef_os(size)))?;
                 cfg.vacuum_size = Some(bytes);
-                i += 2;
+                i = i.saturating_add(2);
             }
             b"-h" | b"--help" | b"help" => {
                 cfg.show_help = true;
-                i += 1;
+                i = i.saturating_add(1);
             }
             _ => {
                 return Err(format!("unknown option: {}", quotef_os(arg)));
@@ -1076,7 +1077,7 @@ fn datetime_at<S: AsRef<OsStr>>(
     let Some(date) = first.to_str() else {
         return Err(format!("cannot parse datetime: {}", quotef_os(first)));
     };
-    let time = word(i + 1)
+    let time = word(i.saturating_add(1))
         .and_then(OsStr::to_str)
         .filter(|t| t.contains(':') && !t.starts_with('-'));
     let (text, taken) = match time {
@@ -1175,7 +1176,7 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             result.truncate(n);
         } else {
             // Take the last n entries.
-            let start = result.len() - n;
+            let start = result.len().saturating_sub(n);
             result = result.split_off(start);
         }
     }
@@ -1570,7 +1571,7 @@ fn cmd_vacuum_size(max_bytes: u64) -> i32 {
         return settle(written, 0);
     }
 
-    let vacuumed = vacuum_size(&files, current_total - max_bytes, &is_rotated);
+    let vacuumed = vacuum_size(&files, current_total.saturating_sub(max_bytes), &is_rotated);
 
     let (_, new_total) = journal_disk_usage();
     let written = to_stdout(|out| {
@@ -1645,7 +1646,9 @@ fn cmd_follow(cfg: &Config) -> i32 {
     let filtered = apply_filters(entries, cfg);
 
     let display_entries = if filtered.len() > num {
-        &filtered[filtered.len() - num..]
+        filtered
+            .get(filtered.len().saturating_sub(num)..)
+            .unwrap_or_default()
     } else {
         &filtered
     };
@@ -1887,6 +1890,14 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 fn main() {}
 
 #[cfg(test)]
+// CLAUDE.md allows the defensive lints inside `#[cfg(test)]`, where panicking
+// on bad data is the point.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -2926,6 +2937,28 @@ mod tests {
             parse_datetime("2024-02-29 12:30"),
             Some(1_709_164_800 + 12 * 3600 + 1800)
         );
+    }
+
+    /// A size or a duration too large to count is refused. Multiplied out
+    /// unchecked, `--vacuum-size 17179869184G` was 2^64 bytes, wrapped round
+    /// to 0, and removed the whole journal; a multi-byte unit panicked.
+    #[test]
+    fn a_vacuum_limit_too_large_to_count_is_refused() {
+        assert_eq!(parse_size_bytes("17179869184G"), None);
+        assert_eq!(
+            parse_size_bytes("17179869183G"),
+            Some(17_179_869_183 * 1_073_741_824)
+        );
+        assert_eq!(parse_duration_secs("600000000000y"), None);
+        assert_eq!(parse_duration_secs("2d"), Some(172_800));
+        assert_eq!(parse_duration_secs("1w"), Some(604_800));
+        assert_eq!(parse_duration_secs("5\u{e9}"), None);
+        assert_eq!(parse_size_bytes("5\u{e9}"), None);
+        assert_eq!(parse_duration_secs(""), None);
+        assert_eq!(parse_size_bytes(""), None);
+        assert_eq!(parse_size_bytes("100"), Some(100));
+        assert_eq!(parse_duration_secs("120"), Some(120));
+        assert_eq!(parse_size_bytes("1x"), None);
     }
 
     /// What used to hang, overflow or panic is answered at once.

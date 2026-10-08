@@ -5430,6 +5430,40 @@ _Port ext4 first. Don't write a custom filesystem._
   agree and 7 differ on purpose, in fixture worlds that include real processes for `pkill`
   to signal and `pidwait` to wait for. `pidwait` is not built until the native ABI has
   `pidfd_open`: `requests/b-ad-pidwait-needs-pidfd-open-on-the-native-abi.md`);
+  `vmstat` (2026-10-08, procps-ng 4.0.4's, replacing `userspace/vmstat`, written from the
+  manual: its `stat`, `meminfo`, `vmstat`, `diskstats` and `slabinfo` readers are the
+  library's, as `coreutils::procps` beside `free`'s, which now shares the `meminfo` one;
+  `scripts/vmstat-diff.sh`: 191 cases agree and 7 differ on purpose, in fixture machines
+  whose files a ticker rewrites between readings, so the interval lines are measured
+  against real differences); `sysctl` (2026-10-08, procps-ng 4.0.4's `sysctl.c` and the
+  `procio.c` it reads and writes `/proc/sys` through, replacing `userspace/sysctl`, written
+  from the manual; `-p` and `--system` expand their files as `glob(3)` does, through the new
+  `libcall::glob`; `scripts/sysctl-diff.sh`: 138 cases agree and 2 differ on purpose, over a
+  fixture `/proc/sys` and fixture configuration directories, each case's writes compared by
+  what they left in the files); `hexdump` (2026-10-08, util-linux 2.39.3's `hexdump.c` and
+  its three `hexdump-*.c`, replacing `userspace/hexdump`, written from the manual: format
+  units and print units as upstream builds and rewrites them, `_L` colour units and
+  `--color` decided by the new `ulcolors` crate -- util-linux's `lib/colors.c`, terminfo and
+  `terminal-colors.d` included -- and standard input read as stdio reads it, so a shared one
+  is given back what was read ahead; `scripts/hexdump-diff.sh`: 275 cases agree and 2
+  differ on purpose); `xxd` (2026-10-08, vim 9.1.0016's `xxd.c`, which `userspace/hexdump`
+  had answered to through an image alias with a subset of it; `scripts/xxd-diff.sh`: 949
+  cases agree and 4 differ on purpose, `-r` included -- into pipes, which it fills with
+  zeros or refuses to go back on, and into files, which it seeks and patches);
+  `look` (2026-10-08, util-linux 2.39.3's `look.c`, replacing `userspace/look`,
+  which read its word list as UTF-8 and refused any list with one Latin-1 word
+  in it; `scripts/look-diff.sh`: 1229 cases agree and 2 differ on purpose,
+  over lists sorted as a dictionary and as bytes, unsorted and awkward ones);
+  `last` and `lastb` (2026-10-08, util-linux 2.39.3's `last.c`, replacing
+  `userspace/last`, which listed the file oldest first and wrote host names'
+  escape sequences to the terminal: the backwards read and its static state,
+  every time format, `-d`/`-i` through the C library's `getnameinfo`, names
+  through util-linux's `fputs_careful`, now in `ulstrutils`;
+  `scripts/last-diff.sh`: 511 cases agree and 3 differ on purpose, over wtmp
+  files written record by record) and `lastlog` (shadow-utils 4.13's, which the
+  same standalone answered to by its `argv[0]`; `scripts/lastlog-diff.sh`: 177
+  cases agree, run in a user namespace and chrooted with `-R` into fixture
+  roots, `-S` and `-C` judged by the file each leaves);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5447,7 +5481,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ip: network interface and route configuration (link up/down, addr/route management, ARP, DNS)
   - [x] useradm: user account management (add/del/mod/passwd/lock/unlock, /etc/users.yaml, SHA-256)
   - [x] monctl: monitor power control (off/on/standby/suspend, brightness, DPMS timers)
-  - [x] sysctl: view/modify kernel parameters via /proc/sys/ and /sys/kernel/ (dot notation, config loading)
+  - [x] sysctl: procps-ng 4.0.4's, a coreutils program since 2026-10-08 (see the coreutils item) -- reading, writing, `-a`, `-p`, `--system`, `-r`, `-N`/`-n`/`-b`/`-q`, `--dry-run` (`scripts/sysctl-diff.sh`, 140 cases)
   - [x] lsblk: block device lister (tree/flat, filesystem info, mount points, JSON output) -- since 2026-09-27 a port of util-linux 2.39.3's `lsblk` on `smartcols` (now with libsmartcols' sorting and `--merge` group chart), `ulmount`, `ulblkid` and `ulsysfs`; `scripts/lsblk-diff.sh`: 502 cases agree (util-linux's `--sysroot` snapshots in every format, the live system, refusals); `scripts/smartcols-diff.sh`: 2954 tables agree with the real libsmartcols.so.1
   - [x] powerctl: power management (shutdown/reboot/suspend/hibernate, schedule, battery status)
   - [x] nslookup: DNS lookup (RFC 1035 packets, A/AAAA/MX/TXT/NS/CNAME/PTR, reverse, custom server)
@@ -5469,7 +5503,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] uname: system info display (kernel name/release/version, machine, hostname, JSON)
   - [x] lsusb: USB device lister (vendor/product database, tree topology, class filter, verbose)
   - [x] iostat: CPU and I/O statistics (extended stats, delta mode, per-device, human-readable)
-  - [x] vmstat: virtual memory stats (procs, memory, swap, I/O, CPU, interval reporting)
+  - [x] vmstat: procps-ng 4.0.4's, a coreutils program since 2026-10-08 (see the coreutils item) -- the since-boot line and the intervals, with `-a`, `-w`, `-t`, `-n`, `-y` and `-S`; `-s`, `-f`, `-d`, `-D`, `-p` and `-m` (`scripts/vmstat-diff.sh`, 198 cases). On SlateOS its swap and I/O columns read 0, and `-d`, `-D` and `-p` refuse to start, for want of what `/proc/vmstat` and `/proc/diskstats` publish: `requests/b-a-procps-vmstat-reads-four-paging-counters-and-diskstats-that-slateos-does-not-publish.md`
   - [x] traceroute: network path tracing (ICMP TTL increment, reverse DNS, per-hop RTT)
   - [x] logrotate: log rotation — config parsing (stanzas with glob patterns, globals inherited per stanza and overridable without leaking back), daily/weekly/monthly/size schedules, `rotate N` retention, real gzip via the shared `deflate` crate, `missingok`, `notifempty`, `--dry-run`, `--force`, `--state`. Frequency is decided against the STATE FILE, not the log's mtime. An unimplemented directive (`olddir`, `postrotate`, …) is an ERROR with its line number rather than a silent skip — a config file states what should happen to a machine's logs, and ignoring part of it puts files somewhere nobody asked for and reports success. 28 tests. **On the image since 2026-09-13** — and it was the attempt to put it there that found that not one of the 278 Rust utilities under `userspace/` had ever been on the image: see `B-THE-RUST-HALF-OF-OUR-USERLAND-HAD-NEVER-BEEN-ON-THE-IMAGE`. (14 compiled-Python utilities were already promoted into `/bin` by the fastpy block, which the first version of that entry missed — the correction is recorded there.) `scripts/create-ext4-rootfs.sh` now stages every ELF in `target/x86_64-slateos/release/` into `/bin`: a measured image build staged 71 of them (60 MiB), skipping 15 names already owned by fastpy and dash, and took `/bin` from 36 entries to 107. Staged is not run: a boot test asserting one of them executes is lane A's, requested in `requests/b-a-our-own-utilities-are-on-the-image-now-can-a-boot-test-run-one.md`.
   - [x] dd: data copy/convert (block sizes, conversions, progress display, skip/seek)

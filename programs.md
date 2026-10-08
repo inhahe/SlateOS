@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**482 programs; 323 on the image, 6 carried inside the kernel.**
+**484 programs; 325 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 297
+## Userland utilities and services (`userspace/`, lane B) -- 299
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -111,7 +111,7 @@ two disagree.
 | `gzip` | Gzip/gunzip/zcat compression utility. | yes |  | `gunzip`, `zcat`, `gzcat` |
 | `hardlink` | File deduplication utility. | yes |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |
-| `hexdump` | Hexadecimal File Dumper | yes |  | `xxd` |
+| `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `xxd` |
 | `hostid` | Print the numeric identifier for the current host. | yes | `coreutils` |  |
 | `hostname` | Show or set the system's host name: Debian's `hostname` 3.23, ported. | yes | `coreutils` | `dnsdomainname`, `domainname`, `nisdomainname`, `ypdomainname` |
 | `hostnamectl` | Query and set the system hostname and related settings. | yes |  |  |
@@ -135,7 +135,8 @@ two disagree.
 | `jq` | Slate OS JSON processor | yes |  |  |
 | `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
 | `kill` | Process Termination Utility | yes |  | `killall` |
-| `last` | Login Records Viewer (`last` / `lastb` / `lastlog`) | yes |  | `lastb`, `lastlog` |
+| `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
+| `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
 | `ldconfig` | Shared library cache management. | yes |  |  |
 | `ldd` | Shared Library Dependency Lister | yes |  |  |
 | `less` | Terminal Pager | yes |  |  |
@@ -150,7 +151,7 @@ two disagree.
 | `logind` | Session manager (logind/loginctl) | yes |  |  |
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
-| `look` | Display lines beginning with a given string for Slate OS | yes |  |  |
+| `look` | Display lines beginning with a given string: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `losetup` | Loop device management utility: `losetup`, to set up and control loop devices. | yes |  |  |
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) | yes |  | `cancel`, `lpq`, `lpr`, `lprm`, `lpstat` |
 | `ls` | List directory contents. | yes | `coreutils` |  |
@@ -260,7 +261,7 @@ two disagree.
 | `swapoff` | Disable devices and files for paging and swapping. | yes | `swapon` |  |
 | `swapon` | Enable devices and files for paging and swapping. | yes |  |  |
 | `sync` | Synchronize cached writes to persistent storage. | yes | `coreutils` |  |
-| `sysctl` | View and Modify Kernel Parameters | yes |  |  |
+| `sysctl` | Read and write kernel parameters at run time: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
@@ -299,7 +300,7 @@ two disagree.
 | `vdir` | List directory contents in the long format. | yes | `coreutils` |  |
 | `vi` | Modal terminal text editor for SlateOS. | yes |  |  |
 | `visudo` | Edit the sudoers file with syntax checking. | yes | `sudo` |  |
-| `vmstat` | Virtual Memory Statistics Utility | yes |  |  |
+| `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
 | `wall` | Terminal messaging utilities for Slate OS | yes |  |  |
 | `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
@@ -313,6 +314,7 @@ two disagree.
 | `wpa` | WiFi Protected Access multi-personality binary. | yes |  |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
 | `xdg-open` | XDG File Association Tools | yes | `xdg` | `xdg-mime`, `mimeopen` |
+| `xxd` | Make a hex dump, or turn one back into binary: vim 9.1.0016's, ported. | yes | `coreutils` |  |
 | `yacc` | LALR(1) parser generator | yes |  |  |
 | `yes` | Output a string repeatedly until killed. | yes | `coreutils` |  |
 | `zip` | Zip/unzip archive utility. | yes |  | `unzip` |

@@ -66,7 +66,6 @@ userspace/getent  # bare deny(clippy::all)
 userspace/getty
 userspace/gzip
 userspace/hardlink  # bare deny(clippy::all)
-userspace/hexdump
 userspace/hostnamectl  # bare deny(clippy::all)
 userspace/htop
 userspace/hwclock
@@ -80,7 +79,6 @@ userspace/iptables  # bare deny(clippy::all)
 userspace/irqbalance  # bare deny(clippy::all)
 userspace/jq
 userspace/kill
-userspace/last
 userspace/ldconfig  # bare deny(clippy::all)
 userspace/less
 userspace/lex
@@ -88,7 +86,6 @@ userspace/localectl  # bare deny(clippy::all)
 userspace/login
 userspace/loginctl  # bare deny(clippy::all)
 userspace/logrotate  # bare deny(clippy::all)
-userspace/look
 userspace/losetup  # bare deny(clippy::all)
 userspace/lp
 userspace/lsmod
@@ -124,7 +121,6 @@ userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
 userspace/ss
-userspace/sysctl
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
 userspace/top
@@ -136,7 +132,6 @@ userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
-userspace/vmstat
 userspace/wall
 userspace/watch
 userspace/wpa  # bare deny(clippy::all)

@@ -248,6 +248,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/guest.py` | A SlateOS guest that stays up, and a way into it from the host. |
 | `scripts/hang-repro-loop.sh` | hang-repro-loop.sh — Repeatedly boot the (already-built) kernel to try to |
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
+| `scripts/hexdump-diff.sh` | Differential test: our `hexdump` against util-linux 2.39.3's. |
 | `scripts/host-errmsg.py` | Find utilities that print the *host's* error text instead of POSIX's. |
 | `scripts/hostid-diff.sh` | hostid-diff.sh — compare our `hostid` against GNU's, inside WSL. |
 | `scripts/hostload.py` | How much CPU this host will give a process right now -- measured, not assumed. |
@@ -265,6 +266,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
 | `scripts/lane-claims.py` | Say, where every lane can see it at once, that you have started a task. |
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
+| `scripts/last-diff.sh` | Differential test: our `last` and `lastb` against util-linux 2.39.3's. |
+| `scripts/lastlog-diff.sh` | Differential test: our `lastlog` against shadow-utils 4.13's. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
 | `scripts/llvm-spike/run.sh` | Cross-compile LLVM 20's `opt`, `llc` and `ld.lld` for SlateOS, linked against |
@@ -273,6 +276,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lockfile-diff.sh` | Differential test: our `lockfile` against procmail 3.24's, as Ubuntu builds it. |
 | `scripts/logger-diff.sh` | Differential test: our `logger` against util-linux 2.39.3's. |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
+| `scripts/look-diff.sh` | Differential test: our `look` against util-linux 2.39.3's. |
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
 | `scripts/ls-diff.sh` | Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL. |
 | `scripts/ls-quote-probe.py` | Measure all ten of GNU's quoting styles at once, byte for byte. |
@@ -353,7 +357,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-env-split-options.sh` | Round 3 of the -S measurement: are OPTIONS inside the split string honoured? |
 | `scripts/probe-env-split-string.sh` | Measure GNU env's -S/--split-string grammar. NOT a gate and not a harness -- |
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
-| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill` and `pidwait` from the |
+| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill`, `pidwait`, `vmstat` and |
 | `scripts/procps_fixture.py` | Fake /proc trees for the procps differential harnesses. |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
 | `scripts/program-catalogue.py` | The catalogue of every program the workspace builds: `programs.md`. |
@@ -446,6 +450,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/swapon-diff.sh` | Differential test: our `swapon` and `swapoff` against util-linux 2.39.3's. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
+| `scripts/sysctl-diff.sh` | Differential test: our `sysctl` against procps-ng 4.0.4's, built from the |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
 | `scripts/syslogd-diff.sh` | Differential test: `syslogd daemon` against systemd-journald, the program |
 | `scripts/tac-diff.sh` | tac-diff.sh — compare our `tac` against GNU coreutils 9.4's, inside WSL. |
@@ -528,9 +533,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/uptime-diff.sh` | Differential test: our `uptime` against procps-ng `uptime`. |
 | `scripts/users-diff.sh` | users-diff.sh — compare our `users` against GNU's, inside WSL. |
 | `scripts/util-linux-extra.sh` | Unpacks Ubuntu's util-linux-extra and rfkill packages, without root, as harness references. |
+| `scripts/util-linux-ref.sh` | Builds util-linux 2.39.3's `cal` from the release, linked as Ubuntu links. |
 | `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
 | `scripts/uu-diff.sh` | Differential test: our `uuencode` and `uudecode` against GNU sharutils 4.15.2's. |
 | `scripts/verify_mutations.py` | Check `mutate.py` tables against the source they claim to break. |
+| `scripts/vmstat-diff.sh` | Differential test: our `vmstat` against procps-ng 4.0.4's, built from the |
 | `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
@@ -545,6 +552,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/workspace-test.py` | workspace-test.py — the workspace test gate, with the three mistakes |
 | `scripts/write-error-diff.sh` | write-error-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
+| `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_537 scripts._
+_545 scripts._

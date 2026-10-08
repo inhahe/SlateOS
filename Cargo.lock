@@ -191,6 +191,7 @@ dependencies = [
 name = "autoopts"
 version = "0.1.0"
 dependencies = [
+ "cstrtol",
  "errmsg",
  "localtime",
  "quoting",
@@ -661,6 +662,7 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "cstrtol",
  "embed-manifest",
  "ere",
  "errmsg",
@@ -684,7 +686,9 @@ dependencies = [
  "stdfdguard",
  "sysroot-dep",
  "ulclosestream",
+ "ulcolors",
  "ulstrutils",
+ "ultimeutils",
  "userspec",
  "utmpfile",
 ]
@@ -804,6 +808,10 @@ version = "0.2.2"
 dependencies = [
  "hybrid-array",
 ]
+
+[[package]]
+name = "cstrtol"
+version = "0.1.0"
 
 [[package]]
 name = "ctags"
@@ -1632,13 +1640,6 @@ name = "hex-literal"
 version = "1.1.0"
 
 [[package]]
-name = "hexdump"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "hexeditor"
 version = "0.1.0"
 dependencies = [
@@ -1967,13 +1968,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "last"
-version = "0.1.0"
-dependencies = [
- "utmpfile",
-]
-
-[[package]]
 name = "launcher"
 version = "0.1.0"
 dependencies = [
@@ -2039,11 +2033,12 @@ dependencies = [
 name = "libmagic"
 version = "0.1.0"
 dependencies = [
- "charwidth",
  "cprintf",
+ "cstrtol",
  "ere",
  "errmsg",
  "localtime",
+ "quoting",
 ]
 
 [[package]]
@@ -2222,13 +2217,6 @@ dependencies = [
  "pathtext",
  "safeio",
  "textline",
-]
-
-[[package]]
-name = "look"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -4142,13 +4130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysctl"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "sysinfo"
 version = "0.1.0"
 dependencies = [
@@ -4481,6 +4462,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ulcolors"
+version = "0.1.0"
+
+[[package]]
 name = "ulmount"
 version = "0.1.0"
 dependencies = [
@@ -4495,6 +4480,7 @@ dependencies = [
 name = "ulstrutils"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
  "quoting",
 ]
 
@@ -4504,6 +4490,14 @@ version = "0.1.0"
 dependencies = [
  "quoting",
  "scratchdir",
+ "ulstrutils",
+]
+
+[[package]]
+name = "ultimeutils"
+version = "0.1.0"
+dependencies = [
+ "localtime",
  "ulstrutils",
 ]
 
@@ -4678,14 +4672,6 @@ dependencies = [
 [[package]]
 name = "vkloader"
 version = "0.1.0"
-
-[[package]]
-name = "vmstat"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
 
 [[package]]
 name = "vorbis"

@@ -439,15 +439,19 @@ mod imp {
         }))
     }
 
-    pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
-        use std::io::{Seek, SeekFrom};
+    pub fn seek(fd: i32, to: std::io::SeekFrom) -> io::Result<u64> {
+        use std::io::Seek;
 
         /// `EBADF`, for the negative number `borrowed` declines.
         const EBADF: i32 = 9;
         let Some(mut f) = borrowed(fd) else {
             return Err(io::Error::from_raw_os_error(EBADF));
         };
-        f.seek(SeekFrom::Current(delta))
+        f.seek(to)
+    }
+
+    pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
+        seek(fd, std::io::SeekFrom::Current(delta))
     }
 
     pub fn read_at(fd: i32, buf: &mut [u8], offset: u64) -> io::Result<usize> {
@@ -569,6 +573,11 @@ mod imp {
 
     /// No `lseek(2)` without libc, and nothing here to seek: the runtime's
     /// standard input keeps its own position.
+    pub fn seek(_fd: i32, _to: io::SeekFrom) -> io::Result<u64> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    /// As [`seek`].
     pub fn seek_current(_fd: i32, _delta: i64) -> io::Result<u64> {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
@@ -934,6 +943,19 @@ impl io::Write for RawStdout {
 /// for a closed descriptor. Always an error off Linux.
 pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
     imp::seek_current(fd, delta)
+}
+
+/// `lseek(2)` to anywhere on a descriptor this process does not own: stdio's
+/// `fseek` and `rewind` on a standard stream -- `rewind (stdin)` in
+/// `xxd -r`, which moves the position the shell's next command reads from.
+/// See [`crate::stdio::StdioReader::seek`].
+///
+/// # Errors
+///
+/// Whatever `lseek(2)` reports, as [`seek_current`]. Always an error off
+/// Linux.
+pub fn seek(fd: i32, to: io::SeekFrom) -> io::Result<u64> {
+    imp::seek(fd, to)
 }
 
 /// `pread(2)`: read at `offset` without moving the descriptor's position.
@@ -1767,6 +1789,19 @@ impl Stream {
         Self::new(1, Buffering::Line)
     }
 
+    /// From here on, buffer by line: `setlinebuf (stream)` part way through a
+    /// run, for a utility that calls it after its options rather than before.
+    ///
+    /// `vmstat` does, and the order shows: its `--help`, `--version` and `-f`
+    /// are written before the call, block-buffered, so on a full disk they
+    /// fail at the close with the reason (`vmstat: write error: No space left
+    /// on device`), where the reports written after it fail line by line and
+    /// the close has none to give. What is already buffered stays buffered,
+    /// as glibc's `setvbuf` leaves it.
+    pub fn set_line_buffered(&mut self) {
+        self.with(|inner, _| inner.mode = Buffering::Line);
+    }
+
     /// Standard error, unbuffered, as stdio has it.
     #[must_use]
     pub fn stderr() -> Self {
@@ -2078,6 +2113,20 @@ mod tests {
         let mut s = broken(Buffering::None);
         let _ = s.write(b"x");
         assert!(s.errored(), "an unbuffered write is attempted at once");
+    }
+
+    /// `setlinebuf` part way: a line held while block-buffered stays held,
+    /// and the next newline after the switch writes it out.
+    #[test]
+    fn switching_to_line_buffering_keeps_what_is_held() {
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(b"one\n");
+        assert!(!s.errored(), "block-buffered, a line is held");
+        s.set_line_buffered();
+        assert!(!s.errored(), "the switch itself writes nothing");
+        assert_eq!(inner(&s).buf, b"one\n");
+        let _ = s.write(b"two\n");
+        assert!(s.errored(), "a line finished now is written, and fails");
     }
 
     /// What a stream on a descriptor nothing can be asked about chooses as its

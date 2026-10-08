@@ -58,6 +58,17 @@ ulstrutils = { path = "../ulstrutils" }
 # crate (`renice`): its standard output is buffered and judged at exit by
 # util-linux's rule, which forgives a closed descriptor gnulib's reports.
 ulclosestream = { path = "../ulclosestream" }
+# util-linux's lib/colors.c and lib/color-names.c -- `--color`, the
+# terminal-colors.d files and the colour names -- for the util-linux ports
+# here that colour their output: `hexdump -L`, and `cal`'s today, week
+# number, header, workdays and weekend.
+ulcolors = { path = "../ulcolors" }
+# C's strtol and strtoul at any base, 0 included: `xxd` reads every number
+# with them, and `hexdump`'s `_L` colour units at bases 8, 10 and 16.
+cstrtol = { path = "../cstrtol" }
+# util-linux's lib/timeutils.c -- parse_timestamp and parse_sec -- for `cal`'s
+# timestamp operand, and the util-linux ports that take times.
+ultimeutils = { path = "../ultimeutils" }
 # strerror(3)'s wording for an io::Error, which lived here as src/errmsg.rs
 # until 2026-09-26; `coreutils::errmsg` re-exports it.
 errmsg = { path = "../errmsg" }

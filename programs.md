@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**484 programs; 325 on the image, 6 carried inside the kernel.**
+**486 programs; 327 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 299
+## Userland utilities and services (`userspace/`, lane B) -- 301
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -169,6 +169,7 @@ two disagree.
 | `make` | Build automation tool |  |  |  |
 | `man` | Manual Page Viewer | yes |  |  |
 | `md5sum` | Print or check MD5 (128-bit) checksums. | yes | `coreutils` |  |
+| `mesg` | Control write access of other users to your terminal: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `mkdir` | Make directories. | yes | `coreutils` |  |
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems | yes |  |  |
@@ -302,7 +303,7 @@ two disagree.
 | `visudo` | Edit the sudoers file with syntax checking. | yes | `sudo` |  |
 | `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
-| `wall` | Terminal messaging utilities for Slate OS | yes |  |  |
+| `wall` | Write a message to all users: util-linux 2.39.3's, ported, with Ubuntu's fix for CVE-2024-28085. | yes | `coreutils` |  |
 | `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility | yes |  |  |
@@ -312,6 +313,7 @@ two disagree.
 | `whois` | WHOIS Lookup Utility | yes |  |  |
 | `wipefs` | Wipe signatures from a device. | yes |  |  |
 | `wpa` | WiFi Protected Access multi-personality binary. | yes |  |  |
+| `write` | Send a message to another user: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
 | `xdg-open` | XDG File Association Tools | yes | `xdg` | `xdg-mime`, `mimeopen` |
 | `xxd` | Make a hex dump, or turn one back into binary: vim 9.1.0016's, ported. | yes | `coreutils` |  |

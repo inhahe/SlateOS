@@ -60,6 +60,7 @@ mod sys {
         // Variadic, as it is in C; see `pty.rs` on why one declaration serves
         // both our library and glibc.
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        pub fn ttyname_r(fd: i32, buf: *mut u8, buflen: usize) -> i32;
     }
 
     /// `fcntl`: read the file status flags.
@@ -236,6 +237,81 @@ pub fn clear_nonblocking(fd: i32) -> Result<(), i32> {
     }
 }
 
+/// `fcntl (fd, F_GETFL)`: the file status flags of `fd`, `O_NONBLOCK` among
+/// them.
+///
+/// # Errors
+///
+/// `EBADF`; [`ENOSYS`](crate::ENOSYS) on a host with no C library of ours.
+pub fn status_flags(fd: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `F_GETFL` takes no third argument and reads no memory.
+        let flags = unsafe { sys::fcntl(fd, sys::F_GETFL) };
+        if flags < 0 {
+            return Err(crate::last_errno());
+        }
+        Ok(flags)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `fcntl (fd, F_SETFL, flags)`: set `fd`'s file status flags.
+///
+/// Separate from [`clear_nonblocking`] for the caller that must make the
+/// call exactly as written somewhere else -- `wall`'s `ttymsg`, which asks
+/// the flags of one descriptor and sets them on another.
+///
+/// # Errors
+///
+/// `EBADF`; [`ENOSYS`](crate::ENOSYS) on a host with no C library of ours.
+pub fn set_status_flags(fd: i32, flags: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `F_SETFL` takes an `int` and reads no memory.
+        if unsafe { sys::fcntl(fd, sys::F_SETFL, flags) } < 0 {
+            return Err(crate::last_errno());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, flags);
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `ttyname_r (fd, buf, buf.len ())`: the path of the terminal on `fd`,
+/// written into `buf` with its terminator, and its length without it.
+///
+/// # Errors
+///
+/// `ENOTTY` when `fd` is not a terminal, `EBADF`, and `ERANGE` when `buf`
+/// is too short for the path; [`ENOSYS`](crate::ENOSYS) on a host with no C
+/// library of ours.
+pub fn ttyname_into(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `buf` is ours, writable for its whole length, which is
+        // what the call is told; it writes the path and a NUL within it or
+        // fails with `ERANGE`.
+        let rc = unsafe { sys::ttyname_r(fd, buf.as_mut_ptr(), buf.len()) };
+        if rc != 0 {
+            return Err(rc);
+        }
+        Ok(buf.iter().position(|&b| b == 0).unwrap_or(buf.len()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, buf);
+        Err(crate::ENOSYS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the
@@ -377,11 +453,61 @@ mod tests {
             assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
             assert_eq!(get_attr(fds[0]), Err(25));
             assert_eq!(set_attr(fds[1], TCSANOW, &Termios::default()), Err(25));
+            // ...and has no name as one: `ENOTTY`.
+            let mut buf = [0u8; 64];
+            assert_eq!(ttyname_into(fds[0], &mut buf), Err(25));
             // SAFETY: descriptors this test owns, closed once.
             unsafe {
                 close(fds[0]);
                 close(fds[1]);
             }
         }
+
+        /// A terminal is named by its path under `/dev/pts`, and a buffer too
+        /// short for it is `ERANGE`.
+        #[test]
+        fn a_terminal_has_a_name() {
+            let pty = Pty::new();
+            let mut buf = [0u8; 4096];
+            let n = ttyname_into(pty.slave, &mut buf).expect("ttyname_r");
+            assert!(buf[..n].starts_with(b"/dev/pts/"), "{:?}", &buf[..n]);
+            assert_eq!(buf[n], 0, "the name is NUL-terminated");
+            let mut short = [0u8; 4];
+            assert_eq!(ttyname_into(pty.slave, &mut short), Err(34));
+        }
+
+        /// The status flags read back as set, `O_NONBLOCK` among them; a
+        /// descriptor that is not open is `EBADF` both ways.
+        #[test]
+        fn status_flags_round_trip() {
+            let mut fds = [-1i32; 2];
+            // SAFETY: `fds` holds the two descriptors `pipe` writes.
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            let flags = status_flags(fds[0]).expect("F_GETFL");
+            assert_eq!(flags & O_NONBLOCK, 0);
+            set_status_flags(fds[0], flags | O_NONBLOCK).expect("F_SETFL");
+            assert_eq!(
+                status_flags(fds[0]).expect("F_GETFL") & O_NONBLOCK,
+                O_NONBLOCK
+            );
+            clear_nonblocking(fds[0]).expect("clear");
+            assert_eq!(status_flags(fds[0]).expect("F_GETFL") & O_NONBLOCK, 0);
+            // SAFETY: descriptors this test owns, closed once.
+            unsafe {
+                close(fds[0]);
+                close(fds[1]);
+            }
+            assert_eq!(status_flags(fds[0]), Err(9));
+            assert_eq!(set_status_flags(fds[0], 0), Err(9));
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_flags_and_no_names() {
+        assert_eq!(status_flags(0), Err(crate::ENOSYS));
+        assert_eq!(set_status_flags(0, 0), Err(crate::ENOSYS));
+        let mut buf = [0u8; 16];
+        assert_eq!(ttyname_into(0, &mut buf), Err(crate::ENOSYS));
     }
 }

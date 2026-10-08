@@ -294,6 +294,35 @@ Two measured examples:
   `**Never logged in**`. **What the loser knew that the winner did not:**
   nothing util-linux or shadow-utils has. Nothing to port.
 
+* **`wall`** — **RETIRED 2026-10-08, with `write` and `mesg` beside it.**
+  `coreutils/src/bin/wall.rs`, `write.rs` and `mesg.rs` are util-linux
+  2.39.3's `term-utils/wall.c` (with Ubuntu's fix for CVE-2024-28085, which
+  escapes a command-line message too), `write.c` and `mesg.c`.
+  `userspace/wall`, written from the manuals, was all three by its `argv[0]`,
+  though only `wall` reached the image: no alias named the other two.
+  `scripts/wall-diff.sh` runs both sides in a user and mount namespace over a
+  fixture utmp and fixture terminals, and compares what each wrote into them:
+
+      coreutils wall/write/mesg   240 passed,   0 differed,  3 differ on purpose
+      userspace/wall               27 passed, 213 differed,  3 differ on purpose
+
+  It read who was logged in from `/var/run/utmp.txt`, a text file of its own
+  that nothing writes, and then wrote to every `/dev/pts/*` and `/dev/tty0`
+  to `tty11` that existed, logged in or not; it named the sender from
+  `/etc/users.yaml` and refused to send at all when it found nobody there
+  (`cannot determine who you are ...; refusing`) -- every `wall` case here. It
+  had no `-t`, wrapped nothing, and wrote a message's escape sequences to every
+  screen as they were. As `write`, it looked the recipient up in the same text
+  file, so every user was `not logged in`; as `mesg`, `y` set only the group's
+  write bit where Ubuntu's sets the others' too, `n` exited 0 where upstream
+  exits 1, and a `chmod` that failed went unreported. Its passes are `mesg`
+  asked a question (`is y`, `is n`) or told `y` on a terminal that already
+  had both bits, `write` to a user nobody is, and one `--help` with standard
+  output closed. **What the loser knew that the winner
+  did not:** refusing an anonymous broadcast. Upstream sends one as
+  `<someone>` after a warning, and that stands: the banner then says plainly
+  that the sender is unknown. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

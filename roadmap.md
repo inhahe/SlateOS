@@ -5959,6 +5959,15 @@ _Port ext4 first. Don't write a custom filesystem._
   same standalone answered to by its `argv[0]`; `scripts/lastlog-diff.sh`: 177
   cases agree, run in a user namespace and chrooted with `-R` into fixture
   roots, `-S` and `-C` judged by the file each leaves);
+  `wall`, `write` and `mesg` (2026-10-08, util-linux 2.39.3's `term-utils`,
+  `wall` with Ubuntu's fix for CVE-2024-28085, replacing `userspace/wall`,
+  which read logins from a text file nothing writes and wrote to every
+  terminal device there was: `ttymsg`'s writing, upstream's quirks kept --
+  the `fcntl` on the wrong descriptor, the `fsync` that turns a failed write
+  into `Invalid argument`, the group test that reads one past the list;
+  `scripts/wall-diff.sh`: 240 cases agree and 3 differ on purpose, in a user
+  and mount namespace over a fixture utmp and fixture terminals, as root and
+  as a user);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).

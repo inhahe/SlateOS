@@ -174,6 +174,7 @@ mod sys {
         pub fn setdomainname(name: *const u8, len: usize) -> i32;
         pub fn gethostname(name: *mut u8, len: usize) -> i32;
         pub fn getdomainname(name: *mut u8, len: usize) -> i32;
+        pub fn getlogin_r(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn kill(pid: i32, sig: i32) -> i32;
         // `union sigval` is eight bytes and passed by value, which on x86-64
@@ -471,6 +472,40 @@ pub fn hostname_into(buf: &mut [u8]) -> Result<usize, i32> {
 /// a name here would be the defect this function exists to remove.
 #[cfg(not(unix))]
 pub fn hostname_into(_buf: &mut [u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// The name of the user logged in on this process's controlling terminal,
+/// written into `buf` with its NUL, and its length without it:
+/// `getlogin_r`.
+///
+/// Who that is is the C library's answer, not the process's own uid: glibc
+/// reads `/proc/self/loginuid` and, when it is unset, the utmp entry for the
+/// terminal on standard input -- so after `su` it is still the user who
+/// logged in. `write` prints both when they differ.
+///
+/// # Errors
+///
+/// `ENOTTY` or `ENXIO` with no terminal, `ENOENT` with no utmp entry for it,
+/// and `ERANGE` when `buf` is too short; [`ENOSYS`] off Unix.
+#[cfg(unix)]
+pub fn login_name_into(buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: the pointer and length are exactly `buf`'s, which the library
+    // writes within, NUL included, or not at all.
+    let rc = unsafe { sys::getlogin_r(buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok(buf.iter().position(|&b| b == 0).unwrap_or(buf.len()))
+}
+
+/// [`login_name_into`] off Unix: always [`ENOSYS`].
+///
+/// # Errors
+///
+/// Always.
+#[cfg(not(unix))]
+pub fn login_name_into(_buf: &mut [u8]) -> Result<usize, i32> {
     Err(ENOSYS)
 }
 
@@ -935,6 +970,19 @@ mod tests {
         assert!(hostname_into(&mut []).is_err());
     }
 
+    /// Who is logged in on the terminal depends on how the tests were run --
+    /// from a terminal with a utmp entry, or not -- so what is held to is the
+    /// shape: a terminated name within the buffer, or an `errno`.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_name_is_terminated_or_refused() {
+        let mut buf = [0xAAu8; 256];
+        match login_name_into(&mut buf) {
+            Ok(n) => assert_eq!(buf.get(n), Some(&0), "not terminated"),
+            Err(e) => assert!(e > 0, "{e}"),
+        }
+    }
+
     /// The library answers with a terminated name that fits the room it was
     /// given: Linux holds at most 64 bytes, `(none)` when unset.
     #[cfg(unix)]
@@ -959,6 +1007,7 @@ mod tests {
         assert_eq!(sethostname(b"host"), Err(ENOSYS));
         assert_eq!(setdomainname(b"domain"), Err(ENOSYS));
         assert_eq!(hostname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
+        assert_eq!(login_name_into(&mut [0u8; 32]), Err(ENOSYS));
         assert_eq!(domainname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
         assert_eq!(klog_size(), Err(ENOSYS));
         assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));

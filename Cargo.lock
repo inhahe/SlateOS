@@ -4697,15 +4697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wall"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "quoting",
- "userdb",
-]
-
-[[package]]
 name = "watch"
 version = "0.1.0"
 dependencies = [

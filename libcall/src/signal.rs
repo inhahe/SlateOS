@@ -54,6 +54,8 @@ const SA_RESTART: i32 = 0x1000_0000;
 const SIG_BLOCK: i32 = 0;
 /// `sigprocmask`: take out of the blocked set.
 const SIG_UNBLOCK: i32 = 1;
+/// `sigprocmask`: replace the blocked set.
+const SIG_SETMASK: i32 = 2;
 /// `setitimer`'s timer that counts real time and ends in `SIGALRM`.
 #[cfg(any(unix, test))]
 const ITIMER_REAL: i32 = 0;
@@ -383,6 +385,18 @@ pub fn unblock(set: &SigSet) -> Result<SigSet, i32> {
     change_mask(SIG_UNBLOCK, set)
 }
 
+/// Make `set` the whole blocked set: `sigprocmask (SIG_SETMASK, ...)`.
+/// Returns the set that was blocked before. With [`SigSet::empty`], nothing
+/// is blocked any more -- what `wall`'s `ttymsg` does in the child it leaves
+/// writing to a slow terminal.
+///
+/// # Errors
+///
+/// As [`block`].
+pub fn set_mask(set: &SigSet) -> Result<SigSet, i32> {
+    change_mask(SIG_SETMASK, set)
+}
+
 #[cfg(unix)]
 fn change_mask(how: i32, set: &SigSet) -> Result<SigSet, i32> {
     let mut old = SigSet { bits: [0; 16] };
@@ -584,6 +598,7 @@ mod tests {
         );
         assert_eq!(SIG_BLOCK, posix::signal::SIG_BLOCK);
         assert_eq!(SIG_UNBLOCK, posix::signal::SIG_UNBLOCK);
+        assert_eq!(SIG_SETMASK, posix::signal::SIG_SETMASK);
         assert_eq!(ITIMER_REAL, posix::time::ITIMER_REAL);
     }
 
@@ -639,6 +654,29 @@ mod tests {
         set_default(SIGUSR1).unwrap();
         assert_eq!(set.add(0), Err(posix::errno::EINVAL));
         assert_eq!(set_handler(SIGKILL, count, true), Err(posix::errno::EINVAL));
+    }
+
+    /// `set_mask` replaces the blocked set and returns the one it replaced.
+    /// The mask is this thread's, so the test is too.
+    #[cfg(unix)]
+    #[test]
+    fn set_mask_replaces_the_whole_set() {
+        const SIGUSR2: i32 = 12;
+        let mut set = SigSet::empty();
+        set.add(SIGUSR2).unwrap();
+        let before = set_mask(&set).unwrap();
+        assert!(!before.contains(SIGUSR2));
+        // Blocking nothing more reports what is blocked now.
+        assert!(block(&SigSet::empty()).unwrap().contains(SIGUSR2));
+        let replaced = set_mask(&before).unwrap();
+        assert!(replaced.contains(SIGUSR2));
+        assert!(!block(&SigSet::empty()).unwrap().contains(SIGUSR2));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_mask_to_set() {
+        assert!(matches!(set_mask(&SigSet::empty()), Err(ENOSYS)));
     }
 
     /// The timer fires, and its signal reaches the handler.

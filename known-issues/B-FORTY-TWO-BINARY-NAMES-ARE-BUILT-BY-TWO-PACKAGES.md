@@ -26,7 +26,10 @@ in `coreutils`, `userspace/look` retired in the same commit. And `last`:
 util-linux's in `coreutils` -- `lastb` by its `argv[0]` -- with shadow-utils'
 `lastlog` beside it, and `userspace/last`, which had been all three by its
 `argv[0]` through the manifest aliases `lastb = last` and `lastlog = last`,
-retired in the commit that added both.
+retired in the commit that added both. And `wall`: util-linux's in
+`coreutils` with `write` and `mesg`, `userspace/wall` -- all three by its
+`argv[0]`, though no alias put the other two on the image -- retired in the
+same commit.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

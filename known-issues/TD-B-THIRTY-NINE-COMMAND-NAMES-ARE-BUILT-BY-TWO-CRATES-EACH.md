@@ -217,6 +217,31 @@ Two measured examples:
   `-b`, `-e`, `-r`, `-f`, `--system`, `--dry-run` or `--deprecated`. It also
   sat in `argv-utf8-baseline.txt` as `argv-as-string`. Nothing to port.
 
+* **`hexdump`** — **RETIRED 2026-10-08, with `xxd` beside it.**
+  `coreutils/src/bin/hexdump.rs` is util-linux 2.39.3's `hexdump.c` and its
+  three `hexdump-*.c`; `coreutils/src/bin/xxd.rs` is vim 9.1.0016's `xxd.c`.
+  `userspace/hexdump`, written from the manuals, was both -- `xxd` by its
+  `argv[0]`, through the manifest alias `xxd = hexdump`. Each harness was run
+  over the standalone too, as `xxd` under that name:
+
+      coreutils hexdump     275 passed,   0 differed,  2 differ on purpose
+      userspace/hexdump      30 passed, 245 differed,  2 differ on purpose
+      coreutils xxd         949 passed,   0 differed,  4 differ on purpose
+      userspace/hexdump     163 passed, 786 differed,  4 differ on purpose
+
+  As `hexdump`, its passes are `-C` on a single file, alone or with standard
+  output or error closed: `-C` was its *default*, where util-linux's is the
+  two-byte hex dump, so a bare `hexdump FILE` differed on every fixture, and
+  it had no `-e` or `-f` at all -- 103 of the 245. As `xxd`, it agreed where
+  its layout happened to coincide with upstream's (a sixteen-byte file, an
+  empty one, some `-c` widths) and where a revert had nothing to write; 248
+  of the differences are `-r` cases, 83 are `-R`, 70 are `-i` and 57 are
+  `-s`. It took options after its operands, ignored an output operand
+  (`xxd -r dump out` wrote to standard output and left `out` alone, so it
+  could not patch a file, which is what `-r` is for), and had none of
+  `-a -b -C -d -e -E -n -o -R -u -v`. **What the loser knew that the winner
+  did not:** `--json`, an invention. Nothing to port.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

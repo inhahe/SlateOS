@@ -192,7 +192,17 @@ impl Stdout {
     /// `close_stdout`: flush what is held, report a failure as util-linux
     /// does, then judge stderr. Returns the status to exit with -- `status`,
     /// or `CLOSE_EXIT_CODE`.
-    pub fn close(mut self, status: u8, short: &[u8]) -> u8 {
+    pub fn close(self, status: u8, short: &[u8]) -> u8 {
+        self.close_exits(status, short).0
+    }
+
+    /// [`Stdout::close`], and whether `close_stdout` ended the process with
+    /// `_exit` -- which it does on every failure it judges, and which skips
+    /// what glibc's `exit` would have done afterwards: above all, giving a
+    /// shared standard input back what was read ahead of what was used
+    /// (`coreutils::stdio::StdioReader::exit_sync`). A caller that does such
+    /// a thing at the end does it only when this is `false`.
+    pub fn close_exits(mut self, status: u8, short: &[u8]) -> (u8, bool) {
         let earlier = self.failed.take();
         // `ferror(stdout) || fflush(stdout)`: with the flag set, nothing more
         // is written.
@@ -208,12 +218,10 @@ impl Stdout {
             Outcome::FailedBefore => warnx(short, "write error"),
             Outcome::FailedAtClose(e) => warn(short, "write error", e),
         }
-        verdict(
-            &stdout,
-            STDERR_FAILED.load(Ordering::Relaxed),
-            status,
-            self.close_exit_code,
-        )
+        let stderr_failed = STDERR_FAILED.load(Ordering::Relaxed);
+        let exited = stderr_failed || !matches!(stdout, Outcome::Fine);
+        let code = verdict(&stdout, stderr_failed, status, self.close_exit_code);
+        (code, exited)
     }
 }
 

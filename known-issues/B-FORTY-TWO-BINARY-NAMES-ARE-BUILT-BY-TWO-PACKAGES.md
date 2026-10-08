@@ -16,7 +16,12 @@ same commit (`TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH.md`
 has the numbers), so `check-bin-collisions.py` never saw the two together on
 a branch and the image never staged either one by accident. The same day,
 the same for `sysctl`: procps-ng's in `coreutils`, `userspace/sysctl`
-measured and retired in one commit.
+measured and retired in one commit -- and for `hexdump`, util-linux's in
+`coreutils`, `userspace/hexdump` retired in the commit that added it. That
+standalone was also the image's `xxd`, through the manifest alias
+`xxd = hexdump` and its own `argv[0]` dispatch; vim's `xxd` reached
+`coreutils` one commit earlier, under a name no other package builds, so
+there was no moment without an `xxd` either.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

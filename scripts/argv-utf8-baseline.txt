@@ -50,7 +50,6 @@ userspace/fw/src/main.rs:argv-as-string
 userspace/getent/src/main.rs:argv-as-string
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string
-userspace/hexdump/src/main.rs:argv-as-string
 userspace/hostnamectl/src/main.rs:argv-as-string
 userspace/htop/src/main.rs:argv-as-string
 userspace/hwclock/src/main.rs:argv-as-string

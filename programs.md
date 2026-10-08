@@ -111,7 +111,7 @@ two disagree.
 | `gzip` | Gzip/gunzip/zcat compression utility. | yes |  | `gunzip`, `zcat`, `gzcat` |
 | `hardlink` | File deduplication utility. | yes |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |
-| `hexdump` | Hexadecimal File Dumper | yes |  | `xxd` |
+| `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `xxd` |
 | `hostid` | Print the numeric identifier for the current host. | yes | `coreutils` |  |
 | `hostname` | Show or set the system's host name: Debian's `hostname` 3.23, ported. | yes | `coreutils` | `dnsdomainname`, `domainname`, `nisdomainname`, `ypdomainname` |
 | `hostnamectl` | Query and set the system hostname and related settings. | yes |  |  |

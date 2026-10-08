@@ -66,7 +66,6 @@ userspace/getent  # bare deny(clippy::all)
 userspace/getty
 userspace/gzip
 userspace/hardlink  # bare deny(clippy::all)
-userspace/hexdump
 userspace/hostnamectl  # bare deny(clippy::all)
 userspace/htop
 userspace/hwclock

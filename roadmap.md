@@ -5935,7 +5935,16 @@ _Port ext4 first. Don't write a custom filesystem._
   from the manual; `-p` and `--system` expand their files as `glob(3)` does, through the new
   `libcall::glob`; `scripts/sysctl-diff.sh`: 138 cases agree and 2 differ on purpose, over a
   fixture `/proc/sys` and fixture configuration directories, each case's writes compared by
-  what they left in the files);
+  what they left in the files); `hexdump` (2026-10-08, util-linux 2.39.3's `hexdump.c` and
+  its three `hexdump-*.c`, replacing `userspace/hexdump`, written from the manual: format
+  units and print units as upstream builds and rewrites them, `_L` colour units and
+  `--color` decided by the new `ulcolors` crate -- util-linux's `lib/colors.c`, terminfo and
+  `terminal-colors.d` included -- and standard input read as stdio reads it, so a shared one
+  is given back what was read ahead; `scripts/hexdump-diff.sh`: 275 cases agree and 2
+  differ on purpose); `xxd` (2026-10-08, vim 9.1.0016's `xxd.c`, which `userspace/hexdump`
+  had answered to through an image alias with a subset of it; `scripts/xxd-diff.sh`: 949
+  cases agree and 4 differ on purpose, `-r` included -- into pipes, which it fills with
+  zeros or refuses to go back on, and into files, which it seeks and patches);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).

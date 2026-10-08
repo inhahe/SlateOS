@@ -1491,6 +1491,10 @@ struct MountPoint {
     /// Counted under the mount table's lock, which is what keeps an open
     /// racing an unmount from slipping between the check and the removal.
     objects: usize,
+    /// Set by a first `umount2(MNT_EXPIRE)` (which answers `EAGAIN`),
+    /// cleared when a file is held through the mount: a second
+    /// `MNT_EXPIRE` with it still set unmounts ([`Vfs::unmount_expire`]).
+    expire_mark: bool,
 }
 
 /// An open regular file held as its filesystem and inode, not its name
@@ -1583,23 +1587,74 @@ fn release_hold(obj: &FileObject) {
     release_mount_hold(obj.fs_id);
 }
 
-/// Give back one hold on mount `fs_id` (`MountPoint::objects`).
+/// Give back one hold on mount `fs_id` (`MountPoint::objects`). The last
+/// hold on a lazily unmounted one ([`Vfs::unmount_detach`]) finishes it.
 fn release_mount_hold(fs_id: u64) {
-    let mut vfs = VFS.lock();
-    if let Some(mp) = vfs.mounts.iter_mut().find(|m| m.fs_id == fs_id) {
-        mp.objects = mp.objects.saturating_sub(1);
+    let finished = {
+        let mut vfs = VFS.lock();
+        if let Some(mp) = vfs.mounts.iter_mut().find(|m| m.fs_id == fs_id) {
+            mp.objects = mp.objects.saturating_sub(1);
+            None
+        } else if let Some(i) = vfs.detached.iter().position(|m| m.fs_id == fs_id) {
+            let last = vfs.detached.get_mut(i).is_some_and(|mp| {
+                mp.objects = mp.objects.saturating_sub(1);
+                mp.objects == 0
+            });
+            last.then(|| vfs.detached.remove(i))
+        } else {
+            None
+        }
+    };
+    // With no lock held: finishing syncs the filesystem.
+    if let Some(mp) = finished {
+        finish_unmount(mp);
     }
+}
+
+/// The mount `fs_id` names, in the table or detached and still held: a held
+/// file's mount, which a lazy unmount does not take from it.
+fn held_mount(vfs: &VfsInner, fs_id: u64) -> Option<&MountPoint> {
+    vfs.mounts
+        .iter()
+        .chain(vfs.detached.iter())
+        .find(|m| m.fs_id == fs_id)
+}
+
+/// Finish an unmount: sync the filesystem, give its device number back, and
+/// let go of what is kept about its files -- advisory locks, per-file state
+/// (`super::perfile`). For a mount already out of the table: a lazy unmount's
+/// at once when nothing is held on it, else at its last hold.
+fn finish_unmount(mp: MountPoint) {
+    if let Err(e) = mp.fs.lock().sync() {
+        crate::serial_println!(
+            "[vfs] WARNING: sync failed finishing the unmount of '{}': {:?}",
+            mp.path.display(),
+            e
+        );
+    }
+    release_dev(mp.fs_id);
+    crate::serial_println!(
+        "[vfs] Unmounted {} from '{}'",
+        mp.fs_type,
+        mp.path.display()
+    );
+    // Locks on its files, by identity; one taken by path (a filesystem with
+    // no inode numbers) by the subtree it was mounted on -- unless that path
+    // is mounted again, by another filesystem, whose locks those now are.
+    let remounted = VFS.lock().mounts.iter().any(|m| m.path == mp.path);
+    LOCK_TABLE.lock().retain(|entry| match entry.id {
+        Some(id) => id.fs_id != mp.fs_id,
+        None => remounted || !crate::fs::pathutil::path_in_subtree(&entry.path, &mp.path),
+    });
+    wake_all_flock_waiters();
+    super::perfile::filesystem_unmounted(mp.fs_id);
 }
 
 /// `ReadOnlyFilesystem` if mount `fs_id` is read-only now, `NotFound` if it
 /// has gone: what can change under a file opened for writing.
 fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
     let vfs = VFS.lock();
-    let mp = vfs
-        .mounts
-        .iter()
-        .find(|m| m.fs_id == fs_id)
-        .ok_or(KernelError::NotFound)?;
+    let mp = held_mount(&vfs, fs_id).ok_or(KernelError::NotFound)?;
     if mp.options.read_only {
         Err(KernelError::ReadOnlyFilesystem)
     } else {
@@ -1893,10 +1948,19 @@ pub struct PinnedDir {
 }
 
 /// The global VFS state.
-static VFS: Mutex<VfsInner> = Mutex::new(VfsInner { mounts: Vec::new() });
+static VFS: Mutex<VfsInner> = Mutex::new(VfsInner {
+    mounts: Vec::new(),
+    detached: Vec::new(),
+});
 
 struct VfsInner {
     mounts: Vec<MountPoint>,
+    /// Mounts taken out of the table by a lazy unmount
+    /// ([`Vfs::unmount_detach`]) while files were still held on them: no
+    /// lookup reaches them, the files held on them go on working, and each
+    /// is finished ([`finish_unmount`]) when its last hold goes
+    /// ([`release_mount_hold`]).
+    detached: Vec<MountPoint>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2676,9 +2740,11 @@ impl Vfs {
         // same thing.
         //
         // Checked before taking `VFS.lock()`, because `stat` re-enters the
-        // VFS and would deadlock against our own guard.
+        // VFS and would deadlock against our own guard. A mount path is a host
+        // path -- the table's -- so it is looked at as one, not translated
+        // through the caller's container root a second time.
         if let Some(parent) = mount_path.parent() {
-            match Self::stat(parent) {
+            match Self::stat_resolved(parent) {
                 Ok(entry) if entry.entry_type == EntryType::Directory => {}
                 Ok(_) => return Err(KernelError::NotADirectory),
                 Err(e) => return Err(e),
@@ -2716,6 +2782,7 @@ impl Vfs {
             options,
             fs_id,
             objects: 0,
+            expire_mark: false,
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
@@ -2731,17 +2798,6 @@ impl Vfs {
         Ok(())
     }
 
-    /// Unmount the filesystem at the given mount point.
-    ///
-    /// Syncs the filesystem before removing it to ensure all data is
-    /// flushed.  Refuses to unmount if the mount point has sub-mounts
-    /// (to prevent orphaning them).
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure no file handles are open on this
-    /// filesystem.  Currently we don't track per-mount handle counts,
-    /// so this is the caller's responsibility.
     /// Index of the mount at `mount_path`, if it may be unmounted right now.
     ///
     /// `NotFound` if nothing is mounted there, `DeviceBusy` if unmounting it
@@ -2774,6 +2830,16 @@ impl Vfs {
         Ok(idx)
     }
 
+    /// Unmount the filesystem at the given mount point.
+    ///
+    /// Syncs the filesystem before removing it to ensure all data is
+    /// flushed, and again after (`finish_unmount`).
+    ///
+    /// # Errors
+    ///
+    /// `PermissionDenied` for `/`; `NotFound` if nothing is mounted there;
+    /// `DeviceBusy` while a file is held open on it or a mount sits beneath
+    /// it (an orphaned sub-mount could never be reached or unmounted).
     pub fn unmount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
         // Normalise to the spelling registration stored, so an unmount is not
         // refused merely because the caller wrote the trailing slash that
@@ -2799,11 +2865,11 @@ impl Vfs {
         // (see known-issues TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS).
         // Cloning the `Arc` is the whole fix: it keeps the filesystem alive
         // across the unlocked window without keeping the mount table locked.
-        let (fs, fs_id, fs_type) = {
+        let (fs, fs_id) = {
             let vfs = VFS.lock();
             let idx = Self::unmount_index(&vfs, mount_path)?;
             let mp = vfs.mounts.get(idx).ok_or(KernelError::NotFound)?;
-            (Arc::clone(&mp.fs), mp.fs_id, mp.fs_type.clone())
+            (Arc::clone(&mp.fs), mp.fs_id)
         };
 
         // Sync with no VFS lock held.
@@ -2847,37 +2913,88 @@ impl Vfs {
             return Err(KernelError::DeviceBusy);
         }
 
-        vfs.mounts.remove(idx);
-        release_dev(fs_id);
-        crate::serial_println!(
-            "[vfs] Unmounted {} from '{}'",
-            fs_type,
-            mount_path.display()
-        );
-
-        // Unmount changes affect path resolution — invalidate entire dcache.
+        let mp = vfs.mounts.remove(idx);
         drop(vfs);
+        // Unmount changes affect path resolution — invalidate entire dcache.
         VFS_DCACHE.lock().invalidate_all();
-
-        // Release any advisory locks on paths under this mount.  The subtree
-        // test matches on component boundaries, so locks on `/mnt_data` are
-        // not cleared when unmounting `/mnt` (and, unlike the byte-prefix
-        // idiom this replaces, a `/mnt/` spelling does not silently keep every
-        // child's lock alive).
-        LOCK_TABLE
-            .lock()
-            .retain(|entry| !crate::fs::pathutil::path_in_subtree(&entry.path, mount_path));
-        // Whoever waited for one of those locks tries again, and finds the
-        // file gone or free. After the table lock: the two are never held
-        // together.
-        wake_all_flock_waiters();
-
-        // And the state kept about its files outside it: no identity on this
-        // filesystem can match again (`super::perfile`). After the lock above
-        // is released, so that it orders against nothing.
-        super::perfile::filesystem_unmounted(fs_id);
-
+        // Synced once more, then its device number, its locks and the state
+        // kept about its files let go (`finish_unmount`). The sync above was
+        // the one that could still be refused; this one catches what was
+        // written in between.
+        finish_unmount(mp);
         Ok(())
+    }
+
+    /// Whether a filesystem is mounted at `path` exactly (a host path): a
+    /// mount's root, which `umount2`, a remount and a change of propagation
+    /// must name.
+    #[must_use]
+    pub fn is_mount_point(path: impl AsRef<Path>) -> bool {
+        let path = normalize_mount_path(path.as_ref());
+        VFS.lock().mounts.iter().any(|mp| mp.path == path)
+    }
+
+    /// Detach the mount at `mount_path` and every mount beneath it --
+    /// Linux's `umount2(MNT_DETACH)`, a lazy unmount. They leave the table at
+    /// once, so no lookup reaches them; the files held open on them go on
+    /// working, and each filesystem is finished ([`finish_unmount`]) when the
+    /// last of them is released -- at once if none is.
+    ///
+    /// # Errors
+    ///
+    /// `PermissionDenied` for `/`; `NotFound` if nothing is mounted at
+    /// `mount_path`.
+    pub fn unmount_detach(mount_path: impl AsRef<Path>) -> KernelResult<()> {
+        let mount_path = &normalize_mount_path(mount_path.as_ref());
+        if mount_path.as_path() == Path::new("/") {
+            return Err(KernelError::PermissionDenied);
+        }
+        let now: Vec<MountPoint> = {
+            let mut vfs = VFS.lock();
+            if !vfs.mounts.iter().any(|mp| mp.path == *mount_path) {
+                return Err(KernelError::NotFound);
+            }
+            let (gone, kept): (Vec<MountPoint>, Vec<MountPoint>) = core::mem::take(&mut vfs.mounts)
+                .into_iter()
+                .partition(|mp| crate::fs::pathutil::path_in_subtree(&mp.path, mount_path));
+            vfs.mounts = kept;
+            let (now, later): (Vec<MountPoint>, Vec<MountPoint>) =
+                gone.into_iter().partition(|mp| mp.objects == 0);
+            vfs.detached.extend(later);
+            now
+        };
+        VFS_DCACHE.lock().invalidate_all();
+        for mp in now {
+            finish_unmount(mp);
+        }
+        Ok(())
+    }
+
+    /// `umount2(MNT_EXPIRE)`: the first call marks the mount at `mount_path`
+    /// expired and answers `WouldBlock` (Linux's `EAGAIN`); a later one finds
+    /// it still marked -- no file held through it since -- and unmounts it as
+    /// [`Self::unmount`] does, `DeviceBusy` if something is held now.
+    ///
+    /// # Errors
+    ///
+    /// `WouldBlock` for the first; `NotFound` if nothing is mounted at
+    /// `mount_path`; [`Self::unmount`]'s.
+    pub fn unmount_expire(mount_path: impl AsRef<Path>) -> KernelResult<()> {
+        let mount_path = normalize_mount_path(mount_path.as_ref());
+        let marked = {
+            let mut vfs = VFS.lock();
+            let mp = vfs
+                .mounts
+                .iter_mut()
+                .find(|mp| mp.path == mount_path)
+                .ok_or(KernelError::NotFound)?;
+            core::mem::replace(&mut mp.expire_mark, true)
+        };
+        if marked {
+            Self::unmount(&mount_path)
+        } else {
+            Err(KernelError::WouldBlock)
+        }
     }
 
     /// Make the filesystem mounted at `new_root` the root, and put the one
@@ -3027,6 +3144,13 @@ impl Vfs {
     /// to resolve a path once and reuse the result.
     pub fn resolve_path<P: AsRef<Path>>(path: P) -> KernelResult<PathBuf> {
         Self::resolve_follow(path.as_ref())
+    }
+
+    /// [`Self::resolve_path`] without following the final component: the
+    /// host path of the entry itself, a link included -- what
+    /// `umount2(UMOUNT_NOFOLLOW)` names.
+    pub fn resolve_path_no_follow<P: AsRef<Path>>(path: P) -> KernelResult<PathBuf> {
+        Self::resolve_no_follow(path.as_ref())
     }
 
     /// The fixed prologue every path resolution pays, before the dcache is
@@ -4609,6 +4733,7 @@ impl Vfs {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
             mp.objects = mp.objects.saturating_add(1);
+            mp.expire_mark = false;
             (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
         };
         let pinned = {
@@ -4653,6 +4778,7 @@ impl Vfs {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
             mp.objects = mp.objects.saturating_add(1);
+            mp.expire_mark = false;
             (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
         };
         let pinned = {
@@ -4711,6 +4837,7 @@ impl Vfs {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, dir)?;
             mp.objects = mp.objects.saturating_add(1);
+            mp.expire_mark = false;
             (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
         };
         let creator = creator_ids();
@@ -5234,9 +5361,7 @@ impl Vfs {
     pub fn object_statvfs(obj: &FileObject) -> KernelResult<FsInfo> {
         let read_only = {
             let vfs = VFS.lock();
-            vfs.mounts
-                .iter()
-                .find(|m| m.fs_id == obj.fs_id)
+            held_mount(&vfs, obj.fs_id)
                 .map(|m| m.options.read_only)
                 .ok_or(KernelError::NotFound)?
         };

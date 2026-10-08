@@ -3684,6 +3684,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_uts_namespaces(),
     );
+    // mount(2) and umount2(2) for root: new mounts, remounts, propagation,
+    // busy, lazy and expiring unmounts (fs::Vfs, fs::new_filesystem).
+    selftest::dispatch_debug(
+        "Linux mount and umount2 (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_mount(),
+    );
     // A program asks the user for a capability and the handler -- the
     // desktop's security dialog -- answers: told on its channel, an approval
     // granting in the same step (crate::cap::request, design-decisions 1548).

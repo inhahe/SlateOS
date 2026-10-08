@@ -14398,29 +14398,10 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let result = match fstype {
-        "ext4" => crate::fs::ext4::mount(source, target),
-        "tmpfs" | "memfs" | "ramfs" => crate::fs::memfs::mount(target),
-        "iso9660" | "iso" | "cd9660" => crate::fs::iso9660::mount(source, target),
-        // Both are read-only drivers, so a caller that passes MS_RDONLY gets
-        // what it asked for and one that does not gets it anyway; the mount
-        // succeeds either way and writes fail per-operation.
-        "ntfs" | "ntfs3" => crate::fs::ntfs::mount(source, target),
-        "btrfs" => crate::fs::btrfs::mount(source, target),
-        "f2fs" => crate::fs::f2fs::mount(source, target),
-        "zfs" => crate::fs::zfs::mount(source, target),
-        "devfs" | "dev" => crate::fs::devfs::mount(target),
-        "proc" | "procfs" => crate::fs::procfs::mount(target),
-        "sysfs" | "sys" => crate::fs::sysfs::mount(target),
-        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => {
-            match crate::fs::fat::FatFs::mount(source) {
-                Ok(fs) => crate::fs::Vfs::mount(target, alloc::boxed::Box::new(fs)),
-                Err(e) => Err(e),
-            }
-        }
-        // Unknown filesystem type.
-        _ => Err(KernelError::NotSupported),
-    };
+    // The types and their drivers are `fs::new_filesystem`'s, shared with
+    // the Linux `mount(2)`; an unknown type is `NotSupported`.
+    let result =
+        crate::fs::new_filesystem(fstype, source).and_then(|fs| crate::fs::Vfs::mount(target, fs));
 
     match result {
         Ok(()) => SyscallResult::ok(0),

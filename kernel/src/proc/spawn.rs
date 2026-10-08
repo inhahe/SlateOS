@@ -24339,6 +24339,113 @@ pub fn self_test_linux_uts_namespaces() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of `mount(2)` and `umount2(2)` through the Linux ABI:
+/// [`elf::build_linux_mount_test_elf`] (`build/mounttest.c`), run as root in a
+/// directory of its own under `/tmp`. A tmpfs mounted there, listed in
+/// `/proc/self/mounts`, remounted read-only and back; propagation changes on a
+/// mount and refused elsewhere; `EBUSY` while a file is open, then unmounted;
+/// a lazy unmount that leaves an open file working; `MNT_EXPIRE`; the
+/// refusals; `EPERM` without root.
+pub fn self_test_linux_mount() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux mount and umount2 (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_mount_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-mount"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes and opens files: a wildcard File capability, as every ring-3
+    // fixture that does is given. Its right to mount is root's.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mount",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let mounts_before = crate::fs::Vfs::mounts().len();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: mount and umount2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x33) => "a process that gave up root could mount or unmount",
+            Some(0x40) => "its directory under /tmp could not be made",
+            Some(0x41..=0x43) => "a tmpfs did not mount, hold a file, or show in /proc/self/mounts",
+            Some(0x44..=0x47) => {
+                "a remount read-only did not refuse a file, or back did not take one"
+            }
+            Some(0x48..=0x4b) => {
+                "MS_PRIVATE on a mount was refused, or a propagation change or remount of a \
+                 directory that is no mount was taken"
+            }
+            Some(0x4c..=0x4f) => {
+                "umount2 did not refuse while a file was open (EBUSY), or did not unmount after"
+            }
+            Some(0x50..=0x54) => {
+                "a lazy unmount did not take the mount away at once, or broke the open file"
+            }
+            Some(0x55..=0x58) => "MNT_EXPIRE did not answer EAGAIN, then unmount",
+            Some(0x59..=0x5d) => "ENODEV, EINVAL or ENOENT was not answered where Linux does",
+            Some(0x5e..=0x61) => "the unprivileged child's test did not run or end 0x2B",
+            Some(0x62) => "its directory could not be removed: something stayed mounted on it",
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Nothing it mounted is left behind.
+    let mounts_after = crate::fs::Vfs::mounts().len();
+    if mounts_after != mounts_before {
+        serial_println!(
+            "[spawn]   FAIL: mount and umount2 (ring 3) -- {} mounts before, {} after",
+            mounts_before,
+            mounts_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux mount and umount2 (ring 3: a tmpfs mounted and listed, remounted \
+         read-only and back, propagation, EBUSY then unmounted, a lazy unmount, MNT_EXPIRE, the \
+         refusals, EPERM without root): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of named pipes through the Linux ABI:
 /// [`elf::build_linux_fifo_test_elf`] (`build/fifotest.c`). `mknod(S_IFIFO)`
 /// makes one that `stat` and `getdents` call a FIFO; nonblocking opens (a

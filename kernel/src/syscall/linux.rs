@@ -30597,177 +30597,218 @@ fn enter_namespace(pid: u64, kind: crate::nsfs::NsKind, id: u64) -> SyscallResul
     }
 }
 
-/// `mount(source, target, fstype, mountflags, data)`.
-fn sys_mount(args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE5(mount) — verbatim):
-    //
-    //   SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
-    //                   char __user *, type, unsigned long, flags, void __user *, data)
-    //   {
-    //       int ret;
-    //       char *kernel_type;
-    //       char *kernel_dev;
-    //       void *options;
-    //
-    //       kernel_type = copy_mount_string(type);              // (1) EFAULT on type
-    //       ret = PTR_ERR(kernel_type);
-    //       if (IS_ERR(kernel_type))
-    //           goto out_type;
-    //
-    //       kernel_dev = copy_mount_string(dev_name);           // (2) EFAULT on dev_name
-    //       ret = PTR_ERR(kernel_dev);
-    //       if (IS_ERR(kernel_dev))
-    //           goto out_dev;
-    //
-    //       options = copy_mount_options(data);                 // (3) EFAULT on data
-    //       ret = PTR_ERR(options);
-    //       if (IS_ERR(options))
-    //           goto out_data;
-    //
-    //       ret = do_mount(kernel_dev, dir_name, kernel_type,   // (4)+(5) inside do_mount
-    //                      flags, options);
-    //       ...
-    //   }
-    //
-    //   // fs/namespace.c::copy_mount_string:
-    //   //   return data ? strndup_user(data, PATH_MAX) : NULL;
-    //   //   (NULL input is silently accepted as "no string"; bad
-    //   //    pointer → -EFAULT via strndup_user.)
-    //
-    //   // do_mount → path_mount → may_mount → EPERM (4),
-    //   //   then user_path_at_empty(dir_name) → EFAULT/ENOENT (5).
-    //
-    // Pre-batch divergences:
-    //
-    //   * mount(NULL,NULL,NULL,0,NULL)
-    //       Linux: -EPERM   (gates 1-3 accept NULL via copy_mount_string's
-    //                        NULL-passthrough; do_mount's may_mount fires)
-    //       Pre:   -EFAULT  (we EFAULTed dir_name == NULL upfront)
-    //
-    //   * mount(valid,NULL,valid,0,NULL)
-    //       Linux: -EPERM
-    //       Pre:   -EFAULT  (same dir_name NULL gate)
-    //
-    //   * mount(valid,valid,NULL,0,NULL)
-    //       Linux: -EPERM   (NULL type accepted, NULL data accepted)
-    //       Pre:   -EPERM   (same answer — pre-batch matched here)
-    //
-    // Container runtimes (runc, podman, bwrap) probe mount support by
-    // attempting `mount(NULL, "/", NULL, MS_BIND, NULL)` inside their
-    // sandbox.  Linux's -EPERM is the documented "you lack CAP_SYS_ADMIN
-    // in this namespace" answer; the runtime uses it to decide to drop
-    // the mount or re-exec with elevated privileges.  -EFAULT instead
-    // makes the runtime retry with alternate path arguments that can
-    // never satisfy may_mount(), looping on a phantom buffer-validity
-    // error.
-    //
-    // Architectural directive: we have no per-namespace user-ns model
-    // and no caller can hold CAP_SYS_ADMIN.  may_mount() always trips
-    // for our kernel context.  Validate type (arg2), dev_name (arg0),
-    // data (arg4) per the copy_mount_string / copy_mount_options
-    // pre-do_mount block; defer the dir_name check (arg1) entirely
-    // because Linux defers it behind may_mount and our may_mount
-    // always fails.  NULL pointers for any of type/dev/data are
-    // silently accepted (matching copy_mount_string's NULL-passthrough).
-    //
-    // Gate 1: copy_mount_string(type) — arg2.
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // Gate 2: copy_mount_string(dev_name) — arg0.
-    if args.arg0 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // Gate 3: copy_mount_options(data) — arg4.
-    if args.arg4 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // Gate 4: do_mount → may_mount() — always -EPERM in our kernel
-    // context (no CAP_SYS_ADMIN holder).  Gate 5 (dir_name path lookup)
-    // is unreachable.
-    linux_err(errno::EPERM)
+/// The `mount(2)` flags this kernel reads (`<linux/mount.h>`).
+mod mount_flags {
+    pub const MS_RDONLY: u64 = 1;
+    pub const MS_NOSUID: u64 = 2;
+    pub const MS_NOEXEC: u64 = 8;
+    pub const MS_REMOUNT: u64 = 32;
+    pub const MS_NOATIME: u64 = 1024;
+    pub const MS_BIND: u64 = 4096;
+    pub const MS_MOVE: u64 = 8192;
+    pub const MS_REC: u64 = 16384;
+    pub const MS_SILENT: u64 = 32768;
+    pub const MS_UNBINDABLE: u64 = 1 << 17;
+    pub const MS_PRIVATE: u64 = 1 << 18;
+    pub const MS_SLAVE: u64 = 1 << 19;
+    pub const MS_SHARED: u64 = 1 << 20;
+    pub const MS_NOUSER: u64 = 1 << 31;
+    /// The old magic number some callers still put in the top half.
+    pub const MS_MGC_MSK: u64 = 0xffff_0000;
+    pub const MS_MGC_VAL: u64 = 0xc0ed_0000;
+    /// The propagation types: exactly one of them names a change of type.
+    pub const PROPAGATION: u64 = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
 }
 
-/// `umount2(target, flags)`.
+/// Whether the caller may mount and unmount -- Linux's `may_mount`,
+/// `CAP_SYS_ADMIN`; here root's authority, an effective uid of 0, as the
+/// native `SYS_FS_MOUNT` asks. A kernel task is refused: it mounts through
+/// `fs::Vfs`, never through this table, and the boot's fidelity probes call
+/// these handlers from one to see an unprivileged caller's answers.
+fn caller_may_mount() -> bool {
+    caller_pid().is_some_and(|pid| pcb::get_credentials(pid).is_some_and(|c| c.uid == 0))
+}
+
+/// A `mount(2)` string argument as `copy_mount_string` copies it: `None`
+/// for NULL, the bytes otherwise; `EFAULT` for one that cannot be read.
+fn optional_mount_string(ptr: u64) -> Result<Option<alloc::vec::Vec<u8>>, SyscallResult> {
+    if ptr == 0 {
+        return Ok(None);
+    }
+    read_user_cstr(ptr, 4095).map(Some).map_err(linux_err)
+}
+
+/// The mount point a `mount(2)` or `umount2(2)` names: the caller's path,
+/// through its container root and its symbolic links (the last one too
+/// when `follow`), as a host path that exists. `EFAULT`, `ENOENT`,
+/// `ENOTDIR`, `ELOOP` and the rest as the lookup answers.
+fn mount_point(path_ptr: u64, follow: bool) -> Result<crate::fs::path::PathBuf, SyscallResult> {
+    let guest = resolve_at_path(AT_FDCWD, path_ptr)?;
+    let host = if follow {
+        crate::fs::Vfs::resolve_path(&guest)
+    } else {
+        crate::fs::Vfs::resolve_path_no_follow(&guest)
+    };
+    let host = host.map_err(|e| linux_err(linux_errno_for(e)))?;
+    crate::fs::Vfs::stat_resolved(&host).map_err(|e| linux_err(linux_errno_for(e)))?;
+    Ok(host)
+}
+
+/// `mount(source, target, fstype, flags, data)` -- Linux's `mount(2)`, in
+/// 6.6's order: the strings are copied (`EFAULT`); the mount point is looked
+/// up, following links (`EFAULT`, `ENOENT`, `ENOTDIR`...); `MS_NOUSER` is
+/// `EINVAL`; then the caller must have root's authority (`EPERM`,
+/// [`caller_may_mount`]); then by the flags:
 ///
-/// Linux ABI: `int umount2(const char *target, int flags)`.
+/// | flags | what happens |
+/// |---|---|
+/// | `MS_REMOUNT` (with `MS_BIND` or without) | the mount at the target takes `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC`, `MS_NOATIME` as given; `EINVAL` if the target is not a mount's root |
+/// | `MS_BIND`, `MS_MOVE` | `EINVAL`: not built yet (known-issues A-MOUNT-HAS-NO-BIND-OR-MOVE) |
+/// | `MS_PRIVATE`, `MS_SLAVE`, `MS_UNBINDABLE` (with `MS_REC` or not) | nothing to change -- no mount here propagates to another, so each already is what these ask; `EINVAL` if the target is not a mount's root or more than one type is named |
+/// | `MS_SHARED` | `EINVAL`: mounts here never propagate, and saying one does would be false |
+/// | none of these | a new mount of `fstype` (`fs::new_filesystem`) over the device `source`: `EINVAL` with no type, `ENODEV` for a type this kernel has no driver for, `ENOTDIR` for a target that is not a directory, `EBUSY` where something is mounted already |
 ///
-/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE2(umount), v6.x):
+/// `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC` and `MS_NOATIME` are the mount's
+/// options; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken
+/// and change nothing, and the `data` options are not read
+/// (known-issues A-MOUNT-HAS-NO-BIND-OR-MOVE).
 ///
-///   SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
-///   {
-///       struct path path;
-///       struct mount *mnt;
-///       int retval;
-///       int lookup_flags = LOOKUP_MOUNTPOINT;
-///       bool user_request = !(current->flags & PF_KTHREAD);
+/// Until 2026-10-08 this answered `EPERM` to every caller, root included,
+/// and checked the privilege before looking the mount point up, as kernels
+/// before 5.x did: Linux 6.6 answers `EFAULT` for a NULL target and `ENOENT`
+/// for a missing one first (checked against it, unprivileged).
+fn sys_mount(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::Vfs;
+    use mount_flags::{
+        MS_BIND, MS_MGC_MSK, MS_MGC_VAL, MS_MOVE, MS_NOATIME, MS_NOEXEC, MS_NOSUID, MS_NOUSER,
+        MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, MS_SHARED, MS_SILENT, MS_SLAVE, MS_UNBINDABLE,
+        PROPAGATION,
+    };
+    // (1)-(3): copy_mount_string(type), copy_mount_string(dev_name),
+    // copy_mount_options(data). The options are not read; a pointer to
+    // them must still be readable.
+    let fstype = match optional_mount_string(args.arg2) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let source = match optional_mount_string(args.arg0) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    if args.arg4 != 0
+        && let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1)
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    // (4): do_mount's user_path_at(dir_name, LOOKUP_FOLLOW).
+    let target = match mount_point(args.arg1, true) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    // (5): path_mount -- the magic number dropped, MS_NOUSER refused, then
+    // may_mount.
+    let mut flags = args.arg3;
+    if flags & MS_MGC_MSK == MS_MGC_VAL {
+        flags &= !MS_MGC_MSK;
+    }
+    if flags & MS_NOUSER != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    let options = crate::fs::vfs::MountOptions {
+        read_only: flags & MS_RDONLY != 0,
+        noatime: flags & MS_NOATIME != 0,
+        noexec: flags & MS_NOEXEC != 0,
+        nosuid: flags & MS_NOSUID != 0,
+    };
+    let done = if flags & MS_REMOUNT != 0 {
+        if !Vfs::is_mount_point(&target) {
+            return linux_err(errno::EINVAL);
+        }
+        Vfs::remount(&target, options)
+    } else if flags & (MS_BIND | MS_MOVE) != 0 {
+        return linux_err(errno::EINVAL);
+    } else if flags & PROPAGATION != 0 {
+        let kind = flags & PROPAGATION;
+        if kind & kind.wrapping_sub(1) != 0 || flags & !(PROPAGATION | MS_REC | MS_SILENT) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if !Vfs::is_mount_point(&target) {
+            return linux_err(errno::EINVAL);
+        }
+        if kind == MS_SHARED {
+            return linux_err(errno::EINVAL);
+        }
+        // MS_PRIVATE, MS_SLAVE (of nothing) and MS_UNBINDABLE: what every
+        // mount here already is.
+        debug_assert!(matches!(kind, MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE));
+        Ok(())
+    } else {
+        // do_new_mount.
+        let Some(fstype) = fstype else {
+            return linux_err(errno::EINVAL);
+        };
+        let Ok(fstype) = core::str::from_utf8(&fstype) else {
+            return linux_err(errno::ENODEV);
+        };
+        let source = source.unwrap_or_default();
+        let Ok(source) = core::str::from_utf8(&source) else {
+            // No device has a name that is not UTF-8.
+            return linux_err(errno::ENOENT);
+        };
+        match Vfs::stat_resolved(&target) {
+            Ok(entry) if entry.entry_type != crate::fs::EntryType::Directory => {
+                return linux_err(errno::ENOTDIR);
+            }
+            _ => {}
+        }
+        match crate::fs::new_filesystem(fstype, source) {
+            Ok(fs) => Vfs::mount_with_options(&target, fs, options),
+            Err(KernelError::NotSupported) => return linux_err(errno::ENODEV),
+            Err(e) => Err(e),
+        }
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::AlreadyExists) => linux_err(errno::EBUSY),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `umount2(target, flags)` -- Linux's, in 6.6's order (`ksys_umount`,
+/// `path_umount`): flags outside `MNT_FORCE | MNT_DETACH | MNT_EXPIRE |
+/// UMOUNT_NOFOLLOW` are `EINVAL`; the target is looked up, following its
+/// last link unless `UMOUNT_NOFOLLOW` (`EFAULT`, `ENOENT`...); the caller
+/// must have root's authority (`EPERM`, [`caller_may_mount`]); the target
+/// must be a mount's root (`EINVAL`). Then:
 ///
-///       if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE |
-///                     UMOUNT_NOFOLLOW))
-///           return -EINVAL;                  // (1) flag mask
+/// - `MNT_DETACH`: a lazy unmount -- the mount and every mount beneath it
+///   leave the table at once, and each filesystem goes when the last file
+///   held on it does (`fs::Vfs::unmount_detach`).
+/// - `MNT_EXPIRE` (`EINVAL` with `MNT_FORCE` or `MNT_DETACH`): the first
+///   call marks the mount and answers `EAGAIN`, a later one with no file held
+///   through it since unmounts it (`fs::Vfs::unmount_expire`).
+/// - otherwise (`MNT_FORCE` too, which aborts nothing here): unmounted, or
+///   `EBUSY` while a file is held on it or a mount sits beneath it.
 ///
-///       if (!may_mount())
-///           return -EPERM;                   // (2) CAP_SYS_ADMIN
+/// `/` is `EBUSY`. (Linux remounts a process's root read-only and answers 0
+/// there; making the system's root read-only on request was judged worse
+/// than refusing.)
 ///
-///       if (!user_request)
-///           lookup_flags |= LOOKUP_NO_EVAL;
-///       if (!(flags & UMOUNT_NOFOLLOW))
-///           lookup_flags |= LOOKUP_FOLLOW;
-///       retval = user_path_at(AT_FDCWD, name, lookup_flags, &path);
-///       if (retval)                          // (3) EFAULT / ENOENT
-///           goto out;
-///       ...
-///   }
-///
-///   static inline bool may_mount(void) {
-///       return ns_capable(current->nsproxy->mnt_ns->user_ns,
-///                         CAP_SYS_ADMIN);
-///   }
-///
-/// SYSCALL_DEFINE2(umount, ..., int, flags) narrows the second
-/// parameter to (int) on entry; the mask check runs at 32-bit width.
-/// Batches 308-317 fixed the truncation issue.  This batch (463)
-/// fixes the *gate order* between the flag mask and the name pointer:
-///
-/// Pre-batch we ran:
-///   * flags & !VALID_FLAGS                  -> EINVAL  (matches Linux)
-///   * args.arg0 == 0                        -> EFAULT  (WRONG — Linux
-///     runs gate 2
-///     first)
-///   * validate_user_read(args.arg0, 1)      -> EFAULT  (WRONG)
-///   * then EPERM.
-///
-/// Concrete divergences from a userspace probe (with flags valid):
-///   * umount2(NULL, 0)        Linux: EPERM.  Pre-batch: EFAULT.
-///   * umount2(0xDEAD, 0)      Linux: EPERM.  Pre-batch: EFAULT.
-///   * umount2(NULL, 0x10)     Linux: EINVAL. Pre-batch: EINVAL.  ✓
-///
-/// Why this matters: the same CAP-probe pattern as batches 343/462.
-/// Unprivileged container-runtime helpers and sandbox teardown code
-/// (runc/podman/bwrap) probe whether they hold CAP_SYS_ADMIN by
-/// attempting a benign cleanup like `umount2(NULL, MNT_DETACH)` and
-/// inspecting errno: EPERM → "we are unprivileged, fall back to a
-/// privileged helper"; EFAULT → "the caller passed garbage, retry
-/// with a different pointer".  Pre-batch we lied to that probe by
-/// reporting EFAULT and sending the runtime down a futile retry
-/// path.  Translator-only fix: drop the upfront pointer-shape
-/// validation and rely on gate 2 (may_mount) returning EPERM
-/// unconditionally in our kernel context (no CAP_SYS_ADMIN holder),
-/// which makes gate 3 (user_path_at on name) unreachable for any
-/// caller — exactly matching Linux's observable behaviour for the
-/// unprivileged case.
+/// Until 2026-10-08 this answered `EPERM` to every caller after the flags,
+/// before looking the target up, as kernels before 5.9 did; 6.6 answers
+/// `EFAULT` for a NULL target and `ENOENT` for a missing one first (checked
+/// against it, unprivileged).
 fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
-    // MNT_FORCE=1, MNT_DETACH=2, MNT_EXPIRE=4, UMOUNT_NOFOLLOW=8.
-    const VALID_FLAGS: u32 = 1 | 2 | 4 | 8;
-    // Gate 1: flag mask at int (32-bit) width — SYSCALL_DEFINE2's
-    // `int flags` narrows the second arg on entry.  High-half garbage
-    // from the AMD64 syscall ABI must be stripped (batches 308-317).
+    const MNT_FORCE: u32 = 1;
+    const MNT_DETACH: u32 = 2;
+    const MNT_EXPIRE: u32 = 4;
+    const UMOUNT_NOFOLLOW: u32 = 8;
+    const VALID_FLAGS: u32 = MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW;
+    // `int flags`: the low 32 bits only (high-half register garbage is not
+    // the caller's).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg1 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -30775,11 +30816,34 @@ fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Gate 2: may_mount() / CAP_SYS_ADMIN.  Our kernel context has no
-    // CAP_SYS_ADMIN holder so this always returns EPERM, making
-    // gate 3 (user_path_at on name) unreachable.  No pointer-shape
-    // validation here — Linux does none until gate 3.
-    linux_err(errno::EPERM)
+    let target = match mount_point(args.arg0, flags & UMOUNT_NOFOLLOW == 0) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    if !caller_may_mount() {
+        return linux_err(errno::EPERM);
+    }
+    if !crate::fs::Vfs::is_mount_point(&target) {
+        return linux_err(errno::EINVAL);
+    }
+    if target.as_path() == crate::fs::path::Path::new("/") {
+        return linux_err(errno::EBUSY);
+    }
+    let done = if flags & MNT_EXPIRE != 0 {
+        if flags & (MNT_FORCE | MNT_DETACH) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        crate::fs::Vfs::unmount_expire(&target)
+    } else if flags & MNT_DETACH != 0 {
+        crate::fs::Vfs::unmount_detach(&target)
+    } else {
+        crate::fs::Vfs::unmount(&target)
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `pivot_root(new_root, put_old)`.
@@ -85361,281 +85425,119 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!("[syscall/linux]   setns int nstype truncation: OK");
 
-            // Batch 462: Linux gate order — copy_mount_string accepts NULL
-            // for type/dev_name/data, and do_mount's may_mount check fires
-            // before dir_name is resolved.  Pre-batch we EFAULTed dir_name
-            // (arg1) == NULL upfront; Linux defers that to gate 5 and
-            // surfaces EPERM at gate 4 first.  All four mount probes below
-            // must now surface EPERM in kernel context (may_mount unprivileged).
-            // (a) mount(NULL,NULL,NULL,0,NULL) — was EFAULT pre-batch.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mount(all NULL) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            // (b) mount(dev=NULL, target, type=NULL, flags=0, data=NULL)
-            //     — matches pre-batch answer, regression-tests the reorder.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x1000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mount(target only) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            // (c) mount(dev=valid, target=NULL, type=valid, flags=0,
-            //          data=valid) — was EFAULT pre-batch (dir_name NULL gate).
-            //     Now: copy_mount_string for type/dev/data passes (they're
-            //     all valid), do_mount runs, may_mount fires → EPERM.
+            // mount(2) and umount2(2) in Linux 6.6's order, from a kernel task,
+            // which is never granted root's authority through this table: the
+            // target is looked up before the privilege is asked about, so a
+            // NULL or unreadable target is EFAULT and an empty one ENOENT --
+            // 6.6's answers to an unprivileged caller, checked against it.
+            // A bad umount2 flag is EINVAL before anything, at int width: the
+            // high half of the register is not the caller's. Until 2026-10-08
+            // all but the flag probes answered EPERM, the order of kernels
+            // before 5.9.
             let stack_buf = [0u8; 16];
             let stack_ptr = stack_buf.as_ptr() as u64;
-            let a = SyscallArgs {
-                arg0: stack_ptr,
-                arg1: 0,
-                arg2: stack_ptr,
-                arg3: 0,
-                arg4: stack_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: mount(dir_name=NULL, others valid) not EPERM"
-                );
-                return Err(KernelError::InternalError);
+            let probes = [
+                ("mount(all NULL)", nr::MOUNT, [0, 0, 0, 0, 0], errno::EFAULT),
+                (
+                    "mount(target unreadable)",
+                    nr::MOUNT,
+                    [0, 0x1000, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "mount(target NULL, the rest readable)",
+                    nr::MOUNT,
+                    [stack_ptr, 0, stack_ptr, 0, stack_ptr],
+                    errno::EFAULT,
+                ),
+                (
+                    "mount(target empty)",
+                    nr::MOUNT,
+                    [stack_ptr, stack_ptr, stack_ptr, 0, stack_ptr],
+                    errno::ENOENT,
+                ),
+                (
+                    "umount2(bad flag)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x8000_0000, 0, 0, 0],
+                    errno::EINVAL,
+                ),
+                (
+                    "umount2(unreadable, 0)",
+                    nr::UMOUNT2,
+                    [0x1000, 0, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half|MNT_FORCE)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_0001, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half|every flag)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_000F, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half only)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_0000, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(high half|bad flag)",
+                    nr::UMOUNT2,
+                    [0x1000, 0x1_0000_0010, 0, 0, 0],
+                    errno::EINVAL,
+                ),
+                (
+                    "umount2(NULL, 0)",
+                    nr::UMOUNT2,
+                    [0, 0, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(0xDEADBEEF, 0)",
+                    nr::UMOUNT2,
+                    [0xDEAD_BEEF, 0, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(NULL, MNT_DETACH)",
+                    nr::UMOUNT2,
+                    [0, 2, 0, 0, 0],
+                    errno::EFAULT,
+                ),
+                (
+                    "umount2(NULL, 0x10)",
+                    nr::UMOUNT2,
+                    [0, 0x10, 0, 0, 0],
+                    errno::EINVAL,
+                ),
+            ];
+            for (what, call, args, want) in probes {
+                let a = SyscallArgs {
+                    arg0: args[0],
+                    arg1: args[1],
+                    arg2: args[2],
+                    arg3: args[3],
+                    arg4: args[4],
+                    arg5: 0,
+                };
+                let got = dispatch_linux(call, &a).value;
+                if got != linux_err(want).value {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: {} -> {} (expected -{})",
+                        what,
+                        got,
+                        want
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
-            // (d) mount(everything valid) — terminal EPERM.
-            let a = SyscallArgs {
-                arg0: stack_ptr,
-                arg1: stack_ptr,
-                arg2: stack_ptr,
-                arg3: 0,
-                arg4: stack_ptr,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::MOUNT, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: mount(all valid) not EPERM");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   mount Linux gate ladder (EPERM regardless of dir_name): OK"
-            );
-            // umount2(target, bad flag) -> EINVAL.
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x8000_0000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::UMOUNT2, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: umount2(bad flag) not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // umount2(target, 0) -> EPERM.
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::UMOUNT2, &a).value != -i64::from(errno::EPERM) {
-                serial_println!("[syscall/linux]   FAIL: umount2 not EPERM");
-                return Err(KernelError::InternalError);
-            }
-
-            // Batch 317: umount2 int truncation — high-half register
-            // garbage must be stripped before the flags mask check.
-            //
-            // Linux signature: `int umount2(const char *target, int flags)`.
-            // flags is C int → low 32 bits only.  Pre-batch we held flags
-            // as u64 and ran the mask check at 64-bit width, so high-half
-            // garbage returned spurious EINVAL where Linux returns EPERM
-            // (no CAP_SYS_ADMIN in kernel context after path validation).
-            //
-            // (a) umount2(0x1000, 0x1_0000_0001) → EPERM
-            //     (high|MNT_FORCE; truncates to 1, mask passes, path
-            //     validated, EPERM terminal).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_0001,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high|MNT_FORCE) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            // (b) umount2(0x1000, 0x1_0000_000F) → EPERM
-            //     (high|all-valid 0xF; truncates to 0xF, mask passes,
-            //     EPERM).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_000F,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high|all-valid) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            // (c) umount2(0x1000, 0x1_0000_0000) → EPERM
-            //     (high-half only, low half zero; truncates to 0, mask
-            //     passes, EPERM).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_0000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high-half-zero) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            // (d) umount2(0x1000, 0x1_0000_0010) → EINVAL
-            //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
-            //     outside MNT_FORCE|MNT_DETACH|MNT_EXPIRE|UMOUNT_NOFOLLOW;
-            //     verifies mask gate still rejects invalid bits after the
-            //     high half is stripped).
-            let a = SyscallArgs {
-                arg0: 0x1000,
-                arg1: 0x1_0000_0010,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(high|bad-low) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-
-            serial_println!("[syscall/linux]   umount2 int truncation (high-half ignored): OK");
-
-            // Batch 463: umount2 gate-order EPERM-first when target pointer
-            // is invalid.  Linux's SYSCALL_DEFINE2(umount) runs the flag
-            // mask, then may_mount() (CAP_SYS_ADMIN), then user_path_at on
-            // the name pointer.  Pre-batch we ran an upfront EFAULT gate on
-            // a NULL target and on a target that failed validate_user_read,
-            // so unprivileged probes saw EFAULT where Linux returns EPERM.
-            // Same CAP-probe pattern as batches 343 (pivot_root/swapoff)
-            // and 462 (mount).
-            //
-            // (a) umount2(NULL, 0) — pre-batch EFAULT; Linux EPERM.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(NULL,0) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (b) umount2(0xDEAD_BEEF, 0) — pre-batch EFAULT (kernel-side
-            //     validate_user_read in user context would reject this
-            //     bogus address; Linux defers all pointer touches until
-            //     after may_mount, so an unprivileged caller sees EPERM).
-            let a = SyscallArgs {
-                arg0: 0xDEAD_BEEF,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(0xDEADBEEF,0) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (c) umount2(NULL, MNT_DETACH) — runc/podman CAP-probe shape.
-            //     Pre-batch EFAULT; Linux EPERM.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 2,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(NULL,MNT_DETACH) -> {} (expected -EPERM)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            // (d) umount2(NULL, 0x10) — bad-flag wins over EPERM (gate 1
-            //     runs before gate 2; this regression-checks that the mask
-            //     check is still first after the EFAULT removal).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x10,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let v = dispatch_linux(nr::UMOUNT2, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: umount2(NULL,0x10) -> {} (expected -EINVAL)",
-                    v
-                );
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   umount2 Linux gate ladder (EPERM regardless of target): OK"
-            );
+            serial_println!("[syscall/linux]   mount and umount2 gate order (Linux 6.6): OK");
 
             // Batch 343: pivot_root / swapoff gate-order EPERM-first.
             // Linux's pivot_root opens with may_mount() (CAP_SYS_ADMIN)

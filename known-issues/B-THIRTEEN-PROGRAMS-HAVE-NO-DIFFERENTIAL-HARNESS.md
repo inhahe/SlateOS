@@ -1,6 +1,9 @@
 ## B-THIRTEEN-PROGRAMS-HAVE-NO-DIFFERENTIAL-HARNESS (lane B, 2026-10-07)
 
-**Status:** OPEN (lane B).
+**Status:** OPEN (lane B), for `kill` alone: every other program here with
+an upstream has a harness now (see Progress), and `fetch` has none to be
+held to. `kill`'s waits on open question B-Q22, which decides whether it is
+procps' or util-linux's.
 
 **In short:** almost every program in `userspace/coreutils` is checked against
 its upstream by a `scripts/*-diff.sh` harness, which runs both on the same
@@ -18,7 +21,6 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `sleep` | GNU coreutils 9.4 (`DIFF_GNU_SOURCE=9.4`, as `stat-diff.sh` builds it) |
 | `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
 | `fetch` | none: a SlateOS program, so its tests are its own |
 
@@ -97,3 +99,12 @@ the descriptor guard (`TD-COREUTILS-AN-UNWRITABLE-STDERR-ABORTS-THE-PROCESS`).
   descriptor, and its success lines went out ahead of a later failure where
   util-linux's `warn` leaves them in the buffer. It uses `ulclosestream` now.
   87 agree, 0 differ, 3 differ on purpose (our version string).
+* **`sleep`, 2026-10-07** -- `scripts/sleep-diff.sh`, which compares how long
+  each side paused (to a tenth of a second, within two) beside the words:
+  the number as `strtod` reads it (exponents, hex, leading space, `inf`), the
+  suffixes, several operands summed, every bad operand named before one
+  referral, and the descriptors. No change needed. When only the time
+  disagrees it runs both sides twice more and compares each one's quickest:
+  a busy machine can only slow a run down, and two early runs each had one
+  stalled case (ours once, GNU's once) while another lane wrote a disk image
+  in WSL. Measured directly, ours dies of `SIGTERM` at once under `timeout`.

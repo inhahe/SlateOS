@@ -2461,6 +2461,8 @@ pub fn exec_process(
     let current = crate::sched::current_task_id();
     if crate::proc::thread::owner_process(current) == Some(pid) {
         crate::proc::thread_clone::release_for_exec(current);
+        // So are its hardware breakpoints: their addresses were in it.
+        crate::sched::clear_current_debug_regs();
     }
 
     // Step 3: Tear down the old user address space.
@@ -23646,6 +23648,7 @@ pub fn self_test_linux_ptrace() -> KernelResult<()> {
             Some(0x4f..=0x52) => "the second single step did not stop after mov eax, 60",
             Some(0x53..=0x56) => "a signal sent to the tracee did not stop it",
             Some(0x57..=0x59) => "a suppressed signal ended the program, or it did not exit 7",
+            Some(0x5a) => "after a single step, DR6 did not read 0xffff4ff0 (the step)",
             Some(0x60 | 0x61) => "PTRACE_TRACEME failed, or a second one was not EPERM",
             Some(0x62) => "the child's execveat failed",
             Some(0x70..=0x72) => "the second child's SIGSTOP did not stop it for its tracer",
@@ -23654,6 +23657,39 @@ pub fn self_test_linux_ptrace() -> KernelResult<()> {
                 "the exec was not a PTRACE_EVENT_EXEC stop with the pid as its message"
             }
             Some(0x7a..=0x7c) => "PTRACE_KILL did not end the tracee with SIGKILL",
+            Some(0x90) => "the third child's PTRACE_TRACEME failed",
+            Some(0x91..=0x93) => "the third child's SIGSTOP did not stop it for its tracer",
+            Some(0x94..=0x96) => "a new thread's DR6, DR7 or DR4 did not read 0xffff0ff0, 0 and 0",
+            Some(0x97) => "a write of DR4 was not EIO",
+            Some(0x98..=0x9d) => {
+                "a debug register Linux refuses (a kernel address, an I/O or 2-byte execution \
+                 breakpoint, an unaligned watchpoint) was taken, or a refusal changed DR7"
+            }
+            Some(0x9e..=0xa0) => "GETFPREGS failed, or xmm0 or MXCSR was not what the child had",
+            Some(0xa1 | 0xa2) => "NT_PRFPREG did not read GETFPREGS's bytes",
+            Some(0xa3..=0xa5) => "NT_PRSTATUS did not read GETREGS's image",
+            Some(0xa6..=0xa9) => {
+                "NT_X86_XSTATE was not ENODEV without XSAVE, or not CPUID's size with XCR0 at \
+                 464, SSE in use and xmm0"
+            }
+            Some(0xaa..=0xae) => {
+                "a register-set refusal was not Linux's (EINVAL for a part word, an unknown set, \
+                 a short FXSAVE area or a reserved MXCSR bit; EFAULT for a short XSAVE area)"
+            }
+            Some(0xaf..=0xb1) => "SETFPREGS did not write xmm1",
+            Some(0xb2) => "ARCH_PRCTL(ARCH_GET_FS) did not read GETREGS's fs_base",
+            Some(0xb3..=0xb5) => "an execution breakpoint could not be set in DR0/DR7",
+            Some(0xb6..=0xbb) => {
+                "the execution breakpoint did not stop the child at the function with \
+                 TRAP_HWBKPT and DR6 B0"
+            }
+            Some(0xbc..=0xc3) => {
+                "the write watchpoint did not stop the child after the store with TRAP_HWBKPT \
+                 and DR6 B1 -- or the execution breakpoint fired again"
+            }
+            Some(0xc4..=0xc7) => {
+                "the child did not exit 0x21: the xmm1 its tracer wrote did not reach it"
+            }
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };

@@ -57,6 +57,15 @@
 //! Linux's segment selectors, `0x33` and `0x2b`, whatever this kernel's are:
 //! GDB decides whether a program is 64-bit by `cs == 0x33`.
 //!
+//! The FPU and vector registers are kept with the stop as the general ones
+//! are: the stopping thread captures its FPU state ([`FPU`]), the tracer
+//! reads and writes that copy -- as `struct user_fpregs_struct`
+//! (`PTRACE_GETFPREGS`, `NT_PRFPREG`) or the XSAVE area (`NT_X86_XSTATE`,
+//! `sched::fpu`'s views) -- and the thread loads it back on its way out if
+//! it changed. The debug registers -- hardware breakpoints and watchpoints,
+//! `struct user`'s `u_debugreg` -- live on the thread's scheduler record and
+//! are the CPU's while it runs (`sched::debugreg`).
+//!
 //! ## Memory
 //!
 //! `PTRACE_PEEK*`/`POKE*` and `/proc/<pid>/mem` read and write the tracee's
@@ -103,10 +112,16 @@ pub mod request {
     pub const GETREGS: u64 = 12;
     /// Write it.
     pub const SETREGS: u64 = 13;
+    /// Read `struct user_fpregs_struct`: the x87 and SSE registers.
+    pub const GETFPREGS: u64 = 14;
+    /// Write it.
+    pub const SETFPREGS: u64 = 15;
     /// Attach to a running process.
     pub const ATTACH: u64 = 16;
     /// Let the tracee go.
     pub const DETACH: u64 = 17;
+    /// The tracee's `arch_prctl`: read or set its `%fs` or `%gs` base.
+    pub const ARCH_PRCTL: u64 = 30;
     /// Set the `PTRACE_O_*` options.
     pub const SETOPTIONS: u64 = 0x4200;
     /// The last event stop's message (an exec's former thread id).
@@ -115,8 +130,25 @@ pub mod request {
     pub const GETSIGINFO: u64 = 0x4202;
     /// Replace it.
     pub const SETSIGINFO: u64 = 0x4203;
+    /// Read a register set, named by its core-file note type, into an iovec.
+    pub const GETREGSET: u64 = 0x4204;
+    /// Write one from an iovec.
+    pub const SETREGSET: u64 = 0x4205;
     /// Attach without stopping the process.
     pub const SEIZE: u64 = 0x4206;
+}
+
+/// The register sets `PTRACE_GETREGSET`/`SETREGSET` name, by their core-file
+/// note types (Linux's x86-64 `user_regset_view`).
+pub mod note {
+    /// `struct user_regs_struct`.
+    pub const PRSTATUS: u64 = 1;
+    /// `struct user_fpregs_struct`.
+    pub const PRFPREG: u64 = 2;
+    /// The I/O permission bitmap, which no thread here has.
+    pub const X86_IOPERM: u64 = 0x201;
+    /// The XSAVE area.
+    pub const X86_XSTATE: u64 = 0x202;
 }
 
 /// The `PTRACE_O_*` options.
@@ -168,6 +200,8 @@ const SIGTRAP: u32 = 5;
 /// `struct user_regs_struct`'s length in words, and `struct user`'s offsets
 /// that `PTRACE_PEEKUSER`/`POKEUSER` take.
 const USER_REGS_WORDS: usize = 27;
+/// `offsetof(struct user, u_debugreg)`: DR0-DR7, a word each.
+const USER_DEBUGREG_OFFSET: u64 = 848;
 /// `sizeof(struct user)`.
 const USER_STRUCT_SIZE: u64 = 912;
 
@@ -178,6 +212,10 @@ const LINUX_USER_SS: u64 = 0x2b;
 
 /// The trap flag in RFLAGS.
 const RFLAGS_TF: u64 = 1 << 8;
+
+/// The RFLAGS bits a tracer may set (Linux's `FLAG_MASK`): CF, PF, AF, ZF,
+/// SF, TF, DF, OF, RF and AC.
+const RFLAGS_TRACER_MASK: u64 = 0x0005_0DD5;
 
 /// A request refused, as Linux's errno for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,10 +228,18 @@ pub enum PtraceError {
     /// `EIO`: an unknown request, an invalid signal or register value, or
     /// memory that cannot be read or written.
     Io,
-    /// `EINVAL`: an unknown option.
+    /// `EINVAL`: an unknown option or register set, or a debug register or
+    /// FPU state the CPU cannot take.
     Invalid,
-    /// `EFAULT`: the caller's own buffer.
+    /// `EFAULT`: the caller's own buffer -- or, as on Linux, an XSAVE area
+    /// of the wrong size.
     Fault,
+    /// `ENODEV`: the XSAVE register set on a CPU without XSAVE.
+    NoDevice,
+    /// `ENXIO`: the I/O permission bitmap, which no thread has.
+    NoDeviceOrAddress,
+    /// `EOPNOTSUPP`: a register set that cannot be written.
+    NotSupported,
 }
 
 impl PtraceError {
@@ -204,8 +250,11 @@ impl PtraceError {
             Self::NotPermitted => 1,
             Self::NoSuchThread => 3,
             Self::Io => 5,
+            Self::NoDeviceOrAddress => 6,
             Self::Fault => 14,
+            Self::NoDevice => 19,
             Self::Invalid => 22,
+            Self::NotSupported => 95,
         }
     }
 }
@@ -266,6 +315,23 @@ struct Tracee {
 /// `sched::resume`. Taken with interrupts off: `signal::classify` asks it,
 /// and a signal can be sent from an interrupt's context.
 static TRACEES: Mutex<BTreeMap<TaskId, Tracee>> = Mutex::new(BTreeMap::new());
+
+/// A stopped thread's FPU state: captured by the thread as it stops, read and
+/// written by its tracer, and put back by the thread on its way out if the
+/// tracer changed it -- as its general registers are (`Stop::regs`). Kept
+/// apart from [`TRACEES`]: it is a heap buffer of up to a few KiB, and that
+/// table is asked with interrupts off.
+struct FpuStop {
+    /// `sched::fpu::capture_signal_image`'s image of the thread's state.
+    image: Vec<u8>,
+    /// The tracer wrote it.
+    changed: bool,
+}
+
+/// Every stopped thread's FPU state, by task id. A tracer's access takes it
+/// before [`TRACEES`] (to see that the thread is still stopped); nothing
+/// takes it inside that lock.
+static FPU: Mutex<BTreeMap<TaskId, FpuStop>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
 // Queries the rest of the kernel asks
@@ -385,6 +451,11 @@ pub struct StopOutcome {
 /// From the thread's own kernel stack on its way to user mode, holding no
 /// lock, interrupts on: it parks. A `SIGKILL` while it is parked ends it
 /// there, and this never returns.
+///
+/// The thread's FPU state is kept with the stop as its registers are: the
+/// CPU's FPU registers hold it here (the kernel uses none of them), so it is
+/// captured before the stop is published, and put back on the way out if
+/// the tracer changed it ([`leave_stop`]).
 fn stop_current(
     pid: ProcessId,
     tid: TaskId,
@@ -393,20 +464,37 @@ fn stop_current(
     regs: &mut LinuxTrapRegs,
     orig_rax: u64,
 ) -> Option<StopOutcome> {
+    if !is_traced(tid) {
+        return None;
+    }
+    let image = crate::sched::fpu::capture_signal_image();
+    FPU.lock().insert(
+        tid,
+        FpuStop {
+            image,
+            changed: false,
+        },
+    );
     // Publish the stop.
-    let tracer = {
+    let published = {
         let mut table = TRACEES.lock_irqsave();
-        let t = table.get_mut(&tid)?;
-        t.stop = Some(Stop {
-            exit_code,
-            reported: false,
-            siginfo,
-            regs: *regs,
-            orig_rax,
-            regs_changed: false,
-            resume: None,
-        });
-        t.tracer
+        table.get_mut(&tid).map(|t| {
+            t.stop = Some(Stop {
+                exit_code,
+                reported: false,
+                siginfo,
+                regs: *regs,
+                orig_rax,
+                regs_changed: false,
+                resume: None,
+            });
+            t.tracer
+        })
+    };
+    let Some(tracer) = published else {
+        // Let go between the two looks (its tracer exited): no stop.
+        FPU.lock().remove(&tid);
+        return None;
     };
     // Tell the tracer: a `wait` it is blocked in -- for this process, or for
     // any of its children -- looks again.
@@ -424,19 +512,19 @@ fn stop_current(
     // Park until the tracer sets what happens next. The check and the mark
     // are made under the lock the tracer's resume takes, so a resume either
     // came first (and is seen here) or comes after the mark (and unparks).
-    loop {
+    let outcome = loop {
         {
             let mut table = TRACEES.lock_irqsave();
             let Some(t) = table.get_mut(&tid) else {
                 // The record went away under us -- only the thread's own exit
                 // removes it, so this cannot happen; run on, delivering what
                 // the thread stopped for.
-                return Some(StopOutcome {
+                break StopOutcome {
                     sig: if exit_code >> 8 == 0 { exit_code } else { 0 },
                     siginfo,
                     regs_changed: false,
                     orig_rax,
-                });
+                };
             };
             if let Some(stop) = t.stop
                 && let Some(resume) = stop.resume
@@ -451,17 +539,36 @@ fn stop_current(
                 if matches!(resume, Resume::Detach { .. }) {
                     table.remove(&tid);
                 }
-                return Some(StopOutcome {
+                break StopOutcome {
                     sig,
                     siginfo: stop.siginfo,
                     regs_changed: stop.regs_changed,
                     orig_rax: stop.orig_rax,
-                });
+                };
             }
             sched::suspend_pending(tid);
         }
         sched::park_if_suspended();
+    };
+    leave_stop(tid);
+    Some(outcome)
+}
+
+/// The end of thread `tid`'s stop, on the thread: its FPU state loaded back
+/// if the tracer changed it, and the `%fs`/`%gs` bases and debug registers --
+/// which the tracer changes on the thread's scheduler record, for a switch in
+/// to load -- given to the CPU now, since a thread resumed before it ever
+/// parked was never switched out and back in.
+fn leave_stop(tid: TaskId) {
+    let fpu = FPU.lock().remove(&tid);
+    if let Some(FpuStop {
+        image,
+        changed: true,
+    }) = fpu
+    {
+        crate::sched::fpu::restore_signal_image(Some(&image));
     }
+    sched::reload_current_user_state();
 }
 
 // ---------------------------------------------------------------------------
@@ -622,9 +729,13 @@ fn set_user_reg(
         16 if value < USER_SPACE_END => r.rip = value,
         17 if value == LINUX_USER_CS => {}
         18 => {
-            // Linux's `set_flags`: a trap flag in the value is the program's
-            // from now on; without one, a flag the tracer set stays set.
-            let mut flags = crate::syscall::entry::sanitize_user_rflags(value);
+            // Linux's `set_flags`: only the arithmetic, trap, direction,
+            // resume and alignment-check flags are the tracer's to change --
+            // the rest stay as the thread's own (interrupts on, I/O privilege
+            // 0), which made them safe. A trap flag in the value is the
+            // program's from now on; without one, a flag the tracer set stays
+            // set.
+            let mut flags = (r.rflags & !RFLAGS_TRACER_MASK) | (value & RFLAGS_TRACER_MASK);
             if flags & RFLAGS_TF != 0 {
                 *forced_tf = false;
             } else if *forced_tf {
@@ -827,6 +938,19 @@ pub fn ptrace(
             set_regs(tid, &words)?;
             Ok(0)
         }
+        request::GETFPREGS => {
+            let fx = with_fpu(tid, crate::sched::fpu::fxsave_view)?;
+            put_user(data, &fx)?;
+            Ok(0)
+        }
+        request::SETFPREGS => {
+            let mut fx = [0u8; crate::sched::fpu::FXSAVE_SIZE];
+            get_user(data, &mut fx)?;
+            set_fpu(tid, |image| crate::sched::fpu::set_from_fxsave(image, &fx))?;
+            Ok(0)
+        }
+        request::GETREGSET | request::SETREGSET => regset(tid, request, addr, data),
+        request::ARCH_PRCTL => arch_prctl(tid, data, addr),
         request::GETSIGINFO => {
             let siginfo = with_stop(tid, |stop, _| stop.siginfo)?;
             put_user(data, &siginfo.to_bytes())?;
@@ -902,9 +1026,10 @@ fn get_regs(tid: TaskId) -> Result<[u64; USER_REGS_WORDS], PtraceError> {
     })
 }
 
-/// Set thread `tid`'s registers from a `struct user_regs_struct`: every
-/// word checked first, so a refused one changes nothing.
-fn set_regs(tid: TaskId, words: &[u64; USER_REGS_WORDS]) -> Result<(), PtraceError> {
+/// Set thread `tid`'s registers from the first `words.len()` words of a
+/// `struct user_regs_struct` (all 27 for `PTRACE_SETREGS`; `NT_PRSTATUS` may
+/// write fewer): every word checked first, so a refused one changes nothing.
+fn set_regs(tid: TaskId, words: &[u64]) -> Result<(), PtraceError> {
     let tls = with_stop(tid, |stop, forced_tf| {
         let mut trial = *stop;
         let mut trial_tf = *forced_tf;
@@ -921,7 +1046,8 @@ fn set_regs(tid: TaskId, words: &[u64; USER_REGS_WORDS]) -> Result<(), PtraceErr
 }
 
 /// A changed `fs_base`/`gs_base`, onto the thread's scheduler record, which
-/// the switch back to it loads.
+/// the switch back to it loads -- or, if it never parked, the end of its stop
+/// ([`leave_stop`]).
 fn apply_tls(tid: TaskId, tls: (Option<u64>, Option<u64>)) {
     if let Some(fs) = tls.0 {
         sched::set_task_fs_base(tid, fs);
@@ -931,8 +1057,156 @@ fn apply_tls(tid: TaskId, tls: (Option<u64>, Option<u64>)) {
     }
 }
 
+/// Run `f` on stopped thread `tid`'s FPU image. `ESRCH` if it is not stopped
+/// (or has been let go, and its image is about to be put back).
+fn with_fpu<R>(tid: TaskId, f: impl FnOnce(&[u8]) -> R) -> Result<R, PtraceError> {
+    let fpu = FPU.lock();
+    with_stop(tid, |_, _| ())?;
+    let stop = fpu.get(&tid).ok_or(PtraceError::NoSuchThread)?;
+    Ok(f(&stop.image))
+}
+
+/// Change stopped thread `tid`'s FPU image with `f`, which checks what it is
+/// given before it changes anything; the thread loads the image on its way
+/// out ([`leave_stop`]).
+fn set_fpu(
+    tid: TaskId,
+    f: impl FnOnce(&mut [u8]) -> Result<(), crate::sched::fpu::FpuImageError>,
+) -> Result<(), PtraceError> {
+    use crate::sched::fpu::FpuImageError;
+    let mut fpu = FPU.lock();
+    // Still stopped, under the lock its way out takes first: a change made
+    // now is one it will load.
+    with_stop(tid, |_, _| ())?;
+    let stop = fpu.get_mut(&tid).ok_or(PtraceError::NoSuchThread)?;
+    f(&mut stop.image).map_err(|e| match e {
+        FpuImageError::Invalid => PtraceError::Invalid,
+        FpuImageError::WrongSize => PtraceError::Fault,
+        FpuImageError::NoXsave => PtraceError::NoDevice,
+    })?;
+    stop.changed = true;
+    Ok(())
+}
+
+/// `PTRACE_GETREGSET`/`SETREGSET` (`request`) of register set `kind` -- a
+/// core-file note type ([`note`]) -- for stopped thread `tid`, through the
+/// caller's `struct iovec` at `iov` (Linux's `ptrace_regset`). The length must
+/// be whole words (`EINVAL`), is cut to the set's size, and is written back
+/// as what was done. A read may be short; a write of `NT_PRSTATUS` may set
+/// the first registers only, `NT_PRFPREG` must be whole (`EINVAL`) and
+/// `NT_X86_XSTATE` must be the whole XSAVE area (`EFAULT`, as on Linux).
+fn regset(tid: TaskId, request: u64, kind: u64, iov: u64) -> Result<u64, PtraceError> {
+    use crate::sched::fpu;
+    /// `IO_BITMAP_BYTES`: the I/O permission bitmap's set.
+    const IO_BITMAP_BYTES: usize = 8192;
+    let mut raw = [0u8; 16];
+    get_user(iov, &mut raw)?;
+    let mut word = [0u8; 8];
+    word.copy_from_slice(raw.get(8..16).ok_or(PtraceError::Fault)?);
+    let asked = u64::from_ne_bytes(word);
+    word.copy_from_slice(raw.get(..8).ok_or(PtraceError::Fault)?);
+    let base = u64::from_ne_bytes(word);
+    let size = match kind {
+        note::PRSTATUS => USER_REGS_WORDS * 8,
+        note::PRFPREG => fpu::FXSAVE_SIZE,
+        note::X86_XSTATE => fpu::user_xstate_size(),
+        note::X86_IOPERM => IO_BITMAP_BYTES,
+        _ => return Err(PtraceError::Invalid),
+    };
+    if !asked.is_multiple_of(8) {
+        return Err(PtraceError::Invalid);
+    }
+    let len = usize::try_from(asked).unwrap_or(usize::MAX).min(size);
+    if request == request::GETREGSET {
+        let set: Vec<u8> = match kind {
+            note::PRSTATUS => get_regs(tid)?
+                .iter()
+                .flat_map(|w| w.to_ne_bytes())
+                .collect(),
+            note::PRFPREG => with_fpu(tid, fpu::fxsave_view)?.to_vec(),
+            note::X86_XSTATE => with_fpu(tid, fpu::xstate_view)?.ok_or(PtraceError::NoDevice)?,
+            _ => return Err(PtraceError::NoDeviceOrAddress),
+        };
+        put_user(base, set.get(..len).ok_or(PtraceError::Fault)?)?;
+    } else {
+        let mut set = alloc::vec![0u8; len];
+        get_user(base, &mut set)?;
+        match kind {
+            note::PRSTATUS => {
+                let words: Vec<u64> = set
+                    .chunks_exact(8)
+                    .map(|c| {
+                        let mut w = [0u8; 8];
+                        w.copy_from_slice(c);
+                        u64::from_ne_bytes(w)
+                    })
+                    .collect();
+                set_regs(tid, &words)?;
+            }
+            note::PRFPREG => {
+                let fx: [u8; fpu::FXSAVE_SIZE] = set
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| PtraceError::Invalid)?;
+                set_fpu(tid, |image| fpu::set_from_fxsave(image, &fx))?;
+            }
+            note::X86_XSTATE => set_fpu(tid, |image| fpu::set_from_xstate(image, &set))?,
+            _ => return Err(PtraceError::NotSupported),
+        }
+    }
+    let done = u64::try_from(len).map_err(|_| PtraceError::Fault)?;
+    put_user(
+        iov.checked_add(8).ok_or(PtraceError::Fault)?,
+        &done.to_ne_bytes(),
+    )?;
+    Ok(0)
+}
+
+/// `PTRACE_ARCH_PRCTL`: the tracee's `arch_prctl(code, arg)` (Linux's
+/// `do_arch_prctl_64` for a tracee) -- its `%fs` or `%gs` base read into the
+/// caller's word at `arg`, or set to `arg`: `EPERM` for a base outside user
+/// space, `EINVAL` for any other code.
+fn arch_prctl(tid: TaskId, code: u64, arg: u64) -> Result<u64, PtraceError> {
+    const ARCH_SET_GS: u64 = 0x1001;
+    const ARCH_SET_FS: u64 = 0x1002;
+    const ARCH_GET_FS: u64 = 0x1003;
+    const ARCH_GET_GS: u64 = 0x1004;
+    match code {
+        ARCH_GET_FS | ARCH_GET_GS => {
+            let (fs, gs) = sched::task_tls_bases(tid).ok_or(PtraceError::NoSuchThread)?;
+            let base = if code == ARCH_GET_FS { fs } else { gs };
+            put_user(arg, &base.to_ne_bytes())?;
+        }
+        ARCH_SET_FS | ARCH_SET_GS => {
+            if arg >= crate::mm::page_table::USER_SPACE_END {
+                return Err(PtraceError::NotPermitted);
+            }
+            with_stop(tid, |_, _| ())?;
+            apply_tls(
+                tid,
+                if code == ARCH_SET_FS {
+                    (Some(arg), None)
+                } else {
+                    (None, Some(arg))
+                },
+            );
+        }
+        _ => return Err(PtraceError::Invalid),
+    }
+    Ok(0)
+}
+
+/// Which debug register the word of `struct user` at `offset` is, if one
+/// (`u_debugreg[0..8]`).
+fn debugreg_index(offset: u64) -> Option<u64> {
+    offset
+        .checked_sub(USER_DEBUGREG_OFFSET)
+        .map(|d| d / 8)
+        .filter(|&n| n < 8)
+}
+
 /// `PTRACE_PEEKUSER`: the word of `struct user` at `offset` -- a register, a
-/// debug register (none is set: 0), or 0 for the rest, as Linux answers;
+/// debug register (`sched::debugreg`), or 0 for the rest, as Linux answers;
 /// `EIO` for an offset that is unaligned or past the structure.
 fn peek_user(tid: TaskId, offset: u64) -> Result<u64, PtraceError> {
     if !offset.is_multiple_of(8) || offset >= USER_STRUCT_SIZE {
@@ -943,22 +1217,32 @@ fn peek_user(tid: TaskId, offset: u64) -> Result<u64, PtraceError> {
         let regs = get_regs(tid)?;
         return regs.get(index).copied().ok_or(PtraceError::Io);
     }
+    if let Some(n) = debugreg_index(offset) {
+        return sched::task_debug_regs(tid)
+            .map(|regs| regs.get(n))
+            .ok_or(PtraceError::NoSuchThread);
+    }
     Ok(0)
 }
 
-/// `PTRACE_POKEUSER`: set the register at `offset` of `struct user`. The
-/// debug registers -- hardware breakpoints and watchpoints -- are not yet
-/// kept per thread, so writing one is `EIO` (GDB then reports "Couldn't
-/// write debug register" for a hardware watchpoint; `set
-/// can-use-hw-watchpoints 0` gives it software ones); so is any other
-/// offset, as on Linux.
+/// `PTRACE_POKEUSER`: set the register or debug register at `offset` of
+/// `struct user` -- a hardware breakpoint or watchpoint, checked as Linux
+/// checks it (`sched::debugreg`: `EINVAL` for one the CPU cannot make, `EIO`
+/// for DR4 and DR5). Any other offset is `EIO`, as on Linux.
 fn poke_user(tid: TaskId, offset: u64, value: u64) -> Result<(), PtraceError> {
+    use crate::sched::debugreg::DebugRegError;
     if !offset.is_multiple_of(8) || offset >= USER_STRUCT_SIZE {
         return Err(PtraceError::Io);
     }
     let index = usize::try_from(offset / 8).map_err(|_| PtraceError::Io)?;
     if index >= USER_REGS_WORDS {
-        return Err(PtraceError::Io);
+        let n = debugreg_index(offset).ok_or(PtraceError::Io)?;
+        return sched::update_task_debug_regs(tid, |regs| regs.set(n, value))
+            .ok_or(PtraceError::NoSuchThread)?
+            .map_err(|e| match e {
+                DebugRegError::Invalid => PtraceError::Invalid,
+                DebugRegError::NoSuchRegister => PtraceError::Io,
+            });
     }
     let tls = with_stop(tid, |stop, forced_tf| {
         let mut tls = (None, None);
@@ -1159,9 +1443,11 @@ pub fn take_stop_report(
 // Ends
 // ---------------------------------------------------------------------------
 
-/// Thread `tid` is gone: its trace ends.
+/// Thread `tid` is gone: its trace ends -- and the FPU state of a stop it
+/// was ended in.
 pub fn on_thread_exit(tid: TaskId) {
     TRACEES.lock_irqsave().remove(&tid);
+    FPU.lock().remove(&tid);
 }
 
 /// Process `pid` is exiting: the threads it traces are let go -- each in a
@@ -1364,6 +1650,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // A trap flag in the value is the program's from then on.
     if set_user_reg(&mut stop, &mut forced, &mut tls, 18, 0x202 | RFLAGS_TF).is_err() || forced {
         return fail("a trap flag the tracer wrote stayed the tracer's");
+    }
+    // The resume flag is the tracer's to set (Linux's FLAG_MASK); the ID
+    // flag is not. (The trap flag, the program's now, goes with a value
+    // without it.)
+    if set_user_reg(&mut stop, &mut forced, &mut tls, 18, 0x0021_0202).is_err()
+        || stop.regs.rflags != 0x0001_0202
+    {
+        return fail("RF was not the tracer's to set, or ID was");
+    }
+    // `struct user`'s debug registers: u_debugreg[0..8], nothing around them.
+    if debugreg_index(USER_DEBUGREG_OFFSET) != Some(0)
+        || debugreg_index(USER_DEBUGREG_OFFSET + 56) != Some(7)
+        || debugreg_index(USER_DEBUGREG_OFFSET + 64).is_some()
+        || debugreg_index(USER_DEBUGREG_OFFSET - 8).is_some()
+    {
+        return fail("the debug registers' offsets in struct user");
     }
 
     // Signals a resume may carry.

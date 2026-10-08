@@ -535,6 +535,10 @@ pub struct Task {
     /// (`proc::thread_clone::register_rseq`): its every dispatch then owes it
     /// the rseq work on its way back to user mode (`crate::rseq`).
     pub rseq_registered: bool,
+    /// The thread's debug registers -- the hardware breakpoints and
+    /// watchpoints its debugger set (`sched::debugreg`): loaded when it is
+    /// switched in, none for a new thread and after an exec.
+    pub debug_regs: super::debugreg::DebugRegs,
     /// Saved CPU register state.
     pub context: Context,
     /// Physical address of the stack's backing frame(s).
@@ -1225,6 +1229,7 @@ impl Task {
             normal_priority: IDLE_PRIORITY,
             reset_on_fork: false,
             rseq_registered: false,
+            debug_regs: super::debugreg::DebugRegs::NONE,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,
@@ -1318,6 +1323,7 @@ impl Task {
             normal_priority: IDLE_PRIORITY,
             reset_on_fork: false,
             rseq_registered: false,
+            debug_regs: super::debugreg::DebugRegs::NONE,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
@@ -1478,6 +1484,7 @@ impl Task {
             normal_priority: priority,
             reset_on_fork: false,
             rseq_registered: false,
+            debug_regs: super::debugreg::DebugRegs::NONE,
             context,
             stack_phys,
             stack_bottom,

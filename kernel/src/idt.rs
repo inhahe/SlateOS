@@ -2350,36 +2350,78 @@ extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
 /// Handle #DB (Debug, vector 1).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
+    use crate::sched::debugreg::{self, dr6};
+    const SIGTRAP: u32 = 5;
+    const RFLAGS_TF: u64 = 1 << 8;
+    const RFLAGS_RF: u64 = 1 << 16;
     count_vector(1);
-    if is_userspace_exception(frame) {
-        // DR6 says why; the CPU never clears it, so it is cleared here, as
-        // Linux's `exc_debug` does.
-        let dr6: u64;
-        // SAFETY: reading and writing DR6 at CPL 0 is always permitted.
-        unsafe {
-            core::arch::asm!("mov {}, dr6", out(reg) dr6, options(nomem, nostack, preserves_flags));
-            core::arch::asm!("mov dr6, {}", in(reg) DR6_RESERVED, options(nomem, nostack, preserves_flags));
-        }
-        if dr6 & DR6_BS != 0 {
-            // One instruction run with the trap flag: SIGTRAP, `TRAP_TRACE`,
-            // at the next instruction (Linux's `send_sigtrap`).
-            const SIGTRAP: u32 = 5;
-            user_trap(
-                frame,
-                SIGTRAP,
-                crate::proc::linux_sigframe::si_fault_code::TRAP_TRACE,
-                frame.rip,
-            );
+    // DR6 says why; the CPU never clears it, so it is cleared here, as
+    // Linux's `exc_debug` does. Positive polarity: 0 is "no cause".
+    let dr6 = debugreg::read_clear_dr6();
+    let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
+
+    if !is_userspace_exception(frame) {
+        if dr6 & !dr6::TRAP_BITS == 0 && dr6 != 0 {
+            // A data breakpoint the current thread's debugger set on a user
+            // address, hit by the kernel's own access for the thread -- a
+            // `read(2)` into a watched buffer: dismissed (`sched::debugreg`).
+            // Nothing that takes a lock: the access may be made under any.
             return;
         }
+        // The kernel sets no trap flag and runs no `int1`. Said lock-free --
+        // what this interrupted may hold the console's lock -- and a trap
+        // flag cleared, or the next instruction traps again.
+        if dr6 & dr6::STEP != 0 {
+            // SAFETY: this exception's own frame on this stack; the stub's
+            // `iretq` reads RFLAGS from it, and nothing else refers to it.
+            unsafe {
+                let rflags = core::ptr::read_volatile(addr_of!((*frame_ptr).rflags));
+                core::ptr::write_volatile(addr_of_mut!((*frame_ptr).rflags), rflags & !RFLAGS_TF);
+            }
+        }
+        emergency_println!(
+            "EXCEPTION: Debug (#DB) in kernel mode at {:#x}, DR6 {:#x}",
+            frame.rip,
+            dr6
+        );
+        return;
     }
-    serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
-}
 
-/// DR6's single-step bit (`BS`).
-const DR6_BS: u64 = 1 << 14;
-/// DR6 with nothing recorded: its reserved bits, which read as 1.
-const DR6_RESERVED: u64 = 0xFFFF_0FF0;
+    // From user mode: a single step, a hardware breakpoint or watchpoint, or
+    // `int1` (`sched::debugreg::classify_user_exception`, against the
+    // breakpoints this CPU was given for the thread).
+    let what =
+        debugreg::classify_user_exception(dr6, debugreg::loaded_dr7(sched::current_cpu_id()));
+    if what.resume_flag {
+        // An execution breakpoint is a fault, taken before its instruction:
+        // the resume flag lets the instruction run when the thread goes back
+        // to it, rather than fire again (Linux's `hw_breakpoint_handler`).
+        // SAFETY: as above -- this exception's own frame.
+        unsafe {
+            let rflags = core::ptr::read_volatile(addr_of!((*frame_ptr).rflags));
+            core::ptr::write_volatile(addr_of_mut!((*frame_ptr).rflags), rflags | RFLAGS_RF);
+        }
+    }
+    let task_id = sched::current_task_id();
+    if crate::proc::ptrace::is_traced(task_id) {
+        // What this was is the thread's DR6 now, which its tracer reads at
+        // the stop -- GDB does at every single step's, to see whether a
+        // watchpoint fired. With interrupts on, as the stop itself runs.
+        // SAFETY: from user mode, so no kernel lock is held by what this
+        // interrupted.
+        unsafe {
+            cpu::sti();
+        }
+        // A thread that has gone has no registers to record.
+        let _ = sched::update_task_debug_regs(task_id, |r| r.record_dr6(what.dr6));
+    }
+    if let Some(si_code) = what.si_code {
+        // SIGTRAP at the instruction the thread goes back to (Linux's
+        // `send_sigtrap`): stopped for by its tracer, delivered to a Linux
+        // program.
+        user_trap(frame, SIGTRAP, si_code, frame.rip);
+    }
+}
 
 /// Handle NMI (Non-Maskable Interrupt, vector 2).
 ///

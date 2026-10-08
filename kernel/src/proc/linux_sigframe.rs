@@ -310,8 +310,14 @@ pub mod si_fault_code {
     pub const ILL_ILLOPN: i32 = 2;
     /// `BUS_ADRALN` — invalid address alignment (#AC).
     pub const BUS_ADRALN: i32 = 1;
+    /// `TRAP_BRKPT` — a breakpoint instruction: `int1` (`icebp`) here; `int3`
+    /// reports `SI_KERNEL`, as on Linux.
+    pub const TRAP_BRKPT: i32 = 1;
     /// `TRAP_TRACE` — a single step (#DB with the trap flag).
     pub const TRAP_TRACE: i32 = 2;
+    /// `TRAP_HWBKPT` — a hardware breakpoint or watchpoint (#DB with a DR6 hit
+    /// bit).
+    pub const TRAP_HWBKPT: i32 = 4;
 }
 
 /// Size of `struct rt_sigframe` *excluding* any trailing fpstate, i.e. the

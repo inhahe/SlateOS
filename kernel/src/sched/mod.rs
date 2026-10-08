@@ -51,6 +51,7 @@ pub mod barrier;
 pub mod condvar;
 pub mod context;
 pub mod deadline;
+pub mod debugreg;
 pub mod eevdf;
 pub mod fpu;
 pub mod io_sched;
@@ -790,6 +791,8 @@ fn note_dispatch(cpu: usize, task: &Task, switched_in: bool) {
     // moved nor had a critical section raced: Linux marks nothing then either.
     if switched_in {
         crate::rseq::note_dispatch(cpu, task.rseq_registered);
+        // Its hardware breakpoints, or none: no thread runs with another's.
+        debugreg::switch_in(cpu, &task.debug_regs);
     }
     // Only a change needs the barrier: a CPU staying in one address space was
     // already counted as running it.
@@ -2623,6 +2626,77 @@ pub fn set_task_gs_base(task_id: TaskId, gs_base: u64) {
     if let Some(task) = state.tasks.get_mut(&task_id) {
         task.gs_base = gs_base;
     }
+}
+
+/// Task `task_id`'s debug registers (`debugreg`). `None` if it is gone.
+#[must_use]
+pub fn task_debug_regs(task_id: TaskId) -> Option<debugreg::DebugRegs> {
+    SCHED.lock().tasks.get(&task_id).map(|task| task.debug_regs)
+}
+
+/// Change task `task_id`'s debug registers: `f` gets them, and its answer is
+/// returned. `None` if the task is gone. What it changes reaches the CPU at
+/// the task's next switch in -- or at once with
+/// [`reload_current_user_state`], for the current task.
+pub fn update_task_debug_regs<R>(
+    task_id: TaskId,
+    f: impl FnOnce(&mut debugreg::DebugRegs) -> R,
+) -> Option<R> {
+    SCHED
+        .lock()
+        .tasks
+        .get_mut(&task_id)
+        .map(|task| f(&mut task.debug_regs))
+}
+
+/// Drop the current thread's hardware breakpoints and watchpoints -- an
+/// exec's, whose addresses named the image it replaces (Linux's
+/// `flush_ptrace_hw_breakpoint`): from its record, and from this CPU. A thread
+/// moved meanwhile was given the empty record by the switch that moved it.
+pub fn clear_current_debug_regs() {
+    let task_id = load_current_task();
+    // A thread that has gone has nothing to clear.
+    let _ = update_task_debug_regs(task_id, |regs| *regs = debugreg::DebugRegs::NONE);
+    crate::cpu::without_interrupts(|| {
+        debugreg::switch_in(current_cpu_id(), &debugreg::DebugRegs::NONE);
+    });
+}
+
+/// Give this CPU the current thread's `%fs` and `%gs` bases and debug
+/// registers from its scheduler record now, rather than at its next switch
+/// in: for a record changed while the thread could not be switched out -- a
+/// debugger that set them and resumed a stopped thread before it ever parked,
+/// or an exec dropping the old image's breakpoints.
+///
+/// From the thread itself, in kernel mode. The record is read first, then
+/// the CPU written with interrupts off; a thread moved to another CPU between
+/// the two was given the same values by the switch that moved it.
+pub fn reload_current_user_state() {
+    let task_id = load_current_task();
+    let Some((fs_base, gs_base, regs, user)) = SCHED.lock().tasks.get(&task_id).map(|task| {
+        (
+            task.fs_base,
+            task.gs_base,
+            task.debug_regs,
+            task.pml4_phys != 0,
+        )
+    }) else {
+        return;
+    };
+    if !user {
+        return;
+    }
+    crate::cpu::without_interrupts(|| {
+        // SAFETY: both bases were checked to be canonical user addresses when
+        // they were stored (`arch_prctl`, `clone`, `ptrace`'s register
+        // writes), so WRMSR cannot #GP; and in kernel mode the active GS base
+        // is the user's, as the switch path's restore of it relies on.
+        unsafe {
+            crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, fs_base);
+            crate::cpu::wrmsr(crate::cpu::IA32_GS_BASE, gs_base);
+        }
+        debugreg::switch_in(current_cpu_id(), &regs);
+    });
 }
 
 /// Task `task_id`'s TLS bases, `(fs_base, gs_base)` -- what its next switch

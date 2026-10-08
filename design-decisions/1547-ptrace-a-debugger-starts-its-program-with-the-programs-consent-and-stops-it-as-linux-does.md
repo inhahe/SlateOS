@@ -24,7 +24,15 @@ not `WUNTRACED` was asked for; `PTRACE_CONT`, `SINGLESTEP`, `DETACH`, `KILL`;
 `GETREGS`/`SETREGS`, `PEEKUSER`/`POKEUSER` of the registers,
 `GETSIGINFO`/`SETSIGINFO`, `GETEVENTMSG`, `SETOPTIONS` with `EXITKILL`;
 `PEEK`/`POKE` of memory and `/proc/<pid>/mem`; `/proc/<pid>/status`'s
-`TracerPid` and the `t (tracing stop)` state.
+`TracerPid` and the `t (tracing stop)` state. And from lane D's Tier 2, the
+registers a debugger cannot do without: the FPU and vector registers
+(`GETFPREGS`/`SETFPREGS`; `GETREGSET`/`SETREGSET` of `NT_PRSTATUS`,
+`NT_PRFPREG` and `NT_X86_XSTATE`) -- GDB reads them for `finish` from a
+function returning a `double`, and saves them all around a call it makes in
+the program -- and the debug registers, `PEEKUSER`/`POKEUSER` of
+`u_debugreg`: GDB reads DR6 at every single step's stop and fails the step
+if it cannot, and they are its hardware breakpoints and watchpoints. Also
+`ARCH_PRCTL`.
 
 **Choice 1 -- `PTRACE_TRACEME` grants the parent `DEBUG` over the caller's
 process.** Design-decisions 24 (the operator's) gates introspection on a
@@ -73,22 +81,55 @@ mappers are untouched. A page shared by design is refused.
 unconditionally and gives up if the call fails. `TRACEEXEC` and `EXITKILL`
 are kept; the others are accepted and their stops not yet made -- a traced
 program's new threads and children run untraced, and it exits without the
-exit stop. That is lane D's "Tier 2" (threads, fork, the other events),
-tracked in `known-issues/A-ptrace-tier-2-*.md`, with the debug registers,
-the FPU registers, attaching and system-call stops. *Easy to reverse:* the
-`option::MASK` check in `SETOPTIONS`.
+exit stop. That is the rest of lane D's "Tier 2" (threads, fork, the other
+events), tracked in `known-issues/A-ptrace-tier-2-*.md` with attaching and
+system-call stops. *Easy to reverse:* the `option::MASK` check in
+`SETOPTIONS`.
+
+**Choice 6 -- the FPU state is kept with the stop, as the general registers
+are.** The stopping thread captures its FPU and vector registers
+(`sched::fpu::capture_signal_image`, the signal frame's image) before it
+publishes the stop; the tracer reads and writes that copy, shown as
+`struct user_fpregs_struct` or as the XSAVE area with XCR0 in its first
+software word (where GDB reads it); and the thread loads it back on its way
+out if it changed. The alternative -- the tracer reading the save area the
+switch-out fills -- races the stop: the tracer can see the stop before the
+thread has switched out, read a stale area, or write one the switch-out then
+overwrites. *What it costs:* an XSAVE and a small allocation per stop.
+
+**Choice 7 -- the debug registers live on the thread's scheduler record and
+are loaded at switch-in.** DR0-DR3 and DR7 are checked as Linux checks them
+(user addresses; a length the CPU has, aligned, no I/O breakpoints;
+`EINVAL`), DR7 reads back as written, and the CPU is given only the checked
+breakpoints -- global, never `GD`. A thread switched in with none clears
+the CPU's, so no other thread runs with them; a stop that ends before the
+thread ever parked loads them itself (`sched::reload_current_user_state`,
+which loads a changed `%fs`/`%gs` base the same way). A hit from user mode
+is `SIGTRAP`/`TRAP_HWBKPT`, DR6 recording it as Linux's `virtual_dr6` does;
+an execution breakpoint sets the resume flag so the instruction runs when the
+thread goes back to it. A watchpoint the *kernel* hits -- `read(2)` filling a
+watched buffer -- is dismissed with no record (Linux records it where only a
+`PEEKUSER` of DR6 before the next user-mode debug exception could see it,
+and sends no signal). An exec drops the thread's breakpoints, as Linux's
+`flush_thread` does.
 
 **Tested by** a ring-3 program (`build/ptracetest.c`,
 `spawn::self_test_linux_ptrace`) whose every answer was checked against Linux
 6.6.87 (WSL2), twelve runs of twelve: `TRACEME` (a second one `EPERM`), the
 exec stop and its registers, `PEEKTEXT`, an `int3` written through
 `/proc/<pid>/mem` into read-only text and not into the memfd it was run from,
-the breakpoint's stop, two single steps, a suppressed `SIGUSR1`, the exit;
-`PTRACE_EVENT_EXEC`, `GETEVENTMSG` and `PTRACE_KILL` on a second child; and by
-`ptrace::self_test` (the register image, its checks, the refusals).
+the breakpoint's stop, two single steps and DR6's step bit, a suppressed
+`SIGUSR1`, the exit; `PTRACE_EVENT_EXEC`, `GETEVENTMSG` and `PTRACE_KILL` on a
+second child; on a third, the debug registers' refusals, xmm0 through
+`GETFPREGS`, `NT_PRFPREG` and `NT_X86_XSTATE`, xmm1 written back, a hardware
+execution breakpoint, the resume flag past it, and a write watchpoint; and
+by `ptrace::self_test` (the register image, its checks, the refusals),
+`sched::debugreg::self_test` (Linux's checks, the classification) and
+`sched::fpu`'s debugger views.
 
 **Where it lives:** `kernel/src/proc/ptrace.rs`; the stops in
 `syscall::handlers` (`traced_signal`, `exec_stop`), `idt`
-(`traced_fault_stop`, `user_trap`) and `syscall::linux`'s exec; `wait.rs`'s
-`ChildEvent::Traced`; `mm::cow::write_private`; `fs::procfs`'s `mem`;
-`signal::classify` for a traced process's signals.
+(`traced_fault_stop`, `user_trap`, `handle_debug`) and `syscall::linux`'s
+exec; `wait.rs`'s `ChildEvent::Traced`; `mm::cow::write_private`;
+`fs::procfs`'s `mem`; `signal::classify` for a traced process's signals;
+`sched::debugreg` and `sched::fpu`'s debugger views for the registers.

@@ -752,7 +752,8 @@ const DEFAULT_MXCSR_MASK: u32 = 0xFFBF;
 static MXCSR_MASK: AtomicU32 = AtomicU32::new(0);
 
 /// The CPU's `MXCSR_MASK` (see [`MXCSR_MASK`]).
-fn mxcsr_mask() -> u32 {
+#[must_use]
+pub fn mxcsr_mask() -> u32 {
     let cached = MXCSR_MASK.load(Ordering::Relaxed);
     if cached != 0 {
         return cached;
@@ -938,6 +939,187 @@ pub fn reset_to_initial() {
 }
 
 // ---------------------------------------------------------------------------
+// A stopped thread's FPU state, as a debugger reads and writes it
+// ---------------------------------------------------------------------------
+//
+// `ptrace` keeps a stopped thread's FPU state as the signal-frame image above
+// (`capture_signal_image` at the stop, `restore_signal_image` on the way out
+// if the debugger changed it), and shows it in the two shapes Linux's ptrace
+// does: `struct user_fpregs_struct` -- the FXSAVE area -- for
+// `PTRACE_GETFPREGS` and `NT_PRFPREG`, and the XSAVE area for
+// `NT_X86_XSTATE`. The image was saved by plain XSAVE into an area that held
+// the initial state, so a component in its initial configuration, which XSAVE
+// need not write, reads as its initial values -- as Linux's
+// `copy_xstate_to_uabi_buf` makes it read.
+
+/// `struct user_fpregs_struct`'s size: the FXSAVE area.
+pub const FXSAVE_SIZE: usize = LEGACY_SIZE;
+/// Where the x87 registers end (and FXSAVE's XMM registers begin).
+const X87_END: usize = 160;
+/// Where FXSAVE's XMM registers end; padding follows.
+const XMM_END: usize = 416;
+/// The XSAVE header's `XCOMP_BV`, which a standard-format area has zero.
+const XCOMP_BV_OFFSET: usize = 520;
+/// Where the header's reserved bytes begin (they run to its end).
+const XSAVE_HEADER_RESERVED: usize = 528;
+
+/// A debugger's FPU state refused (`PTRACE_SETFPREGS`, `PTRACE_SETREGSET`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpuImageError {
+    /// An MXCSR bit the CPU does not have, or an XSAVE header naming a
+    /// component this kernel does not enable, compacted, or with reserved
+    /// bytes set -- what XRSTOR would fault on: Linux's `EINVAL`.
+    Invalid,
+    /// Not the whole XSAVE area: Linux's `EFAULT` for `NT_X86_XSTATE`.
+    WrongSize,
+    /// No XSAVE on this CPU: Linux's `ENODEV`.
+    NoXsave,
+}
+
+/// The XSAVE area's size for the components this kernel enables: what a
+/// debugger's `NT_X86_XSTATE` buffer is (CPUID leaf 0xD, sub-leaf 0, EBX --
+/// what user space reads too; Linux's `fpu_user_cfg.max_size`). 0 without
+/// XSAVE.
+#[must_use]
+pub fn user_xstate_size() -> usize {
+    if !xsave_active() {
+        return 0;
+    }
+    let enabled = core::arch::x86_64::__cpuid_count(0x0D, 0).ebx as usize;
+    enabled.min(xsave_area_size() as usize)
+}
+
+/// Where XSAVE component `i` (2 and up) sits in a standard-format area, and
+/// its size: CPUID leaf 0xD, sub-leaf `i`, EBX and EAX. `None` for a
+/// component this kernel does not enable.
+fn xstate_component(i: u32) -> Option<(usize, usize)> {
+    let enabled = ACTIVE_XCR0.load(Ordering::Relaxed);
+    if i < 2 || i >= 64 || enabled & 1u64.wrapping_shl(i) == 0 {
+        return None;
+    }
+    let leaf = core::arch::x86_64::__cpuid_count(0x0D, i);
+    Some((leaf.ebx as usize, leaf.eax as usize))
+}
+
+/// Copy `src[range]` over `dst[range]`; a range either does not hold is left.
+fn copy_range(dst: &mut [u8], src: &[u8], start: usize, end: usize) {
+    if let (Some(d), Some(s)) = (dst.get_mut(start..end), src.get(start..end)) {
+        d.copy_from_slice(s);
+    }
+}
+
+/// A stopped thread's FPU image as `struct user_fpregs_struct`: the x87 and
+/// SSE registers and MXCSR, the padding zero (Linux's `xfpregs_get`).
+#[must_use]
+pub fn fxsave_view(image: &[u8]) -> [u8; FXSAVE_SIZE] {
+    let mut out = [0u8; FXSAVE_SIZE];
+    copy_range(&mut out, image, 0, XMM_END);
+    out
+}
+
+/// A stopped thread's FPU image as `NT_X86_XSTATE`'s XSAVE area,
+/// [`user_xstate_size`] bytes (Linux's `xstateregs_get`): the software bytes
+/// hold XCR0 in their first word, the word GDB reads at offset 464 to learn
+/// which components there are; the header names only enabled components, in
+/// the standard format. `None` without XSAVE.
+#[must_use]
+pub fn xstate_view(image: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let size = user_xstate_size();
+    if size < LEGACY_SIZE + XSAVE_HEADER_SIZE {
+        return None;
+    }
+    let xcr0 = ACTIVE_XCR0.load(Ordering::Relaxed);
+    let mut out = alloc::vec![0u8; size];
+    copy_range(&mut out, image, 0, size.min(image.len()));
+    if let Some(sw) = out.get_mut(XMM_END..LEGACY_SIZE) {
+        sw.fill(0);
+    }
+    put_le(&mut out, SW_BYTES_OFFSET, &xcr0.to_le_bytes());
+    let bv = get_u64(&out, XSAVE_HEADER_OFFSET) & xcr0;
+    if let Some(header) = out.get_mut(XSAVE_HEADER_OFFSET..XSAVE_HEADER_OFFSET + XSAVE_HEADER_SIZE)
+    {
+        header.fill(0);
+    }
+    put_le(&mut out, XSAVE_HEADER_OFFSET, &bv.to_le_bytes());
+    Some(out)
+}
+
+/// Put `struct user_fpregs_struct` `fx` into a stopped thread's FPU image
+/// (`PTRACE_SETFPREGS`, Linux's `xfpregs_set`): its x87 and SSE registers and
+/// MXCSR, which are then marked in use.
+///
+/// # Errors
+///
+/// [`FpuImageError::Invalid`] for an MXCSR bit the CPU does not have.
+pub fn set_from_fxsave(image: &mut [u8], fx: &[u8; FXSAVE_SIZE]) -> Result<(), FpuImageError> {
+    if get_u32(fx, MXCSR_OFFSET) & !mxcsr_mask() != 0 {
+        return Err(FpuImageError::Invalid);
+    }
+    copy_range(image, fx, 0, XMM_END);
+    if xsave_active() {
+        let bv = get_u64(image, XSAVE_HEADER_OFFSET) | XCR0_X87 | XCR0_SSE;
+        put_le(image, XSAVE_HEADER_OFFSET, &bv.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// Put `NT_X86_XSTATE` area `area` into a stopped thread's FPU image
+/// (`PTRACE_SETREGSET`, Linux's `xstateregs_set` and `copy_uabi_to_xstate`):
+/// each component its header names is taken, and every other one is put in
+/// its initial configuration. The image's own software bytes are kept --
+/// they are what makes it an XSAVE image to `restore_signal_image`.
+///
+/// # Errors
+///
+/// [`FpuImageError::NoXsave`] without XSAVE; [`FpuImageError::WrongSize`]
+/// for an area that is not exactly [`user_xstate_size`] bytes;
+/// [`FpuImageError::Invalid`] for a header naming a component this kernel
+/// does not enable, a compacted one, reserved header bytes set, or an MXCSR
+/// bit the CPU does not have.
+pub fn set_from_xstate(image: &mut [u8], area: &[u8]) -> Result<(), FpuImageError> {
+    if !xsave_active() {
+        return Err(FpuImageError::NoXsave);
+    }
+    if area.len() != user_xstate_size() {
+        return Err(FpuImageError::WrongSize);
+    }
+    let xcr0 = ACTIVE_XCR0.load(Ordering::Relaxed);
+    let xfeatures = get_u64(area, XSAVE_HEADER_OFFSET);
+    let reserved_clear = area
+        .get(XSAVE_HEADER_RESERVED..XSAVE_HEADER_OFFSET + XSAVE_HEADER_SIZE)
+        .is_some_and(|r| r.iter().all(|&b| b == 0));
+    if xfeatures & !xcr0 != 0 || get_u64(area, XCOMP_BV_OFFSET) != 0 || !reserved_clear {
+        return Err(FpuImageError::Invalid);
+    }
+    if xfeatures & (XCR0_X87 | XCR0_SSE | XCR0_AVX) != 0 {
+        if get_u32(area, MXCSR_OFFSET) & !mxcsr_mask() != 0 {
+            return Err(FpuImageError::Invalid);
+        }
+        // MXCSR belongs to SSE and AVX as well as to the x87 component,
+        // which carries it otherwise.
+        if xfeatures & XCR0_X87 == 0 {
+            copy_range(image, area, MXCSR_OFFSET, MXCSR_OFFSET + 8);
+        }
+    }
+    if xfeatures & XCR0_X87 != 0 {
+        copy_range(image, area, 0, X87_END);
+    }
+    if xfeatures & XCR0_SSE != 0 {
+        copy_range(image, area, X87_END, XMM_END);
+    }
+    for i in 2..64u32 {
+        if xfeatures & 1u64.wrapping_shl(i) == 0 {
+            continue;
+        }
+        if let Some((offset, len)) = xstate_component(i) {
+            copy_range(image, area, offset, offset.saturating_add(len));
+        }
+    }
+    put_le(image, XSAVE_HEADER_OFFSET, &xfeatures.to_le_bytes());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1005,6 +1187,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 5: the signal-frame image -- what a signal or an exception saves
     // and its return loads back.
     test_signal_image()?;
+
+    // Test 6: the views a debugger reads a stopped thread's state through,
+    // and what it may write back.
+    test_debugger_views()?;
 
     serial_println!("[fpu] FPU/SSE self-test PASSED");
     Ok(())
@@ -1100,6 +1286,100 @@ fn test_signal_image() -> crate::error::KernelResult<()> {
     }
     reset_to_initial();
     serial_println!("[fpu]   signal-frame image (layout, round trip, reset, hostile image): OK");
+    Ok(())
+}
+
+/// The debugger's views of a stopped thread's FPU image (`fxsave_view`,
+/// `xstate_view`) and its writes (`set_from_fxsave`, `set_from_xstate`): the
+/// layout GDB reads (XCR0 at 464 of the XSAVE view), a write of XMM0 and MXCSR
+/// that loads back as the thread's way out of its stop loads it, and the
+/// refusals -- a reserved MXCSR bit, an XSAVE area of the wrong size, a
+/// compacted header, a component this kernel does not enable.
+fn test_debugger_views() -> crate::error::KernelResult<()> {
+    let fail = |what: &str| {
+        serial_println!("[fpu]   FAIL: debugger view: {}", what);
+        Err(crate::error::KernelError::InternalError)
+    };
+    let pattern: u128 = 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00;
+    let toward_zero: u32 = 0x7F80;
+    let mut image = capture_signal_image();
+    let fx = fxsave_view(&image);
+    if get_u32(&fx, MXCSR_OFFSET) != get_u32(&image, MXCSR_OFFSET)
+        || fx
+            .get(XMM_END..)
+            .is_none_or(|pad| pad.iter().any(|&b| b != 0))
+    {
+        return fail("the FXSAVE view's MXCSR or padding");
+    }
+    let mut new_fx = fx;
+    put_le(&mut new_fx, X87_END, &pattern.to_le_bytes());
+    put_le(&mut new_fx, MXCSR_OFFSET, &toward_zero.to_le_bytes());
+    if set_from_fxsave(&mut image, &new_fx).is_err() {
+        return fail("a valid FXSAVE area was refused");
+    }
+    let mut bad = new_fx;
+    put_le(
+        &mut bad,
+        MXCSR_OFFSET,
+        &((1u32 << 31) | DEFAULT_MXCSR).to_le_bytes(),
+    );
+    if set_from_fxsave(&mut image, &bad) != Err(FpuImageError::Invalid) {
+        return fail("a reserved MXCSR bit was taken");
+    }
+    if xsave_active() {
+        let Some(view) = xstate_view(&image) else {
+            return fail("no XSAVE view with XSAVE");
+        };
+        let xcr0 = ACTIVE_XCR0.load(Ordering::Relaxed);
+        if view.len() != user_xstate_size()
+            || get_u64(&view, SW_BYTES_OFFSET) != xcr0
+            || get_u64(&view, XSAVE_HEADER_OFFSET) & (XCR0_X87 | XCR0_SSE) != XCR0_X87 | XCR0_SSE
+            || get_u64(&view, XSAVE_HEADER_OFFSET) & !xcr0 != 0
+            || view.get(X87_END..X87_END + 16) != Some(&pattern.to_le_bytes()[..])
+        {
+            return fail("the XSAVE view's size, XCR0 word, header or XMM0");
+        }
+        if set_from_xstate(&mut image, &view).is_err() {
+            return fail("the XSAVE view did not write back");
+        }
+        let short = view.get(..view.len().saturating_sub(8)).unwrap_or(&[]);
+        if set_from_xstate(&mut image, short) != Err(FpuImageError::WrongSize) {
+            return fail("a short XSAVE area was taken");
+        }
+        let mut compacted = view.clone();
+        put_le(&mut compacted, XCOMP_BV_OFFSET, &(1u64 << 63).to_le_bytes());
+        let mut unknown = view.clone();
+        put_le(
+            &mut unknown,
+            XSAVE_HEADER_OFFSET,
+            &(1u64 << 62).to_le_bytes(),
+        );
+        if set_from_xstate(&mut image, &compacted) != Err(FpuImageError::Invalid)
+            || set_from_xstate(&mut image, &unknown) != Err(FpuImageError::Invalid)
+        {
+            return fail("a compacted header or an unknown component was taken");
+        }
+    } else if xstate_view(&image).is_some()
+        || set_from_xstate(&mut image, &[]) != Err(FpuImageError::NoXsave)
+    {
+        return fail("an XSAVE view without XSAVE");
+    }
+    // The way out of the stop: the written image loads.
+    let original = capture_signal_image();
+    restore_signal_image(Some(&image));
+    let mut readback: u128 = 0;
+    let mut mxcsr: u32 = 0;
+    // SAFETY: SSE is enabled (CR4.OSFXSR); these store XMM0 and MXCSR to
+    // valid locals.
+    unsafe {
+        asm!("movdqu [{}], xmm0", in(reg) &mut readback, options(nostack));
+        asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack));
+    }
+    restore_signal_image(Some(&original));
+    if readback != pattern || mxcsr & 0xFFFF != toward_zero {
+        return fail("the written XMM0 or MXCSR did not load");
+    }
+    serial_println!("[fpu]   debugger views (FXSAVE, XSAVE, writes, refusals): OK");
     Ok(())
 }
 

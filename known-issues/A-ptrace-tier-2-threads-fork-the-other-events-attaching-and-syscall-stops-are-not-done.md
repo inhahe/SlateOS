@@ -1,13 +1,14 @@
-### [A] ptrace "Tier 2": threads, fork, the other events, the debug and FPU registers, attaching and system-call stops are not done -- 2026-10-08
+### [A] ptrace "Tier 2": threads, fork, the other events, attaching and system-call stops are not done -- 2026-10-08
 
 **Status:** OPEN
 
 **What works** (design-decisions 1547): a debugger can start a
 single-threaded program and debug it -- `PTRACE_TRACEME`, the exec stop,
-signal and exception stops, breakpoints, single steps, the general
-registers, memory (`PEEK`/`POKE`, `/proc/<pid>/mem`), `KILL`, `DETACH`,
-`TRACEEXEC`, `EXITKILL` -- on both ABIs (Linux `ptrace`, native
-`SYS_PTRACE` 1149). That is lane D's Tier 1
+signal and exception stops, breakpoints, single steps, the general, FPU,
+vector and debug registers (hardware breakpoints and watchpoints), memory
+(`PEEK`/`POKE`, `/proc/<pid>/mem`), `KILL`, `DETACH`, `TRACEEXEC`,
+`EXITKILL` -- on both ABIs (Linux `ptrace`, native `SYS_PTRACE` 1149). That
+is lane D's Tier 1, and the registers of its Tier 2
 (`requests/d-a-a-debugger-needs-ptrace-for-native-programs.md`).
 
 **What is missing,** each with where its fix goes:
@@ -30,18 +31,6 @@ registers, memory (`PEEK`/`POKE`, `/proc/<pid>/mem`), `KILL`, `DETACH`,
 - **Exec of a multi-threaded process.** Linux's `de_thread` ends every other
   thread before the new image runs; this kernel's exec does not, so a
   traced exec from a non-leader thread is not modelled.
-- **Debug registers** (`POKEUSER` at `u_debugreg`, offset 848): `EIO`, and
-  `PEEKUSER` there reads 0. GDB reads DR6 at every single-step stop, which
-  works; a hardware watchpoint fails with "Couldn't write debug register"
-  (`set can-use-hw-watchpoints 0` gives software ones), and there are no
-  hardware breakpoints. The fix: DR0-DR3/DR7 per thread on the scheduler
-  record, validated as Linux's `ptrace_set_debugreg` validates them, loaded
-  at switch-in; `#DB` with a DR6 hit bit reports `TRAP_HWBKPT` with
-  `si_addr`.
-- **FPU and vector registers**: `PTRACE_GETFPREGS`/`SETFPREGS` and
-  `GETREGSET`/`SETREGSET` (`NT_PRSTATUS`, `NT_PRFPREG`, `NT_X86_XSTATE`) are
-  `EIO`. The stopped thread's FPU state is saved by the switch out; the fix
-  reads and writes that image, with the `xcr0` copy at offset 464 GDB reads.
 - **Attaching** (`PTRACE_ATTACH`, `SEIZE`, `INTERRUPT`, `LISTEN`): `EPERM`,
   because the right to debug a process one did not start comes from
   design-decisions 24's broker, which does not exist. The broker's design
@@ -61,6 +50,6 @@ registers, memory (`PEEK`/`POKE`, `/proc/<pid>/mem`), `KILL`, `DETACH`,
   trace code (`proc::exception::ExceptionCode`). A Linux program gets
   `SIGTRAP`, as on Linux.
 
-**How to see it.** `ptrace(PTRACE_GETFPREGS, ...)` or `PTRACE_ATTACH` from
-any program; a traced program that calls `pthread_create` with
-`PTRACE_O_TRACECLONE` set: no `PTRACE_EVENT_CLONE` stop arrives.
+**How to see it.** `PTRACE_ATTACH` from any program (`EPERM`); a traced
+program that calls `pthread_create` with `PTRACE_O_TRACECLONE` set: no
+`PTRACE_EVENT_CLONE` stop arrives.

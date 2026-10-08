@@ -2,8 +2,9 @@
 
 **Filed:** 2026-10-07 by lane D. **For:** lane A (`kernel/src/syscall/`,
 `kernel/src/proc/`, `kernel/src/fs/procfs.rs`, `kernel/src/cap/`).
-**Status:** Tier 1 DONE on `lane-a-wip` 2026-10-08 (reply at the end);
-Tier 2 and 3 OPEN, tracked in `known-issues/A-ptrace-tier-2-*.md`.
+**Status:** Tier 1 DONE on `lane-a-wip` 2026-10-08, with Tier 2's
+registers -- FPU, vector and debug (reply at the end); the rest of Tier 2,
+and Tier 3, OPEN, tracked in `known-issues/A-ptrace-tier-2-*.md`.
 
 **In short:** the operator wants a real debugger on SlateOS -- GDB and/or
 LLDB, ported (design-decisions 1050; `roadmap.md` gives the port to lane D).
@@ -225,7 +226,7 @@ But the operator's
 half, and the hand-written `userspace/gdb` crate has no process to
 control either.
 
-## Reply from lane A (2026-10-08): Tier 1 is done
+## Reply from lane A (2026-10-08): Tier 1 is done, and Tier 2's registers
 
 Both ABIs, one body (`kernel/src/proc/ptrace.rs`, design-decisions 1547):
 the Linux `ptrace` and a native **`SYS_PTRACE` = 1149** with the same four
@@ -253,10 +254,19 @@ does.
   `__WNOTHREAD`/`__WALL`/`__WCLONE` (Linux's values), as `wait4` does.
 - **Requests:** `CONT`, `SINGLESTEP`, `DETACH`, `KILL`; `GETREGS`/`SETREGS`
   (`struct user_regs_struct`, `cs` 0x33 and `ss` 0x2b -- Linux's -- and
-  `orig_rax` 59 after an exec, as Linux leaves it); `PEEKUSER`/`POKEUSER` for
-  the registers (the debug registers read 0, and writing one is `EIO` --
-  Tier 2); `GETSIGINFO`/`SETSIGINFO`; `GETEVENTMSG`; `SETOPTIONS` (every
-  `PTRACE_O_*` is accepted, as LLDB needs; `TRACEEXEC` and `EXITKILL` act).
+  `orig_rax` 59 after an exec, as Linux leaves it); `PEEKUSER`/`POKEUSER`;
+  `GETSIGINFO`/`SETSIGINFO`; `GETEVENTMSG`; `SETOPTIONS` (every
+  `PTRACE_O_*` is accepted, as LLDB needs; `TRACEEXEC` and `EXITKILL` act);
+  `ARCH_PRCTL`.
+- **Registers (from Tier 2):** the FPU and vector registers --
+  `GETFPREGS`/`SETFPREGS`, and `GETREGSET`/`SETREGSET` of `NT_PRSTATUS`,
+  `NT_PRFPREG` and `NT_X86_XSTATE` (the XSAVE area, XCR0 at offset 464 as GDB
+  reads it; `ENODEV` on a CPU without XSAVE, which today's QEMU model is),
+  with Linux's length rules and refusals. The debug registers through
+  `PEEKUSER`/`POKEUSER` of `u_debugreg`: hardware breakpoints and
+  watchpoints, per thread, checked as Linux checks them, stopping with
+  `SIGTRAP`/`TRAP_HWBKPT` and DR6 saying which -- GDB reads DR6 at every
+  single step's stop and fails the step without it.
 - **Memory:** `PEEKTEXT`/`POKETEXT` and **`/proc/<pid>/mem`**,
   `/proc/<pid>/task/<tid>/mem`, readable and writable at the address as the
   offset, by the process itself or a holder of `DEBUG`. A write into read-only
@@ -274,12 +284,13 @@ The ring-3 test is the fixture you described, in freestanding form
 execveat of a program built into a memfd, the exec stop and its registers,
 an `int3` through `/proc/<pid>/mem` (the memfd keeps its byte), the
 breakpoint stop, two single steps, a suppressed `SIGUSR1`, exit 7; then
-`PTRACE_EVENT_EXEC` and `PTRACE_KILL`. Twelve of twelve on Linux 6.6.
+`PTRACE_EVENT_EXEC` and `PTRACE_KILL`; then, on a child that runs on in the
+test, the register requests, a hardware execution breakpoint and a write
+watchpoint. Twelve of twelve on Linux 6.6.
 
 Still open (all in `known-issues/A-ptrace-tier-2-*.md`): the clone/fork/
 vfork/exit events and threads (`__WALL` stops of non-leader threads,
-thread-directed `SIGSTOP` across processes), the debug registers, the FPU
-registers (`GETFPREGS`, `GETREGSET`), attaching, `PTRACE_SYSCALL`, and
+thread-directed `SIGSTOP` across processes), attaching, `PTRACE_SYSCALL`, and
 `/proc/<pid>/mem`'s exec binding.
 
 -- lane A

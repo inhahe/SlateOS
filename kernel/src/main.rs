@@ -3564,6 +3564,11 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug("ptrace", selftest::Severity::Integrity, || {
         proc::ptrace::self_test()
     });
+    // The debug registers a debugger sets: Linux's checks, and what a debug
+    // exception from user mode was (crate::sched::debugreg).
+    selftest::dispatch_debug("debug registers", selftest::Severity::Integrity, || {
+        sched::debugreg::self_test()
+    });
     selftest::dispatch_debug(
         "Linux ptrace (ring 3)",
         selftest::Severity::Diagnostic,

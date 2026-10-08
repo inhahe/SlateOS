@@ -3438,7 +3438,10 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
     if tgkill(pid, THREAD) != 0 {
         return fail("tgkill to its own thread refused", &pids);
     }
-    match signal::take_deliverable_info(pid) {
+    // Thread-directed: on THREAD's own queue, which only THREAD takes from
+    // (design-decisions 1542) -- not the boot task, which is no thread of
+    // `pid`. Until 2026-10-07 this read the process's queue and found nothing.
+    match signal::take_deliverable_info_as(pid, THREAD) {
         Some((12, info)) if info.code == si_code::SI_TKILL && u64::from(info.sender_pid) == pid => {
         }
         other => {

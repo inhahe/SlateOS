@@ -2341,7 +2341,7 @@ pub fn take_deliverable_info(pid: ProcessId) -> Option<(u32, SigInfo)> {
 }
 
 /// [`take_deliverable_info`] for thread `me` (the self-tests name one).
-fn take_deliverable_info_as(pid: ProcessId, me: TaskId) -> Option<(u32, SigInfo)> {
+pub(crate) fn take_deliverable_info_as(pid: ProcessId, me: TaskId) -> Option<(u32, SigInfo)> {
     loop {
         let step = with_states(|states| {
             let state = states.get_mut(&pid)?;

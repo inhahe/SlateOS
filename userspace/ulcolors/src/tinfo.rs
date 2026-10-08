@@ -63,9 +63,10 @@ fn search_dirs(
         }
     }
     if let Some(h) = home {
-        if !h.is_empty() {
-            dirs.push(super::path_of(h).join(".terminfo"));
-        }
+        // `sprintf (buf, "%s/.terminfo", home)`: an empty HOME is `/.terminfo`.
+        let mut d = h.to_vec();
+        d.extend_from_slice(b"/.terminfo");
+        dirs.push(super::path_of(&d));
     }
     if let Some(list) = terminfo_dirs {
         for part in list.split(|&c| c == b':') {

@@ -290,6 +290,8 @@ impl Env {
 pub const SYSTEM_DIR: &str = "/etc/terminal-colors.d";
 /// `_PATH_TERMCOLORS_DIRNAME`.
 const DIRNAME: &str = "terminal-colors.d";
+/// Where it is under `$HOME`: `.config/` `_PATH_TERMCOLORS_DIRNAME`.
+const HOME_DIRNAME: &str = ".config/terminal-colors.d";
 
 /// An `OsStr`'s bytes.
 #[cfg(unix)]
@@ -481,14 +483,21 @@ impl Colors {
 
     /// `colors_get_homedir`: `$XDG_CONFIG_HOME/terminal-colors.d`, else
     /// `$HOME/.config/terminal-colors.d`.
+    ///
+    /// Spelled as upstream's `snprintf ("%s/...")` spells it, by
+    /// concatenation: a variable that is set but empty is still set, and
+    /// makes the absolute `/terminal-colors.d` -- where joining paths would
+    /// have made a relative one, read from wherever the program was started.
     fn homedir(&self) -> Option<PathBuf> {
-        if let Some(x) = &self.env.xdg_config_home {
-            return Some(path_of(x).join(DIRNAME));
-        }
-        self.env
-            .home
-            .as_ref()
-            .map(|h| path_of(h).join(".config").join(DIRNAME))
+        let (base, rest): (&[u8], &str) = match (&self.env.xdg_config_home, &self.env.home) {
+            (Some(x), _) => (x, DIRNAME),
+            (None, Some(h)) => (h, HOME_DIRNAME),
+            (None, None) => return None,
+        };
+        let mut path = base.to_vec();
+        path.push(b'/');
+        path.extend_from_slice(rest.as_bytes());
+        Some(path_of(&path))
     }
 
     /// `colors_read_configuration`: the home directory's files, then -- if
@@ -790,6 +799,36 @@ mod tests {
         );
         assert_eq!(filename_to_tokens(b"hexdump.other"), None);
         assert_eq!(filename_to_tokens(b".enable"), None);
+    }
+
+    #[test]
+    fn an_empty_variable_is_set_and_makes_an_absolute_path() {
+        let c = Colors::init_with(
+            ColorMode::Never,
+            b"x",
+            false,
+            Env {
+                xdg_config_home: Some(Vec::new()),
+                home: Some(b"/h".to_vec()),
+                ..Env::default()
+            },
+        );
+        assert_eq!(c.homedir(), Some(PathBuf::from("/terminal-colors.d")));
+        let c = Colors::init_with(
+            ColorMode::Never,
+            b"x",
+            false,
+            Env {
+                home: Some(Vec::new()),
+                ..Env::default()
+            },
+        );
+        assert_eq!(
+            c.homedir(),
+            Some(PathBuf::from("/.config/terminal-colors.d"))
+        );
+        let c = Colors::init_with(ColorMode::Never, b"x", false, Env::default());
+        assert_eq!(c.homedir(), None);
     }
 
     #[test]

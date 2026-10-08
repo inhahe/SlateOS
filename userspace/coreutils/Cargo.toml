@@ -60,7 +60,8 @@ ulstrutils = { path = "../ulstrutils" }
 ulclosestream = { path = "../ulclosestream" }
 # util-linux's lib/colors.c and lib/color-names.c -- `--color`, the
 # terminal-colors.d files and the colour names -- for the util-linux ports
-# here that colour their output (`hexdump -L`).
+# here that colour their output: `hexdump -L`, and `cal`'s today, week
+# number, header, workdays and weekend.
 ulcolors = { path = "../ulcolors" }
 # C's strtol and strtoul at any base, 0 included: `xxd` reads every number
 # with them, and `hexdump`'s `_L` colour units at bases 8, 10 and 16.

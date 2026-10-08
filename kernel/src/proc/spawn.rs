@@ -23899,7 +23899,11 @@ pub fn self_test_linux_exec_threads() -> KernelResult<()> {
 /// exits; a fork and a vfork make their events (`VFORK_DONE` too) and a
 /// traced grandchild the tracer reads and detaches; `PTRACE_SYSCALL` stops at
 /// a call's entry and exit, with `PTRACE_GET_SYSCALL_INFO`, a changed result
-/// and a skipped call (`crate::proc::ptrace`, design-decisions 1547).
+/// and a skipped call (`crate::proc::ptrace`, design-decisions 1547); a
+/// tracer reads and sets a child's signal mask -- the one it set, not
+/// `rt_sigsuspend`'s, which restarts when its signal is taken away -- and
+/// lists its pending signals (`PTRACE_GETSIGMASK`, `SETSIGMASK`,
+/// `PEEKSIGINFO`), its rseq area and its syscall user dispatch.
 pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 90_000_000_000;
@@ -23953,6 +23957,18 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
             Some(0x32) => "the traced child's clone failed",
             Some(0x33 | 0x34) => "a traced child's own fork/vfork or wait for it failed",
             Some(0x35) => "the system-call child did not see 12345 and 777",
+            Some(0x36) => "the signals child's MAP_FIXED page was not where it asked",
+            Some(0x37) => "the signals child's rseq registration failed",
+            Some(0x38) => "the signals child's rt_sigaction failed",
+            Some(0x39) => "the signals child's rt_sigqueueinfo failed",
+            Some(0x3a) => {
+                "rt_sigsuspend did not answer EINTR after the handled SIGUSR1 (it must restart, \
+                 not end, when its SIGWINCH is taken away)"
+            }
+            Some(0x3b) => "the signals child's SIGUSR1 handler did not run exactly once",
+            Some(0x3c) => {
+                "after rt_sigsuspend the child's mask was not the one its tracer set at the stop"
+            }
             Some(0x40 | 0x41) => "the thread child did not stop for its SIGSTOP",
             Some(0x42 | 0x43) => "SETOPTIONS(TRACECLONE|TRACEEXIT) or CONT failed",
             Some(0x44..=0x4b) => {
@@ -23995,6 +24011,41 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
                 "write(-1) could not be skipped at its entry with 777, its exit stopped at"
             }
             Some(0x97 | 0x98) => "the system-call child did not end 0x2B",
+            Some(0xa0 | 0xa1) => "the signals child did not start in its SIGSTOP stop",
+            Some(0xa2 | 0xa3) => "PTRACE_INTERRUPT or LISTEN of a tracee not seized was not EIO",
+            Some(0xa4) => "PTRACE_OLDSETOPTIONS failed",
+            Some(0xa5..=0xa8) => {
+                "PTRACE_GET_RSEQ_CONFIGURATION did not report the area, 32 and the signature \
+                 (24, however much was copied)"
+            }
+            Some(0xa9..=0xab) => {
+                "PTRACE_GET_SYSCALL_USER_DISPATCH_CONFIG did not report it off (EINVAL for a \
+                 wrong size)"
+            }
+            Some(0xac | 0xad) => "the signals child did not stop after sending itself signals",
+            Some(0xae | 0xaf) => "PTRACE_GETSIGMASK did not read the mask (EINVAL for size 4)",
+            Some(0xb0 | 0xb1) => "PTRACE_PEEKSIGINFO did not list SIGUSR2 in the thread's queue",
+            Some(0xb2..=0xb5) => {
+                "PTRACE_PEEKSIGINFO did not list SIGUSR1 then the queued SIGRTMIN in the \
+                 process's queue, from an offset"
+            }
+            Some(0xb6..=0xba) => {
+                "PTRACE_PEEKSIGINFO past the end, of none, of nr -1, of an unknown flag or into a \
+                 bad buffer was not 0, 0, EINVAL, EINVAL, EFAULT"
+            }
+            Some(0xbb | 0xbc) => "PTRACE_SETSIGMASK kept SIGKILL or SIGSTOP",
+            Some(0xbd..=0xc1) => {
+                "a mask that unblocked a pending SIGUSR1 did not have the child stop for it"
+            }
+            Some(0xc2..=0xc7) => {
+                "the SIGWINCH stop in rt_sigsuspend was not at its exit (130, -ERESTARTNOHAND) \
+                 with the child's own mask to read"
+            }
+            Some(0xc8..=0xcd) => {
+                "rt_sigsuspend did not start over, its SIGWINCH taken away, under the mask the \
+                 tracer set"
+            }
+            Some(0xce | 0xcf) => "the signals child did not end 0x2C",
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };
@@ -24008,7 +24059,8 @@ pub fn self_test_linux_ptrace_tier2() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux ptrace tier 2 (ring 3: a traced thread from its first instruction, its \
          tgkill, int3 and exit stops and its exit report; fork and vfork events and a traced \
-         grandchild; system-call entry and exit stops, a changed result, a skipped call): OK"
+         grandchild; system-call entry and exit stops, a changed result, a skipped call; signal \
+         masks, pending signals, rseq and an rt_sigsuspend that restarts): OK"
     );
     Ok(())
 }

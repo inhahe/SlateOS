@@ -1,7 +1,8 @@
-### A-RLIMIT-RTTIME-IS-NOT-ENFORCED -- 2026-10-08 -- FIXED on lane-a-wip, awaiting a boot (lane A)
+### A-RLIMIT-RTTIME-IS-NOT-ENFORCED -- 2026-10-08 (lane A)
 
-**Status:** FIXED on lane-a-wip 2026-10-08, awaiting a boot (design-decisions
-§1550). Move to `known-issues-resolved/` once a boot has run
+**Status:** OPEN -- fixed on lane-a-wip (024ba92bd), awaiting a boot on main
+(design-decisions §1550). Stamp it FIXED and move it to
+`known-issues-resolved/` once a boot on main has run
 `self_test_linux_cpu_timers`, whose eighth part tests it.
 
 **In short:** a real-time thread (`SCHED_FIFO`, `SCHED_RR`) outranks every

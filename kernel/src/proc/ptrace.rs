@@ -74,6 +74,15 @@
 //! into code -- and the tracee then gets its own copy of that page, as
 //! Linux's `FOLL_FORCE` gives it: the file and other processes mapping it are
 //! not changed.
+//!
+//! ## Signals
+//!
+//! A tracer reads and sets a stopped thread's signal mask
+//! (`PTRACE_GETSIGMASK`, `SETSIGMASK`) -- the mask the program set, which a
+//! `sigsuspend` it is in has put aside for the call's own -- and copies the
+//! signals pending for it without taking them (`PTRACE_PEEKSIGINFO`), its own
+//! or its process's: what CRIU dumps a process with. `signal`'s tracer view
+//! (`tracee_sigmask`, `set_tracee_sigmask`, `peek_pending`) does the work.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -127,6 +136,8 @@ pub mod request {
     pub const ATTACH: u64 = 16;
     /// Let the tracee go.
     pub const DETACH: u64 = 17;
+    /// [`SETOPTIONS`]'s first number, which x86-64 Linux still takes.
+    pub const OLDSETOPTIONS: u64 = 21;
     /// The tracee's `arch_prctl`: read or set its `%fs` or `%gs` base.
     pub const ARCH_PRCTL: u64 = 30;
     /// Set the `PTRACE_O_*` options.
@@ -143,8 +154,29 @@ pub mod request {
     pub const SETREGSET: u64 = 0x4205;
     /// Attach without stopping the process.
     pub const SEIZE: u64 = 0x4206;
+    /// Stop a seized tracee, with no signal.
+    pub const INTERRUPT: u64 = 0x4207;
+    /// Leave a seized tracee in its group-stop, reporting what happens.
+    pub const LISTEN: u64 = 0x4208;
+    /// Copy signals pending for the tracee, left pending:
+    /// `struct ptrace_peeksiginfo_args` at `addr`, `siginfo_t`s to `data`.
+    pub const PEEKSIGINFO: u64 = 0x4209;
+    /// Read the tracee's signal mask; `addr` the size of a `sigset_t`, 8.
+    pub const GETSIGMASK: u64 = 0x420a;
+    /// Replace it.
+    pub const SETSIGMASK: u64 = 0x420b;
+    /// One of the tracee's seccomp filters, as a BPF program.
+    pub const SECCOMP_GET_FILTER: u64 = 0x420c;
+    /// One of its filters' flags.
+    pub const SECCOMP_GET_METADATA: u64 = 0x420d;
     /// The system call the tracee is stopped in, `struct ptrace_syscall_info`.
     pub const GET_SYSCALL_INFO: u64 = 0x420e;
+    /// The tracee's rseq registration, `struct ptrace_rseq_configuration`.
+    pub const GET_RSEQ_CONFIGURATION: u64 = 0x420f;
+    /// Set the tracee's syscall user dispatch, `struct ptrace_sud_config`.
+    pub const SET_SYSCALL_USER_DISPATCH_CONFIG: u64 = 0x4210;
+    /// Read it.
+    pub const GET_SYSCALL_USER_DISPATCH_CONFIG: u64 = 0x4211;
 }
 
 /// The register sets `PTRACE_GETREGSET`/`SETREGSET` name, by their core-file
@@ -1115,6 +1147,98 @@ fn resume_signal(data: u64) -> Result<u32, PtraceError> {
         .ok_or(PtraceError::Io)
 }
 
+/// `sizeof(struct ptrace_sud_config)`: a mode, a selector address, an offset
+/// and a length, a word each.
+const SUD_CONFIG_SIZE: u64 = 32;
+
+/// `PTRACE_GETSIGMASK`/`SETSIGMASK`'s `addr`: the size of the kernel's
+/// `sigset_t`, 8 bytes; `EINVAL` for any other.
+fn sigset_size(addr: u64) -> Result<(), PtraceError> {
+    if addr == 8 {
+        Ok(())
+    } else {
+        Err(PtraceError::Invalid)
+    }
+}
+
+/// `PTRACE_PEEKSIGINFO`: up to `nr` of the signals pending for thread `tid`
+/// of `pid` -- in its own queue, or with `PTRACE_PEEKSIGINFO_SHARED` its
+/// process's -- from position `off`, copied as `siginfo_t`s to `data` and
+/// left pending (`signal::peek_pending` says in what order). `args` holds
+/// `struct ptrace_peeksiginfo_args { u64 off; u32 flags; s32 nr; }`.
+///
+/// Returns how many were copied: 0 past the end. Linux's
+/// `ptrace_peek_siginfo`: `EINVAL` for an unknown flag or a negative `nr`,
+/// and `EFAULT` when the first copy fails -- a later one ends the copying,
+/// and the count so far is the answer.
+fn peek_siginfo(pid: ProcessId, tid: TaskId, args: u64, data: u64) -> Result<u64, PtraceError> {
+    /// The process's queue, not the thread's.
+    const SHARED: u32 = 1;
+    /// `sizeof(siginfo_t)`.
+    const SIGINFO_SIZE: u64 = 128;
+    let mut raw = [0u8; 16];
+    get_user(args, &mut raw)?;
+    let (off, rest) = raw.split_at(8);
+    let (flags, nr) = rest.split_at(4);
+    let off = u64::from_ne_bytes(off.try_into().map_err(|_| PtraceError::Fault)?);
+    let flags = u32::from_ne_bytes(flags.try_into().map_err(|_| PtraceError::Fault)?);
+    let nr = i32::from_ne_bytes(nr.try_into().map_err(|_| PtraceError::Fault)?);
+    if flags & !SHARED != 0 {
+        return Err(PtraceError::Invalid);
+    }
+    let nr = u64::try_from(nr).map_err(|_| PtraceError::Invalid)?;
+    let shared = flags == SHARED;
+    let mut copied: u64 = 0;
+    while copied < nr {
+        let Some(index) = off.checked_add(copied) else {
+            break;
+        };
+        let Some((sig, info)) = crate::proc::signal::peek_pending(pid, tid, shared, index) else {
+            break;
+        };
+        let siginfo = LinuxSiginfo::from_record(i32::try_from(sig).unwrap_or(0), &info);
+        let to = copied
+            .checked_mul(SIGINFO_SIZE)
+            .and_then(|o| data.checked_add(o));
+        let stored = to.map_or(Err(PtraceError::Fault), |to| {
+            put_user(to, &siginfo.to_bytes())
+        });
+        if let Err(e) = stored {
+            if copied == 0 {
+                return Err(e);
+            }
+            break;
+        }
+        copied = copied.saturating_add(1);
+    }
+    Ok(copied)
+}
+
+/// `PTRACE_GET_RSEQ_CONFIGURATION`: thread `tid`'s rseq registration as
+/// `struct ptrace_rseq_configuration { u64 rseq_abi_pointer; u32
+/// rseq_abi_size; u32 signature; u32 flags; u32 pad; }` -- all 0 for a thread
+/// with none -- of which the first `size` bytes are copied to `data`. Returns
+/// the structure's size, 24, however much was copied (Linux's
+/// `ptrace_get_rseq_configuration`), so a tracer can tell a newer, longer
+/// one.
+fn rseq_configuration(tid: TaskId, size: u64, data: u64) -> Result<u64, PtraceError> {
+    let (area, len, sig) = crate::proc::thread_clone::lookup_rseq(tid).unwrap_or((0, 0, 0));
+    let mut conf = [0u8; 24];
+    let fields = area
+        .to_ne_bytes()
+        .into_iter()
+        .chain(len.to_ne_bytes())
+        .chain(sig.to_ne_bytes());
+    for (dst, byte) in conf.iter_mut().zip(fields) {
+        *dst = byte;
+    }
+    let n = usize::try_from(size).unwrap_or(usize::MAX).min(conf.len());
+    if n > 0 {
+        put_user(data, conf.get(..n).ok_or(PtraceError::Fault)?)?;
+    }
+    u64::try_from(conf.len()).map_err(|_| PtraceError::Io)
+}
+
 /// `ptrace(request, id, addr, data)` from thread `caller_tid` of process
 /// `caller` -- both ABIs' call. Returns what the call returns: 0 for every
 /// request, the word a `PEEK*` read being stored at `data` as the raw Linux
@@ -1164,6 +1288,12 @@ pub fn ptrace(
         // already on its way out has nothing left to end.
         let _ = crate::syscall::handlers::post_kernel_signal(pid, SIGKILL);
         return Ok(0);
+    }
+    if request == request::INTERRUPT {
+        // Stopped or not, as `KILL`: only a tracee attached by
+        // `PTRACE_SEIZE` can be interrupted, and none is (see the module
+        // doc) -- Linux's `EIO` for every other.
+        return Err(PtraceError::Io);
     }
     if !is_trace_stopped(tid) {
         return Err(PtraceError::NoSuchThread);
@@ -1243,7 +1373,7 @@ pub fn ptrace(
             put_user(data, &msg.to_ne_bytes())?;
             Ok(0)
         }
-        request::SETOPTIONS => {
+        request::SETOPTIONS | request::OLDSETOPTIONS => {
             let options = u32::try_from(data)
                 .ok()
                 .filter(|o| o & !option::MASK == 0)
@@ -1253,6 +1383,50 @@ pub fn ptrace(
             t.options = options;
             Ok(0)
         }
+        request::GETSIGMASK => {
+            sigset_size(addr)?;
+            let mask = crate::proc::signal::tracee_sigmask(pid, tid);
+            put_user(data, &mask.to_ne_bytes())?;
+            Ok(0)
+        }
+        request::SETSIGMASK => {
+            sigset_size(addr)?;
+            let mut mask = [0u8; 8];
+            get_user(data, &mut mask)?;
+            crate::proc::signal::set_tracee_sigmask(pid, tid, u64::from_ne_bytes(mask));
+            Ok(0)
+        }
+        request::PEEKSIGINFO => peek_siginfo(pid, tid, addr, data),
+        request::GET_RSEQ_CONFIGURATION => rseq_configuration(tid, addr, data),
+        request::GET_SYSCALL_USER_DISPATCH_CONFIG => {
+            // Syscall user dispatch (`PR_SET_SYSCALL_USER_DISPATCH`) is not
+            // offered, so every thread's is off: `PR_SYS_DISPATCH_OFF` (0),
+            // and no selector, offset or length.
+            if addr != SUD_CONFIG_SIZE {
+                return Err(PtraceError::Invalid);
+            }
+            put_user(data, &[0u8; 32])?;
+            Ok(0)
+        }
+        request::SET_SYSCALL_USER_DISPATCH_CONFIG => {
+            if addr != SUD_CONFIG_SIZE {
+                return Err(PtraceError::Invalid);
+            }
+            let mut config = [0u8; 32];
+            get_user(data, &mut config)?;
+            // Off with nothing else set is every thread's already. Linux
+            // refuses off with a region or selector (`EINVAL`); and on, which
+            // is not offered, is refused as `prctl` refuses it.
+            if config.iter().any(|&b| b != 0) {
+                return Err(PtraceError::Invalid);
+            }
+            Ok(0)
+        }
+        // No thread has a seccomp filter: `seccomp(2)` installs none. Linux
+        // built without filters answers these `EINVAL`.
+        request::SECCOMP_GET_FILTER | request::SECCOMP_GET_METADATA => Err(PtraceError::Invalid),
+        // A seized tracee's request; none is (`INTERRUPT`, above).
+        request::LISTEN => Err(PtraceError::Io),
         request::CONT
         | request::SINGLESTEP
         | request::SYSCALL

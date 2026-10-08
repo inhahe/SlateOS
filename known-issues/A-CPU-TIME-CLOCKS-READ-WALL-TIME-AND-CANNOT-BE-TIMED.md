@@ -1,8 +1,9 @@
-### A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED -- 2026-10-07 -- FIXED on lane-a-wip, awaiting a boot (lane A)
+### A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED -- 2026-10-07 (lane A)
 
-**Status:** FIXED on lane-a-wip 2026-10-08, awaiting a boot: the reading half
-(design-decisions §1549) and the timing half (§1550). Move to
-`known-issues-resolved/` once a boot has run the three ring-3 tests below.
+**Status:** OPEN -- fixed on lane-a-wip (29e8dc55d, f7cee3e11), awaiting a
+boot on main: the reading half (design-decisions §1549) and the timing half
+(§1550). Stamp it FIXED and move it to `known-issues-resolved/` once a boot on
+main has run the three ring-3 tests below.
 
 **In short:** a program can ask how much processor time it has used, and set
 a timer that fires after it has used so much. The first answered how long the

@@ -55,8 +55,15 @@ Tier 2 but attaching
   follows `PTRACE_EVENT_VFORK` at once; a single step over a `syscall`
   instruction stops with `TRAP_TRACE` after the `SYSRET`, where Linux's
   `user_single_step_report` says `TRAP_BRKPT` at the call's exit (both at
-  the next instruction; GDB treats both as the step); `PTRACE_GETSIGMASK`,
+  the next instruction; GDB treats both as the step); `PTRACE_PEEKSIGINFO`
+  lists a queue by signal number where Linux lists it in the order sent
+  (only the listing can tell: delivery always takes the lowest-numbered
+  signal first, `signal::peek_pending`). ~~`PTRACE_GETSIGMASK`,
   `SETSIGMASK`, `PEEKSIGINFO` and `GET_RSEQ_CONFIGURATION` -- CRIU's -- are
-  `EIO`.
+  `EIO`~~: done on lane-a-wip 2026-10-08, awaiting a boot, with
+  `OLDSETOPTIONS`, `GET`/`SET_SYSCALL_USER_DISPATCH_CONFIG` (always off:
+  syscall user dispatch is not offered) and `SECCOMP_GET_FILTER`/`METADATA`
+  (`EINVAL`: there are no filters); `INTERRUPT` and `LISTEN` are `EIO`, as
+  for any tracee not seized. Checked by the tier-2 ring-3 test's fifth part.
 
 **How to see it.** `PTRACE_ATTACH` from any program: `EPERM`.

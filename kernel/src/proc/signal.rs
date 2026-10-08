@@ -1915,6 +1915,94 @@ pub fn take_saved_sigmask(pid: ProcessId) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
+// A tracer's view of a thread's signals (`proc::ptrace`)
+// ---------------------------------------------------------------------------
+
+/// The mask thread `tid` of `pid` has set for itself: the one a `sigsuspend`
+/// saved while the thread waits under a temporary mask of the call's (Linux's
+/// `saved_sigmask` under `TIF_RESTORE_SIGMASK`), else its blocked mask. What
+/// a tracer's `PTRACE_GETSIGMASK` reads. 0 for a process with no signal
+/// state.
+#[must_use]
+pub fn tracee_sigmask(pid: ProcessId, tid: TaskId) -> u64 {
+    with_states(|states| {
+        states.get(&pid).map_or(0, |s| {
+            let t = s.thread(tid);
+            t.saved_sigmask.unwrap_or(t.blocked)
+        })
+    })
+}
+
+/// A tracer's `PTRACE_SETSIGMASK` of thread `tid` of `pid`, which is stopped:
+/// its blocked mask becomes `mask`, less `SIGKILL` and `SIGSTOP`, and a mask a
+/// `sigsuspend` saved is no longer put back -- the thread runs on under
+/// `mask` (Linux's `clear_tsk_restore_sigmask`). A pending signal the new
+/// mask unblocks is taken as the thread leaves its stop, which looks for
+/// signals again on its way to user mode.
+pub fn set_tracee_sigmask(pid: ProcessId, tid: TaskId, mask: u64) {
+    let mask = mask & !uncatchable_mask();
+    with_states(|states| {
+        let t = states.entry(pid).or_default().thread_mut(tid);
+        t.blocked = mask;
+        t.saved_sigmask = None;
+    });
+}
+
+/// The `index`th signal pending in one of `pid`'s queues -- thread `tid`'s
+/// own, or with `shared` the process's -- left where it is: its number and
+/// record. What a tracer's `PTRACE_PEEKSIGINFO` reads; `None` past the end.
+///
+/// Linux lists a queue in the order its signals were sent. This one keeps no
+/// order between different signals, so it lists them by number, each
+/// signal's instances oldest first: its standard record, then its timers'
+/// entries ([`PendingSet::infos`]). Only this listing can tell the two orders
+/// apart -- delivery always takes the lowest-numbered signal first. A pending
+/// `SIGKILL` is not listed, as Linux queues no record for one
+/// (`__send_signal_locked`).
+#[must_use]
+pub fn peek_pending(
+    pid: ProcessId,
+    tid: TaskId,
+    shared: bool,
+    index: u64,
+) -> Option<(u32, SigInfo)> {
+    with_states(|states| {
+        let s = states.get(&pid)?;
+        let (set, target) = if shared {
+            (&s.shared, None)
+        } else {
+            (&s.thread(tid).pending, Some(tid))
+        };
+        let mut left = index;
+        for sig in 1..=NSIG {
+            let Some(bit) = signal_bit(sig) else {
+                continue;
+            };
+            if sig == SIGKILL || set.bits & bit == 0 {
+                continue;
+            }
+            let record = set
+                .infos
+                .get(bit.trailing_zeros() as usize)
+                .copied()
+                .flatten();
+            let timers = s
+                .timer_queue
+                .iter()
+                .filter(|q| q.sig == sig && q.target == target)
+                .map(|q| q.info);
+            for info in record.into_iter().chain(timers) {
+                if left == 0 {
+                    return Some((sig, info));
+                }
+                left = left.saturating_sub(1);
+            }
+        }
+        None
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Posting and consuming signals
 // ---------------------------------------------------------------------------
 
@@ -2819,8 +2907,118 @@ pub fn self_test() -> KernelResult<()> {
     test_ignored_across_images()?;
     test_per_thread_state()?;
     test_linux_altstack()?;
+    test_tracer_view()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (19 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (20 tests)");
+    Ok(())
+}
+
+/// What a tracer reads and sets of a stopped thread's signals
+/// (`proc::ptrace`'s `PTRACE_GETSIGMASK`, `SETSIGMASK`, `PEEKSIGINFO`): the
+/// mask a `sigsuspend` saved rather than its temporary one, a set mask without
+/// `SIGKILL` and `SIGSTOP` that cancels the saved one, and the queues listed
+/// by signal number -- a signal's record before its timers' entries, a
+/// thread's queue apart from the process's, `SIGKILL` never.
+fn test_tracer_view() -> KernelResult<()> {
+    const SIGUSR1: u32 = 10;
+    const SIGUSR2: u32 = 12;
+    const SIGRTMIN: u32 = 34;
+    let p = TEST_PID_BASE + 80;
+    let (t1, t2): (TaskId, TaskId) = (0x7C1, 0x7C2);
+    let bit = |sig: u32| signal_bit(sig).unwrap_or(0);
+
+    start_spawned(0, p, Some(bit(SIGUSR1)), 0);
+    on_thread_start(p, t1);
+    on_thread_start(p, t2);
+
+    // A thread in `sigsuspend`: the tracer sees the mask it will go back to.
+    with_states(|st| {
+        if let Some(t) = st.get_mut(&p).and_then(|s| s.threads.get_mut(&t1)) {
+            t.blocked = !bit(SIGUSR2);
+            t.saved_sigmask = Some(bit(SIGUSR1) | bit(SIGHUP));
+        }
+    });
+    check(
+        tracee_sigmask(p, t1) == bit(SIGUSR1) | bit(SIGHUP),
+        "the saved mask is the one a tracer reads",
+    )?;
+    check(tracee_sigmask(p, t2) == bit(SIGUSR1), "t2's own mask")?;
+    // Set: SIGKILL and SIGSTOP stripped, the saved mask no longer restored.
+    set_tracee_sigmask(p, t1, bit(SIGUSR2) | bit(SIGKILL) | bit(SIGSTOP));
+    check(
+        tracee_sigmask(p, t1) == bit(SIGUSR2) && blocked_as(p, t1) == bit(SIGUSR2),
+        "a set mask is the thread's, less SIGKILL and SIGSTOP",
+    )?;
+    check(
+        with_states(|st| {
+            st.get(&p)
+                .is_some_and(|s| s.thread(t1).saved_sigmask.is_none())
+        }),
+        "a set mask cancels the sigsuspend restore",
+    )?;
+    check(tracee_sigmask(p, t2) == bit(SIGUSR1), "t2 untouched")?;
+
+    // The queues. The process's: SIGRTMIN's record and a timer's entry,
+    // SIGUSR1's record, a SIGKILL. t1's: SIGUSR2.
+    check(
+        set_pending_info(p, SIGRTMIN, SigInfo::queued(5, 6, 0x5eed)),
+        "post SIGRTMIN",
+    )?;
+    check(
+        set_pending_info(p, SIGUSR1, SigInfo::user(7, 8)),
+        "post SIGUSR1",
+    )?;
+    check(
+        set_pending_info(p, SIGKILL, SigInfo::user(7, 8)),
+        "post SIGKILL",
+    )?;
+    check(
+        set_thread_pending_info(p, t1, SIGUSR2, SigInfo::tkill(9, 10)),
+        "post SIGUSR2 to t1",
+    )?;
+    with_states(|st| {
+        if let Some(s) = st.get_mut(&p) {
+            s.timer_queue.push(QueuedTimerSignal {
+                sig: SIGRTMIN,
+                timer_id: 3,
+                token: 0,
+                target: None,
+                info: SigInfo::timer(3, 0x77),
+            });
+        }
+    });
+    let shared: [Option<(u32, SigInfo)>; 4] =
+        core::array::from_fn(|i| peek_pending(p, t1, true, i as u64));
+    check(
+        shared[0] == Some((SIGUSR1, SigInfo::user(7, 8)))
+            && shared[1] == Some((SIGRTMIN, SigInfo::queued(5, 6, 0x5eed)))
+            && shared[2] == Some((SIGRTMIN, SigInfo::timer(3, 0x77)))
+            && shared[3].is_none(),
+        "the process's queue by number, a record before its timer's entry, no SIGKILL",
+    )?;
+    check(
+        peek_pending(p, t1, false, 0) == Some((SIGUSR2, SigInfo::tkill(9, 10)))
+            && peek_pending(p, t1, false, 1).is_none(),
+        "t1's own queue",
+    )?;
+    check(
+        peek_pending(p, t2, false, 0).is_none(),
+        "t2 has nothing of its own",
+    )?;
+    check(
+        peek_pending(p, t1, true, u64::MAX).is_none(),
+        "far past the end",
+    )?;
+    check(
+        peek_pending(p, t1, true, 1).is_some() && sets(p).pending & bit(SIGUSR1) != 0,
+        "a peek takes nothing",
+    )?;
+
+    // Everything goes with the process's state, the test's own timer entry
+    // (which no timer of the timer module's owns) included, and the bits off
+    // the count with it.
+    remove(p);
+    serial_println!("[signal]   a tracer's view of masks and queues: OK");
     Ok(())
 }
 

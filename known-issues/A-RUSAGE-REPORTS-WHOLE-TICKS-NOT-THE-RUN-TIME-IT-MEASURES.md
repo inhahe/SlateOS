@@ -1,7 +1,8 @@
-### A-RUSAGE-REPORTS-WHOLE-TICKS-NOT-THE-RUN-TIME-IT-MEASURES -- 2026-10-08 -- FIXED on lane-a-wip, awaiting a boot (lane A)
+### A-RUSAGE-REPORTS-WHOLE-TICKS-NOT-THE-RUN-TIME-IT-MEASURES -- 2026-10-08 (lane A)
 
-**Status:** FIXED on lane-a-wip 2026-10-08, awaiting a boot. Move to
-`known-issues-resolved/` once a boot has run the self-tests named below.
+**Status:** OPEN -- fixed on lane-a-wip (6186944ef), awaiting a boot on main.
+Stamp it FIXED and move it to `known-issues-resolved/` once a boot on main has
+run the self-tests named below.
 
 **In short:** `time ./program` and `getrusage` say how much user and system
 time a program used. They said it in whole 10 ms ticks -- a program that ran

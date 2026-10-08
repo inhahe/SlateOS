@@ -36895,41 +36895,40 @@ fn sys_map_shadow_stack(_args: &SyscallArgs) -> SyscallResult {
 // Additional signal-handling and POSIX-timer syscalls
 //
 // The basic signal API (rt_sigaction / rt_sigprocmask / rt_sigpending /
-// kill / tkill / tgkill / nanosleep / sigaltstack) is already
-// implemented elsewhere in this file.  This block fills in the rest:
+// kill / tkill / tgkill / nanosleep / sigaltstack) is implemented elsewhere
+// in this file.  This block has the rest:
 //
-//   * rt_sigsuspend: returns EINTR after validating the mask — there is
-//     no real signal delivery in this kernel, but "I was interrupted"
-//     is the documented end-of-suspend wakeup answer and callers handle
-//     it.
-//   * rt_sigtimedwait: returns EAGAIN (timeout) after validating the
-//     mask + timespec, which is the documented "no signal arrived in
-//     the timeout window" answer.  If timeout is NULL (= wait forever)
-//     we also return EAGAIN; this is mildly hostile, but the
-//     alternative — blocking forever — would hang any caller.
-//   * rt_sigqueueinfo / rt_tgsigqueueinfo: validate siginfo (128 bytes)
-//     and dispatch to the existing kill / tgkill semantics — these are
-//     just kill-with-payload.  We accept the signal but drop the
-//     siginfo because we don't carry it through dispatch.
-//   * timer_create / _delete / _settime / _gettime / _getoverrun:
-//     POSIX per-process timer objects.  No per-process timer state in
-//     this kernel, so timer_create returns ENOSYS and the rest return
-//     EINVAL (the answer for an unknown timerid_t).
+//   * rt_sigsuspend: waits under a temporary mask until a signal it lets
+//     through is pending, and restarts if none of them ran a handler.
+//   * rt_sigtimedwait: takes a signal of the set it waits for, or times out.
+//   * rt_sigqueueinfo / rt_tgsigqueueinfo: kill / tgkill carrying the
+//     caller's si_code and si_value.
+//
+// The POSIX timer calls are `crate::proc::posix_timer`'s.
 // ---------------------------------------------------------------------------
 
 /// `rt_sigsuspend(mask*, sigsetsize)` — atomically install `*mask` as the
-/// blocked set, suspend until a signal whose action runs a handler (or
-/// terminates the process) is delivered, then restore the previous mask and
-/// return `-EINTR`.
+/// blocked set and wait until a signal it does not block is pending. The call
+/// ends only when such a signal runs a handler (`-EINTR`, the mask put back
+/// by the handler's `rt_sigreturn`) or ends the process; a signal that runs
+/// no handler -- ignored after all, a job-control stop and continue, or one a
+/// tracer took away -- has it put the mask back and start over, waiting
+/// again (Linux's `-ERESTARTNOHAND`). POSIX: sigsuspend "shall return after
+/// the signal-catching function returns", and only then.
 ///
 /// This mirrors Linux exactly: the original mask is stashed as the
 /// `saved_sigmask` (cf. `TIF_RESTORE_SIGMASK`) and restored when the signal
 /// is delivered — either by `emit_linux_rt_frame` writing it into the
 /// handler frame's `uc_sigmask` (so `rt_sigreturn` restores it), or by the
-/// no-handler tail of the Linux delivery loop. We park on the same
-/// `signalfd` wait-queue `pause()`/`signalfd`/`rt_sigtimedwait` use, testing
-/// against `pending & !blocked` under the *temporary* mask, so a signal that
-/// is blocked by `*mask` does not wake us (matching Linux).
+/// no-handler tail of the Linux delivery loop, after which the restart runs
+/// the call again from its registers. We park on the same `signalfd`
+/// wait-queue `pause()`/`signalfd`/`rt_sigtimedwait` use, testing against
+/// `pending & !blocked` under the *temporary* mask, so a signal that is
+/// blocked by `*mask` does not wake us (matching Linux).
+///
+/// Until 2026-10-08 the call answered `-EINTR` whatever the signal did, so a
+/// signal a traced program's debugger took away, or a stop and continue,
+/// ended a wait that should have gone on.
 ///
 /// An in-kernel caller (`caller_pid() == None`, e.g. the boot self-test) has
 /// no signal queue to park on and the boot CPU is single-threaded, so we keep
@@ -36970,12 +36969,13 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
 
     // Park until a signal deliverable under the temporary mask is pending.
     // Register-then-recheck closes the post-before-park race exactly like
-    // sys_pause.  sigsuspend's only exit is EINTR; the saved mask is
-    // restored by the signal-delivery checkpoint that runs right after.
+    // sys_pause. The answer is resolved by the signal-delivery checkpoint
+    // that runs right after: `-EINTR` once a handler's frame is built, a
+    // restart when nothing ran one (the saved mask put back first).
     loop {
         let deliverable = !crate::proc::signal::blocked(caller);
         if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
-            return linux_err(errno::EINTR);
+            return restart::restart_result(restart::ERESTARTNOHAND);
         }
         crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
         if crate::proc::signal::has_pending_in_mask(caller, deliverable) {

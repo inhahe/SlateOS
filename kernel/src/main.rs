@@ -165,6 +165,7 @@ mod rcu;
 mod reslimit;
 mod rip_sample;
 mod rng;
+mod rseq;
 mod rtc;
 mod rtl8139;
 mod scfilter;
@@ -3548,6 +3549,14 @@ extern "C" fn kernel_main() -> ! {
         "Linux real-time scheduling (ring 3)",
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_rt_sched(),
+    );
+
+    // Restartable sequences: cpu_id kept current, a critical section switched
+    // out or signalled inside restarted at its abort address (crate::rseq).
+    selftest::dispatch_debug(
+        "Linux rseq (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_rseq(),
     );
 
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):

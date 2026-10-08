@@ -2574,7 +2574,8 @@ pub fn emit_linux_rt_frame(
 ///
 /// Returns `true` on successful delivery (frame rewritten, one signal
 /// consumed).  Returns `false` if the frame could not be built -- the stack
-/// cannot hold it, or it does not fit the alternate stack it belongs on: the
+/// cannot hold it, it does not fit the alternate stack it belongs on, or the
+/// thread's rseq area is malformed (`crate::rseq::on_signal_delivery`): the
 /// signal is then lost, as on Linux, and the caller sends `SIGSEGV` in its
 /// place (`force_sigsegv`).  `regs` keeps any restart resolution already made,
 /// which the frame of the `SIGSEGV` handler records in turn.
@@ -2629,6 +2630,14 @@ pub fn build_linux_rt_frame(
     #[allow(clippy::cast_possible_wrap)]
     let signo_i = sig as i32;
     let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::from_record(signo_i, &info);
+
+    // An rseq critical section the thread is in is aborted first, so the frame
+    // records -- and the handler returns to -- its abort address (Linux's
+    // `rseq_signal_deliver`, at the top of `setup_rt_frame`). A malformed rseq
+    // area fails the frame: the caller sends SIGSEGV in this signal's place.
+    if !crate::rseq::on_signal_delivery(&mut regs.rip) {
+        return false;
+    }
 
     match emit_linux_rt_frame(pid, sig, act, regs, siginfo) {
         Some(entry) => {
@@ -35954,20 +35963,22 @@ fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
 // seccomp / ptrace / clone3 / membarrier / rseq / sync_file_range +
 // process_madvise / cachestat / mseal / map_shadow_stack
 //
-// A grab-bag of "security, sandboxing, and modern syscall extensions"
-// that this kernel does not implement yet.  All are validated and
-// returned a principled error:
+// A grab-bag of "security, sandboxing, and modern syscall extensions".
+// Some are implemented; the rest are validated and return a principled
+// error:
 //
 //   * seccomp: ENOSYS so programs fall back to no-filter execution.
 //     GET_NOTIF_SIZES could return zeroed sizes but ENOSYS is fine.
 //   * ptrace: EPERM (the answer for an untraceable target on Linux).
 //     gdb / strace / perf handle this and either fail with a clear
 //     error or refuse to start.
-//   * clone3: ENOSYS so glibc falls back to clone (which we implement).
-//   * membarrier: query (cmd=0) returns 0 (no commands available);
-//     other cmds get EINVAL.  Glibc, libstdc++ asymmetric-barriers,
-//     Folly, and Boost all handle the absence path.
-//   * rseq: ENOSYS so glibc falls back to no-rseq.
+//   * clone3: implemented on the frame path (`linux_clone3`); the
+//     args-only entry here validates and answers ENOSYS.
+//   * membarrier: implemented -- all ten commands, the expedited ones
+//     interrupting the CPUs that run the caller's threads
+//     (design-decisions 1545).
+//   * rseq: implemented -- registration here, the rest in `crate::rseq`
+//     (design-decisions 1546).
 //   * sync_file_range: validated then 0 (we always write through; no
 //     buffered cache yet, so flushing is a no-op).
 //   * process_madvise: EBADF (no real pidfd in our kernel).
@@ -36292,6 +36303,10 @@ enum MembarrierScope {
     /// `PRIVATE_EXPEDITED` and its `SYNC_CORE` form: every CPU running the
     /// caller's address space is interrupted.
     Private,
+    /// `PRIVATE_EXPEDITED_RSEQ`: as [`Private`](Self::Private) -- or one CPU
+    /// of them, with `MEMBARRIER_CMD_FLAG_CPU` -- and each interrupted thread
+    /// inside an rseq critical section restarts it (`crate::rseq`).
+    PrivateRseq,
 }
 
 /// Decide how to handle a non-QUERY `membarrier` `cmd` given the issuing mm's
@@ -36324,13 +36339,16 @@ fn membarrier_decide(cmd: u64, state: u32) -> MembarrierAction {
                 MembarrierAction::Eperm
             }
         }
-        // The RSEQ commands also restart the rseq critical sections the
-        // interrupted threads are in, which this kernel does not do yet: so
-        // they are EINVAL, as on a Linux built without rseq
-        // (`IS_ENABLED(CONFIG_RSEQ)`), rather than a barrier that leaves the
-        // sections running.
-        MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
-            MembarrierAction::Einval
+        // The interrupted threads' rseq critical sections restart too.
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ => {
+            if state & MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ != 0 {
+                MembarrierAction::Barrier(MembarrierScope::PrivateRseq)
+            } else {
+                MembarrierAction::Eperm
+            }
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ)
         }
         MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => {
             MembarrierAction::Register(MEMBARRIER_READY_GLOBAL_EXPEDITED)
@@ -36395,9 +36413,10 @@ fn membarrier_registrations_mask(state: u32) -> u32 {
 /// - `GLOBAL` waits for every CPU to pass a quiescent state
 ///   (`rcu::synchronize`), as Linux's `synchronize_rcu` does: slower, and it
 ///   interrupts nobody.
-/// - The `RSEQ` commands are `EINVAL`, as on a Linux built without rseq, until
-///   the kernel restarts interrupted rseq critical sections; `QUERY` leaves
-///   them out.
+/// - `PRIVATE_EXPEDITED_RSEQ` does as `PRIVATE_EXPEDITED`, to one CPU with
+///   `MEMBARRIER_CMD_FLAG_CPU` (a negative `cpu_id` meaning all, as on Linux),
+///   and each interrupted thread inside an rseq critical section restarts it
+///   on its way back to user mode (`crate::rseq`, design-decisions 1546).
 ///
 /// Until 2026-10-07 every barrier fenced the calling CPU alone, on the
 /// reasoning that no other thread could share the caller's address space --
@@ -36491,8 +36510,6 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
         if flags != 0 || cpu_id_i32 != 0 {
             return linux_err(errno::EINVAL);
         }
-        // Not the RSEQ commands, which are EINVAL until rseq critical
-        // sections are restarted (`membarrier_decide`).
         let supported = MEMBARRIER_CMD_GLOBAL
             | MEMBARRIER_CMD_GLOBAL_EXPEDITED
             | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
@@ -36500,6 +36517,8 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
             | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
             | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
             | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ
             | MEMBARRIER_CMD_GET_REGISTRATIONS;
         #[allow(clippy::cast_possible_wrap)]
         return SyscallResult::ok(supported as i64);
@@ -36565,14 +36584,28 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
                 MembarrierScope::GlobalExpedited => {
                     crate::cpusync::sync_cpus(crate::sched::cpus_running_user());
                 }
-                MembarrierScope::Private => {
+                MembarrierScope::Private | MembarrierScope::PrivateRseq => {
                     // A kernel caller (the boot self-test) has no address
                     // space of its own for another CPU to be running.
                     let aspace = pid.and_then(crate::proc::pcb::get_pml4).unwrap_or(0);
                     if aspace == 0 {
                         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                    } else {
+                    } else if scope == MembarrierScope::Private {
                         crate::cpusync::sync_cpus(crate::sched::cpus_running_aspace(aspace));
+                    } else {
+                        // FLAG_CPU names one CPU -- none, if it is past the
+                        // CPUs there are -- and a negative cpu_id all of
+                        // them, as Linux's membarrier_private_expedited.
+                        let running = crate::sched::cpus_running_aspace(aspace);
+                        let targets = if flags & MEMBARRIER_CMD_FLAG_CPU == 0 || cpu_id_i32 < 0 {
+                            running
+                        } else {
+                            u32::try_from(cpu_id_i32)
+                                .ok()
+                                .and_then(|c| 1u64.checked_shl(c))
+                                .map_or(0, |bit| running & bit)
+                        };
+                        crate::cpusync::sync_cpus_restarting_rseq(targets);
                     }
                 }
             }
@@ -36618,25 +36651,21 @@ pub(crate) fn native_membarrier(cmd: u64, flags: u64, cpu_id: u64) -> SyscallRes
 /// its per-CPU malloc cache slot is computed via a `sched_getcpu`
 /// fallback on every alloc, and per-thread tcache stays disabled.
 ///
-/// We now do the bookkeeping but skip the per-preemption hook:
-///   * Register: validate ptr/len/flags/sig, refuse double-register
-///     with -EBUSY, store (ptr, len, sig) per task, zero the runtime
-///     fields of the userspace `struct rseq` (cpu_id_start, cpu_id,
-///     node_id, mm_cid) so the first read sees CPU 0 (truthful for
-///     our current uniprocessor scheduler), and return 0.
-///   * Unregister: validate the (ptr, len, sig) triple matches the
-///     stored registration (-EINVAL on mismatch), drop the entry,
-///     return 0.
+/// Register and unregister here; the rest of rseq -- `cpu_id` kept current,
+/// a critical section aborted when its thread is switched out, migrated or
+/// signalled inside it -- is `crate::rseq`, on every return to user mode:
+///   * Register: validate ptr/len/flags/sig, refuse double-register with
+///     -EBUSY, store (ptr, len, sig) per task, write the CPU into the kernel's
+///     fields of `struct rseq` (cpu_id_start, cpu_id, node_id, mm_cid), and
+///     return 0 -- with the thread marked, so the fields are current when the
+///     call returns.
+///   * Unregister: validate the (ptr, len, sig) triple matches the stored
+///     registration (-EINVAL, or -EPERM for the signature), write cpu_id back
+///     to RSEQ_CPU_ID_UNINITIALIZED (-EFAULT, the registration kept, if it
+///     cannot be), drop the entry, return 0.
 ///
-/// What we DO NOT do (deferred — see todo.txt for the SMP hook):
-///   * Update `cpu_id` / `cpu_id_start` / `mm_cid` on each context
-///     switch.  This is the kernel side of rseq's abort-on-migration
-///     protocol.  On a single CPU it does not matter — cpu_id is
-///     always 0 and no abort is ever needed.  When SMP scheduling is
-///     wired up this hook must be added before correctness holds.
-///   * Walk the registered `rseq_cs` pointer on preemption and rewrite
-///     RIP to the abort handler if the section was crossed.  Same SMP
-///     condition.
+/// Until 2026-10-08 the fields were written as 0 at registration and never
+/// again, and no critical section was ever aborted (design-decisions 1546).
 ///
 /// Linux ABI:
 ///   arg0 = rseq*    (32-byte aligned, 32 bytes valid in user space)
@@ -36722,7 +36751,15 @@ fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
                     // Sig mismatch on unregister: Linux returns EPERM.
                     return linux_err(errno::EPERM);
                 }
-                crate::proc::thread_clone::unregister_rseq(task_id);
+                // Linux's rseq_reset_rseq_cpu_node_id: cpu_id back to
+                // RSEQ_CPU_ID_UNINITIALIZED (-1), the rest 0 -- EFAULT, with
+                // the registration kept, if the area cannot be written.
+                if crate::rseq::reset_area(stored_ptr).is_none() {
+                    return linux_err(errno::EFAULT);
+                }
+                // The record was found just above; a second unregistration
+                // cannot have run between (the thread is this one).
+                let _ = crate::proc::thread_clone::unregister_rseq(task_id);
                 return SyscallResult::ok(0);
             }
             None => return linux_err(errno::EINVAL),
@@ -36771,31 +36808,14 @@ fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     crate::proc::thread_clone::register_rseq(task_id, rseq_ptr, len as u32, sig);
 
-    // Initialise the runtime fields the kernel owns:
-    //   offset  0: u32 cpu_id_start (= 0 on our UP scheduler)
-    //   offset  4: u32 cpu_id       (= 0; Linux sentinel for
-    //                                "unregistered" is u32::MAX, so a
-    //                                value of 0 also signals "we are
-    //                                on CPU 0")
-    //   offset 20: u32 node_id      (= 0; single NUMA node)
-    //   offset 24: u32 mm_cid       (= 0; we have no mm-cid concept)
-    //
-    // We do NOT touch:
-    //   offset  8: u64 rseq_cs (user-managed pointer/union)
-    //   offset 16: u32 flags   (user-managed; opt-ins per critical-section)
-    //   offset 28: u32 padding (reserved; touching it would be wrong)
-    let zeros8 = [0u8; 8];
-    let zeros4 = [0u8; 4];
-    // SAFETY: validate_user_write succeeded above for the whole 32-byte
-    // range; the three sub-writes target disjoint slices inside that
-    // range and copy_to_user re-checks under SMAP.
+    // The fields the kernel owns -- cpu_id_start, cpu_id, node_id, mm_cid --
+    // get the CPU the thread runs on, now and again on its way out (Linux
+    // marks the thread with `rseq_set_notify_resume`, so the call returns with
+    // them current). rseq_cs (8), flags (16) and the padding (28) are the
+    // thread's and stay as they are.
+    crate::rseq::notify_this_cpu();
     let write_init = || -> Result<(), KernelError> {
-        unsafe {
-            crate::mm::user::copy_to_user(zeros8.as_ptr(), rseq_ptr, 8)?;
-            crate::mm::user::copy_to_user(zeros4.as_ptr(), rseq_ptr + 20, 4)?;
-            crate::mm::user::copy_to_user(zeros4.as_ptr(), rseq_ptr + 24, 4)?;
-        }
-        Ok(())
+        crate::rseq::write_current_cpu(rseq_ptr).ok_or(KernelError::PageFault)
     };
     if let Err(e) = write_init() {
         // Roll back the registration so the task is in the state it
@@ -60942,16 +60962,15 @@ fn self_test_membarrier_registration() -> crate::error::KernelResult<()> {
             MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE,
             MembarrierAction::Barrier(MembarrierScope::Private),
         ),
-        // The RSEQ commands are EINVAL, registered or not: no rseq restart.
         (
             MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
             0,
-            MembarrierAction::Einval,
+            MembarrierAction::Eperm,
         ),
         (
             MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
             MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ,
-            MembarrierAction::Einval,
+            MembarrierAction::Barrier(MembarrierScope::PrivateRseq),
         ),
         // A non-matching READY bit does NOT permit a different command.
         (
@@ -60978,7 +60997,7 @@ fn self_test_membarrier_registration() -> crate::error::KernelResult<()> {
         (
             MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ,
             0,
-            MembarrierAction::Einval,
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ),
         ),
         (
             MEMBARRIER_CMD_GET_REGISTRATIONS,
@@ -61219,7 +61238,7 @@ fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
         // arg is C `int cpu_id`.  The QUERY arm rejects nonzero cpu_id
         // with EINVAL; high-half garbage with low=0 must truncate and
         // advance to the QUERY bitmask return.
-        // (a) cpu_id=0x1_0000_0000 (high-only) -> 0x27F (QUERY succeeds).
+        // (a) cpu_id=0x1_0000_0000 (high-only) -> 0x3FF (QUERY succeeds).
         let a = SyscallArgs {
             arg0: 0,
             arg1: 0,
@@ -61229,9 +61248,9 @@ fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
             arg5: 0,
         };
         let v = dispatch_linux(nr::MEMBARRIER, &a).value;
-        if v != 0x27F {
+        if v != 0x3FF {
             serial_println!(
-                "[syscall/linux]   FAIL: membarrier QUERY high-half cpu_id -> {} (expected 0x27F)",
+                "[syscall/linux]   FAIL: membarrier QUERY high-half cpu_id -> {} (expected 0x3FF)",
                 v
             );
             return Err(KernelError::InternalError);
@@ -61251,7 +61270,7 @@ fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // (c) cpu_id=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> 0x27F.
+        // (c) cpu_id=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> 0x3FF.
         let a = SyscallArgs {
             arg0: 0,
             arg1: 0,
@@ -61261,9 +61280,9 @@ fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
             arg5: 0,
         };
         let v = dispatch_linux(nr::MEMBARRIER, &a).value;
-        if v != 0x27F {
+        if v != 0x3FF {
             serial_println!(
-                "[syscall/linux]   FAIL: membarrier QUERY all-high cpu_id -> {} (expected 0x27F)",
+                "[syscall/linux]   FAIL: membarrier QUERY all-high cpu_id -> {} (expected 0x3FF)",
                 v
             );
             return Err(KernelError::InternalError);
@@ -93367,8 +93386,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
 
             // membarrier (batch 114): full cmd set.
-            // QUERY returns the supported-cmd bitmask: all 10 but the two
-            // RSEQ commands (0x3FF less 0x180 = 0x27F).
+            // QUERY returns the supported-cmd bitmask (all 10 cmds = 0x3FF).
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0,
@@ -93377,8 +93395,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::MEMBARRIER, &a).value != 0x27F {
-                serial_println!("[syscall/linux]   FAIL: membarrier QUERY not 0x27F");
+            if dispatch_linux(nr::MEMBARRIER, &a).value != 0x3FF {
+                serial_println!("[syscall/linux]   FAIL: membarrier QUERY not 0x3FF");
                 return Err(KernelError::InternalError);
             }
             // QUERY with nonzero flags -> EINVAL.
@@ -93511,8 +93529,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // PRIVATE_EXPEDITED_RSEQ (cmd=128) -> EINVAL, as on a Linux built
-            // without rseq, until rseq critical sections are restarted.
+            // PRIVATE_EXPEDITED_RSEQ (cmd=128) -> 0: a kernel caller's
+            // barrier, permitted without registration.
             let a = SyscallArgs {
                 arg0: 128,
                 arg1: 0,
@@ -93521,15 +93539,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::MEMBARRIER, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
-                serial_println!("[syscall/linux]   FAIL: membarrier RSEQ not EINVAL");
+            if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: membarrier RSEQ not 0");
                 return Err(KernelError::InternalError);
             }
-            // Batch 503: PRIVATE_EXPEDITED_RSEQ (cmd=128) is the ONE cmd whose
-            // v6.6 switch arm carves out FLAG_CPU as legal (the per-CPU
-            // expedited barrier that drains one CPU's RSEQ critical section),
-            // so the flag passes the flag gate -- and the command is then
-            // EINVAL like the plain RSEQ one, for want of rseq restarts.
+            // Batch 503: PRIVATE_EXPEDITED_RSEQ (cmd=128) with FLAG_CPU=1
+            // -> 0.  This is the ONE cmd whose v6.6 switch arm carves out
+            // FLAG_CPU as legal (the per-CPU expedited barrier that drains a
+            // single CPU's RSEQ critical section).
             let a = SyscallArgs {
                 arg0: 128,
                 arg1: 1,
@@ -93538,14 +93555,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::MEMBARRIER, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+            if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
                 serial_println!(
-                    "[syscall/linux]   FAIL: membarrier RSEQ+FLAG_CPU not EINVAL (no rseq restart)"
+                    "[syscall/linux]   FAIL: membarrier RSEQ+FLAG_CPU not 0 (batch-503 legal carve-out)"
                 );
                 return Err(KernelError::InternalError);
             }
             serial_println!(
-                "[syscall/linux]   membarrier FLAG_CPU refused off PRIVATE_EXPEDITED_RSEQ, itself EINVAL until rseq restarts (v6.6, batch 503): OK"
+                "[syscall/linux]   membarrier FLAG_CPU legal only on PRIVATE_EXPEDITED_RSEQ (v6.6, batch 503): OK"
             );
             // REGISTER_GLOBAL_EXPEDITED (cmd=4) -> 0.
             let a = SyscallArgs {
@@ -93850,6 +93867,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             };
             if dispatch_linux(nr::RSEQ, &a).value != 0 {
                 serial_println!("[syscall/linux]   FAIL: rseq unregister-match not 0");
+                return Err(KernelError::InternalError);
+            }
+            // Unregistering resets the kernel's fields as Linux's
+            // rseq_reset_rseq_cpu_node_id does: cpu_id_start 0, cpu_id
+            // RSEQ_CPU_ID_UNINITIALIZED (-1), node_id and mm_cid 0.
+            let view: [u8; 32] = rseq_buf.0;
+            if view[0..4] != [0u8; 4] || view[4..8] != [0xFFu8; 4] || view[20..28] != [0u8; 8] {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rseq unregister did not reset cpu_id to -1"
+                );
                 return Err(KernelError::InternalError);
             }
             // Re-register after unregister -> 0 (fresh slot).

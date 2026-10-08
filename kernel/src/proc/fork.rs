@@ -168,7 +168,7 @@ extern "C" fn fork_child_trampoline(image_raw: u64) {
     // `fork_process_clone` for this thread alone.  No other code observes
     // it.
     let boxed = unsafe { Box::from_raw(image_raw as *mut ForkChildImage) };
-    let regs: [u64; REG_IMAGE_LEN] = boxed.regs;
+    let mut regs: [u64; REG_IMAGE_LEN] = boxed.regs;
     let settid_ptr = boxed.settid_ptr;
     drop(boxed); // Free the heap allocation now — IRETQ never returns.
 
@@ -193,6 +193,18 @@ extern "C" fn fork_child_trampoline(image_raw: u64) {
                 core::mem::size_of::<i32>(),
             )
         };
+    }
+
+    // The rseq work the child's first dispatch left it owing: it inherited
+    // the forking thread's registration (`fork_process_clone_inner`), and its
+    // area still holds the parent's `cpu_id`. Last before the IRETQ, with
+    // interrupts left off (`crate::rseq::exit_to_user`). The parent was in a
+    // system call, so the child is in no critical section and `RIP` stays put.
+    // A SIGSEGV posted for a malformed area waits, like every signal pending
+    // at the child's start, for its first return from the kernel: this path
+    // delivers none.
+    if let Some(rip) = regs.first_mut() {
+        let _ = crate::rseq::exit_to_user(rip);
     }
 
     let ptr = regs.as_ptr();
@@ -796,6 +808,14 @@ fn fork_process_clone_inner(
         parent_gs,
     ) {
         Ok(task_id) => {
+            // The forking thread's rseq area, at the same address in the
+            // copy of its address space: Linux's `rseq_fork` gives a forked
+            // child the registration (a new thread starts without one).
+            if let Some((area, len, sig)) =
+                super::thread_clone::lookup_rseq(crate::sched::current_task_id())
+            {
+                super::thread_clone::register_rseq(task_id, area, len, sig);
+            }
             if let Some(inheritance) = inheritance {
                 crate::sched::inherit_scheduling(task_id, inheritance);
                 // SCHED_RESET_ON_FORK resets the child process's nice too:

@@ -10218,19 +10218,21 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     }
 }
 
-/// Deliver a pending signal to the current thread on an interrupt's return to
-/// user mode -- the other half of Linux's "check on every return to user
-/// mode", without which a thread that makes no system calls (a computation in
-/// a loop) never runs its handler for `^C` or a timer. Called from the
-/// interrupt exit ([`crate::idt::SavedRegisters`]) with the interrupted registers,
-/// which it rewrites to enter the handler.
+/// Deliver a pending signal to the current thread on an interrupt's or an
+/// exception's return to user mode -- the other half of Linux's "check on
+/// every return to user mode", without which a thread that makes no system
+/// calls (a computation in a loop) never runs its handler for `^C` or a timer.
+/// Called from the interrupt and exception exits (`crate::idt`) with the
+/// interrupted registers ([`crate::idt::SavedRegisters`]), which it rewrites
+/// to enter the handler.
 ///
 /// Like Linux's exit-to-user work it runs with interrupts enabled: writing the
 /// frame may fault in the user stack, and a default action may stop or end the
 /// thread. That is safe here because the interrupted code is in ring 3, so it
 /// holds no kernel lock, and this runs on the thread's own kernel stack after
-/// the interrupt has been handled. Interrupts are off again on return, for the
-/// stub's register restore and `iretq`.
+/// the interrupt or exception has been handled. Called with interrupts off,
+/// and they are off again on return, for the stub's register restore and
+/// `iretq`.
 pub fn deliver_pending_signal_on_interrupt_exit(
     gprs: &mut crate::idt::SavedRegisters,
     iret: &mut crate::idt::InterruptStackFrame,

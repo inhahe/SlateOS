@@ -49,7 +49,9 @@ A item). `EINVAL` is what a Linux built without rseq answers, and `QUERY`
 leaves the two commands out, so a library falls back instead of trusting a
 barrier that would let a stale per-CPU operation commit. *Easy to reverse:*
 the two arms in `membarrier_decide` and two bits in `QUERY`'s mask, once
-rseq restarts exist.
+rseq restarts exist -- **which they did the same day (1546): the RSEQ
+commands now interrupt as `PRIVATE_EXPEDITED` does, marking each answering
+CPU for the rseq work, and `QUERY` answers all ten.**
 
 **Found on the way:** `apic::send_fixed_ipi` wrote the destination and the
 command in two steps with interrupts on; an interrupt in between that sent

@@ -776,10 +776,20 @@ fn rt_budget_ticks() -> u64 {
 /// Record what `cpu` now runs ([`CURRENT_LEVEL`]) and give a real-time
 /// policy its slice: none for `SCHED_FIFO`, which runs until it blocks,
 /// yields or a higher level preempts it, and Linux's 100 ms for `SCHED_RR`.
-/// Called at every dispatch, after the pick set the level's ordinary slice.
-fn note_dispatch(cpu: usize, task: &Task) {
+/// Called at every dispatch, after the pick set the level's ordinary slice;
+/// `switched_in` says whether `task` takes the CPU from another task, rather
+/// than being picked again -- or resumed in place -- with nothing else having
+/// run.
+fn note_dispatch(cpu: usize, task: &Task, switched_in: bool) {
     if let Some(level) = CURRENT_LEVEL.get(cpu) {
         level.store(task.effective_priority(), Ordering::Relaxed);
+    }
+    // A thread with an rseq area switched in owes it the rseq work on its way
+    // out -- Linux's `rseq_preempt`, at every switch of a task out, and
+    // `rseq_migrate`. Picked again with nothing else having run, it neither
+    // moved nor had a critical section raced: Linux marks nothing then either.
+    if switched_in {
+        crate::rseq::note_dispatch(cpu, task.rseq_registered);
     }
     // Only a change needs the barrier: a CPU staying in one address space was
     // already counted as running it.
@@ -5604,6 +5614,17 @@ pub fn set_scheduler(task_id: TaskId, attr: task::SchedAttr) -> Option<task::Sch
     Some(old)
 }
 
+/// Record whether `task_id` has an rseq area registered (`crate::rseq`):
+/// `proc::thread_clone`'s registration, unregistration and exec release keep
+/// it in step with their record. `false` if there is no such task.
+pub fn set_rseq_registered(task_id: TaskId, registered: bool) -> bool {
+    let mut state = SCHED.lock();
+    state.tasks.get_mut(&task_id).is_some_and(|t| {
+        t.rseq_registered = registered;
+        true
+    })
+}
+
 /// The scheduling attributes of `task_id`, or `None` if there is no such
 /// task.
 #[must_use]
@@ -8392,7 +8413,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             task.record_dispatch(crate::apic::tick_count());
                             task.state = TaskState::Running;
                             task.last_cpu = cpu;
-                            note_dispatch(cpu, task);
+                            note_dispatch(cpu, task, false);
                         }
                         drop(s);
                         wake_signals.flush();
@@ -8487,7 +8508,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         task.record_dispatch(crate::apic::tick_count());
                         task.state = TaskState::Running;
                         task.last_cpu = cpu;
-                        note_dispatch(cpu, task);
+                        note_dispatch(cpu, task, true);
                     }
 
                     if let (
@@ -8653,7 +8674,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     PER_CPU_SCHED.dequeue(current_id, task.effective_priority(), cpu);
                     task.record_dispatch(crate::apic::tick_count());
                     task.state = TaskState::Running;
-                    note_dispatch(cpu, task);
+                    note_dispatch(cpu, task, false);
                 }
             }
             return;
@@ -8676,7 +8697,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             // save-then-restore.  Handle it uniformly regardless of `requeue`.
             if let Some(task) = state.tasks.get_mut(&current_id) {
                 task.state = TaskState::Running;
-                note_dispatch(cpu, task);
+                note_dispatch(cpu, task, false);
             }
             return;
         }
@@ -8744,7 +8765,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 next_task.record_dispatch(crate::apic::tick_count());
                 next_task.state = TaskState::Running;
                 next_task.last_cpu = cpu;
-                note_dispatch(cpu, next_task);
+                note_dispatch(cpu, next_task, true);
             }
             old_ctx_ptr = old;
             new_ctx_ptr = new;

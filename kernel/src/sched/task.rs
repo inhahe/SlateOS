@@ -531,6 +531,10 @@ pub struct Task {
     /// ordinary -- a real-time policy becomes `SCHED_OTHER` at nice 0, a
     /// negative nice becomes 0 -- and without the flag.
     pub reset_on_fork: bool,
+    /// Whether the thread has an rseq area registered
+    /// (`proc::thread_clone::register_rseq`): its every dispatch then owes it
+    /// the rseq work on its way back to user mode (`crate::rseq`).
+    pub rseq_registered: bool,
     /// Saved CPU register state.
     pub context: Context,
     /// Physical address of the stack's backing frame(s).
@@ -1220,6 +1224,7 @@ impl Task {
             rt_priority: 0,
             normal_priority: IDLE_PRIORITY,
             reset_on_fork: false,
+            rseq_registered: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,
@@ -1312,6 +1317,7 @@ impl Task {
             rt_priority: 0,
             normal_priority: IDLE_PRIORITY,
             reset_on_fork: false,
+            rseq_registered: false,
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
@@ -1471,6 +1477,7 @@ impl Task {
             rt_priority: 0,
             normal_priority: priority,
             reset_on_fork: false,
+            rseq_registered: false,
             context,
             stack_phys,
             stack_bottom,

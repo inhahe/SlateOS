@@ -438,28 +438,63 @@ pub struct InterruptStackFrame {
     pub ss: u64,
 }
 
-/// On an interrupt's way back to ring 3, deliver a pending signal to the
-/// interrupted thread, as Linux does on every return to user mode -- not only
-/// on a system call's, which until 2026-10-07 was the only place this kernel
-/// looked, so a program computing in a loop never saw `^C` or a timer's signal
-/// reach its handler.
+/// On an interrupt's or an exception's way back to ring 3, the work Linux's
+/// `exit_to_user_mode_loop` does on every return to user mode: the rseq work
+/// a dispatch left the interrupted thread owing (`crate::rseq`), and a
+/// pending signal -- which until 2026-10-07 was looked for only on a system
+/// call's return, so a program computing in a loop never saw `^C` or a
+/// timer's signal reach its handler, and until 2026-10-08 not on an
+/// exception's.
+///
+/// Round again while the thread was switched out during the signal step (its
+/// new CPU then owes it the rseq work) or the rseq work posted `SIGSEGV`;
+/// every check is made with interrupts off, so nothing found after the last
+/// one is left behind. Returns with interrupts off, for the stub's `iretq`.
 ///
 /// Called by [`irq_common_dispatch`] once the interrupt has been handled and
-/// any preemption done, on the interrupted thread's own kernel stack. A
-/// no-op unless the frame says ring 3 and some signal may be pending.
-fn deliver_signal_on_user_return(frame: *mut InterruptStackFrame) {
+/// any preemption done, and by [`exception_exit`] once an exception's handler
+/// returns, on the interrupted thread's own kernel stack. A no-op unless the
+/// frame says ring 3.
+fn exit_to_user_mode(frame: *mut InterruptStackFrame) {
     // SAFETY: `frame` is the stub's saved frame on this kernel stack.
     let cs = unsafe { (*frame).cs };
-    if cs & 3 != 3 || !crate::proc::signal::any_pending() {
+    if cs & 3 != 3 {
         return;
     }
-    // SAFETY: every stub pushes the error code and the fifteen registers
-    // directly below the frame (`saved_registers_from_frame`), on this same
-    // stack, and nothing else refers to them until the stub pops them.
-    let gprs = unsafe { &mut *saved_registers_from_frame(frame) };
-    // SAFETY: as above; the frame is ours until the stub's `iretq`.
-    let iret = unsafe { &mut *frame };
-    crate::syscall::handlers::deliver_pending_signal_on_interrupt_exit(gprs, iret);
+    let mut signals = crate::proc::signal::any_pending();
+    loop {
+        // SAFETY: the frame is ours until the stub's `iretq`, and no other
+        // reference to it is live while this one is.
+        let posted = crate::rseq::exit_to_user(unsafe { &mut (*frame).rip });
+        if !(signals || posted) {
+            return;
+        }
+        signals = false;
+        // SAFETY: every stub pushes the error code and the fifteen registers
+        // directly below the frame (`saved_registers_from_frame`), on this same
+        // stack, and nothing else refers to them until the stub pops them.
+        let gprs = unsafe { &mut *saved_registers_from_frame(frame) };
+        // SAFETY: as above; the frame is ours until the stub's `iretq`.
+        let iret = unsafe { &mut *frame };
+        crate::syscall::handlers::deliver_pending_signal_on_interrupt_exit(gprs, iret);
+        // Interrupts are off again: whether the signal step moved the thread
+        // is settled.
+        if !crate::rseq::pending_here() {
+            return;
+        }
+    }
+}
+
+/// The return-to-user-mode work after an exception's handler: the exception
+/// stubs for every vector a ring-3 thread can raise and resume from call it
+/// (not NMI, the double fault or the machine check, which can arrive in any
+/// context and must not turn interrupts on). Without it, a thread whose page
+/// fault waited for I/O -- or was preempted while being resolved -- went back
+/// into an rseq critical section without its abort, and with a `cpu_id` of
+/// the CPU it had left.
+#[unsafe(no_mangle)]
+extern "C" fn exception_exit(frame: *mut InterruptStackFrame) {
+    exit_to_user_mode(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -789,7 +824,7 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
         // (pre-existing behaviour: safe, but without overflow isolation).
         dispatch_vector(frame, vector);
         crate::sched::do_deferred_preempt();
-        deliver_signal_on_user_return(frame);
+        exit_to_user_mode(frame);
         return;
     }
 
@@ -816,7 +851,7 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
         run_on_irq_stack(top, frame, vector);
     }
     crate::sched::do_deferred_preempt();
-    deliver_signal_on_user_return(frame);
+    exit_to_user_mode(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -873,8 +908,23 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
 // ---------------------------------------------------------------------------
 
 /// Generate an assembly stub for an exception WITHOUT a CPU error code.
+///
+/// With `exit_to_user`, the stub calls [`exception_exit`] after the handler,
+/// for the return-to-user-mode work; without it -- NMI, the machine check
+/// and the catch-all vector -- the handler's return goes straight to `iretq`.
 macro_rules! isr_stub_no_error {
     ($stub:ident, $handler:ident) => {
+        isr_stub_no_error!(@emit $stub, $handler,);
+    };
+    ($stub:ident, $handler:ident, exit_to_user) => {
+        isr_stub_no_error!(
+            @emit $stub,
+            $handler,
+            "lea rdi, [rsp + 128]", // the frame again: the call clobbered RDI
+            "call exception_exit"
+        );
+    };
+    (@emit $stub:ident, $handler:ident, $($exit:literal),*) => {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
@@ -902,6 +952,7 @@ macro_rules! isr_stub_no_error {
             "lea rdi, [rsp + 128]", // 16 pushes × 8 bytes = 128
             "xor esi, esi",         // error code = 0
             concat!("call ", stringify!($handler)),
+            $($exit,)*
             "pop r15",
             "pop r14",
             "pop r13",
@@ -927,8 +978,22 @@ macro_rules! isr_stub_no_error {
 }
 
 /// Generate an assembly stub for an exception WITH a CPU error code.
+///
+/// `exit_to_user` as for [`isr_stub_no_error`]; the double fault goes
+/// without.
 macro_rules! isr_stub_with_error {
     ($stub:ident, $handler:ident) => {
+        isr_stub_with_error!(@emit $stub, $handler,);
+    };
+    ($stub:ident, $handler:ident, exit_to_user) => {
+        isr_stub_with_error!(
+            @emit $stub,
+            $handler,
+            "lea rdi, [rsp + 128]", // the frame again: the call clobbered RDI
+            "call exception_exit"
+        );
+    };
+    (@emit $stub:ident, $handler:ident, $($exit:literal),*) => {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
@@ -956,6 +1021,7 @@ macro_rules! isr_stub_with_error {
             "lea rdi, [rsp + 128]", // frame is at 15 GPRs + error code = 128 bytes
             "mov rsi, [rsp + 120]", // error code is at 15 GPRs × 8 = 120
             concat!("call ", stringify!($handler)),
+            $($exit,)*
             "pop r15",
             "pop r14",
             "pop r13",
@@ -980,25 +1046,32 @@ macro_rules! isr_stub_with_error {
     };
 }
 
-// Generate all exception stubs.
-isr_stub_no_error!(isr_divide_error, handle_divide_error);
-isr_stub_no_error!(isr_debug, handle_debug);
+// Generate all exception stubs. Every vector a ring-3 thread can raise and
+// resume from does the return-to-user-mode work (`exit_to_user`); NMI, the
+// double fault and the machine check -- which can interrupt any context, the
+// first two on their own stacks -- do not.
+isr_stub_no_error!(isr_divide_error, handle_divide_error, exit_to_user);
+isr_stub_no_error!(isr_debug, handle_debug, exit_to_user);
 isr_stub_no_error!(isr_nmi, handle_nmi);
-isr_stub_no_error!(isr_breakpoint, handle_breakpoint);
-isr_stub_no_error!(isr_overflow, handle_overflow);
-isr_stub_no_error!(isr_bound_range, handle_bound_range);
-isr_stub_no_error!(isr_invalid_opcode, handle_invalid_opcode);
-isr_stub_no_error!(isr_device_not_avail, handle_device_not_avail);
+isr_stub_no_error!(isr_breakpoint, handle_breakpoint, exit_to_user);
+isr_stub_no_error!(isr_overflow, handle_overflow, exit_to_user);
+isr_stub_no_error!(isr_bound_range, handle_bound_range, exit_to_user);
+isr_stub_no_error!(isr_invalid_opcode, handle_invalid_opcode, exit_to_user);
+isr_stub_no_error!(isr_device_not_avail, handle_device_not_avail, exit_to_user);
 isr_stub_with_error!(isr_double_fault, handle_double_fault);
-isr_stub_with_error!(isr_invalid_tss, handle_invalid_tss);
-isr_stub_with_error!(isr_seg_not_present, handle_seg_not_present);
-isr_stub_with_error!(isr_stack_segment, handle_stack_segment);
-isr_stub_with_error!(isr_general_protection, handle_general_protection);
-isr_stub_with_error!(isr_page_fault, handle_page_fault);
-isr_stub_no_error!(isr_x87_fp, handle_x87_fp);
-isr_stub_with_error!(isr_alignment_check, handle_alignment_check);
+isr_stub_with_error!(isr_invalid_tss, handle_invalid_tss, exit_to_user);
+isr_stub_with_error!(isr_seg_not_present, handle_seg_not_present, exit_to_user);
+isr_stub_with_error!(isr_stack_segment, handle_stack_segment, exit_to_user);
+isr_stub_with_error!(
+    isr_general_protection,
+    handle_general_protection,
+    exit_to_user
+);
+isr_stub_with_error!(isr_page_fault, handle_page_fault, exit_to_user);
+isr_stub_no_error!(isr_x87_fp, handle_x87_fp, exit_to_user);
+isr_stub_with_error!(isr_alignment_check, handle_alignment_check, exit_to_user);
 isr_stub_no_error!(isr_machine_check, handle_machine_check);
-isr_stub_no_error!(isr_simd_fp, handle_simd_fp);
+isr_stub_no_error!(isr_simd_fp, handle_simd_fp, exit_to_user);
 
 // Default handler for unregistered vectors.
 isr_stub_no_error!(isr_default, handle_default);
@@ -2002,7 +2075,7 @@ fn try_deliver_linux_fault_signal(
 
     // SAFETY: both pointers are valid and exclusively ours (interrupts disabled
     // on this CPU); volatile reads pick up the trapped register state.
-    let regs = unsafe {
+    let mut regs = unsafe {
         LinuxTrapRegs {
             rax: read_volatile(addr_of!((*saved_ptr).rax)),
             rbx: read_volatile(addr_of!((*saved_ptr).rbx)),
@@ -2024,6 +2097,23 @@ fn try_deliver_linux_fault_signal(
             rflags: read_volatile(addr_of!((*frame_ptr).rflags)),
         }
     };
+
+    // An rseq critical section the fault is in is aborted first, so the frame
+    // records -- and the handler returns to -- its abort address: Linux's
+    // `rseq_signal_deliver`, from `setup_rt_frame`. The trapped state gets it
+    // too, so a SIGSEGV sent below in this signal's place records it as well.
+    // A malformed rseq area is Linux's `force_sigsegv(sig)` there: SIGSEGV is
+    // posted and this signal's frame built regardless, and the exit that
+    // follows (`exception_exit`) delivers the SIGSEGV, whose own delivery
+    // fails the same way and ends the program -- now, when `sig` is SIGSEGV.
+    let rseq_ok = crate::rseq::on_signal_delivery(&mut regs.rip);
+    // SAFETY: as for the writes below: `frame_ptr` is valid and exclusive.
+    unsafe {
+        write_volatile(addr_of_mut!((*frame_ptr).rip), regs.rip);
+    }
+    if !rseq_ok && !linux::force_sigsegv(pid, sig) {
+        return false;
+    }
 
     let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::fault(
         #[allow(clippy::cast_possible_wrap)]

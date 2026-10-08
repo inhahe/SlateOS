@@ -44,7 +44,7 @@
 //! meanwhile by another CPU is still answered here, and a barrier request is
 //! answered by a CPU that is waiting for a shootdown.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::serial_println;
 
@@ -63,6 +63,12 @@ static SYNC_TARGETS: AtomicU64 = AtomicU64::new(0);
 
 /// How many of them have acknowledged it.
 static ACK_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the latest request also restarts the rseq critical section of
+/// each thread it interrupts (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ`): the
+/// answering CPU is marked for the rseq work its interrupt's exit then does
+/// (`crate::rseq`), as Linux's `ipi_rseq` calls `rseq_preempt`.
+static SYNC_RSEQ: AtomicBool = AtomicBool::new(false);
 
 /// Per CPU: the latest request it has answered (or, for its initiator,
 /// issued), so that a request answered from the handler and from a spin on
@@ -101,6 +107,18 @@ fn cpu_bit(cpu: usize) -> u64 {
 /// From task context with interrupts enabled: the wait is a spin, and a CPU
 /// waiting with interrupts off could be the one a concurrent request needs.
 pub fn sync_cpus(targets: u64) {
+    sync_cpus_for(targets, false);
+}
+
+/// [`sync_cpus`], and each thread it interrupts that is inside an rseq
+/// critical section restarts it, on its way back to user mode
+/// (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ`).
+pub fn sync_cpus_restarting_rseq(targets: u64) {
+    sync_cpus_for(targets, true);
+}
+
+/// [`sync_cpus`], with or without the rseq restart.
+fn sync_cpus_for(targets: u64, restart_rseq: bool) {
     core::sync::atomic::fence(Ordering::SeqCst);
     let me = crate::smp::fast_cpu_index();
     let online = crate::cpu_hotplug::online_mask();
@@ -125,6 +143,7 @@ pub fn sync_cpus(targets: u64) {
         core::hint::spin_loop();
     };
     SYNC_TARGETS.store(others, Ordering::Release);
+    SYNC_RSEQ.store(restart_rseq, Ordering::Release);
     ACK_COUNT.store(0, Ordering::Release);
     let seq = SYNC_SEQ.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
     if let Some(mine) = HANDLED_SEQ.get(me) {
@@ -174,6 +193,11 @@ fn service_pending(cpu: usize) {
         return;
     }
     if SYNC_TARGETS.load(Ordering::Acquire) & cpu_bit(cpu) != 0 {
+        // Marked before the acknowledgement, so the initiator returns only
+        // once every interrupted thread is sure to do the rseq work.
+        if SYNC_RSEQ.load(Ordering::Acquire) {
+            crate::rseq::notify_this_cpu();
+        }
         ACK_COUNT.fetch_add(1, Ordering::AcqRel);
     }
 }

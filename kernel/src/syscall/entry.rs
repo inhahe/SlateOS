@@ -356,7 +356,8 @@ pub fn user_return_state_ok(rip: u64, rsp: u64) -> bool {
 /// Rust-level syscall handler called from the assembly entry stub.
 ///
 /// Receives a pointer to the saved register frame on the kernel stack.
-/// Returns the syscall result value in RAX.
+/// Returns the syscall result value in RAX, with interrupts off for the exit
+/// sequence.
 ///
 /// The frame is mutable because certain syscalls (notably `SYS_PROCESS_EXEC`)
 /// need to modify the saved user RIP and RSP so that the SYSRET path
@@ -364,11 +365,34 @@ pub fn user_return_state_ok(rip: u64, rsp: u64) -> bool {
 #[unsafe(no_mangle)]
 extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // SAFETY: frame points to valid data on the current kernel stack,
-    // pushed by our assembly stub moments ago.  No other code accesses
-    // the frame concurrently (single CPU, interrupts re-enabled after
-    // this read).
+    // pushed by our assembly stub moments ago, and nothing else refers to it
+    // until the exit sequence reads it back.
     let f = unsafe { &mut *frame };
+    let mut rax = handle_syscall(f);
+    // Last on the way out, the rseq work a dispatch left this thread owing
+    // (`crate::rseq::exit_to_user`), checked with interrupts off until none is
+    // owed -- every path through the call ends here, `execve`'s and a signal
+    // return's included. A SIGSEGV it posts for a malformed rseq area is
+    // delivered before the return, as Linux's exit loop delivers it.
+    while crate::rseq::exit_to_user(&mut f.user_rip) {
+        crate::cpu::irqoff_tracker::record_enable();
+        // SAFETY: system call context, on the thread's own kernel stack,
+        // holding no lock: the state every call's own work runs in.
+        unsafe {
+            cpu::sti();
+        }
+        if super::handlers::deliver_pending_signal(f, rax) {
+            // The frame now enters the handler, as in `handle_syscall`; the
+            // value the call returned is saved in the signal frame.
+            rax = 0;
+        }
+    }
+    rax
+}
 
+/// The body of [`syscall_handler_inner`]: run the call `f` describes and
+/// deliver a signal pending on its way out. Returns the value for RAX.
+fn handle_syscall(f: &mut SyscallFrame) -> i64 {
     // Check for syscalls that need to modify the frame directly
     // (they change RIP/RSP rather than just returning a value).
     if f.syscall_nr == super::number::SYS_PROCESS_EXEC {

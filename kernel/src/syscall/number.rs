@@ -6764,9 +6764,10 @@ pub const SCHEDULER_RR_INTERVAL: u64 = 2;
 /// a full memory barrier, and will pass a serializing instruction before it
 /// runs that code again (`cpusync`). `GLOBAL` waits instead for every CPU to
 /// pass a quiescent state (`rcu::synchronize`), as Linux's `synchronize_rcu`.
-/// The `RSEQ` commands are `EINVAL`, as on a Linux built without rseq, until
-/// the kernel restarts interrupted rseq critical sections; `QUERY` (0)
-/// answers the rest. Until 2026-10-07 a native program had no call, and the
+/// `PRIVATE_EXPEDITED_RSEQ` also restarts each interrupted thread's rseq
+/// critical section (`crate::rseq`), on one CPU with `MEMBARRIER_CMD_FLAG_CPU`.
+/// `QUERY` (0) answers them all. Until 2026-10-07 a native program had no
+/// call, and the
 /// Linux ABI's fenced the calling CPU alone
 /// (requests/d-a-membarrier-needs-the-kernel-to-interrupt-the-other-cpus.md).
 pub const SYS_MEMBARRIER: u64 = 1147;

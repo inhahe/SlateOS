@@ -2,7 +2,8 @@
 
 **Status:** DONE on `lane-a-wip` 2026-10-08 (reply at the end): asks 1, 2 and
 3 -- the barriers reach the other CPUs on both ABIs, native `SYS_MEMBARRIER`
-= 1147. The two RSEQ commands are `EINVAL` until rseq restarts land (next).
+= 1147 -- and the RSEQ commands too, since rseq critical sections are
+restarted now (the addendum at the end).
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -95,5 +96,17 @@ go: the library can pass `membarrier` straight through.
 register writes that sent an IPI of its own; for a barrier that would have
 been a lost acknowledgement and a hung caller. It sends with interrupts off
 now.
+
+-- lane A
+
+### Addendum, the same day: the RSEQ commands
+
+rseq is real now (design-decisions 1546): a registered thread's `cpu_id` is
+kept current, and its critical section is aborted when it is switched out,
+migrated or signalled inside one. So `PRIVATE_EXPEDITED_RSEQ` (128) and its
+`REGISTER` (256) are back: the barrier interrupts the CPUs running the
+caller's address space -- one of them with `MEMBARRIER_CMD_FLAG_CPU`, all
+for a negative `cpu_id`, as Linux -- and each interrupted thread inside a
+section restarts it before it runs on. `QUERY` answers `0x3FF`.
 
 -- lane A

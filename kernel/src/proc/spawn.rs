@@ -2453,6 +2453,16 @@ pub fn exec_process(
         KernelError::NoSuchProcess
     })?;
 
+    // What the calling thread registered in the old image -- its robust list,
+    // rseq area and clear-child-tid word -- is released while that image is
+    // still mapped, the robust list walked first (`thread_clone::
+    // release_for_exec`). A kernel caller (a spawn self-test) is no thread of
+    // the process, and has nothing registered.
+    let current = crate::sched::current_task_id();
+    if crate::proc::thread::owner_process(current) == Some(pid) {
+        crate::proc::thread_clone::release_for_exec(current);
+    }
+
     // Step 3: Tear down the old user address space.
     //
     // After this point, the process has an empty user address space.
@@ -23451,6 +23461,109 @@ pub fn self_test_linux_rt_sched() -> KernelResult<()> {
         "[spawn]   Linux real-time scheduling (ring 3: every policy read back, Linux's refusals, \
          RR's 100 ms, SCHED_RESET_ON_FORK across fork, a thread's own policy inherited by its \
          threads, an ordinary thread kept off a spinning SCHED_FIFO thread's CPU): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of restartable sequences through the Linux ABI:
+/// [`elf::build_linux_rseq_test_elf`] (`build/rseqtest.c`) registers an area
+/// and reads `cpu_id` as it moves between CPUs, has a critical section
+/// switched out, one interrupted by a signal and one that faults -- each must
+/// land on the abort address, a signal frame already holding it -- has `membarrier`'s RSEQ
+/// barrier restart a section running on another CPU, has a child killed with
+/// `SIGSEGV` for a section without the signature, and unregisters
+/// (`crate::rseq`, design-decisions 1546).
+pub fn self_test_linux_rseq() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux rseq (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_rseq_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-rseq"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-rseq",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: rseq spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: rseq (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30) => "the mailbox could not be mapped",
+            Some(0x31 | 0x33) => "registering failed, or a second registration was not EBUSY",
+            Some(0x32) => "registration did not fill cpu_id and cpu_id_start with the CPU",
+            Some(0x34..=0x37) => "cpu_id did not follow the thread to another CPU",
+            Some(0x40) => "a section that was not interrupted did not commit",
+            Some(0x41..=0x43) => "the spinner thread could not start or register",
+            Some(0x44) => "a section switched out did not restart at its abort address",
+            Some(0x45) => "the kernel did not clear rseq_cs after the abort",
+            Some(0x50 | 0x51) => "installing SIGALRM's handler or arming the timer failed",
+            Some(0x52) => "a section interrupted by a signal did not come back aborted",
+            Some(0x53) => "a signal frame held an address inside the section, not its abort",
+            Some(0x54) => "no SIGALRM ever landed inside the section in 1000 tries",
+            Some(0x58) => "installing SIGILL's handler failed",
+            Some(0x59 | 0x5A) => {
+                "a section that faulted did not restart at its abort address (the SIGILL \
+                 frame held the faulting instruction)"
+            }
+            Some(0x5B) => "the kernel did not clear rseq_cs after a fault's abort",
+            Some(0x80) => "the main thread could not go back to CPU 0",
+            Some(0x81) => "membarrier's RSEQ barrier was not EPERM before registering",
+            Some(0x82) => "registering for membarrier's RSEQ barrier failed",
+            Some(0x83 | 0x84) => "the second spinner could not start, move to CPU 1 or register",
+            Some(0x85) => "membarrier's RSEQ barrier failed",
+            Some(0x86) => "membarrier's RSEQ barrier did not restart a section on another CPU",
+            Some(0x87) => "the second spinner kept being switched out: no clean try in 1000",
+            Some(0x88) => "the second spinner did not stop",
+            Some(0x60..=0x64) => "a section without the signature was not answered with SIGSEGV",
+            Some(0x70..=0x74) => {
+                "unregistering did not put cpu_id back to -1, or re-registering failed"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: rseq (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux rseq (ring 3: cpu_id kept current across CPUs, a switched-out, a \
+         signalled and a faulting section restarted at their abort address, membarrier's RSEQ \
+         barrier restarting one on another CPU, a missing signature SIGSEGV, unregistration): OK"
     );
     Ok(())
 }

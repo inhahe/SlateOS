@@ -5604,10 +5604,10 @@ fn test_dispatch_thread_scheduler() -> KernelResult<()> {
     test_dispatch_membarrier()
 }
 
-/// `SYS_MEMBARRIER` is the Linux call's body: `QUERY` answers every command
-/// but the two RSEQ ones, which are `EINVAL`; a kernel caller's barriers
-/// succeed (this runs before the APs are up -- `cpusync::self_test`
-/// interrupts them later). The Linux ABI's own tests cover the gates.
+/// `SYS_MEMBARRIER` is the Linux call's body: `QUERY` answers every command,
+/// and a kernel caller's barriers and registrations succeed (this runs before
+/// the APs are up -- `cpusync::self_test` interrupts them later). The Linux
+/// ABI's own tests cover the gates.
 fn test_dispatch_membarrier() -> KernelResult<()> {
     let membarrier = |cmd: u64, flags: u64| {
         let args = SyscallArgs {
@@ -5622,13 +5622,14 @@ fn test_dispatch_membarrier() -> KernelResult<()> {
     };
     let einval = i64::from(super::linux::errno::EINVAL).wrapping_neg();
     let checks = [
-        (membarrier(0, 0), 0x27F),
+        (membarrier(0, 0), 0x3FF),
         (membarrier(1, 0), 0),
         (membarrier(2, 0), 0),
         (membarrier(8, 0), 0),
         (membarrier(32, 0), 0),
-        (membarrier(128, 0), einval),
-        (membarrier(256, 0), einval),
+        (membarrier(128, 0), 0),
+        (membarrier(128, 1), 0),
+        (membarrier(256, 0), 0),
         (membarrier(8, 1), einval),
         (membarrier(1 << 12, 0), einval),
     ];

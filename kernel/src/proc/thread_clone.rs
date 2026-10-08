@@ -210,26 +210,45 @@ pub fn lookup_robust_list(task_id: TaskId) -> Option<(u64, u64)> {
 /// critical section the task installs (Linux checks this at abort
 /// time as a defence against attacker-supplied abort handlers).
 ///
-/// We currently use this only as an ABI-stored value:
-///   * `rseq(2)` register/unregister/duplicate-check is satisfied
-///     from this map.
-///   * The userspace `struct rseq` fields (`cpu_id_start`, `cpu_id`,
-///     `node_id`, `mm_cid`) are zeroed on register and never updated
-///     thereafter.  This is correct on a uniprocessor (cpu_id never
-///     changes from 0), and matches the semantics glibc's per-cpu
-///     fast paths require for *correctness* — they always succeed
-///     because the published cpu_id matches the cpu the section
-///     committed on.  On SMP we would need a preemption-time hook
-///     in the scheduler that writes the current CPU back into
-///     `*ptr` (and runs the abort handler when RIP falls inside a
-///     critical section that crossed CPUs).  See todo.txt for the
-///     deferred SMP rseq hook.
+/// `rseq(2)`'s register/unregister/duplicate checks are answered from
+/// this map, and `crate::rseq` reads it on a registered thread's way back
+/// to user mode -- to keep the area's `cpu_id` current and abort a critical
+/// section the thread was switched out, moved or signalled in
+/// (design-decisions 1546). Whether a thread has an entry is mirrored on its
+/// scheduler record (`sched::set_rseq_registered`), which is how a dispatch
+/// knows to mark its CPU without taking this lock.
 ///
+/// A forked child gets its forking thread's entry (Linux's `rseq_fork`); a
+/// new thread starts with none; an exec drops it ([`release_for_exec`]).
 /// Entries are removed in [`on_thread_exit_hook`] so the table does
 /// not grow without bound across the lifetime of the system.  No
 /// userspace write happens at exit (the thread is dying; Linux also
 /// does not zero the struct on exit).
 static RSEQ: Mutex<BTreeMap<TaskId, (u64, u32, u32)>> = Mutex::new(BTreeMap::new());
+
+/// Release what thread `task_id` registered in the image an exec is about to
+/// replace -- Linux's `exec_mm_release`, from `spawn::exec_process` just
+/// before the old address space is torn down, while it is still mapped:
+///
+/// - its PI futexes are handed to their waiters and its robust list walked,
+///   as at exit ([`on_thread_exit_hook`]'s order): the old image's mutexes die with
+///   it (Linux's `futex_exec_release`);
+/// - the robust-list head, the rseq area and the clear-child-tid word are
+///   forgotten.
+///
+/// Each names an address in the old image. Until 2026-10-08 all three outlived
+/// an exec, and the thread's exit then walked, or wrote into, whatever the new
+/// image had put at those addresses -- unless its C library happened to
+/// register over them first.
+pub fn release_for_exec(task_id: TaskId) {
+    let robust_head = ROBUST_LIST.lock().remove(&task_id).map(|(head, _len)| head);
+    crate::ipc::futex::exit_pi_owned_futexes(task_id);
+    if let Some(head) = robust_head {
+        crate::ipc::futex::exit_robust_list(head, task_id);
+    }
+    let _ = unregister_rseq(task_id);
+    CLEAR_CHILD_TID.lock().remove(&task_id);
+}
 
 /// Register `ptr` (`rseq` userspace pointer), `len` (struct length —
 /// Linux requires 32), and `sig` (abort-signature) for `task_id`.
@@ -238,6 +257,8 @@ static RSEQ: Mutex<BTreeMap<TaskId, (u64, u32, u32)>> = Mutex::new(BTreeMap::new
 /// user space, readable+writable for `len` bytes) and `len == 32`.
 pub fn register_rseq(task_id: TaskId, ptr: u64, len: u32, sig: u32) {
     RSEQ.lock().insert(task_id, (ptr, len, sig));
+    // A task that has gone has nothing to be dispatched with.
+    let _ = crate::sched::set_rseq_registered(task_id, true);
 }
 
 /// Look up the rseq registration for `task_id`.  Returns
@@ -249,7 +270,10 @@ pub fn lookup_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
 /// Remove the rseq registration for `task_id`, if any.  Returns
 /// the previous value for the caller's sanity-checks.
 pub fn unregister_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
-    RSEQ.lock().remove(&task_id)
+    let removed = RSEQ.lock().remove(&task_id);
+    // As above: a task that has gone has no flag to clear.
+    let _ = crate::sched::set_rseq_registered(task_id, false);
+    removed
 }
 
 /// Called from [`super::thread::on_thread_exit`] BEFORE the thread is

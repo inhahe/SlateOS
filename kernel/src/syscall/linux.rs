@@ -52133,8 +52133,8 @@ pub fn self_test_xattr_calls() -> crate::error::KernelResult<()> {
 
 /// The nodes `mknod` and `mknodat` make, as Linux's `vfs_create` and
 /// `vfs_mknod` do: a regular file (`S_IFREG`), which a second `mknod` of the
-/// name finds there (`EEXIST`), and a socket's node (`S_IFSOCK`) -- each of
-/// the type `stat` then reports.
+/// name finds there (`EEXIST`), a socket's node (`S_IFSOCK`) and a named
+/// pipe's (`S_IFIFO`) -- each of the type `stat` then reports.
 ///
 /// Runs once the `/tmp` memfs is mounted rather than in [`self_test`], which
 /// runs before any writable filesystem exists: there `mknod(S_IFREG)` could
@@ -52196,6 +52196,16 @@ pub fn self_test_mknod_nodes() -> crate::error::KernelResult<()> {
         }
         if !is(crate::fs::EntryType::Socket) {
             return Err("mknodat(S_IFSOCK) made something that is not a socket's node");
+        }
+        crate::fs::Vfs::remove(probe_path).map_err(|_| "the probe node could not be removed")?;
+        // A named pipe's node (`ipc::fifo`).
+        let r = call(nr::MKNOD, probe_ptr, 0o010644, 0);
+        if r != 0 {
+            serial_println!("[syscall/linux]   mknod(S_IFIFO) answered {}", r);
+            return Err("mknod(S_IFIFO) did not make a named pipe's node");
+        }
+        if !is(crate::fs::EntryType::Fifo) {
+            return Err("mknod(S_IFIFO) made something that is not a named pipe's node");
         }
         Ok(())
     })();
@@ -75654,15 +75664,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
 
             // The refused node types, as Linux's vfs_mknod: a device needs
-            // CAP_MKNOD (no caller holds it), a FIFO needs named pipes (none
-            // exist). Refused before the path is looked at, so no filesystem
-            // is needed; the nodes that are made are `self_test_mknod_nodes`'s,
-            // which runs once /tmp is writable.
-            for (mode, what) in [
-                (0o020644u64, "S_IFCHR"),
-                (0o060644, "S_IFBLK"),
-                (0o010644, "S_IFIFO"),
-            ] {
+            // CAP_MKNOD, which no caller holds. Refused before the path is
+            // looked at, so no filesystem is needed; the nodes that are made
+            // are `self_test_mknod_nodes`'s, which runs once /tmp is writable.
+            // A FIFO was refused here too until named pipes existed
+            // (e0ed7bd41); it is made now, so it is tested there -- here, in a
+            // kernel task, the probe would make `/syscall_mknod_probe`.
+            for (mode, what) in [(0o020644u64, "S_IFCHR"), (0o060644, "S_IFBLK")] {
                 let a = SyscallArgs {
                     arg0: dummy_ptr,
                     arg1: mode,

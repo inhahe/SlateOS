@@ -24,6 +24,13 @@ exactly the shape ``diff-wsl.sh`` uses for ``SLATEOS_DIFF_BOUNDED``. The two
 compose: unshare re-execs first and sets its flag, the preamble re-execs second
 and sets its own, and neither repeats. A new exception has to argue the same
 thing -- that its second execution is a no-op -- not merely that it looks small.
+
+The second is ``syslogd-diff.sh`` (2026-10-07), which makes the same argument
+in the same shape: it re-execs under ``unshare -r -m -n`` to run a journald of
+its own, guarded by an exported ``SYSLOGD_DIFF_NS``. On the Windows side the
+block is skipped (there is no ``wslpath``); the first run inside WSL enters the
+namespaces and sets the flag; every run after that -- the namespace's, and the
+preamble's bounded re-exec -- finds the flag set and skips it.
 """
 
 import re
@@ -53,7 +60,7 @@ PRE_PREAMBLE_SOURCES = ("util-linux-source.sh", "procps-ref.sh")
 
 # See the module docstring. A name here is a promise that its second execution
 # is a no-op, not that it is short.
-BASELINE = {"df-diff.sh"}
+BASELINE = {"df-diff.sh", "syslogd-diff.sh"}
 
 
 def unquoted_prefix(line, in_quote):

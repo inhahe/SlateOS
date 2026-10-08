@@ -59225,3 +59225,34 @@ unvalidated parts; everything before them (stages 1-5.4 + quiesce helpers +
 the syscall gate) is self-tested and boot-checked. Do NOT wire `powerctl reload`
 to a kexec on `main`, and do NOT leave `sys_power_reload` calling `execute` on a
 published commit, until the kexec-mode boot (5c) passes.
+
+**UPDATE 2026-10-08 (lane A): 5a and 5b are built and the self-reload WORKS in
+QEMU** -- a kernel booted with `selftest.skip=1 kexec.selftest=1` reloads
+itself, and the second kernel boots to BOOT_OK with its command line
+(lane-a-wip, fast boots kexec4/5 of that day). The plan above was wrong in
+places, each found by a boot; the code (`kernel/src/kexec.rs`) is now the
+reference, and its comments say why:
+  - The trampoline switches to the NEW tables FIRST, then clears CR4.PGE/PCIDE/
+    CET (flushing the old kernel's GLOBAL image mappings), then takes the new
+    stack, then copies -- not copy-first under the old tables (the destination
+    is not checked against the old kernel's page-table frames).
+  - Every handoff frame (tables, arena, staging, control region) is allocated
+    BELOW the destination (`handoff_frame_zeroed`, `alloc_order_constrained`):
+    the first boot was refused by the after-the-fact collision check.
+  - The old kernel's direct map is no-execute: NX is cleared on the control
+    region's path before the jump (`allow_execution_at`).
+  - `find_request_sites` takes the first marker window in a WRITABLE segment:
+    the "last start marker" was kexec.rs's own `.rodata` constants, so no
+    request was patched ("Limine did not answer the HHDM request").
+  - The new direct map covers only Limine's types (usable, bootloader-
+    reclaimable, executable-and-modules), not 0..top-of-RAM: the restarted
+    kernel could not map the APIC/IOAPIC uncached over write-back huge pages.
+  - The command line is passed (a kernel-file response with no file), minus
+    `kexec.selftest=1`.
+**Still open, in order:** (1) a `boot-test.sh` kexec flag that boots
+`selftest.skip=1 kexec.selftest=1` and requires a second banner then BOOT_OK
+(5c's harness half; today only `/tmp/fastboot.sh`-style QEMU runs check it);
+(2) the framebuffer response (known-issues `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`);
+(3) SMP -- validated only on one CPU; the APs are INIT'd and the new kernel
+must restart them; (4) only then wire `sys_power_reload` (still `NotSupported`)
+and answer lane C's `requests/c-ab-a-restart-that-keeps-the-computer-on.md`.

@@ -1519,6 +1519,15 @@ list moved to lane D on 2026-09-22):
   (upstream 1.9) and 5.4 ms on a text file (upstream 6.8). Not in the image
   yet: `scripts/rootfs-bin-manifest.txt` ships only what something there
   needs, and the program is 9.4 MB.
+- `[~]` `[B]` **GNU's binutils and GDB take the plain names; `userspace/ar`,
+  `objdump`, `readelf` and `gdb` retire** (design-decisions.md §1065,
+  answering lane D's `requests/d-b-gnu-binutils-is-on-the-image-beside-lane-bs-tools.md`
+  and `requests/d-b-gnu-gdb-is-on-the-image-and-could-take-bin-gdb.md`).
+  Blocked by `services/ctest-binutils-runs/` and `services/ctest-gdb-runs/`
+  passing in a boot of `main`, which wait on lane A's generic C fixture rung.
+  One commit, because neither half can land alone: lane D's to make whole
+  (pre-approved), or lane B's with lane D's recipe lines. `strings` stays
+  lane B's.
 
 Known-issues (open, userland-owned): the whole **`TD-OILS-*` family** — 631
 entries as of 2026-08-14, of which ~325 are still open (the count is a heading

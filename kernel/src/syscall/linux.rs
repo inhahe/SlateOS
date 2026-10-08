@@ -4599,6 +4599,11 @@ fn dispatch_socket_read(
     if cap == 0 {
         return SyscallResult::ok(0);
     }
+    if let Some(r) =
+        inet_pending_error(crate::net::socket::SocketHandle::from_raw(entry.raw_handle))
+    {
+        return r;
+    }
     // A datagram socket has no stream: `read(2)` receives one datagram (dropping
     // the source, as `read` takes no address out-param). Routing through the shared
     // datagram receive keeps the connected-peer filter (a connected UDP socket only
@@ -4665,6 +4670,9 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    if let Some(r) = inet_pending_error(h) {
+        return r;
+    }
     let mut kbuf = alloc::vec![0u8; 4096];
     let mut done = 0usize;
     while done < total_req {
@@ -39592,6 +39600,42 @@ fn unix_send_failed(
     sigpipe_on_epipe(r, !stream || flags & msgflags::MSG_NOSIGNAL != 0)
 }
 
+/// A pending error ([`crate::ipc::unix_socket::take_so_error_for_receive`])
+/// a receive on the `AF_UNIX` socket `h` answers before anything else, as
+/// Linux's `sock_error` -- or `None` to go on.
+fn unix_pending_error(h: crate::ipc::unix_socket::UnixHandle) -> Option<SyscallResult> {
+    match crate::ipc::unix_socket::take_so_error_for_receive(h) {
+        Ok(errno) if errno != 0 => Some(linux_err(errno)),
+        _ => None,
+    }
+}
+
+/// A pending error a receive on the `AF_INET`/`AF_INET6` socket `h` answers
+/// before anything else, by Linux's rule for each kind: a datagram socket
+/// answers it first (`__skb_try_recv_datagram`); a stream only when nothing
+/// waits to be read and its peer has not closed (`tcp_recvmsg` checks
+/// `SOCK_DONE`, then `sk_err`). `ETIMEDOUT` is left to the connection's own
+/// timeout report (`net::socket::recv`), which clears it as it answers.
+/// `None` to go on.
+fn inet_pending_error(h: crate::net::socket::SocketHandle) -> Option<SyscallResult> {
+    const ETIMEDOUT: i32 = 110;
+    let pending = crate::net::socket::pending_so_error(h).ok()?;
+    if pending == 0 || pending == ETIMEDOUT {
+        return None;
+    }
+    if !crate::net::socket::is_dgram(h).unwrap_or(false) {
+        let mut one = [0u8; 1];
+        // Bytes waiting (or the peer's end of file) come first.
+        if crate::net::socket::recv(h, &mut one, true, true).is_ok() {
+            return None;
+        }
+    }
+    match crate::net::socket::take_so_error(h) {
+        Ok(errno) if errno != 0 => Some(linux_err(errno)),
+        _ => None,
+    }
+}
+
 /// `recv`/`recvfrom`/`read` on an `AF_UNIX` descriptor: into `buf` (room
 /// `cap`), the sender's address to `addr_ptr` if it is not null. Returns the
 /// bytes copied -- or, with `MSG_TRUNC`, a datagram's whole length.
@@ -39610,6 +39654,9 @@ fn unix_recv(
         Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
+    if let Some(r) = unix_pending_error(h) {
+        return r;
+    }
     let room = usize::try_from(cap).unwrap_or(usize::MAX).min(limit);
     if room > 0 && crate::mm::user::validate_user_write(buf, room).is_err() {
         // A buffer that cannot take the bytes: answered by the socket, as
@@ -40072,6 +40119,9 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
+    if let Some(r) = unix_pending_error(h) {
+        return r;
+    }
     // Validate every destination first, so a bad pointer loses nothing.
     let mut room = 0usize;
     for &(base, len) in &iovs {
@@ -41348,6 +41398,9 @@ fn dispatch_dgram_recvfrom(
     addr_ptr: u64,
     addrlen_ptr: u64,
 ) -> SyscallResult {
+    if let Some(r) = inet_pending_error(h) {
+        return r;
+    }
     // A short buffer truncates the datagram (Linux discards the overflow unless
     // MSG_TRUNC is set; we always discard — the datagram is consumed whole either
     // way). Cap the staging buffer at the user's request length.
@@ -41960,6 +42013,11 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     if mh.msg_iovlen > 1024 {
         return linux_err(errno::EMSGSIZE);
     }
+    if let Some(r) =
+        inet_pending_error(crate::net::socket::SocketHandle::from_raw(entry.raw_handle))
+    {
+        return r;
+    }
     // First pass: validate each destination iovec writable and compute the
     // bounded receive capacity (one page total).
     let mut segs: alloc::vec::Vec<Seg> = alloc::vec::Vec::new();
@@ -42335,10 +42393,12 @@ fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
 ///   does not bound the wait for the first message. What is left of it is
 ///   written back when anything was received;
 /// - the first failure ends the run, and is the answer only when nothing was
-///   received; otherwise the answer is how many messages were. Linux keeps
-///   such a failure (other than `EAGAIN`) as the socket's pending error for
-///   the next call; here it is not kept, and the next call meets whatever
-///   caused it afresh (known-issues `A-SOCKETS-HAVE-NO-PENDING-ERROR`).
+///   received; otherwise the answer is how many messages were, and the
+///   failure -- unless `EAGAIN` -- is kept as the socket's pending error, for
+///   the next receive or `getsockopt(SO_ERROR)` to answer, as Linux keeps it
+///   (`unix_socket::set_so_error`, `net::socket::set_so_error`). Until
+///   2026-10-08 it was dropped (known-issues
+///   `A-SOCKETS-HAVE-NO-PENDING-ERROR`).
 ///
 /// Until 2026-10-02 this answered `EBADF` for every socket.
 fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
@@ -42425,6 +42485,23 @@ fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
     }
     if received == 0 {
         return failure.unwrap_or(SyscallResult::ok(0));
+    }
+    // A failure after some messages is the socket's to report next time.
+    if let Some(r) = failure
+        && r.value < 0
+        && let errno = i32::try_from(r.value.saturating_neg()).unwrap_or(errno::EIO)
+        && errno != errno::EAGAIN
+    {
+        // The socket closed meanwhile: there is nobody to report it to.
+        let _ = match entry.kind {
+            HandleKind::UnixSocket => {
+                crate::ipc::unix_socket::set_so_error(unix_handle(&entry), errno)
+            }
+            _ => crate::net::socket::set_so_error(
+                crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
+                errno,
+            ),
+        };
     }
     // What is left of the timeout, written back as Linux does once anything
     // was received; a timeout that cannot be written back makes the answer
@@ -42884,8 +42961,9 @@ fn socket_get_multicast(
 }
 
 /// `getsockopt(2)` on an `AF_UNIX` descriptor: `SO_TYPE`, `SO_DOMAIN`,
-/// `SO_PROTOCOL`, `SO_ACCEPTCONN`, `SO_ERROR` (always 0: a Unix-domain
-/// connect fails at once or not at all), the buffer sizes, `SO_PASSCRED`, and
+/// `SO_PROTOCOL`, `SO_ACCEPTCONN`, `SO_ERROR` (the pending error, taken: a
+/// Unix-domain connect fails at once or not at all, so only a `recvmmsg`
+/// that failed part-way leaves one), the buffer sizes, `SO_PASSCRED`, and
 /// `SO_PEERCRED` -- the peer's pid, uid and gid as the kernel recorded them,
 /// or Linux's `{0, 65534, 65534}` ("nobody") for a socket with no peer or a
 /// peer with no process. As Linux, a value longer than `*optlen` is cut to
@@ -42913,7 +42991,9 @@ fn unix_getsockopt(
             None => return linux_err(errno::EBADF),
         },
         so::SO_DOMAIN => int(i32::from(AF_UNIX)),
-        so::SO_PROTOCOL | so::SO_ERROR => int(0),
+        so::SO_PROTOCOL => int(0),
+        // The pending error, taken (`sys_recvmmsg` keeps one).
+        so::SO_ERROR => int(crate::ipc::unix_socket::take_so_error(h).unwrap_or(0)),
         so::SO_PASSCRED => int(i32::from(unix_socket::passcred(h))),
         so::SO_ACCEPTCONN => int(i32::from(unix_socket::is_listening(h))),
         so::SO_SNDBUF | so::SO_RCVBUF => {

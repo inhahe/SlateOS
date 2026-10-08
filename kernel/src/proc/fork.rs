@@ -623,18 +623,19 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
     //     per-signal).
     crate::syscall::linux::linux_sigaction_on_fork(parent_pid, child_pid);
 
-    // 7. Inherit the parent's filesystem namespace (best-effort, like
-    //    spawn).  A non-root parent namespace propagates to the child.
-    let parent_ns = crate::ipc::namespace::query(parent_pid);
-    if parent_ns != crate::ipc::namespace::ROOT_NAMESPACE {
-        if let Err(e) = crate::ipc::namespace::attach(child_pid, parent_ns) {
-            serial_println!(
-                "[fork] Warning: failed to attach child {} to namespace {}: {:?}",
-                child_pid,
-                parent_ns,
-                e
-            );
-        }
+    // 7. Inherit the parent's view: its filesystem namespace, root jail,
+    //    volumes, read-only root and hostname (`namespace::inherit`). All of
+    //    it or no child: a child of a container process that ran outside the
+    //    container would be an escape, not a degraded fork.
+    if let Err(e) = crate::ipc::namespace::inherit(parent_pid, child_pid) {
+        serial_println!(
+            "[fork] Process {}: could not give child {} its view: {:?} -- fork refused",
+            parent_pid,
+            child_pid,
+            e
+        );
+        pcb::destroy(child_pid);
+        return Err(e);
     }
 
     // 8. Grant the parent a Process capability for the child so it can

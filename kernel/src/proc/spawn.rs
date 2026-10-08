@@ -1873,17 +1873,22 @@ fn spawn_process_inner(
         }
     }
 
-    // Step 5c: Inherit the parent's filesystem namespace.
-    //
-    // If the parent process is in a non-root namespace, the child
-    // inherits it automatically (same isolation applies by default).
-    // The parent can override this by attaching the child to a
-    // different namespace before starting it.
-    if options.parent != 0 {
-        let parent_ns = crate::ipc::namespace::query(options.parent);
-        if parent_ns != crate::ipc::namespace::ROOT_NAMESPACE {
-            let _ = crate::ipc::namespace::attach(pid, parent_ns);
-        }
+    // Step 5c: Inherit the parent's view: its filesystem namespace, root
+    // jail, volumes, read-only root and hostname (`namespace::inherit`), so
+    // a container process's child is in the container. The container layer
+    // may change it before the child starts. A view that cannot be given
+    // fails the spawn: the child would run outside it.
+    if options.parent != 0
+        && let Err(e) = crate::ipc::namespace::inherit(options.parent, pid)
+    {
+        serial_println!(
+            "[spawn] Process {}: parent {}'s view could not be given: {:?} -- spawn aborted",
+            pid,
+            options.parent,
+            e,
+        );
+        pcb::destroy(pid);
+        return Err(e);
     }
 
     // Step 5d: Apply fd inheritance map.

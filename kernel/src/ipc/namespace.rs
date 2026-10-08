@@ -589,6 +589,49 @@ pub fn detach(process_id: u64) {
     PROCESS_HOSTNAME.lock().remove(&process_id);
 }
 
+/// Give process `child` the view `parent` has: its namespace (bind and hide
+/// rules), its root jail, its volumes, its read-only root and its hostname --
+/// what a fork or a spawn leaves the child of a container's process with.
+///
+/// Until 2026-10-08 a child got the namespace's rules alone, so a container's
+/// shell ran every command it started outside the container: on the host's
+/// root, with the host's volumes and hostname (known-issues
+/// A-CONTAINER-CHILDREN-ESCAPE-THEIR-CONTAINER). A child is given all of it
+/// or the caller fails the fork or spawn: half a jail is no jail.
+///
+/// # Errors
+///
+/// What [`attach`] answers for a namespace that is gone.
+pub fn inherit(parent: u64, child: u64) -> KernelResult<()> {
+    let ns = query(parent);
+    if ns != ROOT_NAMESPACE {
+        attach(child, ns)?;
+    }
+    // One table at a time, as every path but the two documented at
+    // `reset_ns_features_if_trivial` takes them; the child is not running
+    // yet, so nothing can resolve a path for it between the steps.
+    let root = PROCESS_ROOT.lock().get(&parent).cloned();
+    if let Some(root) = root {
+        let mut roots = PROCESS_ROOT.lock();
+        roots.insert(child, root);
+        mark_ns_features_active();
+    }
+    let mounts = PROCESS_MOUNTS.lock().get(&parent).cloned();
+    if let Some(mounts) = mounts {
+        let mut table = PROCESS_MOUNTS.lock();
+        table.insert(child, mounts);
+        mark_ns_features_active();
+    }
+    if PROCESS_ROOT_RO.lock().contains(&parent) {
+        PROCESS_ROOT_RO.lock().insert(child);
+    }
+    let hostname = PROCESS_HOSTNAME.lock().get(&parent).cloned();
+    if let Some(hostname) = hostname {
+        PROCESS_HOSTNAME.lock().insert(child, hostname);
+    }
+    Ok(())
+}
+
 /// Query which namespace a process belongs to.
 pub fn query(process_id: u64) -> NamespaceId {
     let pns = PROCESS_NS.lock();
@@ -1327,6 +1370,71 @@ fn normalize_jailed(path: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Run namespace self-tests.
+/// [`inherit`]: a child gets its parent's namespace, root jail, volumes,
+/// read-only root and hostname -- and resolves a path as the parent does --
+/// while a parent with none of them leaves the child with none.
+fn test_inherit() -> KernelResult<()> {
+    const PARENT: u64 = 0xFFFF_0101;
+    const CHILD: u64 = 0xFFFF_0102;
+    const PLAIN: u64 = 0xFFFF_0103;
+    const PLAIN_CHILD: u64 = 0xFFFF_0104;
+    let fail = |what: &str| {
+        serial_println!("[namespace]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let ns = create(ROOT_NAMESPACE)?;
+    let cleanup = |ns: NamespaceId| {
+        for pid in [PARENT, CHILD, PLAIN, PLAIN_CHILD] {
+            detach(pid);
+            clear_root(pid);
+            clear_mounts(pid);
+            clear_hostname(pid);
+        }
+        let _ = destroy(ns);
+    };
+    let set_up = (|| {
+        attach(PARENT, ns)?;
+        set_root(PARENT, "/containers/inherit-test/rootfs")?;
+        add_volume(PARENT, "/data", "/host/shared", false)?;
+        set_root_read_only(PARENT, true);
+        set_hostname(PARENT, "jailed")?;
+        inherit(PARENT, CHILD)?;
+        inherit(PLAIN, PLAIN_CHILD)
+    })();
+    if set_up.is_err() {
+        cleanup(ns);
+        return fail("inherit's set-up was refused");
+    }
+    let same_view = query(CHILD) == ns
+        && get_root(CHILD) == get_root(PARENT)
+        && volume_count(CHILD) == 1
+        && is_root_read_only(CHILD)
+        && hostname_for(CHILD).as_deref() == Some("jailed");
+    let same_path = resolve_path_for(CHILD, "/etc/passwd").map(Cow::into_owned)
+        == resolve_path_for(PARENT, "/etc/passwd").map(Cow::into_owned)
+        && resolve_path_for(CHILD, "/data/x").map(Cow::into_owned)
+            == Ok(PathBuf::from("/host/shared/x"));
+    let plain = query(PLAIN_CHILD) == ROOT_NAMESPACE
+        && get_root(PLAIN_CHILD).is_none()
+        && volume_count(PLAIN_CHILD) == 0
+        && !is_root_read_only(PLAIN_CHILD)
+        && hostname_for(PLAIN_CHILD).is_none();
+    cleanup(ns);
+    if !same_view {
+        return fail(
+            "a child did not get its parent's namespace, root, volume, read-only root and hostname",
+        );
+    }
+    if !same_path {
+        return fail("a child resolved a path other than as its parent does");
+    }
+    if !plain {
+        return fail("a parent with no view gave its child one");
+    }
+    serial_println!("[namespace]   inherit (a child's jail, volumes, hostname): OK");
+    Ok(())
+}
+
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[namespace] Running self-tests...");
 
@@ -1343,6 +1451,7 @@ pub fn self_test() -> KernelResult<()> {
     test_process_root()?;
     test_volume_mounts()?;
     test_hostname()?;
+    test_inherit()?;
 
     // Restore the fast path that the tests above disabled. `attach`,
     // `set_root` and `add_volume` arm NS_FEATURES_ACTIVE monotonically, so

@@ -24124,11 +24124,14 @@ pub fn self_test_linux_setid() -> KernelResult<()> {
     let exe_elf = elf::build_linux_setid_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-setid"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens files: `sys_fs_open` wants a wildcard File capability, as
+    // every ring-3 fixture that opens one is given (c6fa64b1b).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-linux-setid",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &file_caps,
         fd_map: &[],
         argv,
         envp,
@@ -24224,11 +24227,14 @@ pub fn self_test_linux_fifo() -> KernelResult<()> {
     let exe_elf = elf::build_linux_fifo_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-linux-fifo"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It opens files: `sys_fs_open` wants a wildcard File capability, as
+    // every ring-3 fixture that opens one is given (c6fa64b1b).
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-linux-fifo",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &file_caps,
         fd_map: &[],
         argv,
         envp,

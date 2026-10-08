@@ -24394,7 +24394,7 @@ pub fn self_test_linux_cpu_clocks() -> KernelResult<()> {
 /// [`elf::build_linux_cpu_timers_test_elf`] (`build/cputimertest.c`). POSIX
 /// timers on the process and thread CPU clocks, `ITIMER_PROF` and
 /// `ITIMER_VIRTUAL`, `clock_nanosleep` on CPU clocks, timers on another
-/// thread's and a child's clock, and `RLIMIT_CPU` -- all fired from the tick
+/// thread's and a child's clock, `RLIMIT_CPU` and `RLIMIT_RTTIME` -- all fired from the tick
 /// (`sched::cpu_timers_due`, `proc::cputimer::expire`,
 /// `posix_timer::expire_cpu`).
 pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
@@ -24484,6 +24484,13 @@ pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
             Some(0x7B) => "RLIMIT_CPU's hard limit never ended the child",
             Some(0x7C) => "RLIMIT_CPU's soft limit did not send exactly one SIGXCPU",
             Some(0x7D) => "the soft limit was not raised a second at SIGXCPU",
+            Some(0x80) => "setrlimit(RLIMIT_RTTIME) failed",
+            Some(0x81) => "sched_setscheduler(SCHED_FIFO) failed",
+            Some(0x82) => "RLIMIT_RTTIME's hard limit never ended the real-time child",
+            Some(0x83) => "fork for the RLIMIT_RTTIME child failed",
+            Some(0x84) => "RLIMIT_RTTIME's hard limit did not end the child with SIGKILL",
+            Some(0x85) => "RLIMIT_RTTIME's soft limit did not send exactly one SIGXCPU",
+            Some(0x86) => "RLIMIT_RTTIME's soft limit was not raised a second at SIGXCPU",
             None => "no exit code: the program died",
             _ => "unexpected exit code",
         };
@@ -24497,7 +24504,7 @@ pub fn self_test_linux_cpu_timers() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux CPU-time timers (ring 3: process and thread CPU-clock timers fire on \
          CPU time, not sleep; ITIMER_PROF/VIRTUAL; clock_nanosleep on CPU clocks; another \
-         thread's and a child's clock; RLIMIT_CPU SIGXCPU then SIGKILL): OK"
+         thread's and a child's clock; RLIMIT_CPU and RLIMIT_RTTIME SIGXCPU then SIGKILL): OK"
     );
     Ok(())
 }

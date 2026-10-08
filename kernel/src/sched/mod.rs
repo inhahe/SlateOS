@@ -4445,6 +4445,11 @@ pub fn timer_tick(from_user: bool) -> bool {
             task.tick_burst(from_user);
             if let Some(account) = &task.cpu_account {
                 account.charge_tick(from_user);
+                // A real-time thread's run without blocking, counted while
+                // its process has an RLIMIT_RTTIME (Linux's `watchdog`).
+                if task.policy.is_realtime() && account.rttime_limited() {
+                    task.rt_run_ticks = task.rt_run_ticks.saturating_add(1);
+                }
             }
             cpu_timer_tick = cpu_timers_due(task);
 
@@ -4878,6 +4883,11 @@ pub struct ProcCpuAccount {
     /// The earliest expiry of each source, in nanoseconds of its measure
     /// ([`ProcExpiry::kind`]); [`NO_CPU_EXPIRY`] for none.
     next: [AtomicU64; 6],
+    /// The process's `RLIMIT_RTTIME`, soft and hard, in microseconds of a
+    /// real-time thread's running without blocking; [`NO_CPU_EXPIRY`] for
+    /// infinite. Kept here, not just in the process table, for the tick
+    /// (`proc::cputimer::rlimit_rttime_changed` sets it).
+    rttime_us: [AtomicU64; 2],
 }
 
 impl ProcCpuAccount {
@@ -4891,7 +4901,31 @@ impl ProcCpuAccount {
             user_ticks: AtomicU64::new(0),
             sys_ticks: AtomicU64::new(0),
             next: [const { AtomicU64::new(NO_CPU_EXPIRY) }; 6],
+            rttime_us: [const { AtomicU64::new(NO_CPU_EXPIRY) }; 2],
         }
+    }
+
+    /// The process's `RLIMIT_RTTIME` as `(soft, hard)` microseconds,
+    /// [`NO_CPU_EXPIRY`] for infinite.
+    #[must_use]
+    pub fn rttime(&self) -> (u64, u64) {
+        let [soft, hard] = &self.rttime_us;
+        (soft.load(Ordering::Acquire), hard.load(Ordering::Acquire))
+    }
+
+    /// Set the process's `RLIMIT_RTTIME` (microseconds, [`NO_CPU_EXPIRY`]
+    /// for infinite).
+    pub fn set_rttime(&self, soft: u64, hard: u64) {
+        let [s, h] = &self.rttime_us;
+        h.store(hard, Ordering::Release);
+        s.store(soft, Ordering::Release);
+    }
+
+    /// Whether a real-time thread of the process is held to a limit: Linux
+    /// counts its running only while the soft limit is finite.
+    #[must_use]
+    pub fn rttime_limited(&self) -> bool {
+        self.rttime().0 != NO_CPU_EXPIRY
     }
 
     /// The process it counts for.
@@ -5069,6 +5103,22 @@ pub struct CpuTimerTick {
     /// The process's account, to publish its new earliest expiries to. Never
     /// the last reference: the running task holds one.
     pub account: Option<Arc<ProcCpuAccount>>,
+    /// For a real-time thread past its process's `RLIMIT_RTTIME`, the ticks
+    /// it has run without blocking ([`Task::rt_run_ticks`]); else `None`.
+    pub rt_run_ticks: Option<u64>,
+}
+
+/// Whether a real-time thread that has run `ticks` ticks without blocking is
+/// past its process's `RLIMIT_RTTIME` (`account`) -- Linux's `watchdog`:
+/// more ticks than the earlier of the two limits, rounded up to ticks.
+fn rttime_due(account: &ProcCpuAccount, ticks: u64) -> bool {
+    let (soft, hard) = account.rttime();
+    let limit = soft.min(hard);
+    if limit == NO_CPU_EXPIRY {
+        return false;
+    }
+    let tick_us = TICK_NS.checked_div(1_000).unwrap_or(1).max(1);
+    ticks > limit.div_ceil(tick_us)
 }
 
 /// Whether a CPU-time timer of `task` -- one on its own clock, or one on its
@@ -5076,9 +5126,14 @@ pub struct CpuTimerTick {
 /// held (from [`timer_tick`]). Cheap when nothing is armed: no sample is
 /// taken unless the task has a thread-timer expiry or an active account.
 fn cpu_timers_due(task: &Task) -> Option<CpuTimerTick> {
+    let rt_due = task.rt_run_ticks > 0
+        && task
+            .cpu_account
+            .as_ref()
+            .is_some_and(|a| rttime_due(a, task.rt_run_ticks));
     let account = task.cpu_account.as_ref().filter(|a| a.is_active());
     let thread_armed = task.cpu_timer_next.iter().any(|&n| n != NO_CPU_EXPIRY);
-    if account.is_none() && !thread_armed {
+    if account.is_none() && !thread_armed && !rt_due {
         return None;
     }
     let thread = sample_locked(task);
@@ -5091,12 +5146,13 @@ fn cpu_timers_due(task: &Task) -> Option<CpuTimerTick> {
     let process_due = account
         .zip(process)
         .is_some_and(|(a, totals)| a.any_due(totals));
-    (thread_due || process_due).then(|| CpuTimerTick {
+    (thread_due || process_due || rt_due).then(|| CpuTimerTick {
         pid: task.cpu_account.as_ref().map_or(0, |a| a.pid()),
         tid: task.id,
         thread,
         process,
         account: task.cpu_account.clone(),
+        rt_run_ticks: rt_due.then_some(task.rt_run_ticks),
     })
 }
 

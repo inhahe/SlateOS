@@ -31,6 +31,8 @@ and tick -- but only once a timer has been armed on that process's clock.
 | `clock_nanosleep` on a CPU clock wakes when the clock could first have got there -- the time left over the CPUs that can move it, at least a tick -- and looks again | arm a kernel-internal CPU timer that wakes the sleeper; poll every tick | no second kind of timer, and no 100 wakeups a second: a clock that runs flat out is caught within a tick, one that does not run at all costs a wakeup per the time left |
 | An expiry already passed when the timer is set fires at once; a setitimer value gets a tick added; `RLIMIT_CPU`'s soft limit is raised a second at each `SIGXCPU` and `getrlimit` shows it; a timer whose thread or process has gone cannot be set (`ESRCH`) and reads zeros | -- | each is Linux 6.6's behaviour, measured on the host (`build/cpuclock_probe.c`, `build/cputimertest.c`, twelve of twelve) |
 
-**Not done:** `RLIMIT_RTTIME` (a real-time thread's CPU time without
-sleeping) is still enforced by nothing
-(`known-issues/A-RLIMIT-RTTIME-IS-NOT-ENFORCED.md`).
+`RLIMIT_RTTIME` -- how long a real-time thread may run without sleeping --
+rides the same tick: the thread counts its ticks (`Task::rt_run_ticks`,
+cleared when it blocks) while the limit is set, and the tick checks the count
+against the limits in its process's account, `SIGXCPU` then `SIGKILL` as for
+`RLIMIT_CPU` (`known-issues/A-RLIMIT-RTTIME-IS-NOT-ENFORCED.md`).

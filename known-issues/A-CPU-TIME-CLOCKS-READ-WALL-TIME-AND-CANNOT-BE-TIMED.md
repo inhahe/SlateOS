@@ -26,4 +26,4 @@ checked at the tick (`sched::cpu_timers_due`, `proc::cputimer::expire`,
 `self_test_linux_cpu_timers` (ring 3; the Linux ones twelve of twelve on
 Linux 6.6.87), and `cputimer::self_test`.
 
-**Left:** `RLIMIT_RTTIME` (`A-RLIMIT-RTTIME-IS-NOT-ENFORCED`).
+`RLIMIT_RTTIME` too, on the same tick (`A-RLIMIT-RTTIME-IS-NOT-ENFORCED`).

@@ -760,6 +760,12 @@ pub struct Task {
     /// earlier than the truth only costs the tick a look.
     pub cpu_timer_next: [u64; 3],
 
+    /// Ticks this thread has run under a real-time policy since it last
+    /// blocked, counted while its process has an `RLIMIT_RTTIME` -- Linux's
+    /// `p->rt.timeout`, which the tick checks against that limit
+    /// (`proc::cputimer`). Cleared when it blocks ([`Self::record_block`]).
+    pub rt_run_ticks: u64,
+
     /// CPU time charged to this task while it was executing **user-mode**
     /// (ring 3) code, in timer ticks (USER_HZ = 100, so 10 ms each).
     ///
@@ -1007,6 +1013,10 @@ impl Task {
 
         // Reset burst counter for the next wake cycle.
         self.burst_ticks = 0;
+
+        // A real-time thread that sleeps starts its RLIMIT_RTTIME count
+        // again (Linux clears `rt.timeout` as it wakes).
+        self.rt_run_ticks = 0;
     }
 
     /// Whether the task has earned the interactive boost: its CPU bursts
@@ -1271,6 +1281,7 @@ impl Task {
             total_cycles: 0,
             cpu_account: None,
             cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1368,6 +1379,7 @@ impl Task {
             total_cycles: 0,
             cpu_account: None,
             cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,
@@ -1538,6 +1550,7 @@ impl Task {
             total_cycles: 0,
             cpu_account: None,
             cpu_timer_next: [super::NO_CPU_EXPIRY; 3],
+            rt_run_ticks: 0,
             user_ticks: 0,
             sys_ticks: 0,
             min_flt: 0,

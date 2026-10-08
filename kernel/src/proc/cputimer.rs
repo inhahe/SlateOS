@@ -33,6 +33,9 @@
 //!   second after (Linux raises the soft limit by a second each time, and so
 //!   does this -- `getrlimit` shows it); at the hard limit, `SIGKILL`. An
 //!   infinite soft limit turns both off, as on Linux.
+//! - `RLIMIT_RTTIME`: the same for how long a real-time thread runs without
+//!   blocking (`Task::rt_run_ticks`, counted at the tick while the soft limit
+//!   is finite, cleared when it blocks), in microseconds.
 //! - [`expire`], which also hands the tick's samples to
 //!   [`crate::proc::posix_timer::expire_cpu`] for the POSIX timers on CPU
 //!   clocks.
@@ -138,6 +141,11 @@ const SIGPROF: u32 = 27;
 
 /// `RLIMIT_CPU`, in seconds.
 pub const RLIMIT_CPU: u32 = 0;
+/// `RLIMIT_RTTIME`, in microseconds a real-time thread may run without
+/// blocking.
+pub const RLIMIT_RTTIME: u32 = 15;
+/// Microseconds per second.
+const US_PER_SEC: u64 = 1_000_000;
 /// `RLIM_INFINITY` (`RLIM64_INFINITY`).
 const RLIM_INFINITY: u64 = u64::MAX;
 /// Nanoseconds per second.
@@ -404,6 +412,9 @@ pub fn rlimit_cpu_changed(pid: ProcessId) {
 /// (the process table is no lock for an interrupt).
 pub fn expire(due: CpuTimerTick) {
     crate::proc::posix_timer::expire_cpu(&due);
+    if let (Some(ticks), Some(account)) = (due.rt_run_ticks, due.account.as_deref()) {
+        rttime_expire(due.pid, account, ticks);
+    }
     let Some(totals) = due.process else {
         return;
     };
@@ -439,6 +450,76 @@ pub fn expire(due: CpuTimerTick) {
             );
         }
     }
+}
+
+/// A real-time thread of process `pid` has run `ticks` ticks without
+/// blocking, past its `RLIMIT_RTTIME` (`account`): Linux's
+/// `check_thread_timers` -- `SIGKILL` at the hard limit, else `SIGXCPU` at the
+/// soft one, which moves on a second (and the process's soft limit with it,
+/// through the work queue). Interrupt context.
+fn rttime_expire(pid: ProcessId, account: &ProcCpuAccount, ticks: u64) {
+    let (soft, hard) = account.rttime();
+    let tick_us = TICK_NS.checked_div(1_000).unwrap_or(1);
+    let ran_us = ticks.saturating_mul(tick_us);
+    if hard != NO_CPU_EXPIRY && ran_us >= hard {
+        signal::set_pending_info(pid, SIGKILL, SigInfo::kernel());
+        return;
+    }
+    if soft != NO_CPU_EXPIRY && ran_us >= soft {
+        account.set_rttime(soft.saturating_add(US_PER_SEC), hard);
+        signal::set_pending_info(pid, SIGXCPU, SigInfo::kernel());
+        if !crate::workqueue::submit(raise_rttime_soft_limit, pid) {
+            serial_println!(
+                "[cputimer] work queue full: RLIMIT_RTTIME of {} not raised",
+                pid
+            );
+        }
+    }
+}
+
+/// Work-queue half of an `RLIMIT_RTTIME` `SIGXCPU`: raise process `pid`'s
+/// soft limit to where the account moved it, as Linux raises it.
+fn raise_rttime_soft_limit(pid: u64) {
+    let Some(account) = pcb::cpu_account(pid) else {
+        return;
+    };
+    let (next, _) = account.rttime();
+    if let Some((soft, hard)) = pcb::get_rlimit(pid, RLIMIT_RTTIME)
+        && soft != RLIM_INFINITY
+        && next != NO_CPU_EXPIRY
+        && soft < next
+    {
+        // Only up to the hard limit, which needs no authority.
+        if pcb::set_rlimit(
+            pid,
+            RLIMIT_RTTIME,
+            next.min(hard),
+            hard,
+            pcb::LimitAuthority::Unprivileged,
+        )
+        .is_err()
+        {
+            serial_println!(
+                "[cputimer] RLIMIT_RTTIME of {} not raised: process gone",
+                pid
+            );
+        }
+    }
+}
+
+/// Process `pid`'s `RLIMIT_RTTIME` changed (`setrlimit`, `prlimit`), or it
+/// was just made with one (`fork` copies the parent's): give the tick the
+/// limits, in its account. An infinite soft limit turns the count off, as on
+/// Linux.
+pub fn rlimit_rttime_changed(pid: ProcessId) {
+    let Some((soft, hard)) = pcb::get_rlimit(pid, RLIMIT_RTTIME) else {
+        return;
+    };
+    let Some(account) = pcb::cpu_account(pid) else {
+        return;
+    };
+    let as_slot = |v: u64| if v == RLIM_INFINITY { NO_CPU_EXPIRY } else { v };
+    account.set_rttime(as_slot(soft), as_slot(hard));
 }
 
 /// Work-queue half of a `SIGXCPU`: raise process `pid`'s `RLIMIT_CPU` soft

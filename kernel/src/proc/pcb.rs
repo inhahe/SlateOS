@@ -2092,10 +2092,11 @@ pub fn fork_create(
         let _ = crate::fs::handle::dup_shared(handle);
     }
 
-    // The child inherits RLIMIT_CPU, and is held to it by its own CPU time:
-    // arm the thresholds on its (fresh) clock. Its itimers are not
-    // inherited, as on Linux.
+    // The child inherits RLIMIT_CPU and RLIMIT_RTTIME, and is held to them
+    // by its own CPU time: arm the thresholds on its (fresh) clock. Its
+    // itimers are not inherited, as on Linux.
     crate::proc::cputimer::rlimit_cpu_changed(pid);
+    crate::proc::cputimer::rlimit_rttime_changed(pid);
 
     Ok(pid)
 }
@@ -3184,6 +3185,11 @@ pub fn set_rlimit(
     // which arming takes.
     if resource == crate::proc::cputimer::RLIMIT_CPU {
         crate::proc::cputimer::rlimit_cpu_changed(pid);
+    }
+    // RLIMIT_RTTIME by the tick's count of a real-time thread's running,
+    // against the limits it reads from the process's CPU account.
+    if resource == crate::proc::cputimer::RLIMIT_RTTIME {
+        crate::proc::cputimer::rlimit_rttime_changed(pid);
     }
     Ok(())
 }

@@ -75,9 +75,9 @@ those has to be ported as upstream does it, which is not `fd_safer` either.
 **Still to do** -- each with a closed-descriptor case in its harness that
 fails before and agrees after:
 
-* `fd_reopen` (onto 0 or 1): `stty -F`, `touch`, `dd`. (`nohup`'s was
-  already right, and now shares `stdfd::move_to`; `csplit`'s and `split`'s
-  inputs were measured and cannot be told apart -- below.)
+* `fd_reopen` (onto 0 or 1): `stty -F`, `touch`. (`dd` is done, below;
+  `nohup`'s was already right, and now shares `stdfd::move_to`; `csplit`'s
+  and `split`'s inputs were measured and cannot be told apart -- below.)
 * `fcntl--.h` (`open_safer`): `cp`, `mv`, `install` (the opens in
   `copy.c`).
 * `ln`'s target directory (`openat_safer`).
@@ -97,6 +97,27 @@ md5sum -c SUMS <&-       (SUMS lists a, then -)
 Both are `stdfd::open_read_safer` now. `digest-diff.sh` has seven
 closed-standard-input cases for each of the seven programs; three differed
 before.
+
+**`dd`, 2026-10-08 -- it corrupted data.** Upstream puts `if=` on
+descriptor 0 and `of=` on descriptor 1 with `fd_reopen`, and reads and
+writes only those two. Ours left each file where its open landed, so with
+standard input closed `of=` became descriptor 0, and `dd` read "standard
+input" out of its own output file:
+
+```
+alpha holds "abcdefghij\n";  dd of=alpha seek=1 bs=4 conv=notrunc <&-
+  ours: alpha becomes "abcdefghefgh";
+        dd: closing output file 'alpha': Bad file descriptor
+  GNU:  alpha unchanged (status 1);
+        dd: error reading 'standard input': Bad file descriptor
+        dd: closing input file 'standard input': Bad file descriptor
+```
+
+Both are now moved into place with `stdfd::move_to`, `of=` still read-write
+first and write-only second as upstream opens it, and the cleanup closes
+descriptors 0 and 1 by number as upstream's `cleanup` does. `dd-diff.sh` has
+fifteen closed-descriptor cases (a `c:` standard-input spec); six differed
+before, none after.
 
 **The `freopen` programs, 2026-10-08.** `uniq`, `shuf`, `tsort`,
 `dircolors`, `du --files0-from` and `ptx -G` take an operand with

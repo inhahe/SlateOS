@@ -1055,26 +1055,52 @@ impl Reporter {
 // The two ends of the copy
 // ---------------------------------------------------------------------------
 
-/// An open file that `dd` may or may not own.
+/// Descriptor 0 or 1, borrowed: where the copy reads, or where it writes.
 ///
-/// `dd` with no `if=`/`of=` reads descriptor 0 and writes descriptor 1, and it
-/// must treat them exactly as it treats an opened file — `seek=` and
-/// `conv=sparse` and the closing `ftruncate` all apply to `dd seek=10 > img`
-/// just as they do to `dd seek=10 of=img`. A borrowed handle gets that for
-/// free, provided it never closes what it borrowed, which is what the
-/// [`ManuallyDrop`] is for.
-enum Handle {
-    Owned(File),
-    Std(ManuallyDrop<File>),
-}
+/// Upstream puts `if=` on descriptor 0 and `of=` on descriptor 1 with
+/// `fd_reopen`, and from then on reads the one and writes the other whichever
+/// way they were given. So `seek=`, `conv=sparse` and the closing `ftruncate`
+/// apply to `dd seek=10 > img` just as they do to `dd seek=10 of=img` -- and a
+/// file opened while a standard descriptor was closed cannot end up as both
+/// ends of the copy. This keeps that arrangement (see [`reopen_onto`]). The
+/// [`ManuallyDrop`] is because the descriptor is closed by number, by
+/// [`close_handle`], where the result of closing it can be seen.
+struct Handle(ManuallyDrop<File>);
 
 impl Handle {
     fn file(&mut self) -> &mut File {
-        match self {
-            Handle::Owned(f) => f,
-            Handle::Std(f) => f,
-        }
+        &mut self.0
     }
+}
+
+/// Upstream's `fd_reopen (FD, ...)` once the file is open: `file` becomes
+/// descriptor `fd` -- standard input for `if=`, standard output for `of=` --
+/// and is borrowed back from there.
+///
+/// Left where its open put it, `of=` took descriptor 0 when standard input was
+/// closed, and `dd` then read "standard input" out of its own output file:
+/// `dd of=out seek=1 bs=4 conv=notrunc <&-` turned `ABCDEFGHIJKL` into
+/// `ABCDEFGHEFGH`, where GNU's leaves the file alone and reports `error
+/// reading 'standard input': Bad file descriptor`.
+///
+/// # Errors
+///
+/// What moving the descriptor said, worded as upstream words a failed
+/// `fd_reopen`: `failed to open FILE: REASON`. Off Linux there is no
+/// descriptor table to arrange, and every `if=` and `of=` fails so.
+fn reopen_onto(file: File, fd: i32, path: &OsStr) -> Result<Handle, Fatal> {
+    let failed = |e: &io::Error| {
+        Fatal::plain(format!(
+            "failed to open {}: {}",
+            quoteaf_os(path),
+            errmsg::strerror(e)
+        ))
+    };
+    stdfd::move_to(file, fd).map_err(|e| failed(&e))?;
+    // `None` only for a negative descriptor, which `fd` is not.
+    filekind::borrowed(fd)
+        .map(Handle)
+        .ok_or_else(|| failed(&io::Error::from(io::ErrorKind::InvalidInput)))
 }
 
 /// Turn on `O_APPEND` on an already-open descriptor.
@@ -2449,7 +2475,8 @@ fn probe_offset(file: &mut File) -> (i64, Option<io::Error>) {
     }
 }
 
-/// Open the input, or borrow descriptor 0.
+/// Upstream's input: `if=` opened and moved onto descriptor 0 (`ifd_reopen
+/// (STDIN_FILENO, ...)`), or descriptor 0 as the process found it.
 fn open_input(set: &Settings) -> Result<Reader, Fatal> {
     // `iflag=append` is passed to `open` by upstream and is a no-op for a
     // descriptor that is only ever read; it is dropped here because Rust's
@@ -2464,13 +2491,13 @@ fn open_input(set: &Settings) -> Result<Reader, Fatal> {
                 errmsg::strerror(&e)
             ))
         })?;
-        (Handle::Owned(file), path.clone())
+        (reopen_onto(file, 0, path)?, path.clone())
     } else {
         let name = OsString::from("standard input");
         apply_fd_flags(0, set.input_flags, &name)?;
         let file = filekind::borrowed(0)
             .ok_or_else(|| Fatal::plain("standard input is not available".to_string()))?;
-        (Handle::Std(file), name)
+        (Handle(file), name)
     };
 
     let mut handle = handle;
@@ -2488,8 +2515,9 @@ fn open_input(set: &Settings) -> Result<Reader, Fatal> {
     })
 }
 
-/// Open the output, or borrow descriptor 1, and truncate it where upstream's
-/// `O_TRUNC` and `ftruncate` would.
+/// Upstream's output: `of=` opened and moved onto descriptor 1 (`ifd_reopen
+/// (STDOUT_FILENO, ...)`), or descriptor 1 as the process found it -- and
+/// truncated where upstream's `O_TRUNC` and `ftruncate` would.
 ///
 /// Returns the writer and the exit status so far, which is 1 when a
 /// truncation at the seek offset was refused for something that should have
@@ -2505,7 +2533,7 @@ fn open_output(set: &Settings) -> Result<(Writer, u8), Fatal> {
             apply_fd_flags(1, set.output_flags, &name)?;
             let file = filekind::borrowed(1)
                 .ok_or_else(|| Fatal::plain("standard output is not available".to_string()))?;
-            (Handle::Std(file), name)
+            (Handle(file), name)
         }
         Some(path) => {
             // The size a `seek=` asks the file to be cut to. `None` means the
@@ -2544,23 +2572,32 @@ fn open_output(set: &Settings) -> Result<(Writer, u8), Fatal> {
             }
 
             // Read access only if a `seek=` might have to be satisfied by
-            // reading. If the file cannot be read, write-only might still work.
-            let mut file = None;
+            // reading. If the file cannot be read, write-only might still work
+            // -- upstream's `ifd_reopen (STDOUT_FILENO, ...)` with `O_RDWR`,
+            // then with `O_WRONLY`. Either way the file becomes descriptor 1.
+            let mut handle = None;
             if set.seek_records != 0 {
-                file = opts.read(true).open(path).ok();
+                handle = opts
+                    .read(true)
+                    .open(path)
+                    .ok()
+                    .and_then(|file| reopen_onto(file, 1, path).ok());
             }
-            let file = match file {
-                Some(file) => file,
-                None => opts.read(false).open(path).map_err(|e| {
+            let mut handle = if let Some(handle) = handle {
+                handle
+            } else {
+                let file = opts.read(false).open(path).map_err(|e| {
                     Fatal::plain(format!(
                         "failed to open {}: {}",
                         quoteaf_os(path),
                         errmsg::strerror(&e)
                     ))
-                })?,
+                })?;
+                reopen_onto(file, 1, path)?
             };
+            let file = handle.file();
 
-            if truncate && append && filekind::is_regular(&file) {
+            if truncate && append && filekind::is_regular(file) {
                 file.set_len(0).map_err(|e| {
                     Fatal::plain(format!(
                         "failed to open {}: {}",
@@ -2577,7 +2614,7 @@ fn open_output(set: &Settings) -> Result<(Writer, u8), Fatal> {
             {
                 // POSIX defines `ftruncate` only for these, so a refusal from
                 // anything else — a tape, a terminal — is not a failure.
-                let regular = filekind::regular(&file);
+                let regular = filekind::regular(file);
                 let directory = file.metadata().is_ok_and(|m| m.is_dir());
                 if regular == Some(true) || directory {
                     stdfd::diag_line(&format!(
@@ -2589,7 +2626,7 @@ fn open_output(set: &Settings) -> Result<(Writer, u8), Fatal> {
                 }
             }
 
-            (Handle::Owned(file), path.clone())
+            (handle, path.clone())
         }
     };
 
@@ -2609,44 +2646,45 @@ fn open_output(set: &Settings) -> Result<(Writer, u8), Fatal> {
 /// only reported at close time is still reported.
 ///
 /// On Unix the descriptor is closed by number, because that is the only way to
-/// see the result: `File`'s `Drop` closes it and discards the error. Off Unix
-/// a borrowed standard descriptor is left alone — there its handle belongs to
-/// `std::io::Stdout`, which will close it again, and a double close is a worse
-/// bug than a missed diagnostic.
+/// see the result: `File`'s `Drop` closes it and discards the error. It is
+/// descriptor 0 or 1 whether `if=`/`of=` named a file or not, since a named
+/// file was moved there (see [`reopen_onto`]) -- upstream's `cleanup` closes
+/// the same two. Off Unix a borrowed standard descriptor is left alone --
+/// there its handle belongs to `std::io::Stdout`, which will close it again,
+/// and a double close is a worse bug than a missed diagnostic.
 ///
 /// The `Result` is always `Ok` off Unix, which is the whole of what
 /// `unnecessary_wraps` sees when it compiles for Windows; on the target — the
 /// only platform whose behaviour is being specified — it is the `close(2)`
 /// result and the reason the function exists.
 #[allow(clippy::unnecessary_wraps)]
-fn close_handle(handle: Handle, fd: i32) -> io::Result<()> {
+fn close_handle(handle: Handle) -> io::Result<()> {
+    // Taken apart rather than dropped, so that a closed handle cannot be used
+    // again: the `ManuallyDrop` inside never closes the descriptor it
+    // borrowed, which is closed by number below.
+    let Handle(file) = handle;
     #[cfg(unix)]
     {
         use std::ffi::c_int;
-        use std::os::fd::IntoRawFd;
+        use std::os::fd::AsRawFd;
 
         unsafe extern "C" {
             fn close(fd: c_int) -> c_int;
         }
 
-        let fd = match handle {
-            Handle::Owned(file) => file.into_raw_fd(),
-            Handle::Std(_) => fd,
-        };
-        // SAFETY: `fd` is an open descriptor this process owns, and ownership
-        // of an `Owned` handle has just been given up by `into_raw_fd`, so
-        // nothing will close it a second time.
-        if unsafe { close(fd) } < 0 {
+        // SAFETY: the descriptor is 0 or 1, which this process owns -- the
+        // stream it was started with, or the file `if=`/`of=` put there -- and
+        // nothing closes it a second time: the `ManuallyDrop` never drops its
+        // `File`.
+        if unsafe { close(file.as_raw_fd()) } < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
     }
     #[cfg(not(unix))]
     {
-        let _ = fd;
-        if let Handle::Owned(file) = handle {
-            drop(file);
-        }
+        // Nothing to close: off Unix the handle is the runtime's own.
+        let _ = file;
         Ok(())
     }
 }
@@ -2727,7 +2765,7 @@ fn finish(dd: Dd, reader: Reader, status: u8) -> u8 {
         ..
     } = out;
 
-    if let Err(e) = close_handle(in_handle, 0) {
+    if let Err(e) = close_handle(in_handle) {
         stdfd::diag_line(&format!(
             "dd: closing input file {}: {}",
             quoteaf_os(&in_name),
@@ -2735,7 +2773,7 @@ fn finish(dd: Dd, reader: Reader, status: u8) -> u8 {
         ));
         return 1;
     }
-    if let Err(e) = close_handle(out_handle, 1) {
+    if let Err(e) = close_handle(out_handle) {
         stdfd::diag_line(&format!(
             "dd: closing output file {}: {}",
             quoteaf_os(&out_name),

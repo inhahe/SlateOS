@@ -17351,11 +17351,15 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   stat {}: directory OK", pid_path);
 
-    // readdir on PID directory — PID_FILES + PID_LINKS, plus the three
+    // readdir on PID directory — PID_FILES + PID_LINKS, plus the four
     // subdirectories every PID directory exposes: `task` (per-thread tree),
-    // `fd` (open file descriptors) and `fdinfo` (per-fd pos/flags).
+    // `fd` (open file descriptors), `fdinfo` (per-fd pos/flags) and `ns`
+    // (the namespaces it is in -- listed for a kernel task too, empty).
     let pid_entries = fs.readdir(Path::new(&pid_path))?;
-    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 3;
+    let expected_pid_entries = PID_FILES
+        .len()
+        .saturating_add(PID_LINKS.len())
+        .saturating_add(4);
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
@@ -17365,8 +17369,9 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    // The extra entries must be the `task`, `fd` and `fdinfo` directories.
-    for subdir in ["task", "fd", "fdinfo"] {
+    // The extra entries must be the `task`, `fd`, `fdinfo` and `ns`
+    // directories.
+    for subdir in ["task", "fd", "fdinfo", "ns"] {
         if !pid_entries
             .iter()
             .any(|e| e.name.as_path() == Path::new(subdir) && e.entry_type == EntryType::Directory)

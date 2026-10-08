@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 /// Exact both ways: a new binary without the guard fails here until it has
 /// one or is added, and a converted binary fails here until it is taken off.
 const NOT_YET_GUARDED: &[&str] = &[
-    "bc", "df", "dir", "ed", "find", "hostname", "kill", "ls", "more", "patch", "vdir",
+    "bc", "df", "ed", "find", "hostname", "kill", "more", "patch",
 ];
 
 fn crate_dir() -> PathBuf {

@@ -2792,20 +2792,24 @@ fn creator_placement() -> (crate::cgroup::CgroupId, crate::netns::NetNsId) {
     )
 }
 
-/// Get the network namespace of the current task (non-blocking).
+/// The network namespace of the current task: the root
+/// ([`ROOT_NS`](crate::netns::ROOT_NS)) for a task not in the table.
 ///
-/// Returns [`ROOT_NS`](crate::netns::ROOT_NS) if the scheduler lock is
-/// contended or the task isn't found.  Designed for use in syscall
-/// handlers where the task needs namespace-aware socket operations.
+/// Blocks for the scheduler lock, as `creator_placement` does. Until
+/// 2026-10-08 it took the lock with `try_lock` and answered the root
+/// namespace -- the host's network -- whenever another CPU held it, so under
+/// load a container's process connected, bound and resolved names on the
+/// host's network (`SYS_TCP_CONNECT`, `SYS_TCP_LISTEN`, `SYS_UDP_BIND`,
+/// `net::dns`). Its callers are system calls and the kernel shell, none of
+/// which holds the scheduler lock.
 #[must_use]
 pub fn current_task_net_ns() -> crate::netns::NetNsId {
     let task_id = load_current_task();
-    if let Some(state) = SCHED.try_lock() {
-        if let Some(task) = state.tasks.get(&task_id) {
-            return task.net_ns;
-        }
-    }
-    crate::netns::ROOT_NS
+    SCHED
+        .lock()
+        .tasks
+        .get(&task_id)
+        .map_or(crate::netns::ROOT_NS, |task| task.net_ns)
 }
 
 /// Set the network namespace for a specific task.

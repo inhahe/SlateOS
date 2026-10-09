@@ -81,9 +81,13 @@ pub const fn native_type_of(kind: HandleKind) -> Option<u8> {
 /// - `NotSupported` for a type no descriptor of which can travel.
 /// - `InvalidHandle` for a handle `pid` does not hold, or whose object has
 ///   ended.
-/// - `TooManyReferences` when `uid` -- not root -- already has more
-///   descriptors in flight than `pid`'s `RLIMIT_NOFILE` (Linux's
-///   `ETOOMANYREFS`).
+/// - `ResourceExhausted` when `uid` -- not root -- already has more
+///   descriptors in flight than `pid`'s `RLIMIT_NOFILE`. Linux answers
+///   `ETOOMANYREFS`, which gets a kernel code of its own (`-305`) once the C
+///   library declares it: a code its `errno.rs` has not heard of fails that
+///   crate's coverage test on `main`, so the library's half goes first
+///   (`requests/a-d-native-sendmsg-and-recvmsg-can-carry-descriptors.md`,
+///   section 4).
 pub fn take(pid: ProcessId, uid: u32, rights: &[NativeRight]) -> KernelResult<Option<Bundle>> {
     if rights.is_empty() {
         return Ok(None);
@@ -107,7 +111,7 @@ pub fn take(pid: ProcessId, uid: u32, rights: &[NativeRight]) -> KernelResult<Op
     }
     let nofile = pcb::get_rlimit(pid, 7).map_or(u64::MAX, |(cur, _)| cur);
     if refused.is_none() && uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
-        refused = Some(KernelError::TooManyReferences);
+        refused = Some(KernelError::ResourceExhausted);
     }
     if let Some(e) = refused {
         // What was taken goes back.

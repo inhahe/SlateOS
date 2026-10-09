@@ -87,11 +87,24 @@ receive that takes none.
   description, so an `fcntl(F_SETFL)` on one side is not seen on the other --
   as with `dup` today, nothing new.
 
-## 4. One new error code
+## 4. One new error code -- yours first
 
 | Code | Name | errno |
 |---|---|---|
 | -305 | `TooManyReferences` | `ETOOMANYREFS` (109) -- the sender's user, not root, already has more descriptors in flight than its `RLIMIT_NOFILE`, Linux's `too_many_unix_fds` |
+
+**Order, changed 2026-10-09.** The kernel does not define -305 yet: until it
+does, this refusal is `ResourceExhausted` (-304). `posix/src/errno.rs`'s test
+`kernel_error_codes_are_all_accounted_for` reads `kernel/src/error.rs`, so a
+kernel that defines a code your `mod native` does not declare fails your
+crate's tests on `main` -- and gate 42 runs them for every push touching
+`posix/` or `userspace/coreutils/`, lane B's included. Lane A built it the
+other way round first and held its publish for you; with lane D away since
+2026-10-08, the kernel takes the code back out instead. **Please add
+`pub const TooManyReferences: i64 = -305;` to `mod native` and an `errno_for`
+arm giving `ETOOMANYREFS`** -- harmless before the kernel has it -- publish it,
+and tell lane A: the kernel switches the refusal to -305 in its next publish
+after.
 
 Others from `SYS_UNIX_SENDMSG`, all existing: `InvalidHandle` (-505) for a
 handle the caller does not hold, `NotSupported` (-2) for a type that cannot

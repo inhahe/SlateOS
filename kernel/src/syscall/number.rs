@@ -7157,8 +7157,10 @@ pub const UNIX_RECV_INFO_LEN: usize = 28 + UNIX_ADDR_LEN;
 /// socket closes. Errors beyond `SYS_UNIX_SEND`'s: `InvalidArgument` for more
 /// than 253 (Linux's `SCM_MAX_FD`), `NotSupported` for a type that cannot
 /// travel, `InvalidHandle` for one the caller does not hold, and
-/// `TooManyReferences` (`ETOOMANYREFS`) when the caller's user, not root,
-/// already has more descriptors in flight than its `RLIMIT_NOFILE`.
+/// `ResourceExhausted` when the caller's user, not root, already has more
+/// descriptors in flight than its `RLIMIT_NOFILE` -- Linux's `ETOOMANYREFS`,
+/// a code of its own (`-305`) once the C library declares it
+/// (`ipc::native_rights::take`).
 pub const SYS_UNIX_SENDMSG: u64 = 1169;
 /// `SYS_UNIX_RECVMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_RECV`], taking
 /// the descriptors the message carries. `msg_ptr` points at

@@ -531,6 +531,19 @@ pub mod fd_handle_type {
     /// is the shape of `script(1)`, a multiplexer spawning a helper to drive
     /// the pty, and sshd's server side.
     pub const PTY: u8 = 7;
+    /// A Unix-domain socket with a name, or either end of one of its pairs
+    /// (from `ipc::unix_socket`, the `SYS_UNIX_*` calls): a listener, a
+    /// connection, a datagram socket. Spawn dups via `unix_socket::dup()`, one
+    /// more holder of the same socket -- the handle is the socket, so the
+    /// child's is numerically the parent's -- which ends with its last
+    /// holder, as an inherited socket does on Linux. What an inetd or a
+    /// socket-activating supervisor hands the service it starts.
+    pub const UNIX_SOCKET: u8 = 8;
+
+    /// The highest type the kernel knows. A list naming a higher one is
+    /// refused whole (`SYS_PROCESS_SET_EXEC_CLOSE`), and the spawn dup loop
+    /// refuses the entry.
+    pub const LAST: u8 = UNIX_SOCKET;
 }
 
 /// Which [`ResourceType`](crate::cap::ResourceType) owns the kernel object
@@ -559,6 +572,7 @@ const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
         fd_handle_type::EVENTFD => Some(ResourceType::EventFd),
         fd_handle_type::PTY => Some(ResourceType::Pty),
         fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => Some(ResourceType::NativeSocket),
+        fd_handle_type::UNIX_SOCKET => Some(ResourceType::UnixSocket),
         // CONSOLE: virtual.
         _ => None,
     }
@@ -2065,6 +2079,17 @@ fn spawn_process_inner(
                         Err(KernelError::InvalidHandle)
                     } else {
                         native_socket::dup(parent_handle)
+                    }
+                }
+                fd_handle_type::UNIX_SOCKET => {
+                    // A Unix-domain socket the parent holds: one more holder of
+                    // it (`unix_socket::dup`), the same handle -- a supervisor
+                    // handing a listener or a connection to what it starts.
+                    use crate::ipc::unix_socket::{self, UnixHandle};
+                    if parent_lacks(crate::cap::ResourceType::UnixSocket) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        unix_socket::dup(UnixHandle::from_raw(parent_handle)).map(|h| h.raw())
                     }
                 }
                 _ => {
@@ -3576,6 +3601,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_fd_map_invalid_handle()?;
     test_spawn_with_pty_master()?;
     test_spawn_pty_master_not_owned()?;
+    test_spawn_with_unix_socket()?;
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
@@ -40605,6 +40631,92 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[spawn]   Spawn refuses a pty master the parent does not own: OK");
+    Ok(())
+}
+
+/// Test: a spawn hands its child a Unix-domain socket (`UNIX_SOCKET`), as a
+/// supervisor hands a listener or a connection to the service it starts.
+///
+/// The same three things as [`test_spawn_with_pty_master`]: the entry arrives
+/// tagged `UNIX_SOCKET` with the parent's value (the handle is the socket); the
+/// child owns it, so its `SYS_UNIX_*` calls are let through; and it is a hold
+/// of its own -- the socket outlives the parent's close, and ends with the
+/// child, which its peer sees as a hang-up. Then the refusal: a socket the
+/// spawning process does not hold is `InvalidHandle`, and takes no hold.
+fn test_spawn_with_unix_socket() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::ipc::unix_socket::{self, Kind};
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: unix socket: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let (mine, peer) = unix_socket::pair(Kind::Stream)?;
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(3_i32, fd_handle_type::UNIX_SOCKET, mine.raw())];
+
+    // Refused first, while the parent's hold is the only one: attributed to a
+    // pid that holds no socket.
+    let unowned = SpawnOptions::new("spawn-test-unix-unowned")
+        .fd_map(&fd_map)
+        .parent(1);
+    let refused = match spawn_process(&elf_data, &unowned) {
+        Err(KernelError::InvalidHandle) => true,
+        Err(_) => false,
+        Ok(result) => {
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            teardown_fixture(result.pid, result.task_id);
+            false
+        }
+    };
+
+    // `parent` 0: kernel-spawned, nobody's ownership to check.
+    let options = SpawnOptions::new("spawn-test-unix").fd_map(&fd_map);
+    let result = match spawn_process(&elf_data, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            unix_socket::close(mine);
+            unix_socket::close(peer);
+            return Err(e);
+        }
+    };
+    let child_fds = pcb::take_initial_fds(result.pid);
+    let arrived = child_fds.first().copied();
+    let owned = arrived
+        .is_some_and(|(_, _, h)| pcb::owns_ipc_handle(result.pid, ResourceType::UnixSocket, h));
+
+    // The parent lets go; the child's hold keeps the socket.
+    unix_socket::close(mine);
+    let survived = unix_socket::kind(mine).is_some();
+
+    // The child ends; its hold was the last, so the peer sees the hang-up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    teardown_fixture(result.pid, result.task_id);
+    let ended = unix_socket::kind(mine).is_none();
+    let hung_up = unix_socket::poll_status(peer) & 0x10 != 0;
+    unix_socket::close(peer);
+
+    if !refused {
+        return fail("a socket the spawning process does not hold was not InvalidHandle");
+    }
+    if child_fds.len() != 1 || arrived != Some((3, fd_handle_type::UNIX_SOCKET, mine.raw())) {
+        return fail("the child's entry was not (fd 3, UNIX_SOCKET, the parent's handle)");
+    }
+    if !owned {
+        return fail("the child does not own the inherited socket");
+    }
+    if !survived {
+        return fail("the socket ended with the parent's hold: the child had none of its own");
+    }
+    if !ended || !hung_up {
+        return fail("the socket outlived the child's hold, or its peer saw no hang-up");
+    }
+    serial_println!(
+        "[spawn]   Spawn passes on a Unix-domain socket (a hold of its own, owned; unowned refused): OK"
+    );
     Ok(())
 }
 

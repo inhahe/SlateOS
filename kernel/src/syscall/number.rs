@@ -6405,6 +6405,13 @@ pub const UNIX_OPT_PASSCRED: u64 = 1;
 pub const UNIX_OPT_RCVTIMEO: u64 = 2;
 /// Option: the same for a blocking send or connect (Linux's `SO_SNDTIMEO`).
 pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+/// Option, read only: how many bytes a receive would find waiting -- the C
+/// library's `ioctl(FIONREAD)` (Linux's `SIOCINQ`), counted as Linux counts
+/// them: everything queued at a stream or sequenced-packet socket, only the
+/// next datagram at a datagram socket. A listener answers `InvalidArgument`
+/// (`EINVAL`), as on Linux; setting it is `NotSupported`, like any option
+/// the kernel does not set.
+pub const UNIX_OPT_INQ: u64 = 4;
 
 // ---------------------------------------------------------------------------
 // The device door (1119-1123)

@@ -4391,7 +4391,7 @@ pub fn sys_process_set_exec_close(args: &SyscallArgs) -> SyscallResult {
     };
     let mut handles = alloc::vec::Vec::with_capacity(entries.len());
     for entry in &entries {
-        if entry.handle_type > fd_handle_type::PTY {
+        if entry.handle_type > fd_handle_type::LAST {
             return SyscallResult::err(KernelError::InvalidArgument);
         }
         handles.push((entry.handle_type, entry.handle));
@@ -4437,6 +4437,7 @@ pub(crate) fn close_handle_at_exec(
         fd_handle_type::STREAM_SOCKET => ResourceType::StreamSocket,
         fd_handle_type::PTY => ResourceType::Pty,
         fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => ResourceType::NativeSocket,
+        fd_handle_type::UNIX_SOCKET => ResourceType::UnixSocket,
         // CONSOLE: see above.
         _ => return Ok(false),
     };
@@ -4460,6 +4461,10 @@ pub(crate) fn close_handle_at_exec(
             // that fails has still let go of the handle, and the exec goes
             // on, as it does for every other type here.
             let _ = crate::net::native_socket::release(handle, NativeEnding::Close);
+        }
+        fd_handle_type::UNIX_SOCKET => {
+            // This process's hold; the socket ends only with its last.
+            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(handle));
         }
         _ => close_pty_handle(crate::tty::pty::PtyHandle::from_raw(handle)),
     }
@@ -9702,10 +9707,13 @@ pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispat
 /// `SYS_UNIX_GET_OPTION` (1118).
 pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use super::number::{UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use super::number::{UNIX_OPT_INQ, UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
     use crate::ipc::unix_socket::{self, Direction};
     let got = unix_held(args.arg0).and_then(|h| match args.arg1 {
         UNIX_OPT_PASSCRED => Ok(i64::from(unix_socket::passcred(h))),
+        UNIX_OPT_INQ => {
+            unix_socket::readable_bytes(h).map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+        }
         UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
             let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
                 Direction::Receive

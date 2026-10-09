@@ -10,6 +10,30 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## In chat to lane A, 2026-10-09 (afternoon)
+
+- **Written:** 2026-10-09, in lane A's session, after lane A answered the
+  questions the operator had asked back in `open-questions/answers.txt`.
+- **Processed:** 2026-10-09 by lane A, the same hour.
+- **Copy:** `operator-answers/2026-10-09-chat-to-lane-a.txt`
+- **Content:** sha256 `c609490015f138335c79e73d207a204fedf9cb994fabd7d0514ff28ee4936b3d`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| C-Q34 | C | -- | relayed 2026-10-09: A, with the per-element control lane A described (text and shapes scaled; an image carries its own density; a surface can ask for real pixels) |
+| C-Q29 | C | -- | relayed 2026-10-09: A, confirmed after lane A's answer on programs with no window (a data-control path; reading from the background takes a permission) |
+| F-Q7 | F | -- | relayed 2026-10-09: A, keep the translation |
+| F-Q8 | F | -- | relayed 2026-10-09: **B**, translate FFmpeg's H.264 decoder (lane F had recommended A) |
+| F-Q9 | F | -- | relayed 2026-10-09: **B**, translate FFmpeg's fixed-point AAC decoder (lane F had recommended A) |
+| F-Q10 | F | -- | relayed 2026-10-09: A, Chrome's colour library; Little CMS when printing is built |
+| F-Q6 | F, C, D | -- | relayed 2026-10-09: turning remote desktop on offers, in the same steps, a dynamic-DNS name (lane D's `services/dyndns`) and a Let's Encrypt certificate -- whatever is not yet set up |
+| The MIT licence | operator | `LICENSE`, lane-a-wip `13032901f` | **done**: committed, reaching `main` with lane A's next publish |
+| The file reform (`todo2.txt`, `roadmap.md`, `known-issues.md`) | A | §1530 | answered in chat: done for the issues, decisions and questions, and finished roadmap blocks moved to `roadmap-done.md`, with a search database; **not** done for `todo.txt` (59,315 lines) -- lane A's, on its roadmap. `todo2.txt` is the operator's own and was never part of it |
+| Process Lasso's controls | A | -- | **question back: `open-questions/A-Q27.md`** |
+| Page Up, Page Down, Home, End, Ctrl+Home, Ctrl+End | C | §1416 (2026-09-27) | recorded and done the same day |
+| "Flip the net.userspace default" | A | §934 (A-Q9, 2026-09-12) | answered in chat: networking moves out of the kernel into its own program; you chose to flip after one fix, and it was flipped 2026-09-12; the in-kernel copy's deletion is lane A's remaining step |
+| "Which order to do the next few things in" | A, C | §69 (2026-07-18), §264 (2026-08-21) | answered in chat: recorded |
+
 ## open-questions/answers.txt
 
 - **Written:** 2026-10-09, as `open-questions/answers.txt` in the integration
@@ -20,7 +44,8 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 - **Content:** sha256 `6302a9fc6df72bd6bcc87acf588378e75fb974ac3525522bea8ffaaebac2f63c`
 - **Also left in the integration tree that day:** `xor.png` (C-Q28's logo),
   and an untracked `LICENSE` (MIT, dated 2026-09-16) that no question asked
-  for -- lane A asked the operator whether it is to be committed.
+  for -- lane A asked the operator whether it is to be committed; the answer
+  was yes, and it is (section above).
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|

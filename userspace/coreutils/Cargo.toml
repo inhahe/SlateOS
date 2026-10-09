@@ -65,6 +65,9 @@ journalfwd = { path = "../journalfwd" }
 # operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
 # the util-linux ports outside coreutils (logger's -S and --id=).
 ulstrutils = { path = "../ulstrutils" }
+# The C library's syslog(3), for killall5 and pidof, whose complaints go
+# there unless standard input is a terminal.
+libcsyslog = { path = "../libcsyslog" }
 # util-linux's closestream.h, for the util-linux port that lives in this
 # crate (`renice`): its standard output is buffered and judged at exit by
 # util-linux's rule, which forgives a closed descriptor gnulib's reports.

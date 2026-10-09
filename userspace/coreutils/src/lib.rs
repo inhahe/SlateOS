@@ -470,6 +470,9 @@
 //! - [`interval`] — a time interval, `strtod` and an `s`/`m`/`h`/`d` suffix:
 //!   `sleep`'s operands and `timeout`'s durations, which upstream copies
 //!   between the two files.
+//! - [`killall5`] — sysvinit's `killall5` and `pidof`, one program that is
+//!   either by the name it is started under; `bin/killall5.rs` and
+//!   `bin/pidof.rs` both run it.
 //! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
 //!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
 //!   had disagreed about whether `LC_ALL=` is set.
@@ -543,6 +546,7 @@ pub mod grouplist;
 pub mod hardlink;
 pub mod human;
 pub mod interval;
+pub mod killall5;
 pub mod locale;
 pub mod ls;
 pub mod mbswidth;

@@ -334,6 +334,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/pgrep-diff.sh` | Differential test: our `pgrep`, `pkill` and `pidwait` against procps-ng |
 | `scripts/pinky-diff.sh` | pinky-diff.sh — compare our `pinky` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pkgconf-spike/run.sh` | Cross-compile upstream pkgconf and link it against SlateOS's own libc.a. |
+| `scripts/pmap-diff.sh` | pmap-diff.sh -- run our `pmap` and procps-ng's side by side and report every |
 | `scripts/positional-model-limits.py` | Where the positional contamination model can and cannot see, derived from its code. |
 | `scripts/pr-diff.sh` | pr-diff.sh — compare our `pr` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pre-boot.py` | Run everything `boot-test.sh` checks before it builds, without building anything. |
@@ -554,4 +555,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_544 scripts._
+_545 scripts._

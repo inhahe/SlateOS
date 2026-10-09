@@ -6042,6 +6042,17 @@ _Port ext4 first. Don't write a custom filesystem._
   procps says nothing -- and `free` keeps `/proc/meminfo` open as the library
   does, which decides what `free >&-` says; `scripts/procps-close-diff.sh`
   holds the whole family to procps' close: 44 cases agree);
+  `pmap` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  default, `-x`, `-d` and `-X`/`-XX` formats, the rc file `-c`/`-C` read and
+  `-n`/`-N` write, `-A` ranges, `-p`, `-q`; each map read with `fgets` into
+  1024 bytes, so a mapping whose path makes its line longer arrives in
+  pieces and the second is scanned as a line of its own, as upstream does;
+  `-X`'s two passes over `smaps` and its field list kept from one process to
+  the next; shared memory named by its id, learned from a segment of its own
+  through the new `libcall::shm`; `procps::scanf` gained `%x` and scansets;
+  `scripts/pmap-diff.sh`: 328 cases agree and 3 differ on purpose, over
+  static targets -- so no shared library's pages move the `Pss` column --
+  mapping long paths, odd ones, deleted files and System V segments);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6070,6 +6081,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] diskutil: disk management (list/info/format/verify/repair/TRIM, benchmark, S.M.A.R.T., partitions)
   - [x] ps: procps-ng 4.0.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/ps-diff.sh`, 590 cases)
   - [x] pwdx: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pwdx-diff.sh`, 120 cases)
+  - [x] pmap: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pmap-diff.sh`, 331 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)

@@ -59236,9 +59236,9 @@ is already waiting, not whether the setter exists.
   `scripts/gen-terminfo-captab.py`, `scripts/systemd-cat-diff.sh`,
   `scripts/patch-merge-fuzz.py`, `scripts/journalfwd-diff.sh`,
   `scripts/journalfwd-walltest.py`, `scripts/pwdx-diff.sh`,
-  `scripts/procps-close-diff.sh`. **Trigger:** `origin/main`'s
-  `scripts/which-lane.py` has `SCRIPT_OWNERS`. **Then:** merge it, add the
-  eight rows to lane B's block, boot.
+  `scripts/procps-close-diff.sh`, `scripts/pmap-diff.sh`. **Trigger:**
+  `origin/main`'s `scripts/which-lane.py` has `SCRIPT_OWNERS`. **Then:**
+  merge it, add the nine rows to lane B's block, boot.
 - **Open: switching off and restarting, from userland.** Lane A's notice of
   2026-10-09 07:39Z: `SYS_POWER_OFF` (1167) and `SYS_POWER_REBOOT` (1168),
   each gated by a Process right (`Rights::POWER_OFF`, `Rights::REBOOT`), and

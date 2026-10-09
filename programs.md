@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**494 programs; 335 on the image, 6 carried inside the kernel.**
+**495 programs; 336 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 309
+## Userland utilities and services (`userspace/`, lane B) -- 310
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -209,6 +209,7 @@ two disagree.
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. | yes | `coreutils` |  |
 | `pkg` | Slate OS package manager. | yes |  |  |
 | `pkill` | Signal processes chosen by name and other attributes. | yes | `coreutils` |  |
+| `pmap` | Report the memory map of each process named: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `polkit` | PolicyKit Authorization Framework | yes |  |  |
 | `powerctl` | Power Management Utility | yes |  |  |
 | `pr` | Paginate or columnate files for printing. | yes | `coreutils` |  |

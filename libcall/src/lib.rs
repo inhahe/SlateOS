@@ -74,6 +74,7 @@ pub mod lock;
 pub mod netdb;
 pub mod process;
 pub mod pty;
+pub mod shm;
 pub mod signal;
 pub mod socket;
 pub mod termios;

@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**497 programs; 338 on the image, 6 carried inside the kernel.**
+**498 programs; 339 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 312
+## Userland utilities and services (`userspace/`, lane B) -- 313
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -284,6 +284,7 @@ two disagree.
 | `tic` | `tic`: ncurses 6.4's (`progs/tic.c`, 20240113), ported -- with its aliases `captoinfo` (`-I`) and `infotocap` (`-C`). | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
+| `tload` | Graph the system load average on a terminal: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
 | `top` | Interactive Process Monitor | yes |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |

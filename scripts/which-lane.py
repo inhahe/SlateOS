@@ -821,6 +821,8 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "tic-diff.sh",
         "time-diff.sh",
         "timeout-diff.sh",
+        "tload-diff.sh",
+        "tload-frames.py",
         "touch-diff.sh",
         "tput-diff.sh",
         "tr-diff.sh",

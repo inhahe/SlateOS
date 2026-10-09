@@ -66,6 +66,48 @@ and resumed on another CPU wrote its stack pointer to address 8
    `sched::select_wake_cpu` keeps the last CPU only if it is idle, and
    otherwise picks an idle CPU the task may run on (design-decisions 1558).
 
+The first two-CPU boot with (4) hung at the boot's first wake after the
+network tests started: task 0 is the BSP's idle task *and*, until the boot
+is done, the boot itself, which blocks and is woken like any task -- and it
+was not pinned, so the wake queued it on the idle AP, leaving the BSP
+without its idle task. `PREV_TASK_IDS` and `running_elsewhere` already
+assumed task 0 never leaves the BSP. Every idle task is now pinned to its
+own CPU (`Task::new_idle`, `Task::new_ap_idle`), and the pin is not passed
+on to what an idle task creates (`sched::inheritable_affinity`), so init
+and the kernel's services, which the boot starts, keep every CPU.
+`sched::smp_self_test` checks both.
+
+With tasks on both CPUs, two more causes came out, each fixed:
+
+- **An idle AP stopped its tick with timers queued on it.** A CPU's
+  hrtimers are fired only by its own timer interrupt (`hrtimer::
+  process_expired`), and the AP idle loop stopped the timer regardless: a
+  task that slept on CPU 1 -- the netstack daemon, its 1 ms poll sleep --
+  was never woken, its timer 17 s overdue when the boot gave up on it (the
+  hang dump's "OVERDUE - the ISR scan is not draining"). The idle loop now
+  keeps the tick while `hrtimer::has_pending_on(cpu)`, checked with
+  interrupts off up to an atomic `sti; hlt`.
+- **An AP ran as CPU 0 until it mapped itself.** `smp::fast_cpu_index`
+  answers an unmapped APIC ID with 0, and an AP published its own mapping
+  only after its GDT, SYSCALL, IDT and APIC set-up, so whatever it locked
+  or allocated before that counted as CPU 0's: a heap lock's preempt count
+  raised on CPU 0 and lowered on CPU 1 left the BSP's count at 1 for the
+  rest of the boot, and every voluntary switch there was reported as made
+  under a lock nobody held. The BSP now publishes each AP's index before
+  starting it. And `sched::preempt_disable` reads the CPU index and raises
+  the count with interrupts off, so a task preempted between the two and
+  resumed elsewhere can no longer raise one CPU's count and lower another's.
+  The switch-under-lock report now names where the count rose
+  (`PREEMPT_DISABLE_SITE`) and any enable that found 0
+  (`sched::preempt_underflows`) -- which is how this one was found.
+
+**Verified (lane-a-wip, 2026-10-09):** two vCPUs under MTTCG,
+`selftest.skip=1`: BOOT_OK in 85 s; no lockup, wedge, overdue timer or
+switch-under-lock report; the ring benchmark's `idle_beside_busy` load
+`"samples":16, "errors":0, "window_ms":1750` (was 234524 and timed out);
+the network witnesses (head-of-line, late data, FIONREAD) pass on both
+designs.
+
 Found on the way, and fixed with them: the voluntary context-switch path
 (`yield_now`, `block_current`) ran with interrupts on between naming the
 incoming task current and switching to its stack, though `switch_context`

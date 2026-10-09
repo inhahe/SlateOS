@@ -1281,7 +1281,15 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi: None,
             last_cpu: 0,
-            cpu_affinity: CPU_AFFINITY_ALL,
+            // The BSP's alone. Task 0 is the BSP's idle task, and until the
+            // boot is done the boot itself, which blocks and is woken like any
+            // task: unpinned, a wake could queue it on an idle AP
+            // (`select_wake_cpu`), or an AP could steal it, leaving the BSP
+            // without its idle task and running the boot -- and the BSP-only
+            // work in it -- elsewhere. `running_elsewhere` and `PREV_TASK_IDS`
+            // already assume it never leaves the BSP. (An SMP boot hung at
+            // the first wake of the boot after the wake placement landed.)
+            cpu_affinity: 1,
             total_ticks: 0,
             total_cycles: 0,
             cpu_account: None,
@@ -1380,7 +1388,13 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi: None,
             last_cpu: cpu_index,
-            cpu_affinity: CPU_AFFINITY_ALL,
+            // Its own CPU alone, as the BSP's idle task is pinned to the BSP
+            // (`new_idle`): an idle task that a steal or a balance moved would
+            // leave its CPU with none.
+            cpu_affinity: u32::try_from(cpu_index)
+                .ok()
+                .and_then(|c| 1u64.checked_shl(c))
+                .unwrap_or(CPU_AFFINITY_ALL),
             total_ticks: 0,
             total_cycles: 0,
             cpu_account: None,

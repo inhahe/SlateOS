@@ -914,16 +914,84 @@ static PREEMPT_DISABLE_COUNT: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = 
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per CPU: where its preempt count last rose from 0 -- the outermost
+/// [`preempt_disable`] in force, as a `&'static Location` -- and the task
+/// that raised it; 0 and `u64::MAX` when the count is 0. For
+/// [`report_switch_under_lock`] to name when no lock accounts for a count.
+static PREEMPT_DISABLE_SITE: [CachePadded<AtomicUsize>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+/// See [`PREEMPT_DISABLE_SITE`].
+static PREEMPT_DISABLE_TASK: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(u64::MAX));
+    [INIT; priority_rr::MAX_CPUS]
+};
+/// `preempt_enable` calls that found their CPU's count already 0: a disable
+/// and its enable made on two different CPUs, or an enable with no disable.
+static PREEMPT_UNDERFLOWS: AtomicU64 = AtomicU64::new(0);
+/// The first such call's `&'static Location` (0: none yet).
+static PREEMPT_UNDERFLOW_SITE: AtomicUsize = AtomicUsize::new(0);
+/// The first such call's task (high bits) and CPU (low 8 bits).
+static PREEMPT_UNDERFLOW_WHO: AtomicU64 = AtomicU64::new(0);
+
+/// How many `preempt_enable` calls found their CPU's count already 0, and
+/// where the first was made: its location, task and CPU.
+#[must_use]
+pub fn preempt_underflows() -> (
+    u64,
+    Option<(&'static core::panic::Location<'static>, TaskId, usize)>,
+) {
+    let n = PREEMPT_UNDERFLOWS.load(Ordering::Relaxed);
+    let raw = PREEMPT_UNDERFLOW_SITE.load(Ordering::Relaxed);
+    if raw == 0 {
+        return (n, None);
+    }
+    let who = PREEMPT_UNDERFLOW_WHO.load(Ordering::Relaxed);
+    // SAFETY: a non-zero value is a `&'static Location` stored by
+    // `preempt_enable` from `Location::caller()`, never changed after.
+    let loc: &'static core::panic::Location<'static> =
+        unsafe { &*(raw as *const core::panic::Location<'static>) };
+    (n, Some((loc, who >> 8, (who & 0xff) as usize)))
+}
+
 /// Disable involuntary preemption on the calling CPU.
 ///
 /// Called by [`crate::sync::Mutex::lock`] / `try_lock` when acquiring a
 /// tracked spinlock.  Cheap: one lock-free CPU-index read plus one relaxed
-/// atomic increment.  Must be paired with exactly one [`preempt_enable`]
-/// (the `MutexGuard`'s `Drop` guarantees this).
+/// atomic increment, and on the outermost disable two relaxed stores naming
+/// the caller and the task.  Must be paired with exactly one
+/// [`preempt_enable`] (the `MutexGuard`'s `Drop` guarantees this).
 #[inline]
+#[track_caller]
 pub fn preempt_disable() {
-    if let Some(c) = PREEMPT_DISABLE_COUNT.get(current_cpu_id()) {
-        c.fetch_add(1, Ordering::Relaxed);
+    // The CPU index and the increment are one step, with interrupts off: a
+    // task preempted between them -- its count not yet raised, so the
+    // preemption is allowed -- and resumed on another CPU would raise the
+    // first CPU's count, which its own enable, made where it now runs, never
+    // lowers. (Linux's `incl %gs:__preempt_count` is one instruction for the
+    // same reason.) Once the count is raised the task cannot be preempted, so
+    // it stays on this CPU until the enable, which needs no such care.
+    let were_on = crate::cpu::interrupts_enabled();
+    if were_on {
+        // SAFETY: clearing IF has no memory effects; set again below.
+        unsafe { crate::cpu::cli() };
+    }
+    let cpu = current_cpu_id();
+    if let Some(c) = PREEMPT_DISABLE_COUNT.get(cpu) {
+        if c.fetch_add(1, Ordering::Relaxed) == 0 {
+            if let Some(site) = PREEMPT_DISABLE_SITE.get(cpu) {
+                let here: &'static core::panic::Location<'static> = core::panic::Location::caller();
+                site.store(core::ptr::from_ref(here) as usize, Ordering::Relaxed);
+            }
+            if let Some(task) = PREEMPT_DISABLE_TASK.get(cpu) {
+                task.store(load_current_task(), Ordering::Relaxed);
+            }
+        }
+    }
+    if were_on {
+        // SAFETY: interrupts were on when this began; the IDT is loaded.
+        unsafe { crate::cpu::sti() };
     }
 }
 
@@ -933,14 +1001,60 @@ pub fn preempt_disable() {
 /// to a huge value and wedge preemption off permanently — the worst case is a
 /// missed decrement, which self-heals on the next balanced pair.
 #[inline]
+#[track_caller]
 pub fn preempt_enable() {
-    if let Some(c) = PREEMPT_DISABLE_COUNT.get(current_cpu_id()) {
+    let cpu = current_cpu_id();
+    if let Some(c) = PREEMPT_DISABLE_COUNT.get(cpu) {
         // fetch_update keeps the decrement atomic w.r.t. a nested ISR that
         // acquires/releases a tracked lock between our read and write.
-        let _ = c.fetch_update(Ordering::Release, Ordering::Relaxed, |v| {
+        let before = c.fetch_update(Ordering::Release, Ordering::Relaxed, |v| {
             Some(v.saturating_sub(1))
         });
+        match before {
+            Ok(0) => {
+                // Nothing to release here: the matching disable was made on
+                // another CPU (a task moved while it held preemption off), or
+                // never. The first is kept, with where, for the report -- not
+                // printed here, where a lock the printer needs may be held.
+                if PREEMPT_UNDERFLOWS.fetch_add(1, Ordering::Relaxed) == 0 {
+                    let here: &'static core::panic::Location<'static> =
+                        core::panic::Location::caller();
+                    PREEMPT_UNDERFLOW_SITE
+                        .store(core::ptr::from_ref(here) as usize, Ordering::Relaxed);
+                    PREEMPT_UNDERFLOW_WHO.store(
+                        (load_current_task() << 8) | (cpu as u64 & 0xff),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            Ok(1) => {
+                if let Some(site) = PREEMPT_DISABLE_SITE.get(cpu) {
+                    site.store(0, Ordering::Relaxed);
+                }
+                if let Some(task) = PREEMPT_DISABLE_TASK.get(cpu) {
+                    task.store(u64::MAX, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
     }
+}
+
+/// The outermost `preempt_disable` still in force on `cpu`, and the task that
+/// made it -- `None` when its count is 0 ([`PREEMPT_DISABLE_SITE`]).
+fn preempt_disable_site(cpu: usize) -> Option<(&'static core::panic::Location<'static>, TaskId)> {
+    let raw = PREEMPT_DISABLE_SITE.get(cpu)?.load(Ordering::Relaxed);
+    if raw == 0 {
+        return None;
+    }
+    let task = PREEMPT_DISABLE_TASK
+        .get(cpu)
+        .map_or(u64::MAX, |t| t.load(Ordering::Relaxed));
+    // SAFETY: a non-zero slot holds a `&'static Location` stored by
+    // `preempt_disable` from `Location::caller()`; it is only ever cleared to 0.
+    let loc: &'static core::panic::Location<'static> =
+        unsafe { &*(raw as *const core::panic::Location<'static>) };
+    Some((loc, task))
 }
 
 /// Current preemption-disable depth on `cpu` (0 == preemptible).
@@ -1095,6 +1209,24 @@ fn report_switch_under_lock(task: TaskId, cpu: usize) {
             cpu,
             preempt_count(cpu)
         ),
+    }
+    if let Some((loc, by)) = preempt_disable_site(cpu) {
+        crate::serial_println!(
+            "[sched]   the count on cpu {} rose from 0 at {}, in task {}",
+            cpu,
+            loc,
+            by
+        );
+    }
+    if let (n @ 1.., Some((loc, by, on))) = preempt_underflows() {
+        crate::serial_println!(
+            "[sched]   {} preempt_enable(s) found a count of 0, the first at {} (task {}, cpu {}) \
+             -- a disable and its enable on two CPUs",
+            n,
+            loc,
+            by,
+            on
+        );
     }
     crate::lockdep::dump_held_locks(cpu);
     crate::backtrace::print_symbolized(&bt);
@@ -6817,6 +6949,24 @@ pub fn get_cpu_affinity(task_id: TaskId) -> Option<u64> {
     state.tasks.get(&task_id).map(|t| t.cpu_affinity)
 }
 
+/// The CPU affinity a task passes on to the threads and processes it creates
+/// (`proc::thread`): its own mask -- Linux's clone, fork and posix_spawn keep
+/// it -- except an idle task's, which passes on every CPU. An idle task is
+/// pinned to its CPU because it is that CPU's idle task (`Task::new_idle`,
+/// `Task::new_ap_idle`), not because what it starts belongs there: the boot,
+/// the BSP's idle task until it is done, starts init and the kernel's
+/// services, and they get every CPU.
+#[must_use]
+pub fn inheritable_affinity(task_id: TaskId) -> u64 {
+    let is_idle_task = IDLE_TASK_IDS
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) == task_id);
+    if is_idle_task {
+        return task::CPU_AFFINITY_ALL;
+    }
+    get_cpu_affinity(task_id).unwrap_or(task::CPU_AFFINITY_ALL)
+}
+
 /// The CPUs a task may run on now: its mask, less the CPUs that are not
 /// online -- what `sched_getaffinity(2)` reports. `None` if there is no such
 /// task. Before CPU hotplug has started, the CPUs brought up so far count as
@@ -10281,6 +10431,37 @@ pub fn smp_self_test() -> KernelResult<()> {
         }
     }
     serial_println!("[sched]   Reap SMP safety: OK");
+
+    // Every idle task is pinned to its own CPU -- the BSP's, task 0, the boot
+    // until it is done, included -- so that no wake, steal or balance moves
+    // one off it; and none passes the pin on to what it creates.
+    for cpu in 0..num_cpus {
+        let Some(idle) = IDLE_TASK_IDS
+            .get(cpu)
+            .map(|slot| slot.load(Ordering::Acquire))
+            .filter(|&id| id != u64::MAX)
+        else {
+            continue;
+        };
+        let own = u32::try_from(cpu).ok().and_then(|c| 1u64.checked_shl(c));
+        if get_cpu_affinity(idle) != own {
+            serial_println!(
+                "[sched]   FAIL: CPU {}'s idle task {} is not pinned to it (mask {:?})",
+                cpu,
+                idle,
+                get_cpu_affinity(idle)
+            );
+            return Err(KernelError::InternalError);
+        }
+        if inheritable_affinity(idle) != task::CPU_AFFINITY_ALL {
+            serial_println!(
+                "[sched]   FAIL: CPU {}'s idle task passes its pin on to what it creates",
+                cpu
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[sched]   Idle tasks pinned to their CPUs, the pin not inherited: OK");
 
     serial_println!("[sched] SMP scheduler validation PASSED");
     Ok(())

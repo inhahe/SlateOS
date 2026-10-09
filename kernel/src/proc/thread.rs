@@ -342,9 +342,10 @@ pub fn spawn_suspended_with_tls(
     // The creating thread's CPU affinity, as Linux's clone, fork and
     // posix_spawn all keep it: a process pinned to some CPUs stays there
     // through the threads and children it starts. A kernel task creating a
-    // process (the boot's init, the kernel's services) has every CPU.
-    let affinity = sched::get_cpu_affinity(sched::current_task_id())
-        .unwrap_or(crate::sched::task::CPU_AFFINITY_ALL);
+    // process (the boot's init, the kernel's services) has every CPU -- the
+    // boot included, pinned to the BSP only as its idle task
+    // (`sched::inheritable_affinity`).
+    let affinity = sched::inheritable_affinity(sched::current_task_id());
     let task_id =
         sched::spawn_suspended_with_id(name, priority, entry, arg, pml4, requested_id, affinity)?;
 

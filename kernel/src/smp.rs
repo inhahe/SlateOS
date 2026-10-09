@@ -181,7 +181,8 @@ pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
 
 /// Get the current CPU's sequential index.
 ///
-/// Returns 0 (BSP) if SMP has not been initialized.
+/// Before any AP has started, 0 (the BSP); from then on, each CPU's own
+/// index -- an AP's from its first instruction in the kernel ([`ap_entry`]).
 ///
 /// # Performance
 ///
@@ -197,18 +198,22 @@ pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
 /// every timer tick took an uncached APIC MMIO round-trip in ISR context.
 /// Delegating removes both gaps permanently.
 ///
-/// The only thing this function adds over [`fast_cpu_index`] is the
-/// `SMP_INITIALIZED` gate, which covers the window before the BSP has
-/// registered itself in `APIC_TO_CPU`.
+/// It used to add one thing: an `SMP_INITIALIZED` gate answering 0 until the
+/// BSP had finished starting every AP, meant for the window before the BSP
+/// registers itself in `APIC_TO_CPU`. That window is [`fast_cpu_index`]'s
+/// tier 0 already -- the BSP registers itself before the first AP starts --
+/// and the gate's answer was wrong for every AP that ran meanwhile: an AP
+/// starting up, told it was CPU 0, raised CPU 0's preempt count taking a lock
+/// and lowered its own releasing it once the gate had opened, leaving CPU 0's
+/// count at 1 for the rest of the boot (the first two-CPU boot with the
+/// self-tests on, 2026-10-09: every voluntary switch on CPU 0 reported as made
+/// under a lock nobody held). Now it is [`fast_cpu_index`] itself.
 ///
 /// This function is lock-free and safe to call from ISR context
 /// (timer interrupt, IPI handlers, etc.).
 #[must_use]
 #[inline]
 pub fn current_cpu_index() -> usize {
-    if !SMP_INITIALIZED.load(Ordering::Acquire) {
-        return BSP_CPU_INDEX;
-    }
     fast_cpu_index()
 }
 
@@ -892,6 +897,18 @@ extern "C" fn ap_entry() -> ! {
         core::ptr::read_volatile(addr) as usize
     };
 
+    // Before anything that asks which CPU this is -- the first lock taken,
+    // the first allocation, the first print: IA32_TSC_AUX, which the RDPID
+    // and rdtscp tiers of `fast_cpu_index` read, is 0 after INIT, which
+    // would name this CPU as the BSP. (The APIC tier's mapping the BSP
+    // published before starting this CPU.)
+    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) || RDPID_AVAILABLE.load(Ordering::Relaxed) {
+        // SAFETY: IA32_TSC_AUX exists when rdtscp or RDPID is supported.
+        unsafe {
+            crate::cpu::wrmsr(IA32_TSC_AUX, cpu_index as u64);
+        }
+    }
+
     serial_println!("[smp] AP {} entered kernel (64-bit mode)", cpu_index);
 
     // Enable FPU/SSE on this AP.
@@ -953,14 +970,6 @@ extern "C" fn ap_entry() -> ! {
     #[allow(clippy::cast_possible_truncation)]
     APIC_TO_CPU[apic_id as usize].store(cpu_index as u8, Ordering::Relaxed);
     CPU_TO_APIC[cpu_index].store(apic_id, Ordering::Relaxed);
-
-    // Write CPU index to IA32_TSC_AUX for fast rdtscp-based lookup.
-    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
-        // SAFETY: IA32_TSC_AUX exists when rdtscp is supported.
-        unsafe {
-            crate::cpu::wrmsr(IA32_TSC_AUX, cpu_index as u64);
-        }
-    }
 
     // Enable SMEP/UMIP on this AP (each CPU has its own CR4).
     // SMAP is intentionally not enabled until user access paths are instrumented.
@@ -1052,14 +1061,28 @@ extern "C" fn ap_entry() -> ! {
     // return.  That contention was measured at ~4x regression on the
     // context switch benchmark.
     loop {
-        // Stop the timer — no more ticks while idle.  This eliminates
-        // 100 unnecessary interrupts/second on this CPU.
+        // Interrupts off from the check below to the `hlt`, which `sti`
+        // re-enables as it sleeps: a timer armed here by an interrupt in
+        // between would otherwise be missed by the check and never fire.
         //
-        // SAFETY: APIC is initialized on this AP, interrupts are enabled
-        // but we're about to HLT.  Even if a timer fires between
-        // stop_timer and HLT, it's harmless (just a spurious wake).
+        // SAFETY: clearing IF has no memory effects; the `sti; hlt` below
+        // sets it again.
         unsafe {
-            crate::apic::stop_timer();
+            crate::cpu::cli();
+        }
+
+        // Stop the timer — no more ticks while idle — unless a timer is
+        // queued on this CPU: its timers are fired by its own timer
+        // interrupt, so a stopped tick would leave a task sleeping here
+        // asleep for good. (The first two-CPU boot whose wakes went to idle
+        // CPUs lost the netstack daemon that way: its 1 ms sleep, queued on
+        // this CPU, was 17 s overdue when the boot gave up on it.) With
+        // nothing queued this eliminates 100 unneeded interrupts a second.
+        if !crate::hrtimer::has_pending_on(cpu_index) {
+            // SAFETY: APIC is initialized on this AP; interrupts are off.
+            unsafe {
+                crate::apic::stop_timer();
+            }
         }
 
         // Notify RCU that this CPU is entering idle.  An idle CPU is
@@ -1069,7 +1092,14 @@ extern "C" fn ap_entry() -> ! {
         // so timer_tick() (which reports quiescent state) never fires.
         crate::rcu::mark_idle();
 
-        crate::cpu::hlt(); // Sleep until reschedule IPI.
+        // Sleep until an interrupt: a reschedule IPI, or the tick kept for a
+        // queued timer. `sti; hlt` together, so no interrupt is taken between
+        // re-enabling and halting (the one-instruction `sti` shadow).
+        //
+        // SAFETY: the IDT is loaded and this CPU's APIC is up.
+        unsafe {
+            core::arch::asm!("sti", "hlt", options(nomem, nostack));
+        }
 
         // Mark this CPU as active before executing any RCU-protected
         // code path.
@@ -1200,6 +1230,22 @@ pub fn init() {
         // Patch the trampoline data area for this AP.
         patch_trampoline(tramp_virt, pml4_phys, ap_entry_virt, stack_top, cpu_index);
 
+        // Publish the AP's index under its APIC ID before it runs a single
+        // instruction. `fast_cpu_index` answers an unmapped APIC ID with 0, so
+        // an AP that took a lock or allocated before mapping itself (in
+        // `ap_entry`, after its GDT, SYSCALL, IDT and APIC set-up) did so as
+        // CPU 0: it raised CPU 0's preempt count, and if the mapping landed
+        // before the matching release, lowered its own -- leaving the BSP
+        // unpreemptible for the rest of the boot (the first two-CPU boot with
+        // tasks on both CPUs reported every voluntary switch on CPU 0 as made
+        // under a lock nobody held). `ap_entry` stores the same value again.
+        if let (Some(slot), Ok(index)) = (
+            APIC_TO_CPU.get(usize::from(ap.apic_id)),
+            u8::try_from(cpu_index),
+        ) {
+            slot.store(index, Ordering::Release);
+        }
+
         serial_println!(
             "[smp] Booting AP {} (APIC ID={}, stack_top={:#x})",
             cpu_index,
@@ -1252,6 +1298,12 @@ pub fn init() {
             // kernel's lifetime.  Without leak, the Vec would be dropped
             // when this iteration ends.
             core::mem::forget(stack);
+        } else {
+            // It never ran: take back the index published for it, so the APIC
+            // ID names no CPU, as before.
+            if let Some(slot) = APIC_TO_CPU.get(usize::from(ap.apic_id)) {
+                slot.store(0xFF, Ordering::Release);
+            }
         }
         // If the AP didn't start, the stack Vec is dropped normally.
     }

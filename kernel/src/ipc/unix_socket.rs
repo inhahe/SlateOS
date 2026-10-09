@@ -1970,6 +1970,32 @@ pub fn poll_status(h: UnixHandle) -> u16 {
     if pending { status | 0x08 } else { status }
 }
 
+/// How many bytes a receive on `h` would find waiting -- `FIONREAD`
+/// (`SIOCINQ`), counted as Linux's `unix_inq_len` counts them: everything
+/// queued at a stream or sequenced-packet socket, but only the next datagram
+/// at a datagram socket, since that is all one receive takes.
+///
+/// # Errors
+///
+/// `InvalidHandle` if `h` is not a live socket; `InvalidArgument` if it is
+/// listening, as Linux's `EINVAL`.
+pub fn readable_bytes(h: UnixHandle) -> KernelResult<usize> {
+    let stream = {
+        let t = TABLE.lock();
+        let s = t.socket(h)?;
+        match &s.state {
+            State::Listening { .. } => return Err(KernelError::InvalidArgument),
+            // The bytes are its pair's, counted once TABLE is let go.
+            State::Connected { stream, .. } => *stream,
+            State::Idle | State::Paired { .. } if s.kind == Kind::Dgram => {
+                return Ok(s.queue.front().map_or(0, |d| d.data.len()));
+            }
+            State::Idle | State::Paired { .. } => return Ok(s.queued_bytes),
+        }
+    };
+    usize::try_from(stream_socket::readable_bytes(stream)).map_err(|_| KernelError::InvalidArgument)
+}
+
 /// [`poll_status`] without the pending error.
 fn readiness(h: UnixHandle) -> u16 {
     let stream = {
@@ -2166,7 +2192,9 @@ fn reports_node(name: &Path) -> bool {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[unix_socket] Running self-test...");
     let mut opened: Vec<UnixHandle> = Vec::new();
-    let result = run_self_test(&mut opened).and_then(|()| pending_error_checks(&mut opened));
+    let result = run_self_test(&mut opened)
+        .and_then(|()| pending_error_checks(&mut opened))
+        .and_then(|()| readable_bytes_checks(&mut opened));
     for h in opened {
         close(h);
     }
@@ -2225,6 +2253,52 @@ fn pending_error_checks(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str
         return Err("SO_ERROR did not take the pending error, once");
     }
     crate::serial_println!("[unix_socket]   pending error (recvmmsg's, SO_ERROR): OK");
+    Ok(())
+}
+
+/// [`readable_bytes`] (`FIONREAD`), kind by kind as Linux counts: a stream
+/// everything waiting, a sequenced-packet socket every packet, a datagram
+/// socket the next datagram only; a receive takes its share off; a listener
+/// is `InvalidArgument`.
+fn readable_bytes_checks(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
+    let mut buf = [0u8; 16];
+    for kind in [Kind::Stream, Kind::SeqPacket, Kind::Dgram] {
+        let (a, b) = pair(kind).map_err(|_| "socketpair failed")?;
+        opened.push(a);
+        opened.push(b);
+        if readable_bytes(a) != Ok(0) {
+            return Err("FIONREAD: a socket with nothing waiting did not count 0");
+        }
+        send(b, b"abc", true).map_err(|_| "send failed")?;
+        send(b, b"defghij", true).map_err(|_| "send failed")?;
+        let (want, after) = match kind {
+            // Everything waiting; then what the 3-byte read left.
+            Kind::Stream => (10, 7),
+            // Every packet; then the one left.
+            Kind::SeqPacket => (10, 7),
+            // The next datagram; then the next one.
+            Kind::Dgram => (3, 7),
+        };
+        if readable_bytes(a) != Ok(want) {
+            return Err("FIONREAD: the bytes waiting were not counted as Linux counts them");
+        }
+        let mut three = [0u8; 3];
+        recv(a, &mut three, true, false).map_err(|_| "recv failed")?;
+        if readable_bytes(a) != Ok(after) {
+            return Err("FIONREAD: a receive did not take its share off the count");
+        }
+        // Drain, so nothing is left for the close.
+        while recv(a, &mut buf, true, false).is_ok_and(|r| r.len > 0) {}
+    }
+    let listener = opened_socket(opened, Kind::Stream)?;
+    bind_abstract(listener, b"slate-selftest-fionread").map_err(|_| "bind_abstract failed")?;
+    listen(listener, 1).map_err(|_| "listen failed")?;
+    if readable_bytes(listener) != Err(KernelError::InvalidArgument) {
+        return Err("FIONREAD on a listener was not InvalidArgument");
+    }
+    crate::serial_println!(
+        "[unix_socket]   FIONREAD: stream all, packets all, datagram the next; listener refused: OK"
+    );
     Ok(())
 }
 

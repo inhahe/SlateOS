@@ -409,6 +409,14 @@ impl<'a> RingGuard<'a> {
     /// after it. Late completions of earlier round-trips that gave up are
     /// discarded on the way. Returns the completion result.
     fn submit_and_reap(&mut self, sqe: &netipc::ring::Sqe) -> KernelResult<i32> {
+        self.submit_and_reap_cqe(sqe).map(|cqe| cqe.result)
+    }
+
+    /// [`submit_and_reap`](Self::submit_and_reap), answering the whole
+    /// completion: for an op whose completion carries more than its result
+    /// (`OP_POLL`'s byte count in `flags`, with
+    /// [`POLL_COUNTED`](netipc::ring::POLL_COUNTED)).
+    fn submit_and_reap_cqe(&mut self, sqe: &netipc::ring::Sqe) -> KernelResult<netipc::ring::Cqe> {
         let want_ud = sqe.user_data;
         if !self.view.sq_push(sqe) {
             return Err(KernelError::ResourceExhausted);
@@ -473,7 +481,7 @@ impl<'a> RingGuard<'a> {
         if self.view.cq_pop().is_some() {
             return Err(KernelError::InternalError);
         }
-        Ok(cqe.result)
+        Ok(cqe)
     }
 
     /// One `OP_RING_TCP` control round-trip: open a fresh `net.stack` channel,
@@ -1331,6 +1339,38 @@ impl NetstackConn {
         let writable = res & netipc::ring::POLL_WRITABLE != 0;
         let error = res & netipc::ring::POLL_ERR != 0;
         Ok((readable, writable, error))
+    }
+
+    /// How many bytes a receive on connection (or datagram socket) `conn_id`
+    /// would find waiting -- `FIONREAD`: a TCP connection's buffered in-order
+    /// bytes, a UDP socket's next datagram's payload, 0 for a listener. One
+    /// [`OP_POLL`](netipc::ring::OP_POLL) round trip, read from its
+    /// completion's `flags` ([`POLL_COUNTED`](netipc::ring::POLL_COUNTED));
+    /// like [`poll_on`](Self::poll_on), it moves no data.
+    ///
+    /// # Errors
+    ///
+    /// [`KernelError::NotConnected`] for an id the daemon does not know;
+    /// [`KernelError::NotSupported`] if the daemon's poll does not count (one
+    /// older than this kernel -- never the embedded one); a control-protocol
+    /// fault as for [`connect`](Self::connect).
+    pub fn readable_bytes_on(&mut self, conn_id: u32) -> KernelResult<u32> {
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_POLL,
+            conn_id,
+            user_data: ud,
+            ..netipc::ring::Sqe::default()
+        };
+        let cqe = ring.submit_and_reap_cqe(&sqe)?;
+        if cqe.result < 0 {
+            return Err(KernelError::NotConnected);
+        }
+        if cqe.result & netipc::ring::POLL_COUNTED == 0 {
+            return Err(KernelError::NotSupported);
+        }
+        Ok(cqe.flags)
     }
 
     /// Register a passive TCP listener on `port` under `listener_id`

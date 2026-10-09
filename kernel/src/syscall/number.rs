@@ -6405,6 +6405,13 @@ pub const UNIX_OPT_PASSCRED: u64 = 1;
 pub const UNIX_OPT_RCVTIMEO: u64 = 2;
 /// Option: the same for a blocking send or connect (Linux's `SO_SNDTIMEO`).
 pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+/// Option, read only: how many bytes a receive would find waiting -- the C
+/// library's `ioctl(FIONREAD)` (Linux's `SIOCINQ`), counted as Linux counts
+/// them: everything queued at a stream or sequenced-packet socket, only the
+/// next datagram at a datagram socket. A listener answers `InvalidArgument`
+/// (`EINVAL`), as on Linux; setting it is `NotSupported`, like any option
+/// the kernel does not set.
+pub const UNIX_OPT_INQ: u64 = 4;
 
 // ---------------------------------------------------------------------------
 // The device door (1119-1123)
@@ -6595,15 +6602,30 @@ pub const SYS_PIDFD_OPEN: u64 = 1137;
 /// `InvalidHandle` if the caller does not hold it.
 pub const SYS_PIDFD_CLOSE: u64 = 1138;
 
-/// `SYS_POWER_RELOAD(image_ptr, image_len)` -- replace the running kernel with
-/// the ELF kernel image at `image_ptr` (`image_len` bytes in the caller's
-/// address space), without a firmware reset (kexec): load it, quiesce, and jump.
-/// Does not return on success. Requires a `Process` capability carrying
+/// `SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)` --
+/// restart SlateOS without the firmware (kexec): load the ELF kernel image at
+/// `image_ptr` (`image_len` bytes in the caller's address space), flush every
+/// filesystem and disk, stop every other CPU, and jump into it, handing it
+/// the command line at `cmdline_ptr` as the bootloader would. The new kernel
+/// boots through its ordinary boot path. Does not return when the restart
+/// happens.
+///
+/// - `(image_ptr, image_len)` = `(0, 0)`: the running kernel's own image,
+///   the file the bootloader loaded.
+/// - `(cmdline_ptr, cmdline_len)` = `(0, 0)`: the running kernel's command
+///   line; a pointer with length 0, an empty one. No NUL byte.
+/// - `arg4` and `arg5` must be 0.
+///
+/// Requires a `Process` capability carrying
 /// [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL) -- the caller
 /// chooses the image, a larger trust question than rebooting, so it is its own
-/// right and not implied by any reboot authority. `PermissionDenied` without it;
-/// `InvalidArgument` for a malformed image. The jump itself is not yet wired, so
-/// a well-formed, authorised call currently returns `NotSupported`.
+/// right and not implied by any reboot authority. `PermissionDenied` without
+/// it; `InvalidArgument` for an image that is not a kernel (refused before
+/// anything is flushed or stopped), an image over 128 MiB, a command line
+/// over 4096 bytes or with a NUL, or one length without its pointer;
+/// `OutOfMemory` when no free memory can hold the image; `NotSupported` for
+/// `(0, 0)` when the bootloader did not say where the running image is. The
+/// orderly stop of services before it is the caller's (`powerctl reload`).
 pub const SYS_POWER_RELOAD: u64 = 1139;
 
 /// `SYS_MEMORY_ADVISE(addr, len, advice)` -- `madvise(2)` for native programs:
@@ -7066,6 +7088,37 @@ pub const SYS_NAMESPACE_CLOSE: u64 = 1165;
 /// Returns 0; `InvalidHandle` for a handle the caller does not hold,
 /// `InvalidAddress` for a buffer that cannot be written.
 pub const SYS_NAMESPACE_INFO: u64 = 1166;
+
+// ---------------------------------------------------------------------------
+// Switching the machine off and restarting it (1167-1168)
+//
+// The kernel's part of a shutdown or a restart: every mounted filesystem
+// flushed (`Vfs::sync`), then the switch -- ACPI S5 for off, the ACPI reset
+// register, the keyboard controller or a triple fault for a restart. The
+// orderly part before it -- asking services and programs to stop, unmounting
+// what userspace mounted -- is the caller's (`powerctl`, the service
+// manager). Until these, nothing in userspace could switch the machine off
+// at all (known-issues `b-org.slateos.servicemanager-has-two-clients-and-no-
+// provider`: `powerctl`'s "direct" fallback found no way).
+//
+// Each is its own right on a `Process` capability -- `power.shutdown` and
+// `power.reboot` in `roadmap-detailed` §1.5 -- checked before anything is
+// flushed, so a caller without it changes nothing. `flags` must be 0
+// (`InvalidArgument`): no bit means anything yet.
+// ---------------------------------------------------------------------------
+
+/// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
+/// off. Does not return on success. Requires a `Process` capability carrying
+/// [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF): `PermissionDenied`
+/// without it. `NotSupported` -- and the machine still running, interrupts on
+/// again -- when no way of switching off worked (no ACPI S5 and no emulator
+/// port answered).
+pub const SYS_POWER_OFF: u64 = 1167;
+/// `SYS_POWER_REBOOT(flags)` -- flush every filesystem and restart the machine
+/// through the firmware. Does not return: the last of its methods, a triple
+/// fault, always resets. Requires [`Rights::REBOOT`](crate::cap::Rights::REBOOT):
+/// `PermissionDenied` without it.
+pub const SYS_POWER_REBOOT: u64 = 1168;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

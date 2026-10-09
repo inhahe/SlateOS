@@ -447,6 +447,13 @@ pub const POLL_WRITABLE: i32 = 1 << 1;
 /// flight reports *neither* [`POLL_WRITABLE`] nor this bit (not yet ready).
 pub const POLL_ERR: i32 = 1 << 2;
 
+/// [`OP_POLL`] bit: the completion's `flags` word carries how many bytes a
+/// receive would find waiting -- the kernel's `FIONREAD` (Linux's `SIOCINQ`):
+/// a TCP connection's buffered in-order bytes, a UDP socket's next
+/// datagram's payload length, 0 for a listener. Set on every successful poll
+/// by a daemon that counts; its absence means the count is unknown, not 0.
+pub const POLL_COUNTED: i32 = 1 << 3;
+
 // ---------------------------------------------------------------------------
 // Entry structs
 // ---------------------------------------------------------------------------
@@ -892,6 +899,25 @@ mod tests {
         // POLL_ERR is a distinct, positive, non-overlapping readiness bit.
         const { assert!(POLL_ERR > 0) };
         assert_eq!(POLL_ERR & (POLL_READABLE | POLL_WRITABLE), 0);
+        // POLL_COUNTED too: a reader testing any one bit must not see it, and a
+        // result carrying all four stays positive (not an errno).
+        const { assert!(POLL_COUNTED > 0) };
+        assert_eq!(POLL_COUNTED & (POLL_READABLE | POLL_WRITABLE | POLL_ERR), 0);
+        const { assert!((POLL_READABLE | POLL_WRITABLE | POLL_ERR | POLL_COUNTED) > 0) };
+    }
+
+    #[test]
+    fn a_poll_completion_carries_its_count_in_flags() {
+        // OP_POLL's count rides in the flags word, which survives the wire.
+        let c = Cqe {
+            user_data: 9,
+            result: POLL_READABLE | POLL_WRITABLE | POLL_COUNTED,
+            flags: 1460,
+        };
+        let back = Cqe::from_bytes(&c.to_bytes()).expect("a whole slot");
+        assert_eq!(back, c);
+        assert_ne!(back.result & POLL_COUNTED, 0);
+        assert_eq!(back.flags, 1460);
     }
 
     #[test]

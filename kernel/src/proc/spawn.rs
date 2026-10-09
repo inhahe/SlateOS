@@ -531,6 +531,19 @@ pub mod fd_handle_type {
     /// is the shape of `script(1)`, a multiplexer spawning a helper to drive
     /// the pty, and sshd's server side.
     pub const PTY: u8 = 7;
+    /// A Unix-domain socket with a name, or either end of one of its pairs
+    /// (from `ipc::unix_socket`, the `SYS_UNIX_*` calls): a listener, a
+    /// connection, a datagram socket. Spawn dups via `unix_socket::dup()`, one
+    /// more holder of the same socket -- the handle is the socket, so the
+    /// child's is numerically the parent's -- which ends with its last
+    /// holder, as an inherited socket does on Linux. What an inetd or a
+    /// socket-activating supervisor hands the service it starts.
+    pub const UNIX_SOCKET: u8 = 8;
+
+    /// The highest type the kernel knows. A list naming a higher one is
+    /// refused whole (`SYS_PROCESS_SET_EXEC_CLOSE`), and the spawn dup loop
+    /// refuses the entry.
+    pub const LAST: u8 = UNIX_SOCKET;
 }
 
 /// Which [`ResourceType`](crate::cap::ResourceType) owns the kernel object
@@ -559,6 +572,7 @@ const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
         fd_handle_type::EVENTFD => Some(ResourceType::EventFd),
         fd_handle_type::PTY => Some(ResourceType::Pty),
         fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => Some(ResourceType::NativeSocket),
+        fd_handle_type::UNIX_SOCKET => Some(ResourceType::UnixSocket),
         // CONSOLE: virtual.
         _ => None,
     }
@@ -1413,6 +1427,118 @@ fn spawn_process_inner(
     elf_data: &[u8],
     options: &SpawnOptions<'_>,
     abi_override: Option<pcb::AbiMode>,
+    linux_fd_redirects: &[(i32, u64, u32)],
+    cap_inherit: CapInherit<'_>,
+    attrs: SpawnAttrs,
+) -> KernelResult<SpawnResult> {
+    spawn_process_suspended(
+        elf_data,
+        options,
+        abi_override,
+        linux_fd_redirects,
+        cap_inherit,
+        attrs,
+    )?
+    .start()
+}
+
+/// A spawned process that has not started: everything of it is in place --
+/// address space, descriptors, identity, job and signals, a first thread --
+/// and none of it has run. What [`spawn_process_suspended`] returns, for a
+/// caller with something to do to the process before its first instruction;
+/// `container::run` is one, binding its init into the container's cgroup,
+/// namespaces and root.
+///
+/// [`start`](Self::start) makes the thread runnable. Dropped unstarted, the
+/// process is undone: its thread unregistered and killed, never having run,
+/// and its record destroyed -- so a caller's error path has nothing of its
+/// own to clean up.
+///
+/// The thread cannot start any other way. It is created awaiting admission
+/// (`sched::task::Task::awaiting_admission`): a stray wake leaves it be, and
+/// a container thawed while it joins returns it to waiting rather than
+/// running it.
+#[must_use = "an unstarted spawn is undone when dropped; call start() to run it"]
+pub struct SuspendedSpawn {
+    result: SpawnResult,
+    /// The first thread's [`UserEntryInfo`], which the trampoline frees when
+    /// the thread first runs -- and so which `drop` frees when it never does.
+    info_ptr: u64,
+    /// The thread was admitted, and the process is the scheduler's.
+    started: bool,
+}
+
+impl SuspendedSpawn {
+    /// The new process's id.
+    #[must_use]
+    pub fn pid(&self) -> ProcessId {
+        self.result.pid
+    }
+
+    /// Its first thread's task id.
+    #[must_use]
+    pub fn task_id(&self) -> TaskId {
+        self.result.task_id
+    }
+
+    /// Start the process: make its first thread runnable.
+    ///
+    /// A process joining a frozen container stays parked: its thread was
+    /// suspended before this, and the thaw is what runs it (`sched::admit`).
+    ///
+    /// # Errors
+    ///
+    /// [`KernelError::InternalError`] if the thread was killed while it
+    /// waited. The process is undone, as a drop would undo it.
+    pub fn start(mut self) -> KernelResult<SpawnResult> {
+        thread::admit(self.result.pid, self.result.task_id)?;
+        self.started = true;
+        serial_println!(
+            "[spawn] Process {} started (thread {})",
+            self.result.pid,
+            self.result.task_id
+        );
+        Ok(self.result)
+    }
+}
+
+impl Drop for SuspendedSpawn {
+    fn drop(&mut self) {
+        if self.started {
+            return;
+        }
+        // Harmless if `start`'s failed admission already did it.
+        thread::abandon(self.result.pid, self.result.task_id);
+        // SAFETY: `info_ptr` came from `Box::into_raw` in
+        // `spawn_process_suspended` and is consumed only by
+        // `userspace_entry_trampoline`, on the thread's first run. The thread
+        // never ran: it was never admitted, and nothing but admission starts a
+        // task created awaiting it (`sched::task::Task::awaiting_admission`)
+        // -- not a wake, not a resume. `abandon` has now killed it, so it never
+        // will. Nothing else holds the pointer.
+        drop(unsafe { Box::from_raw(self.info_ptr as *mut UserEntryInfo) });
+        pcb::destroy(self.result.pid);
+    }
+}
+
+/// Spawn a process and leave it unstarted: [`spawn_process_with_attrs`], with
+/// an ABI override and Linux fd redirects as [`spawn_process_with_abi`] and
+/// [`spawn_process_with_redirects`] take them, up to the moment its first
+/// thread would be made runnable -- and no further.
+///
+/// For a caller that must bind the process to something before it runs a
+/// single instruction. Doing that after an ordinary spawn leaves a window in
+/// which the child runs unbound: on more than one CPU, from the moment the
+/// spawn returns. [`SuspendedSpawn::start`] starts it; dropping it undoes it.
+///
+/// # Errors
+///
+/// Those of [`spawn_process_with_attrs`]. The redirect handles are this
+/// call's either way, as [`spawn_process_with_redirects`] describes.
+pub fn spawn_process_suspended(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    abi_override: Option<pcb::AbiMode>,
     // Kernel-side Linux fd redirects `(fd, handle, status_flags)` applied before
     // the child is runnable (see `spawn_process_with_redirects`).
     linux_fd_redirects: &[(i32, u64, u32)],
@@ -1422,7 +1548,7 @@ fn spawn_process_inner(
     // The child's process group, session and signals, where not its parent's.
     // An argument for the same reason: see [`SpawnAttrs`].
     attrs: SpawnAttrs,
-) -> KernelResult<SpawnResult> {
+) -> KernelResult<SuspendedSpawn> {
     // Start of the span recorded into binfmt on success below.
     let elf_load_start_ns = crate::hrtimer::now_ns();
     // This function OWNS the `linux_fd_redirects` handles (see
@@ -2067,6 +2193,17 @@ fn spawn_process_inner(
                         native_socket::dup(parent_handle)
                     }
                 }
+                fd_handle_type::UNIX_SOCKET => {
+                    // A Unix-domain socket the parent holds: one more holder of
+                    // it (`unix_socket::dup`), the same handle -- a supervisor
+                    // handing a listener or a connection to what it starts.
+                    use crate::ipc::unix_socket::{self, UnixHandle};
+                    if parent_lacks(crate::cap::ResourceType::UnixSocket) {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        unix_socket::dup(UnixHandle::from_raw(parent_handle)).map(|h| h.raw())
+                    }
+                }
                 _ => {
                     // Unknown handle type.
                     serial_println!(
@@ -2263,12 +2400,15 @@ fn spawn_process_inner(
     });
     let info_ptr = Box::into_raw(info) as u64;
 
-    let task_id = match thread::spawn(
+    // Created suspended: runnable only when `SuspendedSpawn::start` admits it.
+    let task_id = match thread::spawn_suspended_with_tls(
         pid,
         options.name.as_bytes(),
         options.priority,
         userspace_entry_trampoline,
         info_ptr,
+        0,
+        0,
     ) {
         Ok(id) => id,
         Err(e) => {
@@ -2283,17 +2423,21 @@ fn spawn_process_inner(
     };
 
     serial_println!(
-        "[spawn] Process {} running (thread {}, entry={:#x}, user_rsp={:#x})",
+        "[spawn] Process {} ready (thread {}, entry={:#x}, user_rsp={:#x})",
         pid,
         task_id,
         entry_rip,
         user_rsp
     );
 
-    Ok(SpawnResult {
-        pid,
-        task_id,
-        entry_point,
+    Ok(SuspendedSpawn {
+        result: SpawnResult {
+            pid,
+            task_id,
+            entry_point,
+        },
+        info_ptr,
+        started: false,
     })
 }
 
@@ -3576,6 +3720,8 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_fd_map_invalid_handle()?;
     test_spawn_with_pty_master()?;
     test_spawn_pty_master_not_owned()?;
+    test_spawn_with_unix_socket()?;
+    test_spawn_suspended()?;
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
@@ -5603,6 +5749,27 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             );
             crate::selftest::report_debug(
                 "net::socket late data",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // FIONREAD on a TCP connection: the count the daemon carries in its poll
+    // completion, as the Linux `ioctl` reports it.
+    match crate::net::socket::self_test_fionread() {
+        // The check prints its own OK line.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   net::socket FIONREAD: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket FIONREAD ({:?}) — the count of bytes waiting is wrong",
+                e
+            );
+            crate::selftest::report_debug(
+                "net::socket FIONREAD",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
             );
@@ -40605,6 +40772,161 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[spawn]   Spawn refuses a pty master the parent does not own: OK");
+    Ok(())
+}
+
+/// Test: a spawn hands its child a Unix-domain socket (`UNIX_SOCKET`), as a
+/// supervisor hands a listener or a connection to the service it starts.
+///
+/// The same three things as [`test_spawn_with_pty_master`]: the entry arrives
+/// tagged `UNIX_SOCKET` with the parent's value (the handle is the socket); the
+/// child owns it, so its `SYS_UNIX_*` calls are let through; and it is a hold
+/// of its own -- the socket outlives the parent's close, and ends with the
+/// child, which its peer sees as a hang-up. Then the refusal: a socket the
+/// spawning process does not hold is `InvalidHandle`, and takes no hold.
+fn test_spawn_suspended() -> KernelResult<()> {
+    use crate::sched::task::TaskState;
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: unstarted spawn: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let elf_data = elf::build_test_elf_public();
+    let unstarted = |name| {
+        spawn_process_suspended(
+            &elf_data,
+            &SpawnOptions::new(name),
+            None,
+            &[],
+            CapInherit::All,
+            SpawnAttrs::default(),
+        )
+    };
+
+    // Unstarted, it waits -- a wake is no start -- and dropped, it is undone:
+    // its thread dead without having run, its record gone.
+    let spawned = unstarted("spawn-test-unstarted")?;
+    let (pid, task_id) = (spawned.pid(), spawned.task_id());
+    let woke = crate::sched::wake(task_id);
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    let waited = crate::sched::task_state(task_id) == Some(TaskState::Blocked)
+        && pcb::state(pid).is_some_and(|s| s != pcb::ProcessState::Zombie)
+        && thread::owner_process(task_id) == Some(pid);
+    drop(spawned);
+    crate::sched::reap_dead_tasks();
+    let undone = pcb::state(pid).is_none()
+        && thread::owner_process(task_id).is_none()
+        && crate::sched::task_state(task_id).is_none_or(|s| s == TaskState::Dead);
+
+    // Started, it runs to its exit.
+    let result = unstarted("spawn-test-started")?.start()?;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let exited = pcb::state(result.pid) == Some(pcb::ProcessState::Zombie)
+        && pcb::exit_code(result.pid) == Some(0);
+    let report = if exited {
+        alloc::string::String::new()
+    } else {
+        unfinished_report(result.task_id)
+    };
+    crate::sched::reap_dead_tasks();
+    teardown_fixture(result.pid, result.task_id);
+
+    if woke || !waited {
+        return fail("it ran, or a wake started it, before it was started");
+    }
+    if !undone {
+        return fail("dropped unstarted, its process or thread was left behind");
+    }
+    if !exited {
+        serial_println!("[spawn]   started, it did not run to its exit: {}", report);
+        return fail("started, it did not run to its exit");
+    }
+    serial_println!(
+        "[spawn]   An unstarted spawn waits, is undone when dropped, and runs when started: OK"
+    );
+    Ok(())
+}
+
+fn test_spawn_with_unix_socket() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::ipc::unix_socket::{self, Kind};
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: unix socket: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let (mine, peer) = unix_socket::pair(Kind::Stream)?;
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(3_i32, fd_handle_type::UNIX_SOCKET, mine.raw())];
+
+    // Refused first, while the parent's hold is the only one: attributed to a
+    // pid that holds no socket.
+    let unowned = SpawnOptions::new("spawn-test-unix-unowned")
+        .fd_map(&fd_map)
+        .parent(1);
+    let refused = match spawn_process(&elf_data, &unowned) {
+        Err(KernelError::InvalidHandle) => true,
+        Err(_) => false,
+        Ok(result) => {
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            teardown_fixture(result.pid, result.task_id);
+            false
+        }
+    };
+
+    // `parent` 0: kernel-spawned, nobody's ownership to check.
+    let options = SpawnOptions::new("spawn-test-unix").fd_map(&fd_map);
+    let result = match spawn_process(&elf_data, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            unix_socket::close(mine);
+            unix_socket::close(peer);
+            return Err(e);
+        }
+    };
+    let child_fds = pcb::take_initial_fds(result.pid);
+    let arrived = child_fds.first().copied();
+    let owned = arrived
+        .is_some_and(|(_, _, h)| pcb::owns_ipc_handle(result.pid, ResourceType::UnixSocket, h));
+
+    // The parent lets go; the child's hold keeps the socket.
+    unix_socket::close(mine);
+    let survived = unix_socket::kind(mine).is_some();
+
+    // The child ends; its hold was the last, so the peer sees the hang-up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    teardown_fixture(result.pid, result.task_id);
+    let ended = unix_socket::kind(mine).is_none();
+    let hung_up = unix_socket::poll_status(peer) & 0x10 != 0;
+    unix_socket::close(peer);
+
+    if !refused {
+        return fail("a socket the spawning process does not hold was not InvalidHandle");
+    }
+    if child_fds.len() != 1 || arrived != Some((3, fd_handle_type::UNIX_SOCKET, mine.raw())) {
+        return fail("the child's entry was not (fd 3, UNIX_SOCKET, the parent's handle)");
+    }
+    if !owned {
+        return fail("the child does not own the inherited socket");
+    }
+    if !survived {
+        return fail("the socket ended with the parent's hold: the child had none of its own");
+    }
+    if !ended || !hung_up {
+        return fail("the socket outlived the child's hold, or its peer saw no hang-up");
+    }
+    serial_println!(
+        "[spawn]   Spawn passes on a Unix-domain socket (a hold of its own, owned; unowned refused): OK"
+    );
     Ok(())
 }
 

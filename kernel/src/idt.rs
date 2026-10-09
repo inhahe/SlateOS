@@ -2441,6 +2441,9 @@ extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
     count_vector(2);
+    // A restart without the firmware stops every other CPU with an NMI: park
+    // here, for good, if that is what this one is (`kexec::stop_other_cpus`).
+    crate::kexec::park_if_restarting();
     // Read System Control Port B (port 0x61) to identify NMI source.
     // SAFETY: port 0x61 is always readable on PC-compatible hardware.
     let port_b: u8 = unsafe { crate::port::inb(0x61) };

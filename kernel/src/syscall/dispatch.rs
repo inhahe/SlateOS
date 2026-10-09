@@ -74,9 +74,10 @@ use super::number::{
     SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
     SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
-    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER, SYS_POWER_RELOAD,
-    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_DUMPABLE,
-    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_IDS,
+    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER, SYS_POWER_OFF,
+    SYS_POWER_REBOOT, SYS_POWER_RELOAD, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
+    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_DUMPABLE, SYS_PROCESS_GET_ARGS,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_IDS,
     SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR,
     SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_GETGROUPS,
     SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
@@ -775,6 +776,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PIDFD_OPEN as usize] = Some(handlers::sys_pidfd_open);
     handlers[SYS_PIDFD_CLOSE as usize] = Some(handlers::sys_pidfd_close);
     handlers[SYS_POWER_RELOAD as usize] = Some(handlers::sys_power_reload);
+    handlers[SYS_POWER_OFF as usize] = Some(handlers::sys_power_off);
+    handlers[SYS_POWER_REBOOT as usize] = Some(handlers::sys_power_reboot);
     handlers[SYS_MEMORY_ADVISE as usize] = Some(handlers::sys_memory_advise);
     handlers[SYS_POSIX_TIMER as usize] = Some(handlers::sys_posix_timer);
     handlers[SYS_PROCESS_DUMPABLE as usize] = Some(handlers::sys_process_dumpable);
@@ -1146,6 +1149,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_shared_anonymous_memory()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;
+    test_dispatch_power_off_and_reboot()?;
     test_dispatch_memory_advise()?;
     test_dispatch_posix_timer()?;
     test_dispatch_ipc_possession()?;
@@ -5265,9 +5269,14 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
 /// `SYS_POWER_RELOAD` is gated on `RELOAD_KERNEL` before it acts. In kernel
 /// context no process holds the right, so the call is refused (NoSuchProcess or
 /// PermissionDenied) before the image arguments are read -- proving the syscall
-/// is registered and gated, not ungated or gated after its arguments. The granted
-/// arm (which returns NotSupported until the jump is wired) needs a ring-3 caller
-/// holding the right, as the secure-boot doors above do.
+/// is registered and gated, not ungated or gated after its arguments. What the
+/// granted arm refuses it refuses in `handlers::reload_request`, before
+/// anything is flushed or stopped, and that is checked here directly: reserved
+/// arguments, a length without its pointer and the reverse, an image or a
+/// command line over its limit, and an image that is not a kernel; and `(0, 0)`
+/// for both is the running kernel's own image, which is one, with its command
+/// line less `kexec.selftest=1`. The restart itself is the kexec boot's to
+/// prove (`python scripts/guest.py kexec`).
 /// `SYS_MEMORY_ADVISE` is wired to the Linux ABI's `madvise`, answering in
 /// Linux errnos: an unknown advice is `-EINVAL` before anything else is
 /// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
@@ -5729,6 +5738,130 @@ fn test_dispatch_power_reload() -> KernelResult<()> {
     }
     serial_println!(
         "[syscall]   SYS_POWER_RELOAD gated on RELOAD_KERNEL (refused without it, before the image is read): OK"
+    );
+
+    use super::handlers::{RELOAD_CMDLINE_MAX, RELOAD_IMAGE_MAX, ReloadImage, reload_request};
+    let request = |a: [u64; 6]| {
+        reload_request(&SyscallArgs {
+            arg0: a[0],
+            arg1: a[1],
+            arg2: a[2],
+            arg3: a[3],
+            arg4: a[4],
+            arg5: a[5],
+        })
+        .map(|(image, cmdline)| (matches!(image, ReloadImage::Running(_)), cmdline))
+    };
+    let too_big = |max: usize| u64::try_from(max).map_or(u64::MAX, |m| m.saturating_add(1));
+    let refusals = [
+        ("a reserved argument", request([0, 0, 0, 0, 1, 0])),
+        ("the last reserved argument", request([0, 0, 0, 0, 0, 1])),
+        (
+            "an image length without its pointer",
+            request([0, 64, 0, 0, 0, 0]),
+        ),
+        (
+            "an image pointer without its length",
+            request([0x1000, 0, 0, 0, 0, 0]),
+        ),
+        (
+            "a command-line length without its pointer",
+            request([0, 0, 0, 3, 0, 0]),
+        ),
+        (
+            "an image over the limit",
+            request([0x1000, too_big(RELOAD_IMAGE_MAX), 0, 0, 0, 0]),
+        ),
+        (
+            "a command line over the limit",
+            request([0, 0, 0x1000, too_big(RELOAD_CMDLINE_MAX), 0, 0]),
+        ),
+    ];
+    if let Some((what, got)) = refusals
+        .iter()
+        .find(|(_, got)| !matches!(got, Err(KernelError::InvalidArgument)))
+    {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD's request with {} answered {:?}, not InvalidArgument",
+            what,
+            got.as_ref().map(|_| ())
+        );
+        return Err(KernelError::InternalError);
+    }
+    if crate::kexec::parse_kernel_elf(b"not a kernel, not even an ELF").is_ok() {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD would take bytes that are not a kernel"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // (0, 0) twice: the running kernel, which is a kernel, with its own command
+    // line less the word that asks a boot to reload itself.
+    let own_line =
+        crate::kexec::restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default());
+    match (crate::kexec::running_image(), request([0; 6])) {
+        (Some(_), Ok((true, line))) if line == own_line => {}
+        (None, Err(KernelError::NotSupported)) => {}
+        (_, got) => {
+            serial_println!(
+                "[syscall]   FAIL: SYS_POWER_RELOAD's (0, 0) request answered {:?}, not the running kernel and its command line",
+                got.map(|(running, line)| (running, line.len()))
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_RELOAD's request: each refusal before anything is stopped, (0, 0) the running kernel: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_POWER_OFF` and `SYS_POWER_REBOOT` are registered, and gated -- on
+/// `POWER_OFF` and `REBOOT` -- before they flush or switch anything. In kernel
+/// context no process holds either right, so both are refused (NoSuchProcess
+/// or PermissionDenied), flags and all; ungated, the first would have switched
+/// this boot off. The rights are distinct bits, and neither is the other's.
+fn test_dispatch_power_off_and_reboot() -> KernelResult<()> {
+    use crate::cap::Rights;
+    let refused = |v: i64| {
+        v == i64::from(KernelError::NoSuchProcess.code())
+            || v == i64::from(KernelError::PermissionDenied.code())
+    };
+    for (nr, name) in [
+        (SYS_POWER_OFF, "SYS_POWER_OFF"),
+        (SYS_POWER_REBOOT, "SYS_POWER_REBOOT"),
+    ] {
+        // Flags that mean nothing: the right is still asked for first.
+        let v = dispatch(
+            nr,
+            &SyscallArgs {
+                arg0: 0x8000,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value;
+        if !refused(v) {
+            serial_println!(
+                "[syscall]   FAIL: {} answered {} with no right -- ungated, or gated after its flags",
+                name,
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if Rights::POWER_OFF.contains(Rights::REBOOT)
+        || Rights::REBOOT.contains(Rights::POWER_OFF)
+        || Rights::POWER_OFF.contains(Rights::RELOAD_KERNEL)
+        || Rights::REBOOT.contains(Rights::RELOAD_KERNEL)
+    {
+        serial_println!("[syscall]   FAIL: POWER_OFF, REBOOT and RELOAD_KERNEL are not distinct");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_OFF and SYS_POWER_REBOOT gated on their own rights (refused without them): OK"
     );
     Ok(())
 }

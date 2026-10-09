@@ -1978,6 +1978,14 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Integrity,
         || sched::self_test_boot_not_starved(),
     );
+    // A context switch hands each task back the interrupt flag it entered
+    // with, though the switch itself runs with interrupts off. Here, the
+    // first point at which there is an "on" to keep.
+    selftest::dispatch(
+        "Switch keeps the interrupt flag",
+        selftest::Severity::Integrity,
+        || sched::self_test_switch_interrupt_flag(),
+    );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     // The workqueue worker, as soon as tasks can be scheduled preemptively:
@@ -9158,9 +9166,9 @@ extern "C" fn kernel_main() -> ! {
                 .is_some_and(|c| c.split_ascii_whitespace().any(|w| w == "kexec.selftest=1"))
             {
                 serial_println!("=== KEXEC-SELFTEST: reloading the kernel into itself now ===");
-                // SAFETY: the bootstrap CPU, at the end of boot, committing to the
-                // restart; on success this never returns.
-                let e = unsafe { kexec::reload_self() };
+                // At the end of boot, committing to the restart; on success this
+                // never returns.
+                let e = kexec::reload_self();
                 serial_println!("=== KEXEC-SELFTEST: reload did not happen: {:?} ===", e);
             }
 

@@ -10329,8 +10329,10 @@ pub mod ioctl_cmd {
     /// to `fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) & ~FD_CLOEXEC)`.
     /// Takes no argument.
     pub const FIONCLEX: u32 = 0x5450;
-    /// `FIOCLEX` — set the `FD_CLOEXEC` flag on `fd`.  Equivalent to
-    /// `fcntl(fd, F_SETFD, FD_CLOEXEC)`.  Takes no argument.
+    /// `FIONREAD` (also `TIOCINQ` and `SIOCINQ`, the same number) -- how
+    /// many bytes a read would find waiting, into `*arg` as an `int`. See
+    /// `fionread` for what each kind of descriptor counts.
+    pub const FIONREAD: u32 = 0x541B;
     /// `BLKDISCARD` -- tell the device the byte range `{ start, length }` no
     /// longer holds useful data (TRIM/UNMAP). Argument is a pointer to
     /// `[u64; 2]`. Destroys data, so the fd must be open for writing.
@@ -10358,6 +10360,8 @@ pub mod ioctl_cmd {
     /// `FS_IOC32_SETFLAGS`.
     pub const FS_IOC32_SETFLAGS: u32 = 0x4004_6602;
 
+    /// `FIOCLEX` — set the `FD_CLOEXEC` flag on `fd`.  Equivalent to
+    /// `fcntl(fd, F_SETFD, FD_CLOEXEC)`.  Takes no argument.
     pub const FIOCLEX: u32 = 0x5451;
     /// `FIONBIO` — toggle `O_NONBLOCK` on `fd`.  `arg` is a pointer
     /// to an `int`: non-zero sets `O_NONBLOCK`, zero clears it.
@@ -11053,6 +11057,7 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
+        ioctl_cmd::FIONREAD => fionread(pid, fd, args.arg2),
         ioctl_cmd::BLKDISCARD | ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => {
             block_discard_ioctl(pid, fd, request, args.arg2)
         }
@@ -11090,6 +11095,87 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
             }
             linux_err(errno::ENOTTY)
         }
+    }
+}
+
+/// `FIONREAD` (`TIOCINQ`, `SIOCINQ`): how many bytes a read of `fd` would find
+/// waiting, written to `*arg` as an `int`. Each kind counts as Linux's own
+/// handler for it does:
+///
+/// | descriptor | the count |
+/// |---|---|
+/// | regular file, memfd | its size less the offset (`do_vfs_ioctl`) -- negative past the end, as there |
+/// | pipe, either end | the bytes in the pipe (`pipe_ioctl`) |
+/// | terminal | its input queue, complete lines only in canonical mode (`n_tty`'s `inq_canon`) |
+/// | Unix-domain socket | a stream's or sequenced-packet socket's bytes, a datagram socket's next datagram; `EINVAL` on a listener (`unix_inq_len`) |
+/// | `AF_INET` socket | a TCP connection's buffered bytes, a UDP socket's next datagram, counted by the netstack daemon; 0 unconnected; `EINVAL` on a listener (`tcp_ioctl`, `udp_ioctl`) |
+/// | anything else | `ENOTTY`, the request being unknown to it |
+///
+/// Until 2026-10-09 every descriptor answered `ENOTTY`.
+fn fionread(pid: pcb::ProcessId, fd: i32, arg: u64) -> SyscallResult {
+    let count = match fionread_count(pid, fd) {
+        Ok(count) => count,
+        Err(code) => return linux_err(code),
+    };
+    if arg == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // Linux stores it with `put_user` into an `int`: the low 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let value = count as i32;
+    // SAFETY: copy_to_user validates that the 4 user bytes at `arg` are mapped
+    // and writable and does the SMAP dance; `value` is a live kernel `i32`.
+    match unsafe { crate::mm::user::copy_to_user(core::ptr::addr_of!(value).cast::<u8>(), arg, 4) }
+    {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// [`fionread`]'s count for process `pid`'s descriptor `fd`, or the errno it
+/// answers instead: `EBADF` for no such descriptor, `ENOTTY` for a kind
+/// without the request, `EINVAL` for a listening socket.
+fn fionread_count(pid: pcb::ProcessId, fd: i32) -> Result<i64, i32> {
+    use crate::proc::linux_fd::HandleKind;
+    let entry = pcb::linux_fd_lookup(pid, fd).ok_or(errno::EBADF)?;
+    let wide = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    match entry.kind {
+        HandleKind::File => {
+            let meta = crate::fs::handle::fstat(entry.raw_handle).map_err(linux_errno_for)?;
+            // Linux answers only for a regular file; a directory or a device
+            // node goes to its own handler, which does not know the request.
+            if meta.entry_type != crate::fs::vfs::EntryType::File {
+                return Err(errno::ENOTTY);
+            }
+            let offset =
+                crate::fs::handle::current_offset(entry.raw_handle).map_err(linux_errno_for)?;
+            Ok(wide(meta.size).saturating_sub(wide(offset)))
+        }
+        HandleKind::MemFd => {
+            use crate::ipc::memfd::{self, MemFdHandle};
+            let h = MemFdHandle::from_raw(entry.raw_handle);
+            let size = memfd::size(h).map_err(linux_errno_for)?;
+            let offset = memfd::offset(h).map_err(linux_errno_for)?;
+            Ok(wide(size).saturating_sub(wide(offset)))
+        }
+        HandleKind::Pipe => Ok(wide(crate::ipc::pipe::queued_bytes(
+            crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle),
+        ))),
+        HandleKind::Console => Ok(i64::try_from(crate::tty::input_bytes(handlers::caller_tty(
+            pid,
+        )))
+        .unwrap_or(i64::MAX)),
+        HandleKind::UnixSocket => crate::ipc::unix_socket::readable_bytes(
+            crate::ipc::unix_socket::UnixHandle::from_raw(entry.raw_handle),
+        )
+        .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+        .map_err(linux_errno_for),
+        HandleKind::Socket => crate::net::socket::readable_bytes(
+            crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
+        )
+        .map(i64::from)
+        .map_err(linux_errno_for),
+        _ => Err(errno::ENOTTY),
     }
 }
 
@@ -31138,21 +31224,107 @@ fn sys_swapoff(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `reboot(magic1, magic2, cmd, arg)`.
+/// `reboot(magic1, magic2, cmd, arg)`, answered as Linux's
+/// `kernel/reboot.c::SYSCALL_DEFINE4(reboot)` answers it:
 ///
-/// Linux's `kernel/reboot.c::SYSCALL_DEFINE4(reboot)` checks
-/// `capable(CAP_SYS_BOOT)` *before* validating the magic numbers, so
-/// an unprivileged caller passing `magic1=0` sees -EPERM, not -EINVAL.
-/// This kernel exposes no path to acquiring `CAP_SYS_BOOT` from
-/// userspace, so every caller is unprivileged: the truthful, Linux-
-/// shaped answer is EPERM unconditionally.
+/// 1. **Authority first.** Linux checks `capable(CAP_SYS_BOOT)` before the
+///    magic numbers, so an unprivileged caller passing `magic1 = 0` sees
+///    `EPERM`, not `EINVAL`, and learns nothing more. `CAP_SYS_BOOT` is a
+///    `Process` capability carrying
+///    [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF) or
+///    [`Rights::REBOOT`](crate::cap::Rights::REBOOT) here; with neither, `EPERM`.
+/// 2. **The magic numbers.** `magic1` must be `0xfee1dead` and `magic2` one
+///    of Linux's four (Torvalds' and his daughters' birthdays); `EINVAL`
+///    otherwise.
+/// 3. **The command**, each against its own right -- stricter than Linux,
+///    whose one capability covers all of them, and the same split as
+///    `SYS_POWER_OFF` and `SYS_POWER_REBOOT`:
 ///
-/// Pre-batch-143 we returned EINVAL when `magic1 != 0xfee1dead`, which
-/// leaked the magic-number sanity check to unprivileged callers — a
-/// deviation from Linux's intentional design of denying that
-/// information to non-root.  Now matches Linux exactly.
-fn sys_reboot(_args: &SyscallArgs) -> SyscallResult {
-    linux_err(errno::EPERM)
+/// | `cmd` | here |
+/// |---|---|
+/// | `RESTART`, `RESTART2` | needs `REBOOT`: flush and restart; does not return (`RESTART2`'s command string is not read) |
+/// | `POWER_OFF`, `HALT` | needs `POWER_OFF`: flush and switch off; `ENOSYS` if nothing could |
+/// | `CAD_ON`, `CAD_OFF` | 0: what Ctrl-Alt-Del does is the desktop's, not the kernel's |
+/// | `KEXEC` | `EINVAL`: no image is loaded (`kexec_load` loads none), Linux's answer then |
+/// | `SW_SUSPEND`, anything else | `EINVAL`, as Linux built without hibernation answers |
+///
+/// `HALT` switches the machine off rather than stopping it powered: a halt
+/// that left the other CPUs running their tasks would be no halt, and there is
+/// no stopping them all yet. Linux itself halts instead of powering off only
+/// when it has no power-off method -- the case `ENOSYS` reports here.
+///
+/// Until 2026-10-09 every caller got `EPERM`: no process could hold
+/// `CAP_SYS_BOOT`, and there was no switch behind it anyway.
+fn sys_reboot(args: &SyscallArgs) -> SyscallResult {
+    match reboot_decision(caller_pid(), args) {
+        Err(code) => linux_err(code),
+        Ok(RebootAction::Nothing) => SyscallResult::ok(0),
+        Ok(RebootAction::Restart) => {
+            crate::serial_println!(
+                "[power] restart requested through reboot(2) by process {}",
+                caller_pid().unwrap_or(0)
+            );
+            crate::power::reboot()
+        }
+        Ok(RebootAction::PowerOff) => {
+            crate::serial_println!(
+                "[power] power off requested through reboot(2) by process {}",
+                caller_pid().unwrap_or(0)
+            );
+            crate::power::try_power_off();
+            // Still here: nothing could switch the machine off.
+            linux_err(errno::ENOSYS)
+        }
+    }
+}
+
+/// What [`sys_reboot`] does once it has decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebootAction {
+    /// Flush and restart.
+    Restart,
+    /// Flush and switch off.
+    PowerOff,
+    /// Answer 0 and do nothing (`CAD_ON`, `CAD_OFF`).
+    Nothing,
+}
+
+/// [`sys_reboot`]'s decision for process `pid` (`None`: a kernel task, which
+/// holds nothing), apart from acting on it, so the granted arms can be
+/// checked without restarting the machine: the action, or the errno to
+/// answer. The order is Linux's -- authority, then the magic numbers, then
+/// the command -- as [`sys_reboot`] describes.
+fn reboot_decision(pid: Option<pcb::ProcessId>, args: &SyscallArgs) -> Result<RebootAction, i32> {
+    const MAGIC1: u64 = 0xfee1_dead;
+    const MAGIC2: [u64; 4] = [672_274_793, 85_072_278, 369_367_448, 537_993_216];
+    const CMD_RESTART: u32 = 0x0123_4567;
+    const CMD_HALT: u32 = 0xCDEF_0123;
+    const CMD_CAD_ON: u32 = 0x89AB_CDEF;
+    const CMD_CAD_OFF: u32 = 0x0000_0000;
+    const CMD_POWER_OFF: u32 = 0x4321_FEDC;
+    const CMD_RESTART2: u32 = 0xA1B2_C3D4;
+    use crate::cap::{ResourceType, Rights};
+
+    let pid = pid.ok_or(errno::EPERM)?;
+    let holds = |right: Rights| pcb::has_capability_type(pid, ResourceType::Process, right);
+    if !holds(Rights::POWER_OFF) && !holds(Rights::REBOOT) {
+        return Err(errno::EPERM);
+    }
+    // Linux reads the magics as `int`s: the low 32 bits.
+    let magic1 = args.arg0 & 0xffff_ffff;
+    let magic2 = args.arg1 & 0xffff_ffff;
+    if magic1 != MAGIC1 || !MAGIC2.contains(&magic2) {
+        return Err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation)] // Linux's `unsigned int cmd`
+    let cmd = args.arg2 as u32;
+    match cmd {
+        CMD_RESTART | CMD_RESTART2 if holds(Rights::REBOOT) => Ok(RebootAction::Restart),
+        CMD_POWER_OFF | CMD_HALT if holds(Rights::POWER_OFF) => Ok(RebootAction::PowerOff),
+        CMD_RESTART | CMD_RESTART2 | CMD_POWER_OFF | CMD_HALT => Err(errno::EPERM),
+        CMD_CAD_ON | CMD_CAD_OFF => Ok(RebootAction::Nothing),
+        _ => Err(errno::EINVAL),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -70317,6 +70489,100 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    crate::selftest::step(self_test_ioctl_fionread())?;
+
+    /// `FIONREAD`: each kind of descriptor counts as Linux's own handler does
+    /// (`fionread_count`) -- a pipe's bytes from either end, a datagram
+    /// socket's next datagram only, a listener `EINVAL`, a descriptor without
+    /// the request `ENOTTY`, none at all `EBADF` -- on a synthetic Linux
+    /// process holding the descriptors. Until 2026-10-09 every one was
+    /// `ENOTTY`.
+    #[inline(never)]
+    fn self_test_ioctl_fionread() -> crate::error::KernelResult<()> {
+        use crate::ipc::unix_socket::{self, Kind};
+        use crate::ipc::{eventfd, pipe};
+        use crate::proc::linux_fd::FdEntry;
+        use crate::serial_println;
+
+        // Wired into the dispatch: from kernel context the caller-pid gate
+        // answers first, as for FIONBIO -- not the catch-all's ENOTTY.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: u64::from(ioctl_cmd::FIONREAD),
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::IOCTL, &a).value != i64::from(errno::EBADF).wrapping_neg() {
+            serial_println!("[syscall/linux]   FAIL: FIONREAD is not wired into ioctl");
+            return Err(KernelError::InternalError);
+        }
+
+        let (rd, wr) = pipe::create();
+        let (dgram, dgram_peer) = unix_socket::pair(Kind::Dgram)?;
+        let listener = unix_socket::create(Kind::Stream)?;
+        let efd = eventfd::create(0);
+        let test_pid = pcb::create("ioctl-fionread-test", 0);
+        let outcome = (|| -> Result<(), &'static str> {
+            pcb::linux_fd_install_stdio(test_pid).map_err(|_| "installing stdio failed")?;
+            let install = |entry| pcb::linux_fd_install(test_pid, entry, 3);
+            let rfd = install(FdEntry::pipe(rd.raw(), 0)).map_err(|_| "install failed")?;
+            let wfd = install(FdEntry::pipe(wr.raw(), 1)).map_err(|_| "install failed")?;
+            let dfd =
+                install(FdEntry::unix_socket(dgram.raw(), 0, 2)).map_err(|_| "install failed")?;
+            let lfd = install(FdEntry::unix_socket(listener.raw(), 0, 2))
+                .map_err(|_| "install failed")?;
+            let efd_no = install(FdEntry::eventfd(efd.raw(), 2)).map_err(|_| "install failed")?;
+
+            if fionread_count(test_pid, rfd) != Ok(0) {
+                return Err("an empty pipe did not count 0");
+            }
+            pipe::try_write(wr, b"hello").map_err(|_| "pipe write failed")?;
+            if fionread_count(test_pid, rfd) != Ok(5) || fionread_count(test_pid, wfd) != Ok(5) {
+                return Err("a pipe's bytes were not counted from both ends");
+            }
+            unix_socket::send(dgram_peer, b"abc", true).map_err(|_| "send failed")?;
+            unix_socket::send(dgram_peer, b"defghij", true).map_err(|_| "send failed")?;
+            if fionread_count(test_pid, dfd) != Ok(3) {
+                return Err("a datagram socket did not count its next datagram alone");
+            }
+            unix_socket::bind_abstract(listener, b"slate-selftest-linux-fionread")
+                .map_err(|_| "bind failed")?;
+            unix_socket::listen(listener, 1).map_err(|_| "listen failed")?;
+            if fionread_count(test_pid, lfd) != Err(errno::EINVAL) {
+                return Err("a listening socket was not EINVAL");
+            }
+            if fionread_count(test_pid, efd_no) != Err(errno::ENOTTY) {
+                return Err("an eventfd, which has no such request, was not ENOTTY");
+            }
+            if fionread_count(test_pid, 99) != Err(errno::EBADF) {
+                return Err("a descriptor that is not open was not EBADF");
+            }
+            if fionread_count(test_pid, 0).is_err() {
+                return Err("the terminal did not answer");
+            }
+            Ok(())
+        })();
+        // The descriptors were installed without holds of their own (no
+        // `ipc_handles` entries), so the process's end closes nothing.
+        pcb::destroy(test_pid);
+        pipe::close(rd);
+        pipe::close(wr);
+        unix_socket::close(dgram);
+        unix_socket::close(dgram_peer);
+        unix_socket::close(listener);
+        eventfd::close(efd);
+        if let Err(why) = outcome {
+            serial_println!("[syscall/linux]   FAIL: FIONREAD: {}", why);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   ioctl(FIONREAD): pipe either end, datagram the next, listener EINVAL, eventfd ENOTTY, closed EBADF: OK"
+        );
+        Ok(())
+    }
+
     crate::selftest::step(self_test_prctl_set_vma())?;
 
     #[inline(never)]
@@ -85899,6 +86165,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             serial_println!("[syscall/linux]   reboot EPERM ordering: OK");
+
+            // The granted arms, decided without acting (`reboot_decision`): a
+            // synthetic process holding REBOOT alone, then POWER_OFF too.
+            {
+                use crate::cap::{ResourceType, Rights};
+                let args = |m1: u64, m2: u64, cmd: u64| SyscallArgs {
+                    arg0: m1,
+                    arg1: m2,
+                    arg2: cmd,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let m1 = 0xfee1_dead;
+                let m2 = 672_274_793;
+                let pid = pcb::create("reboot-decision-test", 0);
+                let outcome = (|| -> Result<(), &'static str> {
+                    if reboot_decision(Some(pid), &args(m1, m2, 0x0123_4567)) != Err(errno::EPERM) {
+                        return Err("a process holding neither right was not EPERM");
+                    }
+                    pcb::grant_capability(pid, ResourceType::Process, 0, Rights::REBOOT)
+                        .map_err(|_| "granting REBOOT failed")?;
+                    let cases: [(u64, u64, u64, Result<RebootAction, i32>); 9] = [
+                        (m1, m2, 0x0123_4567, Ok(RebootAction::Restart)),
+                        (m1, 537_993_216, 0xA1B2_C3D4, Ok(RebootAction::Restart)),
+                        // The other right's commands: refused.
+                        (m1, m2, 0x4321_FEDC, Err(errno::EPERM)),
+                        (m1, m2, 0xCDEF_0123, Err(errno::EPERM)),
+                        // Ctrl-Alt-Del's switch is the desktop's: 0, nothing done.
+                        (m1, m2, 0x89AB_CDEF, Ok(RebootAction::Nothing)),
+                        (m1, m2, 0, Ok(RebootAction::Nothing)),
+                        // No image loaded; no hibernation.
+                        (m1, m2, 0x4558_4543, Err(errno::EINVAL)),
+                        (m1, m2, 0xD000_FCE2, Err(errno::EINVAL)),
+                        // A holder now sees the magic numbers checked.
+                        (0xdead, m2, 0x0123_4567, Err(errno::EINVAL)),
+                    ];
+                    for (a, b, c, want) in cases {
+                        if reboot_decision(Some(pid), &args(a, b, c)) != want {
+                            return Err("a REBOOT holder's command was not decided as Linux would");
+                        }
+                    }
+                    pcb::grant_capability(pid, ResourceType::Process, 0, Rights::POWER_OFF)
+                        .map_err(|_| "granting POWER_OFF failed")?;
+                    if reboot_decision(Some(pid), &args(m1, m2, 0x4321_FEDC))
+                        != Ok(RebootAction::PowerOff)
+                        || reboot_decision(Some(pid), &args(m1, 85_072_278, 0xCDEF_0123))
+                            != Ok(RebootAction::PowerOff)
+                    {
+                        return Err("a POWER_OFF holder's power off or halt was not PowerOff");
+                    }
+                    Ok(())
+                })();
+                pcb::destroy(pid);
+                if let Err(why) = outcome {
+                    serial_println!("[syscall/linux]   FAIL: reboot(2): {}", why);
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[syscall/linux]   reboot(2): REBOOT restarts, POWER_OFF powers off and halts, each refused without its right; CAD 0; KEXEC and SW_SUSPEND EINVAL: OK"
+                );
+            }
 
             // syslog(99) -> EINVAL (out of 0..=10 range).
             let a = SyscallArgs {

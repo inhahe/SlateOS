@@ -450,6 +450,23 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, so no atomics needed.
     pub pending_wake: bool,
+    /// Created by [`spawn_suspended`](super::spawn_suspended) and not yet
+    /// [`admit`](super::admit)ted: the task has never run, and only `admit`
+    /// may make it runnable.
+    ///
+    /// Its state is `Blocked` -- or `Suspended`, if it was suspended before
+    /// its admission -- and until 2026-10-09 that was all there was to say,
+    /// so anything that ends a `Blocked` or `Suspended` state could start it:
+    /// a [`wake`](super::wake) from a stale wait-queue entry naming a reused
+    /// id, or the [`resume`](super::resume) of a container thawed while a
+    /// process was joining it. A task started that way ran before its creator
+    /// had finished registering it, the race the two-phase spawn exists to
+    /// close. Now a wake leaves such a task be -- one that has not started
+    /// cannot be waiting for anything -- and `resume` returns it to
+    /// `Blocked`, still awaiting its admission.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub awaiting_admission: bool,
     /// Source location of the most recent [`block_current()`](super::block_current)
     /// call that parked this task, or `None` if it has never blocked.
     ///
@@ -1254,6 +1271,7 @@ impl Task {
             name_len: tag.len(),
             state: TaskState::Running,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
@@ -1281,7 +1299,15 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi: None,
             last_cpu: 0,
-            cpu_affinity: CPU_AFFINITY_ALL,
+            // The BSP's alone. Task 0 is the BSP's idle task, and until the
+            // boot is done the boot itself, which blocks and is woken like any
+            // task: unpinned, a wake could queue it on an idle AP
+            // (`select_wake_cpu`), or an AP could steal it, leaving the BSP
+            // without its idle task and running the boot -- and the BSP-only
+            // work in it -- elsewhere. `running_elsewhere` and `PREV_TASK_IDS`
+            // already assume it never leaves the BSP. (An SMP boot hung at
+            // the first wake of the boot after the wake placement landed.)
+            cpu_affinity: 1,
             total_ticks: 0,
             total_cycles: 0,
             cpu_account: None,
@@ -1353,6 +1379,7 @@ impl Task {
             name_len: idx_str,
             state: TaskState::Running,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
@@ -1380,7 +1407,13 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi: None,
             last_cpu: cpu_index,
-            cpu_affinity: CPU_AFFINITY_ALL,
+            // Its own CPU alone, as the BSP's idle task is pinned to the BSP
+            // (`new_idle`): an idle task that a steal or a balance moved would
+            // leave its CPU with none.
+            cpu_affinity: u32::try_from(cpu_index)
+                .ok()
+                .and_then(|c| 1u64.checked_shl(c))
+                .unwrap_or(CPU_AFFINITY_ALL),
             total_ticks: 0,
             total_cycles: 0,
             cpu_account: None,
@@ -1519,6 +1552,7 @@ impl Task {
             name_len: copy_len,
             state: TaskState::Ready,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,

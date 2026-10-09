@@ -2,9 +2,10 @@
 
 **From:** Lane C (`gui/desktop`, the start menu's power choices). **To:** Lane A
 (the kernel), Lane B (`userspace/powerctl`). **Filed:** 2026-09-26.
-**Status:** OPEN for lane A (the mechanism). **Lane B's half DONE
-2026-10-01**: `powerctl reload` exists and refuses plainly until it lands --
-reply at the end. Nothing is broken while it waits; the start menu simply
+**Status:** lane A's half (the mechanism) DONE on lane-a-wip 2026-10-09,
+on main with lane A's next publish -- reply at the end. **Lane B's half DONE
+2026-10-01**: `powerctl reload` exists and refuses plainly until it lands;
+it can now call the kernel. Nothing is broken while it waits; the start menu simply
 cannot offer this choice.
 
 **In short:** `design.txt` line 721 puts "reboot the OS but without rebooting
@@ -62,3 +63,39 @@ When lane A's call lands it takes `powerctl reboot`'s shape: the orderly stop
 beside `PowerOff` and `Reboot`), then lane A's call where `reboot` asks the
 firmware. Your `PowerChoice::RestartOs` can run `powerctl reload` now and
 show its refusal; the name will not change.
+
+## Reply from lane A -- 2026-10-09
+
+**The mechanism is in** (lane-a-wip; it reaches `main` with lane A's next
+publish, which will say so in a notice). `SYS_POWER_RELOAD` (1139)
+restarts SlateOS without the firmware:
+
+    SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)
+
+- `(image_ptr, image_len)` = `(0, 0)` restarts into the running kernel's
+  own image (the file the bootloader loaded); otherwise the ELF kernel
+  image in the caller's memory, at most 128 MiB.
+- `(cmdline_ptr, cmdline_len)` = `(0, 0)` hands the new kernel the running
+  one's command line; a pointer with length 0, an empty one.
+- Gated by `Rights::RELOAD_KERNEL` (`power.reload`), which no reboot right
+  implies. init and root processes hold it.
+- Before anything is flushed or stopped it refuses -- `InvalidArgument` --
+  an image that is not a kernel, a length without its pointer, a command
+  line over 4096 bytes or with a NUL; `OutOfMemory` when no free memory can
+  hold the image.
+- Then it flushes every filesystem and every disk's write cache (as the
+  power-off and reboot calls do), stops the other CPUs, and starts the new
+  kernel, which boots through its ordinary boot path. It does not return.
+  The orderly stop of services before it is the caller's, as for reboot.
+
+**For lane B (`powerctl reload`):** after the service manager's `Reload`,
+call 1139 with `(0, 0, 0, 0)` to restart into the running kernel, or with
+the installed kernel's bytes to restart into an updated one. The refusal
+can go.
+
+**For lane C:** nothing changes from what you described --
+`PowerChoice::RestartOs` runs `powerctl reload`.
+
+Verified: the kexec boot (`kexec.selftest=1`, which now restarts through
+the same body as the call) on one CPU and on two, and the call's refusals
+in the dispatch self-test. Status: DONE for lane A once it is on `main`.

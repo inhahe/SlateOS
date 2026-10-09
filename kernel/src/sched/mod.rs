@@ -914,16 +914,84 @@ static PREEMPT_DISABLE_COUNT: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = 
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per CPU: where its preempt count last rose from 0 -- the outermost
+/// [`preempt_disable`] in force, as a `&'static Location` -- and the task
+/// that raised it; 0 and `u64::MAX` when the count is 0. For
+/// [`report_switch_under_lock`] to name when no lock accounts for a count.
+static PREEMPT_DISABLE_SITE: [CachePadded<AtomicUsize>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicUsize> = CachePadded::new(AtomicUsize::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+/// See [`PREEMPT_DISABLE_SITE`].
+static PREEMPT_DISABLE_TASK: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(u64::MAX));
+    [INIT; priority_rr::MAX_CPUS]
+};
+/// `preempt_enable` calls that found their CPU's count already 0: a disable
+/// and its enable made on two different CPUs, or an enable with no disable.
+static PREEMPT_UNDERFLOWS: AtomicU64 = AtomicU64::new(0);
+/// The first such call's `&'static Location` (0: none yet).
+static PREEMPT_UNDERFLOW_SITE: AtomicUsize = AtomicUsize::new(0);
+/// The first such call's task (high bits) and CPU (low 8 bits).
+static PREEMPT_UNDERFLOW_WHO: AtomicU64 = AtomicU64::new(0);
+
+/// How many `preempt_enable` calls found their CPU's count already 0, and
+/// where the first was made: its location, task and CPU.
+#[must_use]
+pub fn preempt_underflows() -> (
+    u64,
+    Option<(&'static core::panic::Location<'static>, TaskId, usize)>,
+) {
+    let n = PREEMPT_UNDERFLOWS.load(Ordering::Relaxed);
+    let raw = PREEMPT_UNDERFLOW_SITE.load(Ordering::Relaxed);
+    if raw == 0 {
+        return (n, None);
+    }
+    let who = PREEMPT_UNDERFLOW_WHO.load(Ordering::Relaxed);
+    // SAFETY: a non-zero value is a `&'static Location` stored by
+    // `preempt_enable` from `Location::caller()`, never changed after.
+    let loc: &'static core::panic::Location<'static> =
+        unsafe { &*(raw as *const core::panic::Location<'static>) };
+    (n, Some((loc, who >> 8, (who & 0xff) as usize)))
+}
+
 /// Disable involuntary preemption on the calling CPU.
 ///
 /// Called by [`crate::sync::Mutex::lock`] / `try_lock` when acquiring a
 /// tracked spinlock.  Cheap: one lock-free CPU-index read plus one relaxed
-/// atomic increment.  Must be paired with exactly one [`preempt_enable`]
-/// (the `MutexGuard`'s `Drop` guarantees this).
+/// atomic increment, and on the outermost disable two relaxed stores naming
+/// the caller and the task.  Must be paired with exactly one
+/// [`preempt_enable`] (the `MutexGuard`'s `Drop` guarantees this).
 #[inline]
+#[track_caller]
 pub fn preempt_disable() {
-    if let Some(c) = PREEMPT_DISABLE_COUNT.get(current_cpu_id()) {
-        c.fetch_add(1, Ordering::Relaxed);
+    // The CPU index and the increment are one step, with interrupts off: a
+    // task preempted between them -- its count not yet raised, so the
+    // preemption is allowed -- and resumed on another CPU would raise the
+    // first CPU's count, which its own enable, made where it now runs, never
+    // lowers. (Linux's `incl %gs:__preempt_count` is one instruction for the
+    // same reason.) Once the count is raised the task cannot be preempted, so
+    // it stays on this CPU until the enable, which needs no such care.
+    let were_on = crate::cpu::interrupts_enabled();
+    if were_on {
+        // SAFETY: clearing IF has no memory effects; set again below.
+        unsafe { crate::cpu::cli() };
+    }
+    let cpu = current_cpu_id();
+    if let Some(c) = PREEMPT_DISABLE_COUNT.get(cpu) {
+        if c.fetch_add(1, Ordering::Relaxed) == 0 {
+            if let Some(site) = PREEMPT_DISABLE_SITE.get(cpu) {
+                let here: &'static core::panic::Location<'static> = core::panic::Location::caller();
+                site.store(core::ptr::from_ref(here) as usize, Ordering::Relaxed);
+            }
+            if let Some(task) = PREEMPT_DISABLE_TASK.get(cpu) {
+                task.store(load_current_task(), Ordering::Relaxed);
+            }
+        }
+    }
+    if were_on {
+        // SAFETY: interrupts were on when this began; the IDT is loaded.
+        unsafe { crate::cpu::sti() };
     }
 }
 
@@ -933,14 +1001,60 @@ pub fn preempt_disable() {
 /// to a huge value and wedge preemption off permanently — the worst case is a
 /// missed decrement, which self-heals on the next balanced pair.
 #[inline]
+#[track_caller]
 pub fn preempt_enable() {
-    if let Some(c) = PREEMPT_DISABLE_COUNT.get(current_cpu_id()) {
+    let cpu = current_cpu_id();
+    if let Some(c) = PREEMPT_DISABLE_COUNT.get(cpu) {
         // fetch_update keeps the decrement atomic w.r.t. a nested ISR that
         // acquires/releases a tracked lock between our read and write.
-        let _ = c.fetch_update(Ordering::Release, Ordering::Relaxed, |v| {
+        let before = c.fetch_update(Ordering::Release, Ordering::Relaxed, |v| {
             Some(v.saturating_sub(1))
         });
+        match before {
+            Ok(0) => {
+                // Nothing to release here: the matching disable was made on
+                // another CPU (a task moved while it held preemption off), or
+                // never. The first is kept, with where, for the report -- not
+                // printed here, where a lock the printer needs may be held.
+                if PREEMPT_UNDERFLOWS.fetch_add(1, Ordering::Relaxed) == 0 {
+                    let here: &'static core::panic::Location<'static> =
+                        core::panic::Location::caller();
+                    PREEMPT_UNDERFLOW_SITE
+                        .store(core::ptr::from_ref(here) as usize, Ordering::Relaxed);
+                    PREEMPT_UNDERFLOW_WHO.store(
+                        (load_current_task() << 8) | (cpu as u64 & 0xff),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            Ok(1) => {
+                if let Some(site) = PREEMPT_DISABLE_SITE.get(cpu) {
+                    site.store(0, Ordering::Relaxed);
+                }
+                if let Some(task) = PREEMPT_DISABLE_TASK.get(cpu) {
+                    task.store(u64::MAX, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
     }
+}
+
+/// The outermost `preempt_disable` still in force on `cpu`, and the task that
+/// made it -- `None` when its count is 0 ([`PREEMPT_DISABLE_SITE`]).
+fn preempt_disable_site(cpu: usize) -> Option<(&'static core::panic::Location<'static>, TaskId)> {
+    let raw = PREEMPT_DISABLE_SITE.get(cpu)?.load(Ordering::Relaxed);
+    if raw == 0 {
+        return None;
+    }
+    let task = PREEMPT_DISABLE_TASK
+        .get(cpu)
+        .map_or(u64::MAX, |t| t.load(Ordering::Relaxed));
+    // SAFETY: a non-zero slot holds a `&'static Location` stored by
+    // `preempt_disable` from `Location::caller()`; it is only ever cleared to 0.
+    let loc: &'static core::panic::Location<'static> =
+        unsafe { &*(raw as *const core::panic::Location<'static>) };
+    Some((loc, task))
 }
 
 /// Current preemption-disable depth on `cpu` (0 == preemptible).
@@ -1095,6 +1209,24 @@ fn report_switch_under_lock(task: TaskId, cpu: usize) {
             cpu,
             preempt_count(cpu)
         ),
+    }
+    if let Some((loc, by)) = preempt_disable_site(cpu) {
+        crate::serial_println!(
+            "[sched]   the count on cpu {} rose from 0 at {}, in task {}",
+            cpu,
+            loc,
+            by
+        );
+    }
+    if let (n @ 1.., Some((loc, by, on))) = preempt_underflows() {
+        crate::serial_println!(
+            "[sched]   {} preempt_enable(s) found a count of 0, the first at {} (task {}, cpu {}) \
+             -- a disable and its enable on two CPUs",
+            n,
+            loc,
+            by,
+            on
+        );
     }
     crate::lockdep::dump_held_locks(cpu);
     crate::backtrace::print_symbolized(&bt);
@@ -1758,6 +1890,41 @@ fn set_current_task(cpu: usize, id: TaskId) {
     CURRENT_TASK_IDS[cpu].store(id, Ordering::Release);
 }
 
+/// Before this CPU, `cpu`, switches to task `next`: when `next` is not its
+/// idle task, undo what the idle loop did on its way into `hlt` -- RCU's idle
+/// mark ([`crate::rcu::leave_idle`]) and, on an AP, the stopped LAPIC timer
+/// ([`crate::apic::timer_stopped_on`]).
+///
+/// The idle loops undo both themselves after their `hlt`, but only on their
+/// own path. A switch made at an interrupt's exit while the idle task sat in
+/// `hlt` -- a deferred preemption ([`do_deferred_preempt`]) -- skipped them,
+/// and until the task it switched to blocked, that CPU ran with no tick and
+/// marked idle: nothing it ran was time-sliced or balanced, starving the
+/// tasks queued behind it (on two CPUs, the ring benchmark's prober got two
+/// probes in four minutes behind its busy sender), and RCU's grace periods,
+/// and `membarrier`'s global barrier with them, passed it over as quiescent
+/// while it ran. Here every switch is covered.
+///
+/// Called with interrupts off, between [`set_current_task`] and
+/// `switch_context`, on `cpu` itself, so the LAPIC write is this CPU's own.
+#[inline]
+fn leave_idle_for(cpu: usize, next: TaskId) {
+    let idle = IDLE_TASK_IDS
+        .get(cpu)
+        .map(|slot| slot.load(Ordering::Acquire));
+    if idle == Some(next) {
+        return;
+    }
+    crate::rcu::leave_idle(cpu);
+    if crate::apic::timer_stopped_on(cpu) {
+        // SAFETY: only a CPU whose APIC is initialized stops its timer, and
+        // the write is to this CPU's own LAPIC with interrupts off.
+        unsafe {
+            crate::apic::restart_timer();
+        }
+    }
+}
+
 /// Read the current-task ID for the calling CPU.
 #[inline]
 fn load_current_task() -> TaskId {
@@ -1927,6 +2094,7 @@ pub fn init() {
     }
 
     state.initialized = true;
+    drop(state);
     serial_println!(
         "[sched] Scheduler initialized ({}, {} levels, {} CPU{})",
         backend::backend_name(backend::active_backend()),
@@ -1934,6 +2102,28 @@ pub fn init() {
         num_cpus,
         if num_cpus > 1 { "s" } else { "" }
     );
+
+    // CPU 0's idle context for while task 0 is the boot (`BOOT_IDLE_ID`).
+    // Unqueued and unadmitted: only the idle fallback switches to it.
+    match spawn_inner(
+        b"idle0-boot",
+        task::IDLE_PRIORITY,
+        boot_idle_entry,
+        0,
+        0,
+        cpu_bit(0),
+        false,
+        None,
+    ) {
+        Ok(id) => BOOT_IDLE_ID.store(id, Ordering::Release),
+        // Not fatal: the fallback idles on the stopped task's stack, as it
+        // did before there was one -- every self-test that moves a task off
+        // CPU 0 while the boot sleeps will say so.
+        Err(e) => serial_println!(
+            "[sched] WARNING: CPU 0's boot-time idle context could not be made: {:?}",
+            e
+        ),
+    }
 }
 
 /// Register an idle task for an Application Processor.
@@ -2030,6 +2220,71 @@ fn choose_cpu_for_task(task: &Task) -> usize {
     } else {
         task.last_cpu
     }
+}
+
+/// Whether `cpu` is idle, as placing a woken task asks: running its own idle
+/// task with no other task queued. The BSP's idle task, task 0, is the boot
+/// until the boot is done ([`BOOT_TASK_WORKING`]) -- CPU 0 idles in its
+/// boot-time idle context ([`BOOT_IDLE_ID`]) then -- and a CPU that has not
+/// registered an idle task is not up, and not idle. A queue whose lock is
+/// held counts as busy.
+///
+/// Lock-free but for a `try_lock` of `cpu`'s queue, and so a moment stale
+/// either way -- which costs at most a placement that was not the best, never
+/// correctness: a task queued on any CPU runs there or is balanced away.
+fn cpu_idle_for_wake(cpu: usize) -> bool {
+    let Some(idle) = IDLE_TASK_IDS
+        .get(cpu)
+        .map(|slot| slot.load(Ordering::Acquire))
+    else {
+        return false;
+    };
+    if idle == u64::MAX {
+        return false;
+    }
+    let idle = if cpu == 0 && BOOT_TASK_WORKING.load(Ordering::Acquire) {
+        BOOT_IDLE_ID.load(Ordering::Acquire)
+    } else {
+        idle
+    };
+    let running = CURRENT_TASK_IDS
+        .get(cpu)
+        .map(|slot| slot.load(Ordering::Acquire));
+    running == Some(idle) && PER_CPU_SCHED.try_real_queue_length(cpu) == Some(0)
+}
+
+/// The CPU a task that has just become runnable -- woken, or resumed from a
+/// stop -- is queued on.
+///
+/// [`choose_cpu_for_task`]'s answer, its last CPU, whose cache it is warm in,
+/// when that CPU is idle or no other CPU the task may run on is; otherwise
+/// the first idle CPU after it that the task may run on, which runs it at once
+/// rather than after whatever holds its last one. Linux's
+/// `select_idle_sibling`, without its search by cache domain: the machines
+/// this kernel runs on share their last-level cache across cores.
+///
+/// Before this, a task went back to its last CPU however busy: on two CPUs
+/// the ring benchmark's prober queued behind its CPU-bound busy sender while
+/// the other CPU sat in `hlt`, with its tick stopped, balancing nothing
+/// (known-issues `A-SMP-APS-STOP-TICKING-AND-NO-BOOT-TEST-RUNS-MORE-THAN-ONE-CPU`).
+/// On one CPU this is `choose_cpu_for_task`.
+fn select_wake_cpu(task: &Task) -> usize {
+    let preferred = choose_cpu_for_task(task);
+    let n = PER_CPU_SCHED.num_cpus();
+    if n <= 1 || cpu_idle_for_wake(preferred) {
+        return preferred;
+    }
+    let online = crate::cpu_hotplug::online_mask();
+    (1..n)
+        .filter_map(|step| preferred.wrapping_add(step).checked_rem(n))
+        .find(|&cpu| {
+            let up = u32::try_from(cpu)
+                .ok()
+                .and_then(|bit| online.checked_shr(bit))
+                .is_some_and(|m| m & 1 != 0);
+            up && task.can_run_on(cpu) && cpu_idle_for_wake(cpu)
+        })
+        .unwrap_or(preferred)
 }
 
 /// Signal a CPU that new work has been enqueued on its run queue.
@@ -2211,16 +2466,42 @@ pub fn spawn_suspended_with_id(
     )
 }
 
-/// Admit a task previously created via [`spawn_suspended`], transitioning it
-/// from `Blocked` to `Ready` and enqueuing it so the scheduler can run it.
+/// Admit a task created by [`spawn_suspended`] -- the one thing that starts
+/// it (`Task::awaiting_admission`).
 ///
-/// Returns `true` if the task was admitted.  Returns `false` if the task no
-/// longer exists or was not in the expected `Blocked` state (e.g. it was
-/// already killed).  Implemented on top of [`wake`], which already handles
-/// the Blocked→Ready transition, run-queue insertion, target-CPU selection,
-/// and the pending-wake race.
+/// A `Blocked` task is made `Ready` and queued, as a wake would. One
+/// suspended before its admission -- a process joining a frozen container
+/// (`container::add_process_task`) -- is admitted where it is: it stays
+/// `Suspended`, and the [`resume`] that thaws it queues it.
+///
+/// Returns `true` if the task was admitted; `false` if there is no such task,
+/// it was not awaiting admission (admitted already, or not spawned
+/// suspended), or it was killed first.
 pub fn admit(task_id: TaskId) -> bool {
-    wake(task_id)
+    let (target_cpu, preempt_target) = {
+        let mut state = SCHED.lock();
+        let Some(task) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
+        if !task.awaiting_admission {
+            return false;
+        }
+        match task.state {
+            TaskState::Blocked => {
+                task.awaiting_admission = false;
+                make_blocked_ready(task_id, task)
+            }
+            TaskState::Suspended => {
+                task.awaiting_admission = false;
+                return true;
+            }
+            // Killed before its admission. (`Ready` and `Running` are not
+            // reached without one.)
+            TaskState::Dead | TaskState::Ready | TaskState::Running => return false,
+        }
+    };
+    announce_ready(task_id, target_cpu, preempt_target);
+    true
 }
 
 /// Shared implementation of [`spawn_with_affinity`] and [`spawn_suspended`].
@@ -2276,7 +2557,9 @@ fn spawn_inner(
         // scheduled until the caller finishes registration and calls admit().
         if !admit {
             new_task.state = task::TaskState::Blocked;
-            // Admission is a `wake`, and a wake from Blocked banks the ticks
+            // Only `admit` may start it: see `Task::awaiting_admission`.
+            new_task.awaiting_admission = true;
+            // Admission ends a Blocked state, which banks the ticks
             // since `block_tick` as sleep credit. Left at its initial 0, that
             // would credit a brand-new task with every tick since boot and
             // hand it the interactive boost on its first run; stamped now, it
@@ -2999,49 +3282,66 @@ fn block_current_inner(
 /// Returns `true` if the task was blocked and is now ready.
 /// Returns `false` if the task was not in the Blocked state.
 pub fn wake(task_id: TaskId) -> bool {
-    let target_cpu;
-    let preempt_target;
-    {
+    let (target_cpu, preempt_target) = {
         let mut state = SCHED.lock();
-        if let Some(task) = state.tasks.get_mut(&task_id) {
-            if task.state == TaskState::Blocked {
-                task.mark_ready(crate::apic::tick_count());
-                // Reset burst counter for the new wake cycle.
-                task.burst_ticks = 0;
-                let prio = task.effective_priority();
-                // Respect CPU affinity when choosing the target CPU.
-                target_cpu = choose_cpu_for_task(task);
-                task.last_cpu = target_cpu;
-                PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
-                preempt_target = wake_preempts(target_cpu, prio);
-            } else {
-                // Task is not Blocked (still Running or Ready).  Set the
-                // pending-wake flag so block_current() won't actually
-                // block.  This prevents the lost-wakeup race where a
-                // timer preemption between registering in a wait queue
-                // and calling block_current() lets a waker find the task
-                // as Running and lose the wake signal.
-                task.pending_wake = true;
-                return false;
-            }
-        } else {
+        let Some(task) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
+        if task.awaiting_admission {
+            // Not started, so not waiting for anything: a wake aimed at it is
+            // stale (a reused id) or early, and only `admit` starts it
+            // (`Task::awaiting_admission`). Not kept as `pending_wake` either,
+            // which would only make the task's first real park return early.
             return false;
         }
-    }
+        if task.state != TaskState::Blocked {
+            // Task is not Blocked (still Running or Ready).  Set the
+            // pending-wake flag so block_current() won't actually
+            // block.  This prevents the lost-wakeup race where a
+            // timer preemption between registering in a wait queue
+            // and calling block_current() lets a waker find the task
+            // as Running and lose the wake signal.
+            task.pending_wake = true;
+            return false;
+        }
+        make_blocked_ready(task_id, task)
+    };
+    announce_ready(task_id, target_cpu, preempt_target);
+    true
+}
+
+/// Make the `Blocked` task `task` (`task_id`) `Ready`, queued on a CPU it may
+/// use: the part of a wake -- and of an admission -- done under the `SCHED`
+/// lock. Returns that CPU, and whether the task should preempt what it runs
+/// ([`wake_preempts`]); [`announce_ready`] does the rest once the lock is
+/// dropped.
+fn make_blocked_ready(task_id: TaskId, task: &mut Task) -> (usize, bool) {
+    task.mark_ready(crate::apic::tick_count());
+    // Reset burst counter for the new wake cycle.
+    task.burst_ticks = 0;
+    let prio = task.effective_priority();
+    // Respect CPU affinity when choosing the target CPU.
+    let target_cpu = select_wake_cpu(task);
+    task.last_cpu = target_cpu;
+    PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+    (target_cpu, wake_preempts(target_cpu, prio))
+}
+
+/// The end of a wake, after the `SCHED` lock is dropped: trace it, and signal
+/// the CPU the task was queued on -- or, for a wake into the real-time band
+/// above what that CPU runs, have it switch now.
+fn announce_ready(task_id: TaskId, target_cpu: usize, preempt_target: bool) {
     crate::ktrace::record(
         crate::ktrace::Category::Sched,
         crate::ktrace::event::TASK_WAKE,
         task_id,
         target_cpu as u64,
     );
-    // Signal the target CPU after releasing the lock -- and, for a wake into
-    // the real-time band above what it runs, have it switch now.
     if preempt_target {
         request_preempt_on(target_cpu);
     } else {
         signal_cpu(target_cpu);
     }
-    true
 }
 
 /// Wake a blocked task using `try_lock` — safe in ISR context.
@@ -3091,6 +3391,11 @@ pub fn try_wake(task_id: TaskId) -> bool {
         // No such task: nothing to wake, and retrying cannot help.
         return true;
     };
+    if task.awaiting_admission {
+        // Accounted for: dropped, as `wake` drops it -- a task that has not
+        // started is waiting for nothing (`Task::awaiting_admission`).
+        return true;
+    }
     if task.state != TaskState::Blocked {
         // Same pending-wake logic as wake() — see the comment there.  The
         // wake is now recorded on the task itself, so it must NOT also be
@@ -3101,7 +3406,7 @@ pub fn try_wake(task_id: TaskId) -> bool {
     task.mark_ready(crate::apic::tick_count());
     task.burst_ticks = 0;
     let prio = task.effective_priority();
-    let target_cpu = choose_cpu_for_task(task);
+    let target_cpu = select_wake_cpu(task);
     task.last_cpu = target_cpu;
     PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
     drop(state);
@@ -3274,7 +3579,12 @@ fn watchdog_check() {
         let current = heartbeat.load(Ordering::Relaxed);
         let previous = last_seen.load(Ordering::Relaxed);
 
-        if current == previous && previous > 0 {
+        // An AP in tickless idle has stopped its timer and so takes no
+        // heartbeat ticks: silence there is the idle loop working, not a
+        // lockup. Its stall count starts again from here.
+        if crate::apic::timer_stopped_on(cpu) {
+            stall_count.store(0, Ordering::Relaxed);
+        } else if current == previous && previous > 0 {
             // CPU hasn't ticked since last check.
             let count = stall_count
                 .fetch_add(1, Ordering::Relaxed)
@@ -5469,8 +5779,10 @@ pub fn do_deferred_preempt() {
         //     interrupts immediately, and the enclosing IRQ stub's `iretq`
         //     restores IF=1 from the saved frame regardless.
         //   * Voluntary yields (`yield_now`, channel/futex blocking) do NOT go
-        //     through this path; they run, and are saved, with IF=1 — so the
-        //     per-task RFLAGS-preservation invariant is untouched for them.
+        //     through this path. They run with IF=1 up to the switch itself,
+        //     which clears it and puts it back for them when they resume
+        //     (`SwitchIrqs`) -- so each task still comes back with the
+        //     interrupt state it entered the switch with.
         //   * `preempt()` calls `schedule_inner(true, ..)` (requeue=true), so
         //     the current task is always re-enqueued and a runnable task is
         //     always picked — the HLT-based idle fallback (which needs IF=1) is
@@ -5673,6 +5985,70 @@ static BOOT_TASK_WORKING: AtomicBool = AtomicBool::new(true);
 /// booster leaves it be, as it leaves every idle task (`main::idle_loop`).
 pub fn boot_work_done() {
     BOOT_TASK_WORKING.store(false, Ordering::Release);
+}
+
+/// CPU 0's idle context of its own: the task the idle fallback hands CPU 0
+/// to when nothing may run there, so that the fallback idles on this task's
+/// stack and never on another's. `u64::MAX` until [`init`] has made it.
+///
+/// Every AP has an idle task, always queued, so its scheduler never runs out
+/// of something to run. CPU 0's is task 0, which is the boot until the boot
+/// is done, and the boot blocks -- in every self-test that sleeps or waits.
+/// With nothing else runnable then, the fallback in [`schedule_inner`] used
+/// to idle on the stack of whichever task had just stopped, and that task's
+/// context stayed live on CPU 0 until something else came along to run: a
+/// task that had pinned itself to CPU 1 could not leave, CPU 1 handing it
+/// back as still running here ([`classify_pick`]), and it carried on on CPU 0
+/// -- the first two-CPU boot to run the affinity self-test, 2026-10-09. A
+/// task woken while CPU 0 idled on its stack was tied to CPU 0 the same way.
+///
+/// Created awaiting admission and never admitted (`Task::awaiting_admission`),
+/// so no wake or resume can queue it: the fallback, which switches to it
+/// directly, is the one thing that runs it. Pinned to CPU 0.
+static BOOT_IDLE_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// [`BOOT_IDLE_ID`]'s body. It runs only when the idle fallback hands CPU 0
+/// to it, and parks again at once -- in the fallback, which then idles on
+/// this, its own stack, until there is something to run.
+extern "C" fn boot_idle_entry(_arg: u64) {
+    loop {
+        block_current();
+    }
+}
+
+/// Ready CPU 0's idle context `idle` ([`BOOT_IDLE_ID`]) to be switched to by
+/// the idle fallback, under `SCHED`: whether it can be. It is parked
+/// (`Blocked`) whenever it is not running, and is never queued -- nothing
+/// admits it -- but an entry for it is removed all the same, so that the
+/// switch leaves none behind.
+fn take_fallback_idle(state: &mut SchedState, idle: TaskId) -> bool {
+    let Some(task) = state.tasks.get(&idle) else {
+        return false;
+    };
+    match task.state {
+        TaskState::Blocked => true,
+        TaskState::Ready => {
+            PER_CPU_SCHED.dequeue(idle, task.effective_priority(), task.last_cpu);
+            true
+        }
+        // Running is impossible -- it is pinned to CPU 0, which is running
+        // another task -- and Dead or Suspended leaves the fallback where it
+        // is.
+        TaskState::Running | TaskState::Suspended | TaskState::Dead => false,
+    }
+}
+
+/// The task the idle fallback on `cpu` should leave the stack of `current`
+/// for: CPU 0's own idle context ([`BOOT_IDLE_ID`]), unless `current` is it
+/// or it does not exist yet -- before [`init`] has made it, or on an AP,
+/// whose idle task is always queued and so never leaves the fallback with
+/// another task's stack to idle on.
+fn fallback_idle_for(cpu: usize, current: TaskId) -> Option<TaskId> {
+    if cpu != 0 {
+        return None;
+    }
+    let id = BOOT_IDLE_ID.load(Ordering::Acquire);
+    (id != u64::MAX && id != current).then_some(id)
 }
 
 /// Whether the booster passes task `id` over: an idle-level task -- task 0
@@ -6365,10 +6741,17 @@ pub fn resume(task_id: TaskId) -> bool {
         if task.state != TaskState::Suspended {
             return false;
         }
+        if task.awaiting_admission {
+            // Suspended before it was ever admitted: thawed, it is back where
+            // it was -- created and not started -- and its `admit` is what
+            // starts it (`Task::awaiting_admission`).
+            task.state = TaskState::Blocked;
+            return true;
+        }
 
         task.mark_ready(crate::apic::tick_count());
         let prio = task.effective_priority();
-        target_cpu = choose_cpu_for_task(task);
+        target_cpu = select_wake_cpu(task);
         task.last_cpu = target_cpu;
         PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
     }
@@ -6714,6 +7097,24 @@ pub fn set_affinity(task_id: TaskId, mask: u64) -> KernelResult<u64> {
 pub fn get_cpu_affinity(task_id: TaskId) -> Option<u64> {
     let state = SCHED.lock();
     state.tasks.get(&task_id).map(|t| t.cpu_affinity)
+}
+
+/// The CPU affinity a task passes on to the threads and processes it creates
+/// (`proc::thread`): its own mask -- Linux's clone, fork and posix_spawn keep
+/// it -- except an idle task's, which passes on every CPU. An idle task is
+/// pinned to its CPU because it is that CPU's idle task (`Task::new_idle`,
+/// `Task::new_ap_idle`), not because what it starts belongs there: the boot,
+/// the BSP's idle task until it is done, starts init and the kernel's
+/// services, and they get every CPU.
+#[must_use]
+pub fn inheritable_affinity(task_id: TaskId) -> u64 {
+    let is_idle_task = IDLE_TASK_IDS
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) == task_id);
+    if is_idle_task {
+        return task::CPU_AFFINITY_ALL;
+    }
+    get_cpu_affinity(task_id).unwrap_or(task::CPU_AFFINITY_ALL)
 }
 
 /// The CPUs a task may run on now: its mask, less the CPUs that are not
@@ -8238,11 +8639,14 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) -> u64 {
         }
         // We already hold the lock — wake directly.
         if let Some(task) = state.tasks.get_mut(&task_id) {
-            if task.state == TaskState::Blocked {
+            if task.awaiting_admission {
+                // Dropped, as `wake` drops it: a task that has not started is
+                // waiting for nothing (`Task::awaiting_admission`).
+            } else if task.state == TaskState::Blocked {
                 task.mark_ready(crate::apic::tick_count());
                 task.burst_ticks = 0;
                 let prio = task.effective_priority();
-                let target_cpu = choose_cpu_for_task(task);
+                let target_cpu = select_wake_cpu(task);
                 task.last_cpu = target_cpu;
                 PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
                 // Owe `target_cpu` a reschedule signal, to be sent once the
@@ -8588,12 +8992,17 @@ fn wake_expired_sleeper(task_id: TaskId) -> SleeperWake {
         return SleeperWake::Retry;
     };
     match state.tasks.get_mut(&task_id) {
+        Some(task) if task.awaiting_admission => {
+            // Not started, so not asleep: a slot naming a reused id. Released
+            // and dropped, as `wake` drops it (`Task::awaiting_admission`).
+            SleeperWake::Release
+        }
         Some(task) if task.state == TaskState::Blocked => {
             // Normal case: the task is still blocked on its timed sleep.
             task.mark_ready(crate::apic::tick_count());
             task.burst_ticks = 0;
             let prio = task.effective_priority();
-            let target_cpu = choose_cpu_for_task(task);
+            let target_cpu = select_wake_cpu(task);
             task.last_cpu = target_cpu;
             PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
             drop(state);
@@ -9267,8 +9676,24 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 // runnable, so a lost wakeup (task parked forever) is dumped
                 // once instead of hanging silently — see dump_idle_fallback_wedge.
                 let mut idle_spins: u64 = 0;
+                // Where this stack is not the CPU's own idle context, leave it
+                // for that context, which idles in its place: the current task
+                // may be wanted elsewhere -- re-homed by its affinity, or woken
+                // onto another CPU -- and no CPU can run it while this one
+                // stands on its stack (`BOOT_IDLE_ID`).
+                let mut handoff = fallback_idle_for(cpu, current_id);
+                // The task a wedge report is about: the current one, or --
+                // idling in CPU 0's boot-time idle context, which is parked by
+                // design -- the boot, whose wake is the one that matters.
+                let wedge_subject = if BOOT_IDLE_ID.load(Ordering::Acquire) == current_id {
+                    0
+                } else {
+                    current_id
+                };
                 loop {
-                    cpu::hlt();
+                    if handoff.is_none() {
+                        cpu::hlt();
+                    }
 
                     let Some(mut s) = SCHED.try_lock() else {
                         continue;
@@ -9290,17 +9715,29 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // for a dead or parked task is dropped here too, rather
                     // than switched to.
                     let mut pick_signals = 0u64;
-                    // The current task's context stays live on this CPU
-                    // here, so it is not moved (`classify_pick`).
-                    let picked =
-                        pick_runnable_locked(&mut s, cpu, current_id, &mut pick_signals, false);
+                    // The current task's context stays live on this CPU while
+                    // the fallback idles on its stack, so then it is not moved
+                    // (`classify_pick`). About to leave the stack, it may be:
+                    // the switch saves it.
+                    let picked = pick_runnable_locked(
+                        &mut s,
+                        cpu,
+                        current_id,
+                        &mut pick_signals,
+                        handoff.is_some(),
+                    );
                     wake_signals.add(pick_signals);
+                    let picked = picked.or_else(|| {
+                        handoff
+                            .take()
+                            .filter(|&idle| take_fallback_idle(&mut s, idle))
+                    });
                     let Some(ready_id) = picked else {
                         idle_spins = idle_spins.saturating_add(1);
                         if idle_spins == IDLE_FALLBACK_WEDGE_TICKS
                             && !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed)
                         {
-                            dump_idle_fallback_wedge(&s, cpu, current_id);
+                            dump_idle_fallback_wedge(&s, cpu, wedge_subject);
                         }
                         drop(s);
                         wake_signals.flush();
@@ -9437,7 +9874,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             flag.store(false, Ordering::Release);
                         }
 
+                        // Interrupts off from here into `switch_context`
+                        // (`SwitchIrqs`): this fallback idles with them on.
+                        let irqs = SwitchIrqs::disable();
+
                         set_current_task(cpu, ready_id);
+                        leave_idle_for(cpu, ready_id);
 
                         // Pin the outgoing task until it is off its own stack
                         // — same reason as the main `schedule_inner` switch
@@ -9527,6 +9969,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         // shortest correct span rather than the shortest
                         // convenient one.
                         finish_task_switch();
+                        irqs.restore();
 
                         // NOTE: After switch_context returns, we're now
                         // running as the OLD task (resumed later).  The
@@ -9722,7 +10165,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
     // --- Context switch (outside the lock) ---
 
+    // Interrupts off from here into `switch_context`: a voluntary switch
+    // (`yield_now`, `block_current`) arrives with them on. See `SwitchIrqs`.
+    let irqs = SwitchIrqs::disable();
+
     set_current_task(cpu, next_id);
+    leave_idle_for(cpu, next_id);
 
     // Pin the outgoing task until it is off its own stack.  `set_current_task`
     // above has just retired `current_id` from the reaper's exclusion set, but
@@ -9812,6 +10260,61 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     // why `finish_task_switch` re-reads the CPU index and clears the slot
     // rather than taking an id.  See `PREV_TASK_IDS`.
     finish_task_switch();
+    irqs.restore();
+}
+
+/// The interrupt flag across a context switch: cleared from just before
+/// [`set_current_task`] until the incoming task is on its own stack, and
+/// restored for the outgoing task when it is resumed.
+///
+/// `switch_context` asks for interrupts off around it, and the involuntary
+/// path ([`do_deferred_preempt`]) has always had them off; the voluntary one
+/// (`yield_now`, `block_current`) did not, because `SCHED` is a plain spin
+/// lock that leaves them alone. An interrupt landing in that window --
+/// `CURRENT_TASK_IDS` already naming the incoming task, the CPU still on the
+/// outgoing one's stack -- whose exit found a preemption pending (one deferred
+/// while `SCHED` was held is re-armed, not dropped) would run a second
+/// `schedule_inner` as the wrong task: saving the outgoing task's stack as the
+/// incoming one's context, so that the incoming task, when next picked,
+/// resumed on a stack not its own. The window is a microsecond or so, which
+/// is why it went unseen on one CPU; with every AP ticking it is not one to
+/// leave open.
+///
+/// `switch_context` saves RFLAGS per task, so the outgoing task is saved with
+/// interrupts off and resumed, by a later switch, with them off: `restore`,
+/// on the line after `switch_context` returns, puts back what this task had
+/// on the way in. A task running for the first time starts from its initial
+/// RFLAGS, interrupts on (`Task::new_kernel`).
+#[must_use = "restore the interrupt flag once the switch has returned"]
+struct SwitchIrqs {
+    /// Whether interrupts were on when the switch began.
+    were_on: bool,
+}
+
+impl SwitchIrqs {
+    /// Record the interrupt flag and clear it.
+    #[inline]
+    fn disable() -> Self {
+        let were_on = crate::cpu::interrupts_enabled();
+        // SAFETY: clearing IF has no memory effects; `restore` sets it again
+        // on the same task once it has been switched back to.
+        unsafe {
+            crate::cpu::cli();
+        }
+        Self { were_on }
+    }
+
+    /// Put the interrupt flag back as `disable` found it.
+    #[inline]
+    fn restore(self) {
+        if self.were_on {
+            // SAFETY: interrupts were on when this task entered the switch;
+            // the IDT is loaded on every CPU that schedules.
+            unsafe {
+                crate::cpu::sti();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -10115,6 +10618,37 @@ pub fn smp_self_test() -> KernelResult<()> {
     }
     serial_println!("[sched]   Reap SMP safety: OK");
 
+    // Every idle task is pinned to its own CPU -- the BSP's, task 0, the boot
+    // until it is done, included -- so that no wake, steal or balance moves
+    // one off it; and none passes the pin on to what it creates.
+    for cpu in 0..num_cpus {
+        let Some(idle) = IDLE_TASK_IDS
+            .get(cpu)
+            .map(|slot| slot.load(Ordering::Acquire))
+            .filter(|&id| id != u64::MAX)
+        else {
+            continue;
+        };
+        let own = u32::try_from(cpu).ok().and_then(|c| 1u64.checked_shl(c));
+        if get_cpu_affinity(idle) != own {
+            serial_println!(
+                "[sched]   FAIL: CPU {}'s idle task {} is not pinned to it (mask {:?})",
+                cpu,
+                idle,
+                get_cpu_affinity(idle)
+            );
+            return Err(KernelError::InternalError);
+        }
+        if inheritable_affinity(idle) != task::CPU_AFFINITY_ALL {
+            serial_println!(
+                "[sched]   FAIL: CPU {}'s idle task passes its pin on to what it creates",
+                cpu
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[sched]   Idle tasks pinned to their CPUs, the pin not inherited: OK");
+
     serial_println!("[sched] SMP scheduler validation PASSED");
     Ok(())
 }
@@ -10131,6 +10665,7 @@ pub fn self_test() -> KernelResult<()> {
     test_kill_and_reap()?;
     test_stale_run_queue_entries()?;
     test_suspend_resume()?;
+    test_admission()?;
     test_two_phase_self_suspend()?;
     test_set_priority()?;
     test_realtime_band()?;
@@ -10154,6 +10689,79 @@ pub fn self_test() -> KernelResult<()> {
     test_load_address_space_uses_live_cr3()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// How many times [`irqflag_partner`] has run.
+static IRQFLAG_PARTNER_RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// [`self_test_switch_interrupt_flag`]'s partner: counts itself and exits,
+/// giving the test's yields a task to switch to and back from.
+extern "C" fn irqflag_partner(_arg: u64) {
+    IRQFLAG_PARTNER_RUNS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// A switch gives a task back the interrupt flag it went in with, on and
+/// off, though the switch itself runs with interrupts off ([`SwitchIrqs`]):
+/// the outgoing task is saved with them off, and puts them back on resuming
+/// only if they were on. A `restore` that forgot would leave a CPU's
+/// interrupts off for good after its first yield; one that set them
+/// regardless would turn them on inside a caller's `without_interrupts`.
+///
+/// Its own boot step, after preemptive scheduling starts: [`self_test`] runs
+/// before interrupts are first enabled, when there is no "on" to keep.
+///
+/// # Errors
+///
+/// `InternalError` when a flag comes back changed, when the partner never
+/// runs, or when interrupts are off as it starts.
+pub fn self_test_switch_interrupt_flag() -> KernelResult<()> {
+    if !crate::cpu::interrupts_enabled() {
+        serial_println!(
+            "[sched]   FAIL: switch interrupt flag: interrupts were off as the test began; it runs once preemptive scheduling has started"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Pinned here, and above the boot's level, so that a yield of this task
+    // switches to the partner and the partner's exit switches back.
+    let here = u32::try_from(current_cpu_id())
+        .ok()
+        .and_then(|c| 1u64.checked_shl(c))
+        .unwrap_or(1);
+    // One yield-until-the-partner-has-run; the interrupt flag it came back
+    // with.
+    let round = |label: &str| -> KernelResult<bool> {
+        IRQFLAG_PARTNER_RUNS.store(0, Ordering::Release);
+        let id = spawn_with_affinity(b"irqflag-partner", 16, irqflag_partner, 0, 0, here)?;
+        for _ in 0..1000 {
+            yield_now();
+            if IRQFLAG_PARTNER_RUNS.load(Ordering::Acquire) > 0 {
+                return Ok(crate::cpu::interrupts_enabled());
+            }
+        }
+        // Never run: give it no chance to run later, into another test.
+        let killed = kill_task(id);
+        serial_println!(
+            "[sched]   FAIL: switch interrupt flag ({}): the partner never ran (killed: {})",
+            label,
+            killed
+        );
+        Err(KernelError::InternalError)
+    };
+
+    let on_after = round("interrupts on")?;
+    let off_after = crate::cpu::without_interrupts(|| round("interrupts off"))?;
+    if !on_after {
+        serial_println!("[sched]   FAIL: a yield made with interrupts on came back with them off");
+        return Err(KernelError::InternalError);
+    }
+    if off_after {
+        serial_println!("[sched]   FAIL: a yield made with interrupts off came back with them on");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[sched]   A switch returns the interrupt flag it was entered with (on, off): OK"
+    );
     Ok(())
 }
 
@@ -11793,6 +12401,76 @@ fn test_suspend_resume() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   Suspend/resume: OK");
+    Ok(())
+}
+
+/// Only [`admit`] starts a task spawned suspended (`Task::awaiting_admission`).
+///
+/// A wake, an interrupt's wake, a deferred wake, and a resume after a suspend
+/// each leave it unstarted -- each used to start it, running a thread before
+/// its creator had finished registering it. Suspended before its admission,
+/// it stays suspended once admitted, and the resume runs it.
+fn test_admission() -> KernelResult<()> {
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    let id = spawn_suspended(b"test-admission", 16, test_task_incr, 7, 0)?;
+    let fail = |what: &str| {
+        serial_println!("[sched]   FAIL: admission: {}", what);
+        kill_task(id);
+        reap_dead_tasks();
+        Err(KernelError::InternalError)
+    };
+    // (state, awaiting admission, pending wake)
+    let look = || {
+        let state = SCHED.lock();
+        state
+            .tasks
+            .get(&id)
+            .map(|t| (t.state, t.awaiting_admission, t.pending_wake))
+    };
+    let ran = || TEST_COUNTER.load(Ordering::SeqCst) != 0;
+
+    let woke = wake(id);
+    let accounted = try_wake(id);
+    defer_wake(id);
+    yield_now();
+    yield_now();
+    if woke || !accounted || look() != Some((TaskState::Blocked, true, false)) || ran() {
+        return fail("a wake started a task awaiting admission, or was kept for it");
+    }
+
+    let suspended = suspend(id);
+    let resumed = resume(id);
+    yield_now();
+    yield_now();
+    if !suspended || !resumed || look() != Some((TaskState::Blocked, true, false)) || ran() {
+        return fail("suspended and resumed, it did not go back to awaiting admission");
+    }
+
+    let suspended = suspend(id);
+    let admitted = admit(id);
+    yield_now();
+    yield_now();
+    if !suspended || !admitted || look() != Some((TaskState::Suspended, false, false)) || ran() {
+        return fail("suspended, then admitted, it did not stay suspended");
+    }
+    if admit(id) {
+        return fail("admitted twice");
+    }
+
+    if !resume(id) {
+        return fail("the resume of an admitted task was refused");
+    }
+    for _ in 0..200 {
+        if ran() {
+            break;
+        }
+        yield_now();
+    }
+    if TEST_COUNTER.load(Ordering::SeqCst) != 7 {
+        return fail("resumed after its admission, it never ran");
+    }
+    reap_dead_tasks();
+    serial_println!("[sched]   Only admit starts a task spawned suspended: OK");
     Ok(())
 }
 

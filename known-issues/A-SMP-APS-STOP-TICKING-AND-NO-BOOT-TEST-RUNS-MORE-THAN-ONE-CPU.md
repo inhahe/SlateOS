@@ -31,13 +31,22 @@ same boot no longer crashes, and shows this instead.
   network self-test's 2.5 s wait took 34 s. The boot did not reach its end in
   420 s, where one CPU takes about 60.
 
-**Not yet known:** whether the APs' LAPIC timers stop (or never start: CPU 2's
-heartbeat never moved), whether the APs spin with interrupts off (a lock), or
-whether QEMU's TCG on this host starves vCPUs (one emulation thread round-robin
-across four vCPUs would look much like this, and would not be the kernel's
-fault). The first step is to tell those apart: the same boot with `-accel
-whpx` or on a Linux host with MTTCG, and an NMI backtrace of a silent AP (the
-hard-lockup watchdog's dump, `--hard-lockup-watchdog`).
+**The lockups were the emulator; a hang is not.** The same boot under
+`-accel tcg,thread=multi` (one host thread per vCPU) has no soft lockup at
+all, and the network test's 2.5 s wait takes 2.5 s again: single-threaded
+TCG, round-robin across four vCPUs, was starving them. But that boot hangs
+too, later: in the ring benchmark's `idle_beside_busy` load
+(`net::ring_bench`), the prober task finishes (`Task 20 exiting`) and the
+boot thread never prints the load's report line -- after which it would
+stop the busy sender, wait at most `LOAD_DEADLINE_MS` for it, close the
+sockets and go on. So the boot thread is stuck in `wait_for`'s
+`sleep_ms(5)` (a timer wakeup lost across CPUs) or in `socket::close`
+behind the busy sender running on another CPU (a lock or a wakeup lost the
+same way). One CPU never shows it.
+
+**Next step:** reproduce with `-smp 2` under MTTCG, then name the boot
+thread's wait: the hard-lockup watchdog's NMI dump (`--hard-lockup-watchdog`)
+or a `[sched]` dump of every task's state and wait channel at the deadline.
 
 **What would make it stay fixed:** a boot test on more than one CPU. Today
 `scripts/boot-test.sh` starts QEMU without `-smp`, so a multi-CPU regression

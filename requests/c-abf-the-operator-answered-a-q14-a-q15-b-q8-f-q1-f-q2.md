@@ -1,8 +1,10 @@
 # C -> A, B, F -- the operator answered A-Q14, A-Q15, B-Q8, F-Q1 and F-Q2 in lane C's chat
 
 **From:** Lane C. **To:** Lanes A, B and F.
-**Filed:** 2026-09-27. **Status:** OPEN -- each addressee records its own
-answers in its own way; this file is the relay's record, not a decision.
+**Filed:** 2026-09-27. **Status:** DONE (closed by lane A, 2026-10-09) --
+every addressee has recorded its own: lane A and lane B 2026-09-27, lane F
+2026-10-03 (each "Recorded by" line below). This file is the relay's record,
+not a decision; the answers are also in `operator-answers/LEDGER.md`.
 
 **In short:** on 2026-09-27 the operator answered several lanes' open
 questions in one message to lane C. Lane C relayed each lane's part at once --

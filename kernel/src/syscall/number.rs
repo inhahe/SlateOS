@@ -6602,15 +6602,30 @@ pub const SYS_PIDFD_OPEN: u64 = 1137;
 /// `InvalidHandle` if the caller does not hold it.
 pub const SYS_PIDFD_CLOSE: u64 = 1138;
 
-/// `SYS_POWER_RELOAD(image_ptr, image_len)` -- replace the running kernel with
-/// the ELF kernel image at `image_ptr` (`image_len` bytes in the caller's
-/// address space), without a firmware reset (kexec): load it, quiesce, and jump.
-/// Does not return on success. Requires a `Process` capability carrying
+/// `SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)` --
+/// restart SlateOS without the firmware (kexec): load the ELF kernel image at
+/// `image_ptr` (`image_len` bytes in the caller's address space), flush every
+/// filesystem and disk, stop every other CPU, and jump into it, handing it
+/// the command line at `cmdline_ptr` as the bootloader would. The new kernel
+/// boots through its ordinary boot path. Does not return when the restart
+/// happens.
+///
+/// - `(image_ptr, image_len)` = `(0, 0)`: the running kernel's own image,
+///   the file the bootloader loaded.
+/// - `(cmdline_ptr, cmdline_len)` = `(0, 0)`: the running kernel's command
+///   line; a pointer with length 0, an empty one. No NUL byte.
+/// - `arg4` and `arg5` must be 0.
+///
+/// Requires a `Process` capability carrying
 /// [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL) -- the caller
 /// chooses the image, a larger trust question than rebooting, so it is its own
-/// right and not implied by any reboot authority. `PermissionDenied` without it;
-/// `InvalidArgument` for a malformed image. The jump itself is not yet wired, so
-/// a well-formed, authorised call currently returns `NotSupported`.
+/// right and not implied by any reboot authority. `PermissionDenied` without
+/// it; `InvalidArgument` for an image that is not a kernel (refused before
+/// anything is flushed or stopped), an image over 128 MiB, a command line
+/// over 4096 bytes or with a NUL, or one length without its pointer;
+/// `OutOfMemory` when no free memory can hold the image; `NotSupported` for
+/// `(0, 0)` when the bootloader did not say where the running image is. The
+/// orderly stop of services before it is the caller's (`powerctl reload`).
 pub const SYS_POWER_RELOAD: u64 = 1139;
 
 /// `SYS_MEMORY_ADVISE(addr, len, advice)` -- `madvise(2)` for native programs:

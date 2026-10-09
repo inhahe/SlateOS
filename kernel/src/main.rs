@@ -9166,9 +9166,9 @@ extern "C" fn kernel_main() -> ! {
                 .is_some_and(|c| c.split_ascii_whitespace().any(|w| w == "kexec.selftest=1"))
             {
                 serial_println!("=== KEXEC-SELFTEST: reloading the kernel into itself now ===");
-                // SAFETY: the bootstrap CPU, at the end of boot, committing to the
-                // restart; on success this never returns.
-                let e = unsafe { kexec::reload_self() };
+                // At the end of boot, committing to the restart; on success this
+                // never returns.
+                let e = kexec::reload_self();
                 serial_println!("=== KEXEC-SELFTEST: reload did not happen: {:?} ===", e);
             }
 

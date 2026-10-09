@@ -27,8 +27,11 @@
 //! - Kshell provides `shutdown` and `reboot` commands.
 //! - Programs reach both through `SYS_POWER_OFF` and `SYS_POWER_REBOOT`
 //!   (each gated by its own right), and Linux programs through `reboot(2)`.
-//! - [`shutdown`] and [`reboot`] flush every filesystem first; the orderly
-//!   stop of services before them is the caller's.
+//! - [`reload`] restarts SlateOS without the firmware (kexec), into a kernel
+//!   image the caller names: `SYS_POWER_RELOAD`, gated by a right of its own
+//!   because the caller chooses what runs next.
+//! - [`shutdown`], [`reboot`] and [`reload`] flush every filesystem first;
+//!   the orderly stop of services before them is the caller's.
 //! - The kernel panic handler can call `emergency_reboot()`, which flushes
 //!   nothing: a panicking kernel's filesystems are not to be trusted.
 //!
@@ -155,6 +158,45 @@ fn flush_filesystems() {
             e
         );
     }
+}
+
+/// Restart SlateOS without the firmware, into the kernel `image` with the
+/// command line `cmdline` (kexec): flush every filesystem and disk, as a
+/// reboot does, move to the bootstrap CPU -- the only one that may stop the
+/// rest -- and jump (`kexec::reload`). `SYS_POWER_RELOAD`'s body.
+///
+/// Does not return when the restart happens. When it cannot -- the image
+/// cannot be placed, or the handoff cannot be built -- it returns why, with
+/// nothing stopped and the caller back on the CPUs it could use before. The
+/// filesystems stay flushed, which harms nothing.
+pub fn reload(image: &[u8], cmdline: &[u8]) -> crate::error::KernelError {
+    use crate::error::KernelError;
+
+    flush_filesystems();
+
+    // `kexec::quiesce` stops every CPU but the one it runs on, and must run on
+    // the bootstrap CPU: the new kernel starts on the CPU the jump is made
+    // from, and a kernel boots on the bootstrap CPU. Pinned there, the caller
+    // returns from `set_affinity` on it and cannot leave.
+    let me = crate::sched::current_task_id();
+    let before = crate::sched::get_cpu_affinity(me).unwrap_or(crate::sched::task::CPU_AFFINITY_ALL);
+    if let Err(e) = crate::sched::set_affinity(me, 1) {
+        return e;
+    }
+    let refused = if crate::smp::current_cpu_index() == 0 {
+        serial_println!("[power] restarting without the firmware");
+        // SAFETY: on the bootstrap CPU, pinned there, and committing to the
+        // restart, which is what the caller asked for.
+        unsafe { crate::kexec::reload(image, cmdline) }
+    } else {
+        // `set_affinity` returns on an allowed CPU; reaching here is a bug.
+        KernelError::InternalError
+    };
+    // The restart did not happen: give the caller its CPUs back. A failure
+    // here leaves it pinned to the bootstrap CPU, which is harmless and not
+    // worth replacing the answer that matters -- why the restart failed.
+    let _ = crate::sched::set_affinity(me, before);
+    refused
 }
 
 /// Attempt to shut down the system (enter ACPI S5 state).

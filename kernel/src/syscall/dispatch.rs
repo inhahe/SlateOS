@@ -5269,9 +5269,14 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
 /// `SYS_POWER_RELOAD` is gated on `RELOAD_KERNEL` before it acts. In kernel
 /// context no process holds the right, so the call is refused (NoSuchProcess or
 /// PermissionDenied) before the image arguments are read -- proving the syscall
-/// is registered and gated, not ungated or gated after its arguments. The granted
-/// arm (which returns NotSupported until the jump is wired) needs a ring-3 caller
-/// holding the right, as the secure-boot doors above do.
+/// is registered and gated, not ungated or gated after its arguments. What the
+/// granted arm refuses it refuses in `handlers::reload_request`, before
+/// anything is flushed or stopped, and that is checked here directly: reserved
+/// arguments, a length without its pointer and the reverse, an image or a
+/// command line over its limit, and an image that is not a kernel; and `(0, 0)`
+/// for both is the running kernel's own image, which is one, with its command
+/// line less `kexec.selftest=1`. The restart itself is the kexec boot's to
+/// prove (`python scripts/guest.py kexec`).
 /// `SYS_MEMORY_ADVISE` is wired to the Linux ABI's `madvise`, answering in
 /// Linux errnos: an unknown advice is `-EINVAL` before anything else is
 /// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
@@ -5733,6 +5738,79 @@ fn test_dispatch_power_reload() -> KernelResult<()> {
     }
     serial_println!(
         "[syscall]   SYS_POWER_RELOAD gated on RELOAD_KERNEL (refused without it, before the image is read): OK"
+    );
+
+    use super::handlers::{RELOAD_CMDLINE_MAX, RELOAD_IMAGE_MAX, ReloadImage, reload_request};
+    let request = |a: [u64; 6]| {
+        reload_request(&SyscallArgs {
+            arg0: a[0],
+            arg1: a[1],
+            arg2: a[2],
+            arg3: a[3],
+            arg4: a[4],
+            arg5: a[5],
+        })
+        .map(|(image, cmdline)| (matches!(image, ReloadImage::Running(_)), cmdline))
+    };
+    let too_big = |max: usize| u64::try_from(max).map_or(u64::MAX, |m| m.saturating_add(1));
+    let refusals = [
+        ("a reserved argument", request([0, 0, 0, 0, 1, 0])),
+        ("the last reserved argument", request([0, 0, 0, 0, 0, 1])),
+        (
+            "an image length without its pointer",
+            request([0, 64, 0, 0, 0, 0]),
+        ),
+        (
+            "an image pointer without its length",
+            request([0x1000, 0, 0, 0, 0, 0]),
+        ),
+        (
+            "a command-line length without its pointer",
+            request([0, 0, 0, 3, 0, 0]),
+        ),
+        (
+            "an image over the limit",
+            request([0x1000, too_big(RELOAD_IMAGE_MAX), 0, 0, 0, 0]),
+        ),
+        (
+            "a command line over the limit",
+            request([0, 0, 0x1000, too_big(RELOAD_CMDLINE_MAX), 0, 0]),
+        ),
+    ];
+    if let Some((what, got)) = refusals
+        .iter()
+        .find(|(_, got)| !matches!(got, Err(KernelError::InvalidArgument)))
+    {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD's request with {} answered {:?}, not InvalidArgument",
+            what,
+            got.as_ref().map(|_| ())
+        );
+        return Err(KernelError::InternalError);
+    }
+    if crate::kexec::parse_kernel_elf(b"not a kernel, not even an ELF").is_ok() {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD would take bytes that are not a kernel"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // (0, 0) twice: the running kernel, which is a kernel, with its own command
+    // line less the word that asks a boot to reload itself.
+    let own_line =
+        crate::kexec::restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default());
+    match (crate::kexec::running_image(), request([0; 6])) {
+        (Some(_), Ok((true, line))) if line == own_line => {}
+        (None, Err(KernelError::NotSupported)) => {}
+        (_, got) => {
+            serial_println!(
+                "[syscall]   FAIL: SYS_POWER_RELOAD's (0, 0) request answered {:?}, not the running kernel and its command line",
+                got.map(|(running, line)| (running, line.len()))
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_RELOAD's request: each refusal before anything is stopped, (0, 0) the running kernel: OK"
     );
     Ok(())
 }

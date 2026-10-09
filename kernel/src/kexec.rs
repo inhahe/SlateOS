@@ -30,19 +30,27 @@
 //!    the kind of range the running kernel occupies, so — as Linux's kexec does
 //!    — the segment bytes are staged in scattered frames and copied to the
 //!    contiguous destination *last*, by the trampoline.
-//! 3. **Answer** the Limine requests found in the loaded image (later stage).
-//! 4. **Build** the handoff page tables (later stage).
-//! 5. **Quiesce** the machine and **jump** (later stage, capability-gated).
+//! 3. **Answer** the Limine requests found in the loaded image
+//!    ([`find_request_sites`], the `build_*_response` functions,
+//!    [`patch_requests`]).
+//! 4. **Build** the handoff page tables ([`build_handoff_tables`]) and stage
+//!    the image ([`stage_image`]); [`prepare_handoff`] does stages 1–4.
+//! 5. **Quiesce** the machine and **jump** ([`PreparedHandoff::execute`],
+//!    [`quiesce`], the trampoline).
 //!
-//! Stages 3–5 land in follow-up changes; this module is inert until
-//! [`crate::syscall`] gains the `power.reload` entry point that drives it. The
-//! parsing and planning here are pure and covered by [`self_test`].
+//! [`reload`] runs the whole of it, on the bootstrap CPU. Two things call it:
+//! `SYS_POWER_RELOAD`, gated by `Rights::RELOAD_KERNEL`, which moves its
+//! caller to the bootstrap CPU first; and the boot path under
+//! `kexec.selftest=1` ([`reload_self`]), which reloads the running kernel into
+//! itself to validate the jump -- the one part no self-test can exercise.
+//! Everything before the jump is covered by [`self_test`].
 
 use crate::error::{KernelError, KernelResult};
 use crate::limine::{MemmapEntry, memmap_type};
 use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table::{PageFlags, PageTableEntry, VirtAddr};
 use core::arch::{asm, global_asm};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // ELF constants
@@ -2141,18 +2149,22 @@ fn free_frames(frames: &[PhysFrame]) {
 /// This is the irreversible point: after it the running kernel can no longer
 /// service interrupts or schedule, so it must be immediately followed by the jump
 /// into the new image. It is never called from a self-test -- every step would
-/// break the running kernel -- only from the (forthcoming) handoff execution.
+/// break the running kernel -- only from the handoff execution
+/// ([`PreparedHandoff::execute`]).
 ///
 /// # Safety
 ///
 /// The caller must jump into the new kernel immediately after this returns: the
 /// machine is left unable to run the old kernel. Only the bootstrap CPU may call
 /// it, and a prepared handoff must be ready.
-#[allow(dead_code)] // called by the handoff execution path, which lands next
 pub unsafe fn quiesce() {
     // 1. No more interrupts on this CPU.
     // SAFETY: we are about to hand off; the old kernel will not run again.
     unsafe { crate::cpu::cli() };
+
+    // 1b. Stop every other CPU where it is, and wait until each has: from here
+    //     nothing but this CPU runs the old kernel (`stop_other_cpus`).
+    stop_other_cpus();
 
     // 2. Mask every IOAPIC line, so no device interrupt is delivered to the new
     //    kernel before it has installed its own IDT and re-programmed the IOAPIC.
@@ -2175,8 +2187,10 @@ pub unsafe fn quiesce() {
     //    If that changes, clear the translation-enable bit on every unit here, so
     //    the new kernel's first DMA is not translated through the old tables.
 
-    // 6. Send INIT to every other CPU, leaving each parked waiting for a SIPI --
-    //    exactly the state the firmware leaves them in for the MP request.
+    // 6. Send INIT to every other CPU, leaving each waiting for a SIPI --
+    //    exactly the state the firmware leaves them in for the MP request. Each
+    //    is parked by step 1b already; one that never answered it is reset all
+    //    the same, since an INIT is taken whatever a CPU is doing.
     let self_id = crate::apic::read_id();
     let count = crate::smp::cpu_count();
     for i in 0..count {
@@ -2186,6 +2200,104 @@ pub unsafe fn quiesce() {
                 unsafe { crate::apic::send_init_ipi(apic_id) };
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stopping the other CPUs
+// ---------------------------------------------------------------------------
+
+/// Set from the moment a restart starts stopping the other CPUs: an NMI that
+/// finds it set parks the CPU it arrives on ([`park_if_restarting`]). Never
+/// cleared -- the kernel that set it is about to cease to exist.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// The CPU stopping the others, which its own NMI handler must never park
+/// (an NMI from elsewhere -- the hard-lockup watchdog -- can reach it too).
+static STOPPER: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// The CPUs (bit N = CPU N) parked so far.
+static PARKED: AtomicU64 = AtomicU64::new(0);
+
+/// How long [`stop_other_cpus`] waits for every other CPU to park. An NMI is
+/// taken within microseconds; the margin is for an emulator's CPU threads
+/// under a loaded host.
+const STOP_WAIT_NS: u64 = 500_000_000;
+
+/// Bit `cpu` of a CPU mask (0 for a CPU past the mask).
+fn kexec_cpu_bit(cpu: usize) -> u64 {
+    u32::try_from(cpu)
+        .ok()
+        .and_then(|c| 1u64.checked_shl(c))
+        .unwrap_or(0)
+}
+
+/// The NMI handler's first step: if a restart is stopping the other CPUs,
+/// park this one where it is -- interrupts off, `hlt` for good, until the
+/// INIT that ends it ([`quiesce`]). Returns at once otherwise.
+///
+/// Parked in the NMI handler, the CPU takes no further NMI (they stay blocked
+/// until an `iretq` that never comes) and no interrupt, and runs no more of
+/// the old kernel: a lock it held stays held, which nothing will ever ask for
+/// again.
+pub fn park_if_restarting() {
+    if !STOPPING.load(Ordering::Acquire) {
+        return;
+    }
+    let cpu = crate::smp::fast_cpu_index();
+    if cpu == STOPPER.load(Ordering::Acquire) {
+        return;
+    }
+    PARKED.fetch_or(kexec_cpu_bit(cpu), Ordering::AcqRel);
+    loop {
+        // SAFETY: clearing the interrupt flag and halting have no memory
+        // effects; with it clear, only an NMI (blocked: this is the NMI
+        // handler), an SMI or the coming INIT ends the halt.
+        unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
+    }
+}
+
+/// Stop every CPU but this one before the jump: send each an NMI, which
+/// parks it ([`park_if_restarting`]), and wait until each says it has.
+///
+/// The INIT [`quiesce`] sends afterwards would stop them too, but not at a
+/// moment this CPU can see: an INIT is taken when the target next can, and a
+/// CPU still running the old kernel while the trampoline copies the new one
+/// over memory could write into it. An NMI rather than an ordinary interrupt
+/// because a CPU spinning with interrupts off -- on a lock this one holds, say
+/// -- takes it all the same. Linux stops the other CPUs the same way before a
+/// kexec (`native_stop_other_cpus`, an NMI for the ones that do not answer).
+///
+/// A CPU that has not parked within [`STOP_WAIT_NS`] is reported, and reset
+/// by the INIT regardless.
+fn stop_other_cpus() {
+    let me = crate::smp::fast_cpu_index();
+    let mut others = 0u64;
+    for cpu in 0..crate::smp::cpu_count() {
+        if cpu != me && crate::smp::cpu_apic_id(cpu).is_some() {
+            others |= kexec_cpu_bit(cpu);
+        }
+    }
+    if others == 0 {
+        return;
+    }
+    STOPPER.store(me, Ordering::Release);
+    PARKED.store(0, Ordering::Release);
+    STOPPING.store(true, Ordering::SeqCst);
+    // SAFETY: the APIC is up (the kernel is running), and every CPU's NMI
+    // handler parks on this NMI (`park_if_restarting`).
+    unsafe { crate::apic::send_nmi_all_excluding_self() };
+    let start = crate::hrtimer::now_ns();
+    while PARKED.load(Ordering::Acquire) & others != others {
+        if crate::hrtimer::now_ns().saturating_sub(start) > STOP_WAIT_NS {
+            // Lock-free: a parked CPU may hold the serial lock.
+            crate::emergency_println!(
+                "[kexec] CPUs {:#x} did not stop; the INIT resets them regardless",
+                others & !PARKED.load(Ordering::Acquire)
+            );
+            return;
+        }
+        core::hint::spin_loop();
     }
 }
 
@@ -2618,33 +2730,55 @@ unsafe fn allow_execution_at(virt: u64) -> KernelResult<()> {
 
 /// Reload the running kernel into itself: the boot-test kexec mode's trigger.
 ///
-/// Gathers the running kernel's own ELF (the file Limine loaded) and boot facts,
-/// prepares a handoff, and executes it. On success it does not return (the second
-/// kernel boots); on any pre-jump failure it returns the [`KernelError`]. The
-/// second kernel is given this one's command line without the
-/// `kexec.selftest=1` that asked for the reload ([`restart_cmdline`]), so it
-/// boots as this one was told to -- skipping the self-tests, say, so the
-/// harness need not wait for them twice -- and does not reload again: the
-/// self-reload happens exactly once.
+/// The running kernel's own ELF (the file Limine loaded), restarted into
+/// through [`crate::power::reload`] -- the body of `SYS_POWER_RELOAD`, so the
+/// kexec boot proves the call's flush and its move to the bootstrap CPU as
+/// well as the jump. On success it does not return (the second kernel boots);
+/// on any pre-jump failure it returns the [`KernelError`]. The second kernel
+/// is given this one's command line without the `kexec.selftest=1` that asked
+/// for the reload ([`restart_cmdline`]), so it boots as this one was told to
+/// -- skipping the self-tests, say, so the harness need not wait for them
+/// twice -- and does not reload again: the self-reload happens exactly once.
 ///
 /// Called only from the boot path under the `kexec.selftest=1` command line, to
 /// validate the trampoline (the one part no self-test can exercise). Not reached
-/// on an ordinary boot.
-///
-/// # Safety
-///
-/// Only the bootstrap CPU may call this, and the caller is committing to the
-/// restart: on success the old kernel ceases to exist.
-pub unsafe fn reload_self() -> KernelError {
-    let Some((addr, size)) = crate::boot::kernel_file_address() else {
-        return KernelError::NotSupported;
-    };
-    // SAFETY: Limine keeps the kernel file mapped, live for the kernel's lifetime.
-    let image = unsafe { core::slice::from_raw_parts(addr as *const u8, size) };
-    let Some(hhdm) = crate::mm::page_table::hhdm() else {
+/// on an ordinary boot. The caller commits to the restart: on success the old
+/// kernel ceases to exist.
+pub fn reload_self() -> KernelError {
+    let Some(image) = running_image() else {
         return KernelError::NotSupported;
     };
     let cmdline = restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default());
+    crate::power::reload(image, &cmdline)
+}
+
+/// The running kernel's own image: the ELF file Limine loaded, which it keeps
+/// mapped for the kernel's lifetime. `None` when Limine did not say where.
+#[must_use]
+pub fn running_image() -> Option<&'static [u8]> {
+    let (addr, size) = crate::boot::kernel_file_address()?;
+    // SAFETY: Limine keeps the kernel file mapped, live and unwritten, for the
+    // kernel's lifetime (the kernel-file response's contract).
+    Some(unsafe { core::slice::from_raw_parts(addr as *const u8, size) })
+}
+
+/// Restart into `image`, handing it `cmdline`: gather the running kernel's boot
+/// facts (memory map, direct-map offset, RSDP, framebuffers), prepare the
+/// handoff, and execute it. Shared by the boot-path self-reload
+/// ([`reload_self`]) and `SYS_POWER_RELOAD`.
+///
+/// On success it does not return: the new kernel boots. On any failure before
+/// the machine is quiesced it returns the [`KernelError`], with nothing changed.
+///
+/// # Safety
+///
+/// Only the bootstrap CPU may call this ([`quiesce`] INITs every other CPU),
+/// and the caller is committing to the restart: on success the old kernel
+/// ceases to exist.
+pub unsafe fn reload(image: &[u8], cmdline: &[u8]) -> KernelError {
+    let Some(hhdm) = crate::mm::page_table::hhdm() else {
+        return KernelError::NotSupported;
+    };
     let framebuffers: alloc::vec::Vec<FramebufferDesc> = crate::boot::framebuffers()
         .iter()
         .map(|fb| FramebufferDesc::of(fb))
@@ -2653,7 +2787,7 @@ pub unsafe fn reload_self() -> KernelError {
         memory_map: crate::boot::memory_map(),
         hhdm,
         rsdp_address: crate::boot::rsdp_address(),
-        cmdline: Some(&cmdline),
+        cmdline: Some(cmdline),
         framebuffers: &framebuffers,
     };
     let prepared = match prepare_handoff(image, &facts) {

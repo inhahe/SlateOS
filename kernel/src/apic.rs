@@ -711,6 +711,29 @@ pub unsafe fn send_sipi(apic_id: u8, vector: u8) {
     wait_icr_idle();
 }
 
+/// Send an NMI to every CPU but this one (the "all excluding self"
+/// shorthand). An NMI is taken whatever the target's interrupt flag, so it
+/// reaches a CPU spinning with interrupts off; what it then does is the NMI
+/// handler's to decide (`idt::handle_nmi`).
+///
+/// # Safety
+///
+/// APIC must be initialized, and every target's NMI handler must expect this
+/// NMI: today only a restart's stop does (`kexec::park_if_restarting`).
+pub unsafe fn send_nmi_all_excluding_self() {
+    wait_icr_idle();
+
+    // ICR low: NMI delivery (100 in bits 10:8), edge, physical, all excluding
+    // self (bits 19:18 = 11). The vector field is ignored for an NMI.
+    // = 0x000C_0400
+    // SAFETY: Valid APIC register write, triggers the IPI.
+    unsafe {
+        apic_write(APIC_ICR_LOW, 0x000C_0400);
+    }
+
+    wait_icr_idle();
+}
+
 /// Send a fixed-mode IPI with the given vector to all CPUs except self.
 ///
 /// Uses the "all excluding self" shorthand destination (ICR bits 19:18 = 11)

@@ -59267,3 +59267,23 @@ the boot is task 0, pinned to the BSP since 2026-10-09 -- but
 (and wakes now go to idle CPUs, design-decisions 1558). Before `execute`, pin
 the caller to the BSP (`sched::set_affinity(current, 1)`, then yield until
 `current_cpu_index() == 0`), or hand the reload to a BSP kernel task.
+**UPDATE 2026-10-09 (lane A, lane-a-wip): (4) is wired.**
+`SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)`: (0, 0)
+for the image is the running kernel's own file, (0, 0) for the command line
+the running one's less `kexec.selftest=1`; `handlers::reload_request` refuses
+everything it refuses before anything is flushed or stopped (dispatch
+self-test). `power::reload` flushes every filesystem and disk, pins the
+caller to the BSP (`set_affinity`, which returns on it), and calls
+`kexec::reload`; the boot-path self-reload goes through `power::reload`
+too, so the kexec boot proves the call's body. For (3), `quiesce` now stops
+the other CPUs before the INITs: an NMI to all but itself, parking each in
+the NMI handler (`kexec::park_if_restarting`, interrupts off, `hlt`), and
+waits until each says so (500 ms, then the INIT regardless) -- an INIT
+alone is taken when the target next can, and a CPU still running the old
+kernel during the copy could write into the new one. **Verified
+2026-10-09:** the kexec boot (`selftest.skip=1 kexec.selftest=1`, through
+`power::reload`) on one CPU and on two under multi-threaded TCG -- AP 1
+stopped by the NMI within the wait, the second kernel brought it back up,
+BOOT_OK both times. **Left:** lane C's request answered and lane B told
+that `powerctl reload` can call 1139, once this is on main; the kexec boot
+is still run by hand, not by `boot-test.sh`.

@@ -8539,26 +8539,103 @@ pub fn sys_power_reboot(args: &SyscallArgs) -> SyscallResult {
     crate::power::reboot()
 }
 
-/// `SYS_POWER_RELOAD` -- replace the running kernel without a firmware reset
-/// (kexec). See [`SYS_POWER_RELOAD`](crate::syscall::number::SYS_POWER_RELOAD).
+/// The largest kernel image `SYS_POWER_RELOAD` copies in: four times the
+/// debug kernel (~29 MiB), and bounded so a caller's length cannot make the
+/// kernel allocate without limit. The image must also fit one contiguous run
+/// of free memory, which `kexec` checks.
+pub(crate) const RELOAD_IMAGE_MAX: usize = 128 << 20;
+
+/// The longest command line `SYS_POWER_RELOAD` passes on.
+pub(crate) const RELOAD_CMDLINE_MAX: usize = 4096;
+
+/// The image a `SYS_POWER_RELOAD` call restarts into: the running kernel's
+/// own, or one copied in from the caller.
+pub(crate) enum ReloadImage {
+    /// The file the bootloader loaded, `(image_ptr, image_len)` = `(0, 0)`.
+    Running(&'static [u8]),
+    /// The caller's bytes.
+    Copied(alloc::vec::Vec<u8>),
+}
+
+impl ReloadImage {
+    /// The image's bytes.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Running(image) => image,
+            Self::Copied(image) => image,
+        }
+    }
+}
+
+/// What a `SYS_POWER_RELOAD` call asks for, read from the caller and checked
+/// -- everything the call refuses, it refuses here, before anything is
+/// flushed or stopped: reserved arguments that are not 0, a length without
+/// its pointer or a pointer without its length, an image over
+/// [`RELOAD_IMAGE_MAX`] or a command line over [`RELOAD_CMDLINE_MAX`] or with
+/// a NUL in it, and an image that is not a kernel. Split from
+/// [`sys_power_reload`] so that the dispatch self-test can check each refusal
+/// without a caller allowed to restart the machine.
+pub(crate) fn reload_request(
+    args: &SyscallArgs,
+) -> KernelResult<(ReloadImage, alloc::vec::Vec<u8>)> {
+    if args.arg4 != 0 || args.arg5 != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let read = |ptr: u64, len: u64, max: usize| -> KernelResult<alloc::vec::Vec<u8>> {
+        let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+        if len > max {
+            return Err(KernelError::InvalidArgument);
+        }
+        crate::mm::user::read_user_vec(ptr, len, max)
+    };
+    // The image: the caller's, or with (0, 0) the running kernel's own.
+    let image = match (args.arg0, args.arg1) {
+        (0, 0) => {
+            ReloadImage::Running(crate::kexec::running_image().ok_or(KernelError::NotSupported)?)
+        }
+        (0, _) | (_, 0) => return Err(KernelError::InvalidArgument),
+        (ptr, len) => ReloadImage::Copied(read(ptr, len, RELOAD_IMAGE_MAX)?),
+    };
+    // The command line: the caller's -- empty, given a pointer and length 0 --
+    // or with (0, 0) the running kernel's, less `kexec.selftest=1`.
+    let cmdline = match (args.arg2, args.arg3) {
+        (0, 0) => {
+            crate::kexec::restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default())
+        }
+        (0, _) => return Err(KernelError::InvalidArgument),
+        (_, 0) => alloc::vec::Vec::new(),
+        (ptr, len) => {
+            let line = read(ptr, len, RELOAD_CMDLINE_MAX)?;
+            if line.contains(&0) {
+                return Err(KernelError::InvalidArgument);
+            }
+            line
+        }
+    };
+    crate::kexec::parse_kernel_elf(image.bytes())
+        .map_err(crate::kexec::KexecError::as_kernel_error)?;
+    Ok((image, cmdline))
+}
+
+/// `SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)` --
+/// restart SlateOS without the firmware (kexec). See
+/// [`SYS_POWER_RELOAD`](crate::syscall::number::SYS_POWER_RELOAD).
 ///
-/// Gates on [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL) before
-/// anything else -- the caller chooses the image, a larger trust question than a
-/// reboot -- then checks the image arguments. The handoff *preparation*
-/// (`kexec::prepare_handoff`) is built and self-tested, but the quiesce-and-jump
-/// that would make this call not return is not yet wired (todo.txt), so a
-/// well-formed, authorised call is refused cleanly with `NotSupported` rather
-/// than half-acting.
+/// Gates on [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL)
+/// before anything else -- the caller chooses the image, a larger trust
+/// question than a reboot -- then reads and checks what it asks for
+/// ([`reload_request`]). Past that it does not return when the restart
+/// happens ([`crate::power::reload`]).
 pub fn sys_power_reload(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_power_reload_right() {
         return SyscallResult::err(e);
     }
-    let image_ptr = args.arg0;
-    let image_len = args.arg1;
-    if image_ptr == 0 || image_len == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    SyscallResult::err(KernelError::NotSupported)
+    let (image, cmdline) = match reload_request(args) {
+        Ok(request) => request,
+        Err(e) => return SyscallResult::err(e),
+    };
+    note_power_request("restart without the firmware");
+    SyscallResult::err(crate::power::reload(image.bytes(), &cmdline))
 }
 
 /// `SYS_MEMORY_ADVISE(addr, len, advice)` (1140): `madvise(2)` for native

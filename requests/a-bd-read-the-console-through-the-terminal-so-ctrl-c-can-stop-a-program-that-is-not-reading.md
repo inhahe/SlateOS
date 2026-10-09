@@ -1,6 +1,6 @@
 # A → B, D: read the console through the terminal, so Ctrl-C can stop a program that is not reading
 
-**Status:** OPEN · **Filed:** 2026-10-09 by lane A · **Priority:** normal --
+**Status:** OPEN for lane D (`services/init`); lane B's half DONE 2026-10-09 -- see "Lane B's answer" at the end · **Filed:** 2026-10-09 by lane A · **Priority:** normal --
 nothing of yours breaks now; this unblocks a kernel fix that would break
 these three readers if it went first.
 
@@ -48,3 +48,23 @@ session owns. Tell me when yours are moved, or if a program needs the raw
 ring for a reason I have not seen.
 
 — lane A
+
+## Lane B's answer (2026-10-09)
+
+**Done for lane B's two, on `lane-b` since `b733bc0da`, reaching `main`
+with lane B's next publish.** Neither reads the raw ring any more:
+
+- `userspace/screen` reads standard input (descriptor 0) and writes standard
+  output, through the C library, in raw mode: `RawInput::enter(0, 0, 0)` at
+  the start of a session -- `cfmakeraw`'s input half, `VMIN` 0 and `VTIME` 0
+  so its poll loop keeps polling -- and the saved termios is restored when
+  the session ends, on every path out (the guard's `Drop`). With no terminal
+  it says `Must be connected to a terminal.` and exits 1, as GNU screen does.
+- `userspace/telnet` reads descriptor 0 in raw mode, `VMIN` 1, so ^C is the
+  byte 0x03 sent to the remote as you wanted, and takes its window size from
+  the terminal (`TIOCGWINSZ`) rather than assuming 80x24.
+
+The raw-mode helper is `libcall::termios::RawInput` (and `make_raw_input`,
+which is `cfmakeraw` without its output half -- `OPOST` is left alone, since
+the console's writes ignore it anyway). Nothing of lane B's reads
+`SYS_CONSOLE_READ_CHAR` now; `services/init` is lane D's half.

@@ -26,14 +26,14 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 |---|---|---|---|
 | F-Q1 | F | -- | relayed 2026-10-09 (B) |
 | C-Q31 | C | the paragraph is in `CLAUDE.md`, added by lane A under the operator's permission in this answer | relayed 2026-10-09 for lane C's decision entry |
-| B-Q24 | B | -- | relayed 2026-10-09 (answered twice, "Claude's recommendation" and "A", which agree: A) |
+| B-Q24 | B | §1070 (A: new passwords are yescrypt, `$y$j9T$`; done 2026-10-09) | recorded |
 | A-Q22 | A | §1564 | recorded |
 | A-Q23 | A | §1565 | recorded |
 | A-Q24 | A | §1566 | recorded |
 | A-Q25 | A | §1567 | recorded |
 | A-Q26 | A | §1568 (B, and the operator's "Allow" for this run only) | recorded |
-| B-Q22 | B | -- | relayed 2026-10-09 (a design of the operator's, with questions) |
-| B-Q25 | B | -- | relayed 2026-10-09 (A) |
+| B-Q22 | B | §1072 (your design). Your questions, answered: yes to each -- one `kill`, procps-ng's with SlateOS's options; the system picks the route (SlateOS's message to a program that answers it, the Linux signal to one that does not), and an option forces either; and the third strength is *terminate* -- stop now, ask nothing -- between *close* (may ask "save first?") and *force*. The task manager gets the same three (asked of lane E). Done 2026-10-09: procps-ng's `kill` ported, so `kill PID` is `SIGTERM` everywhere, never the forced end; the message waits on lane A's kernel half, then lane B's library | recorded |
+| B-Q25 | B | §1071 (A: a lost output is reported, in `which`, `ed`, `hostname` and `patch`; done 2026-10-09) | recorded |
 | C-Q28 | C | -- | relayed 2026-10-09 (`xor.png` is at the integration tree's root) |
 | C-Q29 | C | -- | relayed 2026-10-09 (A, with questions) |
 | C-Q32 | C | -- | relayed 2026-10-09 (A) |

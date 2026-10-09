@@ -7,21 +7,26 @@
 # The ports, each saying so in its module doc and checked against the real
 # binary: blkdiscard, blkid, blockdev, column, findfs, findmnt, flock, getopt,
 # logger, lsblk, lscpu, lsirq, lsmem, lsns, mountpoint, prlimit, swapon and
-# swapoff, wipefs; userspace/coreutils's cal and renice; userspace/login's
-# login records (login-utils/login.c); and the libraries smartcols
-# (libsmartcols), ulblkid (libblkid), ulmount (libmount), ulsysfs (lib/sysfs.c
-# and friends), ulstrutils (lib/strutils.c) and this crate
-# (include/closestream.h).
+# swapoff, wipefs; userspace/coreutils's cal, renice, hexdump, look, last and
+# lastb, wall, write and mesg; userspace/login's login records
+# (login-utils/login.c); and the libraries smartcols (libsmartcols), ulblkid
+# (libblkid), ulmount (libmount), ulsysfs (lib/sysfs.c and friends),
+# ulstrutils (lib/strutils.c), ulcolors (lib/colors.c, lib/color-names.c),
+# ultimeutils (lib/timeutils.c) and this crate (include/closestream.h).
 #
 # util-linux licenses file by file (its README.licensing). What these ports
 # take from:
 #   GPL-2.0-or-later  the default, for every file without a notice of its own,
-#                     and most programs (lsblk, findmnt, wipefs, getopt...)
+#                     and most programs (lsblk, findmnt, wipefs, getopt,
+#                     login-utils/last.c...)
 #   LGPL-2.1-or-later libblkid, libmount, libsmartcols, blkid.c, lsirq.c,
 #                     lib/timeutils.c, lib/cpuset.c, lib/mbsalign.c,
-#                     lib/canonicalize.c, lib/encode.c, lib/match.c
+#                     lib/canonicalize.c, lib/encode.c, lib/match.c,
+#                     lib/colors.c
 #   BSD-4-Clause-UC   misc-utils/cal.c, text-utils/column.c,
-#                     misc-utils/logger.c, sys-utils/renice.c
+#                     misc-utils/logger.c, sys-utils/renice.c,
+#                     text-utils/hexdump*.c, misc-utils/look.c,
+#                     term-utils/wall.c, write.c, mesg.c and ttymsg.c
 #   BSD-4.3TAHOE      login-utils/login.c
 #   MIT               sys-utils/flock.c
 #   public domain     include/closestream.h, lib/strutils.c, lib/sysfs.c,

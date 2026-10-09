@@ -62,9 +62,13 @@ GNU Time:
   texts:
     - GPL-3.0
 
-# src/bin/free.rs (src/free.c and local/strutils.c, GPL-2.0-or-later;
-# library/meminfo.c, LGPL-2.1-or-later) and src/bin/uptime.rs (src/uptime.c,
-# LGPL-2.1-or-later).
+# The procps-ng programs, each a port of its src/*.c: free, uptime, vmstat,
+# ps, pgrep and pkill, w, sysctl (with local/procio.c), slabtop, watch,
+# tload, pmap, pwdx, skill and snice, and kill (src/kill.c,
+# LGPL-2.1-or-later); src/procps/ (library/*.c -- readproc, meminfo, stat,
+# vmstat, diskstats, slabinfo, namespace, sysinfo, devname, pwcache -- and
+# local/signals.c, local/strutils.c). The programs are GPL-2.0-or-later
+# unless their header says otherwise; library/ is LGPL-2.1-or-later.
 procps-ng:
   version: 4.0.4
   licence: GPL-2.0-or-later AND LGPL-2.1-or-later
@@ -83,3 +87,84 @@ Debian hostname:
   licence: GPL-2.0-or-later
   texts:
     - GPL-2.0
+
+# src/bin/pstree.rs (src/pstree.c). psmisc's files are GPL-2.0-or-later.
+psmisc:
+  version: 23.7
+  licence: GPL-2.0-or-later
+  texts:
+    - GPL-2.0
+
+# ncurses' programs -- src/bin/tput.rs, clear.rs, tset.rs, tabs.rs, toe.rs,
+# infocmp.rs and src/bin/tic/ (progs/*.c) -- and src/ncurses.rs (tty_settings.c
+# and the like); elsewhere in lane B, userspace/curses (ncursesw's base,
+# tty and widechar libraries) and userspace/terminfo (tinfo: tparm, tputs,
+# the compiled-entry reader, the compiler). One licence for all of it, the
+# X11 licence with "distribute with modifications" added: its text is
+# ncurses-COPYING, which must travel with every copy.
+ncurses:
+  version: 6.4-20240113
+  licence: X11-distribute-modifications-variant
+  texts:
+    - ncurses-COPYING
+
+# src/bin/patch/ (src/*.c, with Debian 2.7.6-7's fifteen patches, and the
+# gnulib modules patch bundles: backupfile, quotearg, ...).
+GNU patch:
+  version: 2.7.6
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0
+
+# src/killall5.rs, src/bin/killall5.rs and src/bin/pidof.rs (src/killall5.c).
+sysvinit:
+  version: 3.08
+  licence: GPL-2.0-or-later
+  texts:
+    - GPL-2.0
+
+# src/bin/lastlog.rs (src/lastlog.c); elsewhere in lane B, userspace/chpasswd
+# (src/chpasswd.c). Both files are BSD-3-Clause, as shadow-utils is unless a
+# file says otherwise; their own copyright lines follow the licence in
+# shadow-utils-COPYING. chpasswd also translates libmisc/salt.c's
+# crypt_make_salt, which is under the Unlicense and owes no notice.
+shadow-utils:
+  version: 4.13
+  licence: BSD-3-Clause
+  texts:
+    - shadow-utils-COPYING
+
+# src/bin/xxd.rs: vim's src/xxd/xxd.c, which its author offers under the
+# X11 (MIT) licence or GPL-2.0, at the user's choice. xxd-NOTICE is the
+# file's own grant; GPL-2.0 is the text of the second choice.
+xxd:
+  version: vim 9.1.0016
+  licence: MIT OR GPL-2.0-only
+  texts:
+    - xxd-NOTICE
+    - GPL-2.0
+
+# src/bin/systemd-cat.rs (src/journal/cat.c, and the parts of
+# src/basic/ and src/shared/ it calls).
+systemd:
+  version: 255
+  licence: LGPL-2.1-or-later
+  texts:
+    - LGPL-2.1
+
+# src/bin/awk/: gawk's interpreter -- its array layouts and hashes
+# (str_array.c, int_array.c, cint_array.c), format_tree (builtin.c), the
+# instruction order of awkgram.y and interpret.h -- translated; and
+# userspace/ere's awk module, gawk's escape handling (awkgram.y, re.c).
+gawk:
+  version: 5.2.1
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0
+
+# src/bin/strings.rs: binutils' binutils/strings.c, its scan and options.
+GNU binutils:
+  version: 2.42
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0

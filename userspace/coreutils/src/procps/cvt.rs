@@ -68,6 +68,13 @@ pub fn dbl(v: u64) -> f64 {
     v as f64
 }
 
+/// `unsigned int` to `float`: to nearest, as C converts it.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn flt(v: u32) -> f32 {
+    v as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::{cvt_i32, cvt_i64, cvt_u32, cvt_u64, dbl};

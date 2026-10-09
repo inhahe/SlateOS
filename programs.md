@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**500 programs; 341 on the image, 6 carried inside the kernel.**
+**501 programs; 342 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 315
+## Userland utilities and services (`userspace/`, lane B) -- 316
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -252,6 +252,7 @@ two disagree.
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. | yes | `coreutils` |  |
 | `shuf` | Write a random permutation of the input lines. | yes | `coreutils` |  |
 | `skill` | Send a signal to the processes an expression picks. | yes | `coreutils` |  |
+| `slabtop` | Display the kernel's slab caches, a screen at a time: procps-ng 4.0.4's `slabtop`, ported. | yes | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
 | `snice` | Set the nice value of the processes an expression picks. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |

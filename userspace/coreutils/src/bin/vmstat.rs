@@ -880,8 +880,12 @@ fn slabheader(out: &mut Stream) {
 }
 
 fn slabformat(run: &Run, out: &mut Stream) -> Result<(), Stop> {
-    let mut info =
-        SlabInfo::new().map_err(|e| fatal_errno("Unable to create slabinfo structure", &e))?;
+    let mut info = SlabInfo::new().map_err(|e| {
+        fatal_errno(
+            "Unable to create slabinfo structure",
+            &std::io::Error::from_raw_os_error(e),
+        )
+    })?;
     if !run.moreheaders {
         slabheader(out);
     }

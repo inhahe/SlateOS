@@ -80,6 +80,8 @@ ulcolors = { path = "../ulcolors" }
 # ncurses' terminfo layer -- setupterm's verdicts, tgetent's trimmed sgr0,
 # tparm, tputs -- for `pstree`'s symbol choice and its `-h`/`-H` highlight.
 terminfo = { path = "../terminfo" }
+# ncursesw's screen library, for the full-screen procps programs: `slabtop`.
+curses = { path = "../curses" }
 # C's strtol and strtoul at any base, 0 included: `xxd` reads every number
 # with them, and `hexdump`'s `_L` colour units at bases 8, 10 and 16.
 cstrtol = { path = "../cstrtol" }

@@ -440,6 +440,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/shuf-diff.sh` | shuf-diff.sh — compare our `shuf` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/skill-diff.sh` | skill-diff.sh -- run our `skill` and `snice` and procps-ng's side by side and |
+| `scripts/slabtop-diff.sh` | Differential test: our slabtop against procps-ng 4.0.4's. |
 | `scripts/sleep-diff.sh` | Differential test: our `sleep` against GNU coreutils 9.4's. |
 | `scripts/smartcols-cases.py` | Scripts for scripts/smartcols-diff.sh: tables to build, each printed. |
 | `scripts/smartcols-diff.sh` | Differential test: `userspace/smartcols`, the port of libsmartcols, against |
@@ -577,4 +578,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_567 scripts._
+_568 scripts._

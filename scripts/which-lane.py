@@ -791,6 +791,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "shred-diff.sh",
         "shuf-diff.sh",
         "skill-diff.sh",
+        "slabtop-diff.sh",
         "sleep-diff.sh",
         "smartcols-cases.py",
         "smartcols-diff.sh",

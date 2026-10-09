@@ -31,7 +31,10 @@ const F_SETFD: i32 = 2;
 #[cfg(any(unix, test))]
 const FD_CLOEXEC: i32 = 1;
 
-/// `poll`'s events: room to write, and a descriptor that is not open.
+/// `poll`'s events: something to read, room to write, and a descriptor that
+/// is not open.
+#[cfg(any(unix, test))]
+const POLLIN: i16 = 0x0001;
 #[cfg(any(unix, test))]
 const POLLOUT: i16 = 0x0004;
 #[cfg(any(unix, test))]
@@ -56,8 +59,9 @@ mod sys {
         pub fn close(fd: i32) -> i32;
         pub fn isatty(fd: i32) -> i32;
         pub fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-        // `void *`, as the C library and Rust's runtime declare it.
+        // `void *`, as the C library and Rust's runtime declare them.
         pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
+        pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
     }
 }
 
@@ -86,6 +90,32 @@ fn write_one(fd: i32, buf: &[u8]) -> Result<usize, i32> {
 
 #[cfg(not(unix))]
 fn write_one(_fd: i32, _buf: &[u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// Read from `fd` once into `buf`: `read`. How many bytes came, 0 at the
+/// end; never more than asked for, and nothing read ahead -- what a program
+/// reading keys one at a time between `select`s needs, which a buffered
+/// stream would take from under the next `select`.
+///
+/// # Errors
+///
+/// What `read` reports: `EINTR`, `EAGAIN`, `EBADF`, `EIO` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn read(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    read_one(fd, buf)
+}
+
+#[cfg(unix)]
+fn read_one(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: `buf` is writable for its whole length, which is what the call
+    // is told.
+    let n = unsafe { sys::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    usize::try_from(n).map_err(|_| last_errno())
+}
+
+#[cfg(not(unix))]
+fn read_one(_fd: i32, _buf: &mut [u8]) -> Result<usize, i32> {
     Err(ENOSYS)
 }
 
@@ -226,6 +256,47 @@ fn is_terminal_one(_fd: i32) -> bool {
     false
 }
 
+/// Wait at most `timeout_ms` milliseconds (`-1` for ever) for `fd` to have
+/// something to read: `poll` for `POLLIN`. `Ok(true)` when it has -- or has
+/// reached its end, failed or hung up, which is when `select` too calls a
+/// descriptor readable and the read then says which -- and `Ok(false)` when
+/// the time ran out.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open (`POLLNVAL`), `EINTR` when a signal came
+/// first, `EINVAL`, `ENOMEM`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait_readable(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    wait_readable_one(fd, timeout_ms)
+}
+
+#[cfg(unix)]
+fn wait_readable_one(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    let mut p = sys::PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `p` is one live `struct pollfd`, which the call reads and
+    // writes `revents` into; `nfds` says one.
+    let rc = unsafe { sys::poll(&raw mut p, 1, timeout_ms) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    if rc == 0 {
+        return Ok(false);
+    }
+    if p.revents & POLLNVAL != 0 {
+        return Err(EBADF);
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn wait_readable_one(_fd: i32, _timeout_ms: i32) -> Result<bool, i32> {
+    Err(ENOSYS)
+}
+
 /// Wait at most `timeout_ms` milliseconds (`-1` for ever) for `fd` to take a
 /// write: `poll` for `POLLOUT`, as systemd's `fd_wait_for_event` asks it.
 /// `Ok(true)` when it will -- or when it has failed or hung up, which the
@@ -279,6 +350,7 @@ mod tests {
         assert_eq!(F_GETFD, posix::fcntl_ops::F_GETFD);
         assert_eq!(F_SETFD, posix::fcntl_ops::F_SETFD);
         assert_eq!(FD_CLOEXEC, 1);
+        assert_eq!(POLLIN, posix::poll::POLLIN);
         assert_eq!(POLLOUT, posix::poll::POLLOUT);
         assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
     }

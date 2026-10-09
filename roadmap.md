@@ -5601,6 +5601,20 @@ _Port ext4 first. Don't write a custom filesystem._
   over `/dev/log` -- and with a terminal, every run in a PID namespace of its
   own whose init starts the same fixtures in the same order on both sides,
   so that killall5 can reach nothing else);
+  `slabtop` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  first full-screen procps program, drawn through `userspace/curses`; the
+  library's `slabinfo.c` arithmetic in its own types -- `float` use, wrapping
+  `unsigned int` totals, the smallest object starting at `INT_MAX` -- the
+  totals from a second read of the file, the caches in `qsort_r`'s stable
+  order with names by `strcoll`, keys read one at a time between frames,
+  `SIGINT` and `SIGWINCH` as upstream handles them and `SIGTERM` left to
+  curses; an empty `/proc/slabinfo` is the library's null info, refused by
+  every read after with `EINVAL`, which vmstat's `-m` now also says; the new
+  `libcall::fd::read` and `wait_readable` and `libcall::locale`'s `strcoll`,
+  `tolower` and `radix`; `scripts/slabtop-diff.sh`: 218 cases agree and 3
+  differ on purpose, `-o` reports over pinned fixtures and the screen on
+  pseudo-terminals -- keys, resizes, `SIGINT`, `SIGTERM`, `SIGHUP`, `^Z`, a
+  file changing between frames);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5743,7 +5757,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/clear/tset/reset/tabs: ncurses 6.4's, coreutils programs since 2026-10-08 (see the coreutils item) -- capabilities, `-S`, `init`/`reset`, the init and reset strings, margins, tab stops, `tset`'s mappings and questions, the line put right, `tabs`' lists, through `userspace/terminfo` (`scripts/tput-diff.sh`)
   - [x] tic/captoinfo/infotocap/infocmp/toe: ncurses 6.4's terminfo compiler and its tools, coreutils programs since 2026-10-09 (see the coreutils item) -- compiling terminfo and termcap sources, translating between them, `tic -v`'s checks, `infocmp`'s dumps and comparisons, `toe`'s tables, through `userspace/terminfo`'s `compile` (`scripts/tic-diff.sh`). The image has no terminfo database to use them on yet: `requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md`
-  - [-] curses: ncursesw 6.4's screen library, ported as Ubuntu builds it, for procps' `slabtop` and `watch` (2026-10-09, `userspace/curses`) -- the screen and `stdscr`, adding bytes and wide characters, attributes and colours, the cursor-movement optimiser and the hash-map scroll optimiser, `doupdate`, `endwin` and coming back, resizing, line drawing, and the `SIGTSTP`/`SIGINT`/`SIGTERM`/`SIGWINCH` handlers -- which here wait for a curses call in progress rather than running inside it (§1069); `scripts/curses-diff.sh`: 990 cases agree with Ubuntu's libncursesw, scripts of curses calls run under 17 terminal types, to a file and to a pseudo-terminal, suspended, interrupted and resized. No input (`getch`). Remaining: `slabtop` and `watch` on it, then `TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER`
+  - [-] curses: ncursesw 6.4's screen library, ported as Ubuntu builds it, for procps' `slabtop` and `watch` (2026-10-09, `userspace/curses`) -- the screen and `stdscr`, adding bytes and wide characters, attributes and colours, the cursor-movement optimiser and the hash-map scroll optimiser, `doupdate`, `endwin` and coming back, resizing, line drawing, and the `SIGTSTP`/`SIGINT`/`SIGTERM`/`SIGWINCH` handlers -- which here wait for a curses call in progress rather than running inside it (§1069); `scripts/curses-diff.sh`: 990 cases agree with Ubuntu's libncursesw, scripts of curses calls run under 17 terminal types, to a file and to a pseudo-terminal, suspended, interrupted and resized. No input (`getch`). `slabtop` draws through it (2026-10-09). Remaining: `watch` on it, then `TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER`
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)

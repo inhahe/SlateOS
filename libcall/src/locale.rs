@@ -21,10 +21,17 @@
 
 /// `LC_CTYPE`.
 pub const LC_CTYPE: i32 = 0;
+/// `LC_NUMERIC`.
+pub const LC_NUMERIC: i32 = 1;
+/// `LC_COLLATE`.
+pub const LC_COLLATE: i32 = 3;
 /// `LC_ALL`.
 pub const LC_ALL: i32 = 6;
 /// `CODESET`, `nl_langinfo`'s item for the codeset's name.
 pub const CODESET: i32 = 14;
+/// `RADIXCHAR`, `nl_langinfo`'s item for the decimal point `printf`'s `%f`
+/// writes.
+pub const RADIXCHAR: i32 = 0x1_0000;
 
 /// `MB_LEN_MAX` in glibc: the most bytes one character takes in any locale.
 pub const MB_LEN_MAX: usize = 16;
@@ -72,6 +79,8 @@ mod sys {
         pub fn wctob(wc: u32) -> i32;
         pub fn btowc(c: i32) -> u32;
         pub fn __ctype_get_mb_cur_max() -> usize;
+        pub fn strcoll(s1: *const u8, s2: *const u8) -> i32;
+        pub fn tolower(c: i32) -> i32;
     }
 }
 
@@ -149,6 +158,61 @@ pub fn codeset(buf: &mut [u8]) -> Option<usize> {
         let dst = buf.get_mut(..ASCII.len())?;
         dst.copy_from_slice(ASCII);
         Some(ASCII.len())
+    }
+}
+
+/// `nl_langinfo (RADIXCHAR)`: the selected `LC_NUMERIC`'s decimal point,
+/// copied into `buf` -- `.` in `C`, `,` in many others. What `printf`'s
+/// `%f` writes between the whole and the fraction.
+pub fn radix(buf: &mut [u8]) -> Option<usize> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `RADIXCHAR` is a valid item; the result is copied out at
+        // once.
+        let p = unsafe { sys::nl_langinfo(RADIXCHAR) };
+        copy_c_string(p, buf)
+    }
+    #[cfg(not(unix))]
+    {
+        let dst = buf.get_mut(..1)?;
+        dst.copy_from_slice(b".");
+        Some(1)
+    }
+}
+
+/// `strcoll (a, b)`: how the selected `LC_COLLATE` orders two strings --
+/// `strcmp`'s byte order in `C`, the locale's collation elsewhere.
+#[must_use]
+pub fn strcoll(a: &core::ffi::CStr, b: &core::ffi::CStr) -> core::cmp::Ordering {
+    #[cfg(unix)]
+    {
+        // SAFETY: both are NUL-terminated strings that live for the call,
+        // which only reads them.
+        let r = unsafe { sys::strcoll(a.as_ptr().cast(), b.as_ptr().cast()) };
+        r.cmp(&0)
+    }
+    #[cfg(not(unix))]
+    {
+        a.to_bytes().cmp(b.to_bytes())
+    }
+}
+
+/// `tolower (c)`, for `c` an `unsigned char` or `EOF`: the selected
+/// `LC_CTYPE`'s lower case of a byte; anything outside that range comes
+/// back as it was.
+#[must_use]
+pub fn tolower(c: i32) -> i32 {
+    if !(-1..=255).contains(&c) {
+        return c;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `c` is in the range the function is defined for.
+        unsafe { sys::tolower(c) }
+    }
+    #[cfg(not(unix))]
+    {
+        u8::try_from(c).map_or(c, |b| i32::from(b.to_ascii_lowercase()))
     }
 }
 
@@ -328,8 +392,11 @@ mod tests {
     #[test]
     fn the_numbers_are_the_librarys() {
         assert_eq!(LC_CTYPE, posix::locale::LC_CTYPE);
+        assert_eq!(LC_NUMERIC, posix::locale::LC_NUMERIC);
+        assert_eq!(LC_COLLATE, posix::locale::LC_COLLATE);
         assert_eq!(LC_ALL, posix::locale::LC_ALL);
         assert_eq!(CODESET, posix::langinfo::CODESET);
+        assert_eq!(RADIXCHAR, posix::langinfo::RADIXCHAR);
         assert_eq!(
             core::mem::size_of::<MbState>(),
             core::mem::size_of::<posix::wchar::MbstateT>()
@@ -359,5 +426,16 @@ mod tests {
         assert!(!isprint(300) && !iscntrl(-2));
         assert_eq!((wctob(0x41), wctob(0xe9)), (0x41, EOF));
         assert_eq!((btowc(0x41), btowc(0xe9)), (0x41, WEOF));
+        let mut point = [0u8; 8];
+        let n = radix(&mut point).expect("a decimal point");
+        assert_eq!(point.get(..n), Some(&b"."[..]));
+        assert_eq!(strcoll(c"abc", c"abd"), core::cmp::Ordering::Less);
+        assert_eq!(strcoll(c"b", c"B"), core::cmp::Ordering::Greater);
+        assert_eq!(strcoll(c"same", c"same"), core::cmp::Ordering::Equal);
+        assert_eq!(
+            (tolower(0x41), tolower(0x61), tolower(0xc9)),
+            (0x61, 0x61, 0xc9)
+        );
+        assert_eq!((tolower(-1), tolower(300)), (-1, 300));
     }
 }

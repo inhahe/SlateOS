@@ -134,30 +134,31 @@ pub fn charable(ctx: &AddCtx<'_>, ch: &Cell) -> bool {
 
 /// `unctrl (ch)` (`safe_unctrl` with a screen): how a byte is shown -- `^X`
 /// for a control character, `~X` and `M-X` for the bytes above 127 the
-/// locale does not print, the byte itself otherwise. `None` past 255.
+/// locale does not print, the byte itself otherwise. Only the character
+/// bits of `ch` are looked at (`ChCharOf`), so there is always an answer.
 #[must_use]
-pub fn unctrl(ctx: &AddCtx<'_>, ch: Attr) -> Option<Vec<u8>> {
-    let check = (ch & crate::cell::A_CHARTEXT).cast_signed();
-    let byte = u8::try_from(check).ok()?;
+pub fn unctrl(ctx: &AddCtx<'_>, ch: Attr) -> Vec<u8> {
+    let [byte, ..] = (ch & crate::cell::A_CHARTEXT).to_le_bytes();
+    let check = i32::from(byte);
     // `unctrl_c1`: the byte itself.
     let raw = || vec![byte];
     if ctx.legacy_coding > 1 && (128..160).contains(&check) {
-        return Some(raw());
+        return raw();
     }
     if (160..256).contains(&check)
         && (ctx.legacy_coding > 0 || (ctx.legacy_coding == 0 && ctx.ctype.isprint(check)))
     {
-        return Some(raw());
+        return raw();
     }
     // `unctrl_table`.
-    Some(match byte {
+    match byte {
         0..=31 => vec![b'^', byte.wrapping_add(0x40)],
         32..=126 => vec![byte],
         127 => b"^?".to_vec(),
         128..=159 => vec![b'~', byte.wrapping_sub(64)],
         160..=254 => vec![b'M', b'-', byte.wrapping_sub(128)],
         255 => b"~?".to_vec(),
-    })
+    }
 }
 
 /// `wunctrl (wc)`: [`unctrl`] of a one-byte character, widened; the cell's
@@ -165,7 +166,7 @@ pub fn unctrl(ctx: &AddCtx<'_>, ch: Attr) -> Option<Vec<u8>> {
 #[must_use]
 pub fn wunctrl(ctx: &AddCtx<'_>, wc: &Cell) -> Vec<WChar> {
     if charable(ctx, wc) {
-        let shown = unctrl(ctx, to_char(ctx, wc.ch()).cast_unsigned()).unwrap_or_default();
+        let shown = unctrl(ctx, to_char(ctx, wc.ch()).cast_unsigned());
         shown
             .iter()
             .map(|&b| ctx.ctype.btowc(i32::from(b)).cast_signed())
@@ -379,7 +380,7 @@ fn waddch_literal(win: &mut Window, ctx: &AddCtx<'_>, ch: Cell) -> bool {
             let attr = ch.attr;
             // "handle EILSEQ"
             if len == -1 && is8bits(ch.ch()) {
-                let shown = unctrl(ctx, ch.ch().cast_unsigned()).unwrap_or_default();
+                let shown = unctrl(ctx, ch.ch().cast_unsigned());
                 if shown.len() > 1 {
                     for b in shown {
                         if !waddch(win, ctx, u32::from(b) | attr) {
@@ -440,7 +441,7 @@ fn waddch_literal(win: &mut Window, ctx: &AddCtx<'_>, ch: Cell) -> bool {
 fn waddch_nosync(win: &mut Window, ctx: &AddCtx<'_>, ch: Cell) -> bool {
     let t = ch.ch();
     let shown = unctrl(ctx, t.cast_unsigned());
-    let single = shown.as_ref().is_some_and(|s| s.len() == 1);
+    let single = shown.len() == 1;
     if ch.attr & A_ALTCHARSET != 0
         || (ctx.legacy_coding != 0 && single)
         || (ctx.ctype.isprint(t) && !ctx.ctype.iscntrl(t))
@@ -505,7 +506,7 @@ fn waddch_nosync(win: &mut Window, ctx: &AddCtx<'_>, ch: Cell) -> bool {
             win.flags &= !WRAPPED;
         }
         _ => {
-            for b in shown.unwrap_or_default() {
+            for b in shown {
                 let mut sch = Cell::with_char(WChar::from(b), ch.attr);
                 sch.set_pair(ch.pair());
                 if !waddch_literal(win, ctx, sch) {
@@ -839,20 +840,20 @@ mod tests {
         let u = Utf8;
         let legacy = ctx(&u, 1);
         let modern = ctx(&u, 0);
-        assert_eq!(unctrl(&legacy, 0x01).unwrap(), b"^A");
-        assert_eq!(unctrl(&legacy, 0x41).unwrap(), b"A");
-        assert_eq!(unctrl(&legacy, 0x7f).unwrap(), b"^?");
-        assert_eq!(unctrl(&legacy, 0x81).unwrap(), b"~A");
+        assert_eq!(unctrl(&legacy, 0x01), b"^A");
+        assert_eq!(unctrl(&legacy, 0x41), b"A");
+        assert_eq!(unctrl(&legacy, 0x7f), b"^?");
+        assert_eq!(unctrl(&legacy, 0x81), b"~A");
         assert_eq!(
-            unctrl(&legacy, 0xe9).unwrap(),
+            unctrl(&legacy, 0xe9),
             b"\xe9",
             "a legacy locale shows it as it is"
         );
-        assert_eq!(unctrl(&modern, 0xe9).unwrap(), b"M-i");
-        assert_eq!(unctrl(&modern, 0xff).unwrap(), b"~?");
+        assert_eq!(unctrl(&modern, 0xe9), b"M-i");
+        assert_eq!(unctrl(&modern, 0xff), b"~?");
         assert_eq!(
             unctrl(&modern, 0x100 | A_REVERSE),
-            Some(b"^@".to_vec()),
+            b"^@".to_vec(),
             "the character bits only"
         );
     }

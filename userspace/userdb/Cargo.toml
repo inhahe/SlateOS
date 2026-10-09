@@ -12,8 +12,14 @@ path = "src/lib.rs"
 # password-hash constructions — and it previously contained three, none of
 # which agreed. See `design-decisions.md` §329 for the `/etc/shadow` half of
 # the same story.
+#
+# `libcall` for `crypt_gensalt`, which makes a new password's setting: the
+# C library's own, as `chpasswd`'s are (design-decisions §1070). Named as a
+# Rust path, `posix`'s copy would be a second C library in the program
+# (§768).
 [dependencies]
 posix = { path = "../../posix" }
+libcall = { path = "../../libcall" }
 
 [lints]
 workspace = true

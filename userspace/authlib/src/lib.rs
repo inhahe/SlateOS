@@ -114,7 +114,11 @@ pub const MAX_DELAY_SECS: u64 = 300;
 /// matters is that it is a *valid* setting for [`userdb::PASSWORD_METHOD`], so
 /// the work it costs matches the work checking a new password costs. A test
 /// pins that, so that changing the method without this fails there.
-const DUMMY_SALT: &[u8] = b"slateosnobody";
+///
+/// For yescrypt that means characters which decode to whole bytes: these 22
+/// are the length of a new password's salt (16 bytes), the spare bits of the
+/// last character zero, as `crypt_gensalt` writes them.
+const DUMMY_SALT: &[u8] = b"SlateOS.nobody.salt.0.";
 
 // ---------------------------------------------------------------------------
 // Outcome
@@ -1093,7 +1097,7 @@ mod tests {
         record.set_uid(1000);
         record.set("username", "alice");
         record
-            .set_password_with_salt("correct horse", "nativesalt")
+            .set_password_with_salt("correct horse", "nativesalt..")
             .expect("set password");
         record.set_locked(true);
         db.push(record);

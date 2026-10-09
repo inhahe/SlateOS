@@ -239,8 +239,6 @@ fn each_method_asks_crypt_gensalt_what_shadow_utils_asks_it() {
         (sha.prefix.as_slice(), sha.count, sha.nrbytes),
         (&b"$6$"[..], 5000, 15)
     );
-    // No `-c`: the method new passwords get, at upstream's default cost.
-    assert_eq!(request_for(&[]), Some(sha));
     let sha256 = request_for(&["-c", "SHA256", "-s", "9000"]).unwrap();
     assert_eq!(sha256.prefix, b"$5$rounds=9000$");
     assert_eq!(sha256.count, 9000);
@@ -249,6 +247,9 @@ fn each_method_asks_crypt_gensalt_what_shadow_utils_asks_it() {
         (yes.prefix.as_slice(), yes.count, yes.nrbytes),
         (&b"$y$j9T$"[..], 5, 16)
     );
+    // No `-c`: the method new passwords get, yescrypt, at upstream's default
+    // cost (deliberate difference 3).
+    assert_eq!(request_for(&[]), Some(yes));
     let des = request_for(&["-c", "DES"]).unwrap();
     assert_eq!(des.prefix, vec![b'.'; 99]);
     assert_eq!((des.count, des.nrbytes), (0, 2));
@@ -289,7 +290,10 @@ fn rounds_and_cost_are_clamped_and_zero_means_the_default() {
 /// one of the same shape, so that what a run does with a hash is still tested
 /// on a host with no `crypt_gensalt` to ask: the prefix, then as many salt
 /// characters as libxcrypt writes for the method, each from crypt's alphabet
-/// and a random byte. (A DES setting is its salt alone.)
+/// and a random byte. (A DES setting is its salt alone.) A yescrypt salt's
+/// last character carries two bits of its sixteenth byte and four spare ones,
+/// which must be zero for the salt to decode, so it is one of the first four
+/// characters.
 fn setting_for_tests(request: &SettingRequest, random: &[u8]) -> Option<Vec<u8>> {
     const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     if cfg!(target_os = "linux") {
@@ -303,6 +307,10 @@ fn setting_for_tests(request: &SettingRequest, random: &[u8]) -> Option<Vec<u8>>
     };
     let mut setting = prefix.to_vec();
     setting.extend((0..chars).map(|i| ALPHABET[usize::from(random[i % random.len()]) % 64]));
+    if request.prefix.starts_with(b"$y") {
+        let last = setting.last_mut()?;
+        *last = ALPHABET[usize::from(*last) % 4];
+    }
     Some(setting)
 }
 

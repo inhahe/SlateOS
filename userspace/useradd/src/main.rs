@@ -3137,11 +3137,13 @@ mod tests {
             passwd.lines().any(|l| l.starts_with("alice:x:1000:100:")),
             "{passwd}"
         );
+        // Yescrypt at its default cost, the method new passwords get
+        // (design-decisions §1070).
         let shadow = env.read_file("shadow");
         assert!(
             shadow
                 .lines()
-                .any(|l| l.starts_with("alice:$6$abcdef0123456789$")),
+                .any(|l| l.starts_with("alice:$y$j9T$abcdef0123456789$")),
             "{shadow}"
         );
     }

@@ -18,8 +18,9 @@
 //!
 //! Two duplications went with that change. The hashing — a private
 //! `hash_password`/`generate_salt` pair — is now `userdb`'s
-//! [`userdb::Record::set_password`], which does the same thing (SHA-512-crypt,
-//! a `/dev/urandom` salt, and no fallback to a guessable one) in the one place
+//! [`userdb::Record::set_password`], which does the same thing (the method new
+//! passwords get -- yescrypt since 2026-10-09, SHA-512-crypt before -- a
+//! `/dev/urandom` salt, and no fallback to a guessable one) in the one place
 //! that also stores the result. And the aging fields, which this program used
 //! to define its own `ShadowEntry` for, are [`userdb::Aging`].
 //!
@@ -255,7 +256,8 @@ fn has_password(record: &Record) -> bool {
 // `userdb::Record::set_password` already does -- the same SHA-512-crypt, the
 // same crypt base-64 salt at the method's own maximum length, the same
 // refusal to fall back to a guessable salt when `/dev/urandom` cannot be
-// read.
+// read. (`userdb` has since moved new passwords to yescrypt, design-decisions
+// §1070 -- a change made once, for every tool, which is the point.)
 //
 // A second correct copy is still a place for the two to drift apart, and this
 // program is the one that proved it: the reason it has a `posix::crypt`
@@ -1228,10 +1230,11 @@ mod tests {
         assert!(!verify_password("wrong horse", &stored), "{stored}");
     }
 
-    /// The entry reaching `/etc/shadow` is a standard one: the `$6$`
-    /// identifier and the salt as given. The format this file used to invent,
-    /// `$sha256$<salt>$<64 hex>`, satisfied neither, which is why `login`
-    /// could not read what `passwd` wrote.
+    /// The entry reaching `/etc/shadow` is a standard one: yescrypt's `$y$`
+    /// identifier, libxcrypt's default cost (`j9T`) and the salt as given --
+    /// what Ubuntu's `passwd` writes (design-decisions §1070). The format this
+    /// file used to invent, `$sha256$<salt>$<64 hex>`, satisfied none of it,
+    /// which is why `login` could not read what `passwd` wrote.
     #[test]
     fn the_generated_entry_is_in_the_format_a_standard_reader_expects() {
         let scratch = scratchdir::ScratchDir::new("passwd-format");
@@ -1240,10 +1243,10 @@ mod tests {
             .expect("save");
 
         let stored = generated_shadow_entry(scratch.dir(), "dave");
-        assert!(stored.starts_with(&format!("$6${SALT}$")), "{stored}");
+        assert!(stored.starts_with(&format!("$y$j9T${SALT}$")), "{stored}");
         assert_eq!(
             posix::crypt::stored_method(stored.as_bytes()),
-            Some(posix::crypt::Method::Sha512),
+            Some(posix::crypt::Method::Yescrypt),
             "{stored}"
         );
         assert!(!stored.contains("$sha256$"), "{stored}");

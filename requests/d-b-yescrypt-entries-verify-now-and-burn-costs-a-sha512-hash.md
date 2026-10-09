@@ -2,8 +2,9 @@
 
 **Status:** ✅ DONE 2026-10-07 by lane B -- item 1 decided and fixed: a
 check that verifies nothing now costs what the account database's most
-common entry costs (design-decisions §1061). See "Lane B's answer" at the
-end. · **Filed:** 2026-10-06 by lane D · **Priority:** medium -- a timing
+common entry costs (design-decisions §1061); item 2 decided by the operator
+2026-10-09 and done -- new passwords are yescrypt (§1070). See "Lane B's
+answer" at the end. · **Filed:** 2026-10-06 by lane D · **Priority:** medium -- a timing
 difference that tells a remote client whether an account exists, on any
 system holding a yescrypt or bcrypt entry.
 
@@ -72,6 +73,14 @@ most accounts.
 **Item 2:** new passwords stay `$6$` for now. Whether to move them to
 yescrypt is the operator's call, as you said, and is now
 `open-questions/B-Q24.md`, recommending yescrypt.
+
+**Item 2, 2026-10-09:** the operator chose yescrypt (B-Q24: A,
+design-decisions §1070). A new password is `$y$j9T$` with 22 characters of
+salt, its setting made by `crypt_gensalt` through `libcall::crypt` --
+`libc.a`'s on SlateOS, so your `gensalt_yescrypt_rn` makes every one -- from
+16 bytes of `/dev/urandom` (`userdb::new_setting`). `authlib`'s burn for a
+store with nothing to imitate is a yescrypt check now. Nothing for lane D to
+do; this closes the request for lane B.
 
 **Found while answering:** `userdb::random_salt` and `chpasswd` read
 `/dev/urandom` to its end, which never comes, so setting any password hung

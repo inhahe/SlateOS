@@ -35,10 +35,12 @@
 //!    differ: PAM's own messages, and its own choice of method.
 //! 3. **No `/etc/login.defs`.** SlateOS does not have one (`useradd`'s notes
 //!    say why). A password with no `-c` therefore gets the method every new
-//!    password here gets, `userdb::PASSWORD_METHOD` (SHA-512). Upstream with
-//!    no `login.defs` falls back to DES, whose eight-character, 56-bit key a
-//!    laptop recovers. The rounds the `login.defs` variables would choose are
-//!    upstream's defaults.
+//!    password here gets, `userdb::PASSWORD_METHOD` -- yescrypt at its default
+//!    cost, `$y$j9T$` (design-decisions §1070), which is also what Ubuntu's
+//!    gives one with no `-c`, by way of PAM. Upstream with no `login.defs`
+//!    falls back to DES, whose eight-character, 56-bit key a laptop recovers.
+//!    The rounds the `login.defs` variables would choose are upstream's
+//!    defaults.
 //! 4. **A fresh salt for every password.** Upstream draws one salt when it
 //!    starts and gives it to every password in the run. So two accounts given
 //!    the same password in one run get the same hash, and one precomputed

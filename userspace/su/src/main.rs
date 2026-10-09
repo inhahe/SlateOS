@@ -35,7 +35,8 @@
 //! # Authentication
 //!
 //! Reads `/etc/users.yaml` through the shared `userdb` crate. Passwords are
-//! `crypt(3)` entries — SHA-512-crypt — and are checked by re-running `crypt`
+//! `crypt(3)` entries — yescrypt for a new one, whatever method an older one
+//! names — and are checked by re-running `crypt`
 //! on the stored entry, which is a valid setting for itself. Root (uid 0) can
 //! switch to any user without a password.
 //!

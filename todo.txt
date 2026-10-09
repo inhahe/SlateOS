@@ -59223,3 +59223,30 @@ is already waiting, not whether the setter exists.
   `SYS_FS_SET_STATUS_FLAGS` (1095) on `origin/main`. **Then:** `F_SETFL`
   sends the description's flags in native `OpenFlags` bits; `write` keeps its
   `SEEK_END` only where the call answered `ENOSYS`.
+
+## Lane B — what waits on lane A's next publish (2026-10-09)
+
+- **Open: SCRIPT_OWNERS rows for lane B's new scripts.** Lane A's ownership
+  gate (design-decisions 973; `scripts/which-lane.py` SCRIPT_OWNERS, checked
+  by the boot test) refuses any tracked script without an owner, and refuses
+  a row naming a file that is not tracked -- so a row goes in the commit that
+  creates its script, from the moment the table exists on our branch. It is
+  on lane-a, not yet on main. Scripts created before it arrives, which need
+  rows in lane B's block when it does: `scripts/tic-diff.sh`,
+  `scripts/gen-terminfo-captab.py`, `scripts/systemd-cat-diff.sh`,
+  `scripts/patch-merge-fuzz.py`, `scripts/journalfwd-diff.sh`,
+  `scripts/journalfwd-walltest.py`. **Trigger:** `origin/main`'s
+  `scripts/which-lane.py` has `SCRIPT_OWNERS`. **Then:** merge it, add the
+  six rows to lane B's block, boot.
+- **Open: switching off and restarting, from userland.** Lane A's notice of
+  2026-10-09 07:39Z: `SYS_POWER_OFF` (1167) and `SYS_POWER_REBOOT` (1168),
+  each gated by a Process right (`Rights::POWER_OFF`, `Rights::REBOOT`), and
+  Linux `reboot(2)` through them; on lane-a-wip (d0907aa5e), reaching main with
+  lane A's publish after next. Lane B's half: libcall wrappers for both,
+  `powerctl`'s direct fallback calling them instead of `/proc/acpi/power`
+  (which does not exist), the rights' names in the capability projection
+  (`CAP_SYS_BOOT` <- POWER_OFF|REBOOT|RELOAD_KERNEL), and whatever comes to
+  provide org.slateos.ServiceManager ending PowerOff/Reboot with them
+  (known-issues b-org.slateos.servicemanager-has-two-clients-and-no-provider).
+  **Trigger:** `SYS_POWER_OFF` in `origin/main`'s
+  `kernel/src/syscall/number.rs`.

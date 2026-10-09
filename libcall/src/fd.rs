@@ -1,7 +1,10 @@
 //! The descriptor table itself: putting a descriptor at a given number
 //! (`dup2`), copying one above the standard three (`F_DUPFD_CLOEXEC`), whether
 //! it survives an `exec` (`FD_CLOEXEC`), and closing one by number -- through
-//! the linked C library.
+//! the linked C library. And two questions asked of a descriptor: whether it
+//! is a terminal (`isatty`), and whether it will take a write within a time
+//! (`poll` for `POLLOUT`), which a program writing to other people's
+//! terminals -- journald's broadcast -- asks of each.
 //!
 //! What a program needs when it arranges another program's standard
 //! descriptors and then becomes that program, as `systemd-cat` does: std
@@ -28,12 +31,31 @@ const F_SETFD: i32 = 2;
 #[cfg(any(unix, test))]
 const FD_CLOEXEC: i32 = 1;
 
+/// `poll`'s events: room to write, and a descriptor that is not open.
+#[cfg(any(unix, test))]
+const POLLOUT: i16 = 0x0004;
+#[cfg(any(unix, test))]
+const POLLNVAL: i16 = 0x0020;
+/// `EBADF`.
+#[cfg(unix)]
+const EBADF: i32 = 9;
+
 #[cfg(unix)]
 mod sys {
+    /// C's `struct pollfd`.
+    #[repr(C)]
+    pub struct PollFd {
+        pub fd: i32,
+        pub events: i16,
+        pub revents: i16,
+    }
+
     unsafe extern "C" {
         pub fn dup2(old: i32, new: i32) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn close(fd: i32) -> i32;
+        pub fn isatty(fd: i32) -> i32;
+        pub fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
     }
 }
 
@@ -155,6 +177,65 @@ fn close_one(_fd: i32) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// Whether `fd` is a terminal: `isatty`. False for anything else, a
+/// descriptor that is not open included, and off Unix.
+#[must_use]
+pub fn is_terminal(fd: i32) -> bool {
+    is_terminal_one(fd)
+}
+
+#[cfg(unix)]
+fn is_terminal_one(fd: i32) -> bool {
+    // SAFETY: a number; the call asks the terminal layer about it and touches
+    // no memory of ours.
+    unsafe { sys::isatty(fd) == 1 }
+}
+
+#[cfg(not(unix))]
+fn is_terminal_one(_fd: i32) -> bool {
+    false
+}
+
+/// Wait at most `timeout_ms` milliseconds (`-1` for ever) for `fd` to take a
+/// write: `poll` for `POLLOUT`, as systemd's `fd_wait_for_event` asks it.
+/// `Ok(true)` when it will -- or when it has failed or hung up, which the
+/// write itself then reports -- and `Ok(false)` when the time ran out.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open (`POLLNVAL`), `EINTR` when a signal came
+/// first, `EINVAL`, `ENOMEM`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait_writable(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    wait_writable_one(fd, timeout_ms)
+}
+
+#[cfg(unix)]
+fn wait_writable_one(fd: i32, timeout_ms: i32) -> Result<bool, i32> {
+    let mut p = sys::PollFd {
+        fd,
+        events: POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `p` is one live `struct pollfd`, which the call reads and
+    // writes `revents` into; `nfds` says one.
+    let rc = unsafe { sys::poll(&raw mut p, 1, timeout_ms) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    if rc == 0 {
+        return Ok(false);
+    }
+    if p.revents & POLLNVAL != 0 {
+        return Err(EBADF);
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn wait_writable_one(_fd: i32, _timeout_ms: i32) -> Result<bool, i32> {
+    Err(ENOSYS)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
@@ -168,6 +249,27 @@ mod tests {
         assert_eq!(F_GETFD, posix::fcntl_ops::F_GETFD);
         assert_eq!(F_SETFD, posix::fcntl_ops::F_SETFD);
         assert_eq!(FD_CLOEXEC, 1);
+        assert_eq!(POLLOUT, posix::poll::POLLOUT);
+        assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_no_terminal_and_takes_a_write_at_once() {
+        extern crate std;
+        use std::os::fd::AsRawFd;
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        assert!(!is_terminal(file.as_raw_fd()));
+        assert!(!is_terminal(-1));
+        assert_eq!(wait_writable(file.as_raw_fd(), 0), Ok(true));
+        // A number nothing has open. Taking one and closing it would race
+        // the test above, which `dup2`s onto the number after its own copy
+        // -- tests share one descriptor table and run at once.
+        assert_eq!(wait_writable(1 << 20, 0), Err(EBADF), "not open");
     }
 
     #[cfg(unix)]
@@ -197,5 +299,7 @@ mod tests {
         assert_eq!(dup_above(0, 3), Err(ENOSYS));
         assert_eq!(set_close_on_exec(0, true), Err(ENOSYS));
         assert_eq!(close(0), Err(ENOSYS));
+        assert!(!is_terminal(0));
+        assert_eq!(wait_writable(1, 0), Err(ENOSYS));
     }
 }

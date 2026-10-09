@@ -57,6 +57,10 @@ libcall = { path = "../../libcall" }
 # used for its `systemd-cat` personality, which this replaces.
 journalrec = { path = "../journalrec" }
 journalio = { path = "../journalio" }
+# journald's forwarding, which `systemd-cat`'s helper does as journald would:
+# an `emerg` line broadcast to every logged-in user's terminal, and a writer's
+# command name escaped as journald escapes it. Shared with `syslogd`.
+journalfwd = { path = "../journalfwd" }
 # util-linux's lib/strutils.c number parsing -- `cal -c`, `cal -n`, the year
 # operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
 # the util-linux ports outside coreutils (logger's -S and --id=).

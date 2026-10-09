@@ -624,6 +624,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn credentials_and_root_are_refused_as_the_library_refuses_them() {
+        extern crate std;
+
         assert_eq!(
             change_root(c"/nonexistent/libcall-test"),
             Err(crate::ENOENT)
@@ -633,7 +635,9 @@ mod tests {
         // Too many groups: `EPERM` for a caller without the privilege, which
         // the kernel checks first, `EINVAL` for one with it. Neither changes
         // anything.
-        let too_many = [0u32; 65537];
+        // On the heap: 256 KiB is more than a test thread's stack should
+        // be asked to hold.
+        let too_many = std::vec![0u32; 65537];
         let refused = set_groups(&too_many);
         assert!(
             refused == Err(posix::errno::EPERM) || refused == Err(posix::errno::EINVAL),

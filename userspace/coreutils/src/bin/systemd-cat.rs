@@ -977,13 +977,10 @@ fn priority_name(priority: u8) -> &'static str {
         .unwrap_or("info")
 }
 
-/// `/proc/PID/comm`, without its newline, while the process is there.
+/// `/proc/PID/comm`, escaped as journald's `pid_get_comm` escapes it, while
+/// the process is there.
 fn read_comm(pid: u32) -> Option<Vec<u8>> {
-    let mut comm = std::fs::read(format!("/proc/{pid}/comm")).ok()?;
-    if comm.last() == Some(&b'\n') {
-        comm.pop();
-    }
-    Some(comm)
+    journalfwd::pid_get_comm(pid)
 }
 
 // ------------------------------------------------------------ arguments ----
@@ -1206,8 +1203,9 @@ mod journald {
         /// Whether a line's own `<N>` is read.
         level_prefix: bool,
         /// The header's three forwarding switches -- syslog, kmsg, console.
-        /// Read, because the protocol has them, and acted on by nothing here:
-        /// `known-issues/TD-B-NOTHING-DOES-JOURNALDS-FORWARDING.md`.
+        /// Read, because the protocol has them, and not acted on yet:
+        /// `known-issues/TD-B-A-STREAMS-FORWARDING-SWITCHES-ARE-READ-AND-IGNORED.md`. (The
+        /// broadcast of an `emerg` line needs no switch, and is done.)
         forward: [bool; 3],
     }
 
@@ -1387,6 +1385,22 @@ mod journald {
         pub pid: i32,
         pub uid: Option<u32>,
         pub gid: Option<u32>,
+    }
+
+    /// journald's forwarding of one line, done before the line is filed, as
+    /// `stdout_stream_log` does it: a line at `emerg` broadcast to every
+    /// logged-in user's terminal (`ForwardToWall`, on by default), as
+    /// `IDENTIFIER[PID]: MESSAGE`. A line journald would not file is not
+    /// forwarded either.
+    pub fn forward(stream: &Stream, writer: &Writer, line: &[u8]) {
+        if let Some((priority, text)) = message(line, stream.level_prefix, stream.priority) {
+            journalfwd::forward_wall(
+                priority,
+                stream.identifier.as_deref(),
+                text,
+                u32::try_from(writer.pid).ok(),
+            );
+        }
     }
 
     /// The record journald would make of one line, as a journal line with its
@@ -1705,7 +1719,9 @@ mod journald {
 mod plumbing {
     //! The streams, the helpers that read them, and the `exec`.
 
-    use super::journald::{LINE_MAX, LineBreak, Refused, Stream, Writer, comm_of, header, record};
+    use super::journald::{
+        LINE_MAX, LineBreak, Refused, Stream, Writer, comm_of, forward, header, record,
+    };
     use super::{
         AT_EXECUTE, AT_FSTAT, AT_REARRANGE, AT_STDERR_STREAM, AT_STREAM, Args, Log, errno_of,
         read_comm,
@@ -2215,6 +2231,7 @@ mod plumbing {
         out: &mut Vec<u8>,
     ) -> Result<usize, Refused> {
         stream.scan(data, force, &mut |s, line, why| {
+            forward(s, writer, line);
             if let Some(r) = record(s, writer, &mut |pid| names.get(pid), line, why) {
                 out.extend_from_slice(&r);
             }

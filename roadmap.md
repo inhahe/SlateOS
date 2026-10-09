@@ -6009,7 +6009,9 @@ _Port ext4 first. Don't write a custom filesystem._
   newline, a NUL or 48 KiB, its trimming and `<N>` prefixes, each line filed
   under the process that wrote it from the socket's credentials, the writer
   named as journald's context cache names it -- plus systemd's own log for
-  its messages, every `SYSTEMD_LOG_*` setting and its colours; through new
+  its messages, every `SYSTEMD_LOG_*` setting and its colours, and an
+  `emerg` line broadcast to every logged-in terminal as journald's
+  `ForwardToWall` does (`userspace/journalfwd`); through new
   `libcall::socket` and `libcall::fd`; `scripts/systemd-cat-diff.sh`: 100
   cases agree and 1 differs on purpose, ours in namespaces of its own with a
   private `/var/log`, the reference's records read back from WSL's journald);
@@ -6132,7 +6134,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pgrep/pkill: procps-ng 4.0.4's, coreutils programs since 2026-10-03 (see the coreutils item; `scripts/pgrep-diff.sh`, 437 cases); `pidwait` waits on the native `pidfd_open`
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
   - [x] logger: util-linux 2.39.3 port (local/RFC 3164/RFC 5424 headers, structured data, octet counting, prio-prefix, Unix/UDP/TCP delivery, `--journald`, root `--id` credentials; `/dev/log` messages become journal records while SlateOS has no Unix-domain sockets — design-decisions §1033; checked by `scripts/logger-diff.sh`)
-  - [-] syslogd: the `/dev/log` reader (step 2 of known-issues `TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES`) -- each datagram filed as systemd-journald files it: the local form taken apart as journald takes it, the rest kept, bytes that are not text kept as bytes, the sender's credentials (design-decisions §1063); `journalctl` reads byte-valued fields; `scripts/syslogd-diff.sh` holds it to a private journald. Works on Linux; on SlateOS it waits for path-bound `AF_UNIX` sockets (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`, lanes A and D), then for its line in the image's `/etc/startup.conf` (lane D)
+  - [-] syslogd: the `/dev/log` reader (step 2 of known-issues `TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES`) -- each datagram filed as systemd-journald files it: the local form taken apart as journald takes it, the rest kept, bytes that are not text kept as bytes, the sender's credentials (design-decisions §1063); an `emerg` message broadcast to every logged-in user's terminal as journald's default `ForwardToWall` does (`userspace/journalfwd`, shared with `systemd-cat`; `scripts/journalfwd-diff.sh` holds it to systemd's own `wall()`, 31 cases); `journalctl` reads byte-valued fields; `scripts/syslogd-diff.sh` holds it to a private journald. Works on Linux; on SlateOS it waits for path-bound `AF_UNIX` sockets (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`, lanes A and D), then for its line in the image's `/etc/startup.conf` (lane D)
   - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)
   - [x] ftp: interactive FTP client (USER/PASS login, PORT/PASV data, ASCII/binary transfer, mget/mput with glob, resume, progress)
   - [x] chroot: change root directory (root check, --userspec, --groups, user/group resolution, privilege drop)

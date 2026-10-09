@@ -1725,6 +1725,9 @@ pub fn create(name: &str, parent: ProcessId) -> ProcessId {
     let mut table = PROCESS_TABLE.lock();
     table.insert(pid, proc);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
+    drop(table);
+    // A child of a paused container's process is paused with it.
+    crate::proc::freezer::on_new_process(parent, pid);
 
     pid
 }
@@ -2196,6 +2199,9 @@ pub fn fork_create(
     // `utsns` never takes: the order is one way only.
     crate::utsns::retain(uts_ns);
     drop(table);
+    // A child of a paused container's process is paused with it: it parks
+    // before its first instruction (`crate::proc::freezer`).
+    crate::proc::freezer::on_new_process(parent_pid, pid);
     // Its parent's mount namespace (`crate::fs::mntns`, leaf locks only).
     // The child has no thread yet, so nothing resolves a path for it before
     // this. `clone(CLONE_NEWNS)` moves it to a copy afterwards.
@@ -5608,6 +5614,8 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     // And on its mount namespace (`crate::fs::mntns`), whose table goes with
     // the last: no process-table lock is held here.
     crate::fs::mntns::process_gone(pid);
+    // A paused container's process that ends is no longer paused.
+    crate::proc::freezer::on_process_exit(pid);
     // The rest of the record holds nothing that needs a lock to release.
     drop(proc);
     destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);
@@ -8905,6 +8913,72 @@ pub fn linux_fd_install_passed(
     Ok((fd, held))
 }
 
+/// Record that process `pid` now holds the object behind a descriptor a
+/// native receive brought it -- `kind` and `raw` as the sender had them --
+/// and say whether it held that object already. The native counterpart of
+/// [`linux_fd_install_passed`], without a descriptor table to install into:
+/// a native program keeps its table in its C library.
+///
+/// A process holds one reference per object however many descriptors name
+/// it, so a reference brought for an object it held already is the
+/// caller's to drop (`held` true); otherwise the object joins the process's
+/// `ipc_handles`, where exit releases it and fork shares it. A kind with no
+/// object behind it (the console) is never held and registers nothing.
+///
+/// # Errors
+///
+/// - `NoSuchProcess` if `pid` is gone.
+/// - `OutOfMemory` if its handle list cannot grow.
+pub fn native_install_passed(
+    pid: ProcessId,
+    kind: super::linux_fd::HandleKind,
+    raw: u64,
+) -> KernelResult<bool> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let Some(resource) = kind.resource_type() else {
+        return Ok(false);
+    };
+    if proc.ipc_handles.contains(&(resource, raw)) {
+        return Ok(true);
+    }
+    proc.ipc_handles
+        .try_reserve(1)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    proc.ipc_handles.push((resource, raw));
+    Ok(false)
+}
+
+/// Undo a [`native_install_passed`] that answered `false`, for a receive
+/// whose report to the program failed: take the object back out of `pid`'s
+/// `ipc_handles`, and say whether it was still there -- whether the
+/// reference the receive brought is the caller's to release. It is not when
+/// one of the program's threads has closed the handle in between, which
+/// released that reference already.
+#[must_use]
+pub fn native_uninstall_passed(
+    pid: ProcessId,
+    kind: super::linux_fd::HandleKind,
+    raw: u64,
+) -> bool {
+    let Some(resource) = kind.resource_type() else {
+        // Nothing was registered, and nothing is held: release it.
+        return true;
+    };
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        // The process is gone, and its exit released what it held.
+        return false;
+    };
+    match proc.ipc_handles.iter().position(|&h| h == (resource, raw)) {
+        Some(i) => {
+            proc.ipc_handles.swap_remove(i);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Take descriptor `fd` out of `pid`'s table and say whether it was the
 /// process's last for its object -- the one whose close releases it.
 ///
@@ -8917,6 +8991,33 @@ pub fn linux_fd_take_last(pid: ProcessId, fd: i32) -> Option<(super::linux_fd::F
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid)?;
     let fd_table = proc.linux_fd_table.as_mut()?;
+    let entry = fd_table.take(fd)?;
+    let last = !fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
+    Some((entry, last))
+}
+
+/// [`linux_fd_take_last`], only while descriptor `fd` still names the object
+/// a call put there -- `kind` and `raw` -- for that call to take back a
+/// descriptor it installed and could not report. Between the install and
+/// the taking back, another thread of the process may have closed the number
+/// and opened something else at it; that is not the call's to close. Judged
+/// and taken in one step under the process table's lock, so nothing can
+/// slip in between. `None` if the descriptor is gone or names something
+/// else now.
+#[must_use]
+pub fn linux_fd_take_last_if(
+    pid: ProcessId,
+    fd: i32,
+    kind: super::linux_fd::HandleKind,
+    raw: u64,
+) -> Option<(super::linux_fd::FdEntry, bool)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let fd_table = proc.linux_fd_table.as_mut()?;
+    let current = fd_table.lookup(fd)?;
+    if current.kind != kind || current.raw_handle != raw {
+        return None;
+    }
     let entry = fd_table.take(fd)?;
     let last = !fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
     Some((entry, last))

@@ -1475,7 +1475,8 @@ pub mod restart_block {
 ///   * `ERESTART_RESTARTBLOCK` → restart via the `restart_syscall(2)`
 ///     trampoline: same RIP rewind, but RAX is set to `nr::RESTART_SYSCALL` so
 ///     the resumed call consults the saved `restart_block` (e.g. `nanosleep`
-///     resuming with the remaining time).
+///     resuming with the remaining time) -- for a native process, to the
+///     native `SYS_RESTART_SYSCALL`, which resumes a frozen `SYS_SLEEP`.
 ///
 /// A non-sentinel value is returned unchanged.  A sentinel is **never**
 /// returned to userspace.
@@ -1494,9 +1495,20 @@ pub fn resolve_syscall_restart(frame: &mut crate::syscall::entry::SyscallFrame, 
         }
         restart::RestartAction::RestartBlock => {
             frame.user_rip = frame.user_rip.wrapping_sub(restart::SYSCALL_INSN_LEN);
+            // Each ABI resumes through its own number: Linux's
+            // `restart_syscall` (219), or the native `SYS_RESTART_SYSCALL`
+            // (1171) -- 219 means something else in the native table.
+            let native = crate::proc::thread::owner_process(crate::sched::current_task_id())
+                .and_then(crate::proc::pcb::get_abi_mode)
+                .is_none_or(|m| m == crate::proc::pcb::AbiMode::Native);
+            let restart_nr = if native {
+                crate::syscall::number::SYS_RESTART_SYSCALL
+            } else {
+                nr::RESTART_SYSCALL
+            };
             #[allow(clippy::cast_possible_wrap)]
             {
-                nr::RESTART_SYSCALL as i64
+                restart_nr as i64
             }
         }
         // restart_action never yields Eintr when has_handler == false, but stay
@@ -5244,7 +5256,8 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // checkpoint, which a parked read never reaches.
         let deliverable = !crate::proc::signal::blocked(caller);
         let interrupt_mask = deliverable & !mask;
-        if crate::proc::signal::has_pending_in_mask(caller, interrupt_mask) {
+        // A freeze breaks the wait as such a signal does (`proc::freezer`).
+        if crate::proc::signal::wait_ends(caller, interrupt_mask) {
             return restart::restart_result(restart::ERESTARTSYS);
         }
 
@@ -5256,9 +5269,9 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         let task = crate::sched::current_task_id();
         let wait_mask = mask | deliverable;
         crate::proc::signal::register_signalfd_waiter(caller, task, wait_mask);
-        if crate::proc::signal::has_pending_in_mask(caller, wait_mask) {
-            // Raced with an arriving signal — re-evaluate (drain or interrupt)
-            // on the next iteration.
+        if crate::proc::signal::wait_ends(caller, wait_mask) {
+            // Raced with an arriving signal (or a freeze) — re-evaluate (drain
+            // or interrupt) on the next iteration.
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -5491,12 +5504,22 @@ fn linux_close_fd(pid: u64, fd: i32) -> SyscallResult {
         Some(t) => t,
         None => return linux_err(errno::EBADF),
     };
+    linux_close_taken(pid, entry, last);
+    SyscallResult::ok(0)
+}
+
+/// The rest of a close, for a descriptor already out of `pid`'s table:
+/// drop its record locks, and release the object behind it when it was the
+/// process's last descriptor for it (`last`, as `pcb::linux_fd_take_last`
+/// judged it).
+fn linux_close_taken(pid: u64, entry: FdEntry, last: bool) {
     release_record_locks_on_close(pid, &entry);
     if entry.kind.needs_kernel_close() && last {
-        // No other fd still references this handle — release it.
+        // No other fd still references this handle — release it. A failure
+        // here has no caller to tell: the descriptor is already gone, as a
+        // Linux close's is whatever the release reports.
         let _ = close_handle(entry);
     }
-    SyscallResult::ok(0)
 }
 
 /// `dup(oldfd)` — duplicate `oldfd` onto the lowest free slot.
@@ -9472,7 +9495,9 @@ fn interruptible_sleep_until(
             return true; // slept to completion
         }
         let deliverable = !crate::proc::signal::blocked(pid);
-        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A freeze interrupts the sleep as a signal does; the restart block
+        // keeps its deadline, so the thawed sleep ends when it would have.
+        if crate::proc::signal::wait_ends(pid, deliverable) {
             return false; // interrupted before parking
         }
         let remaining = deadline_ns - now;
@@ -9480,7 +9505,7 @@ fn interruptible_sleep_until(
         // Register-then-recheck: a signal posted between the check above and
         // the park must not be lost (set_pending wakes signal-waiters).
         crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        if crate::proc::signal::wait_ends(pid, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(pid, task);
             let _ = crate::hrtimer::cancel(handle); // discard: nothing to wake
             return false;
@@ -21191,20 +21216,20 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
     loop {
         // Deliverable = pending and not blocked.
         let deliverable = !crate::proc::signal::blocked(caller);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             // Linux returns -ERESTARTNOHAND from pause() (arch-generic
             // sys_pause -> -ERESTARTNOHAND).  The signal-delivery checkpoint
             // resolves it: a handler that runs collapses it to -EINTR
             // (ERESTARTNOHAND never honours SA_RESTART when a handler ran),
             // while a default/no-handler disposition restarts pause() — which
-            // is exactly the re-park we want.
+            // is exactly the re-park we want, and what a freeze gets.
             return restart::restart_result(restart::ERESTARTNOHAND);
         }
         // Register-then-recheck so a signal posted in the gap before we
         // park is not lost (set_pending wakes registered waiters whose
         // mask covers the signal's bit).
         crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -25359,7 +25384,7 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 // wrap, so there is no -512/CrossDevice collision.)
                 let deliverable = caller.map_or(0, |p| !crate::proc::signal::blocked(p));
                 if let Some(p) = caller
-                    && crate::proc::signal::has_pending_in_mask(p, deliverable)
+                    && crate::proc::signal::wait_ends(p, deliverable)
                 {
                     return restart::restart_result(restart::ERESTARTSYS);
                 }
@@ -25375,8 +25400,8 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 if let Some(p) = caller {
                     crate::proc::signal::register_signalfd_waiter(p, task, deliverable);
                 }
-                let racey_signal = caller
-                    .is_some_and(|p| crate::proc::signal::has_pending_in_mask(p, deliverable));
+                let racey_signal =
+                    caller.is_some_and(|p| crate::proc::signal::wait_ends(p, deliverable));
                 if crate::ipc::inotify::is_readable(handle) || racey_signal {
                     crate::fs::notify::deregister_notify_waiter(token, task);
                     if let Some(p) = caller {
@@ -30837,8 +30862,10 @@ fn mount_source(source: Option<&[u8]>) -> Result<crate::fs::path::PathBuf, Sysca
 /// `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC` and `MS_NOATIME` are the mount's
 /// options -- a remount naming no atime flag keeps the mount's, as Linux's
 /// does; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken and
-/// change nothing, and the `data` options are not read (known-issues
-/// A-LINUX-MOUNT-GAPS). A new mount, a bind or a move onto a mount point
+/// change nothing. The `data` options are read for a new tmpfs -- `size=`,
+/// `nr_inodes=`, `mode=` and the rest of what Linux's takes, `EINVAL` for one
+/// it does not ([`crate::fs::new_filesystem_with_data`]) -- and for no other
+/// type yet (known-issues A-LINUX-MOUNT-GAPS). A new mount, a bind or a move onto a mount point
 /// goes on top of what is there, which it covers until it goes, as Linux
 /// stacks them (`fs::Vfs::mount_on_top`); refused with `EBUSY` until
 /// 2026-10-08.
@@ -30965,7 +30992,17 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
             }
             _ => {}
         }
-        match crate::fs::new_filesystem(fstype, source) {
+        // The options, for a type that reads them (tmpfs's `size=` and the
+        // rest); any other type's are not read, as before.
+        let data = if crate::fs::reads_mount_data(fstype) {
+            match optional_mount_string(args.arg4) {
+                Ok(d) => d.unwrap_or_default(),
+                Err(r) => return r,
+            }
+        } else {
+            alloc::vec::Vec::new()
+        };
+        match crate::fs::new_filesystem_with_data(fstype, source, &data) {
             Ok(fs) => Vfs::mount_on_top(&target, fs, options),
             Err(KernelError::NotSupported) => return linux_err(errno::ENODEV),
             Err(e) => Err(e),
@@ -32946,7 +32983,10 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
 /// reports an ignored signal.)
 fn caller_has_deliverable_signal(pid: Option<u64>) -> bool {
     match pid {
-        Some(p) => crate::proc::signal::has_pending_in_mask(p, !crate::proc::signal::blocked(p)),
+        // A freeze ends the wait too (`proc::freezer`); the call then
+        // returns `-EINTR` as for a signal -- what Linux's `epoll_wait` does
+        // under its freezer, though its `poll` and `select` restart.
+        Some(p) => crate::proc::signal::wait_ends(p, !crate::proc::signal::blocked(p)),
         None => false,
     }
 }
@@ -32979,7 +33019,7 @@ fn interruptible_wait_slice(pid: Option<u64>, slice_ms: u64) -> bool {
     // Recheck after registering: a signal posted in the gap before the park
     // already woke (a now-removed) waiter, so observe it here instead of
     // sleeping through it.
-    if crate::proc::signal::has_pending_in_mask(p, deliverable) {
+    if crate::proc::signal::wait_ends(p, deliverable) {
         crate::proc::signal::deregister_signalfd_waiter(p, task);
         return true;
     }
@@ -32988,7 +33028,7 @@ fn interruptible_wait_slice(pid: Option<u64>, slice_ms: u64) -> bool {
     // deferring signal delivery to the end of the slice.
     crate::sched::sleep_ms_interruptible(slice_ms);
     crate::proc::signal::deregister_signalfd_waiter(p, task);
-    crate::proc::signal::has_pending_in_mask(p, deliverable)
+    crate::proc::signal::wait_ends(p, deliverable)
 }
 
 /// Sleep up to `total_ms` in ≤10 ms slices, returning `true` if a deliverable
@@ -37650,11 +37690,13 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
     // restart when nothing ran one (the saved mask put back first).
     loop {
         let deliverable = !crate::proc::signal::blocked(caller);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        // A freeze ends the wait as a signal with no handler would: the call
+        // is restarted after the thaw (`proc::freezer`).
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             return restart::restart_result(restart::ERESTARTNOHAND);
         }
         crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -37878,14 +37920,16 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
         // Recomputed every pass: a handler installed by another thread counts
         // from the next wake.
         let interrupters = sigtimedwait_interrupters(caller, mask);
-        if crate::proc::signal::has_pending_in_mask(caller, interrupters) {
+        // A freeze ends the wait the same way, as Linux's freezer ends it
+        // with -EINTR (`proc::freezer`).
+        if crate::proc::signal::wait_ends(caller, interrupters) {
             return linux_err(errno::EINTR);
         }
         // Register-then-recheck so a signal raised in the gap before we
         // park is not missed (`set_pending` wakes registered waiters).
         let wake_on = mask | interrupters;
         crate::proc::signal::register_signalfd_waiter(caller, task, wake_on);
-        if crate::proc::signal::has_pending_in_mask(caller, wake_on) {
+        if crate::proc::signal::wait_ends(caller, wake_on) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -39922,7 +39966,8 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
 // sender's credentials (SCM_CREDENTIALS) -- as the kernel recorded them, or
 // as the sender stated them on its send, checked as Linux checks them (its
 // own; for root, any live process's) -- and descriptors travel both ways
-// (SCM_RIGHTS: `take_rights` on a send, `install_rights` on a receive).
+// (SCM_RIGHTS: `parse_send_control` and `attach_rights` on a send,
+// `install_rights` on a receive).
 // ---------------------------------------------------------------------------
 
 /// `AF_UNIX` (`AF_LOCAL`).
@@ -40445,15 +40490,29 @@ fn read_iovecs(iov_ptr: u64, count: u64) -> Result<alloc::vec::Vec<(u64, usize)>
     Ok(out)
 }
 
-/// What a send's `msg_control` carries.
+/// What a send's `msg_control` carries, read as Linux's `__scm_send` reads
+/// it: everything in it judged in order, as each message is reached.
 #[derive(Default)]
 struct SendControl {
-    /// `SCM_RIGHTS`: the descriptors to pass, in order, from every such
-    /// message -- not yet looked up.
-    rights: alloc::vec::Vec<i32>,
-    /// `SCM_CREDENTIALS`: the credentials the sender states -- `pid_t`, uid,
-    /// gid -- not yet checked. The last such message counts, as on Linux.
-    cred: Option<(i32, u32, u32)>,
+    /// `SCM_RIGHTS`: a reference to each descriptor named, in order, from
+    /// every such message -- taken as its message was read, not yet charged
+    /// to the sender's user ([`attach_rights`] does that, last).
+    rights: alloc::vec::Vec<crate::ipc::passed::Passed>,
+    /// `SCM_CREDENTIALS`: the credentials the sender states, checked as read
+    /// (`unix_socket::check_stated_cred`). The last such message counts, as
+    /// on Linux.
+    cred: Option<crate::ipc::channel::PeerCred>,
+}
+
+impl Drop for SendControl {
+    /// A send refused after its control was read gives back every
+    /// reference it took, now rather than at some later drain.
+    fn drop(&mut self) {
+        if !self.rights.is_empty() {
+            self.rights.clear();
+            crate::ipc::passed::drain();
+        }
+    }
 }
 
 /// Walk a send's `msg_control` as Linux's `____sys_sendmsg` and
@@ -40465,9 +40524,15 @@ struct SendControl {
 ///   whole header is left;
 /// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` gives the whole
 ///   `int`s after its header, more than [`MAX_PER_MESSAGE`] in all being
-///   `EINVAL` (Linux's `scm_fp_copy`); `SCM_CREDENTIALS` must be exactly
-///   `CMSG_LEN(sizeof(struct ucred))` long (`EINVAL`); any other `SOL_SOCKET`
-///   type is `EINVAL`.
+///   `EINVAL`, and each is looked up and a reference taken as it is read, one
+///   not open being `EBADF` (Linux's `scm_fp_copy`); `SCM_CREDENTIALS` must be
+///   exactly `CMSG_LEN(sizeof(struct ucred))` long (`EINVAL`), and what it
+///   states is checked as it is read (`scm_check_creds`); any other
+///   `SOL_SOCKET` type is `EINVAL`.
+///
+/// So each refusal comes in the order Linux's would: a message's own
+/// failures ahead of a later message's, and all of them ahead of the send's
+/// size or address, which Linux judges after `scm_send`.
 ///
 /// [`MAX_PER_MESSAGE`]: crate::ipc::passed::MAX_PER_MESSAGE
 fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, SyscallResult> {
@@ -40509,6 +40574,9 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
                     {
                         return Err(linux_err(errno::EINVAL));
                     }
+                    out.rights
+                        .try_reserve(count)
+                        .map_err(|_| linux_err(errno::ENOMEM))?;
                     let body = at.saturating_add(HDR);
                     for i in 0..count {
                         let from = body.saturating_add(i.saturating_mul(4));
@@ -40516,7 +40584,14 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
                             .get(from..from.saturating_add(4))
                             .and_then(|w| <[u8; 4]>::try_from(w).ok())
                             .unwrap_or([0xFF; 4]);
-                        out.rights.push(i32::from_ne_bytes(word));
+                        // Looked up and taken now, as `scm_fp_copy` fetches
+                        // each while reading its message: one not open is
+                        // EBADF ahead of anything after it. Every reference
+                        // taken so far goes back with `out` on the way out.
+                        let entry = lookup_caller_fd(i32::from_ne_bytes(word))?;
+                        let held = crate::ipc::passed::Passed::take(entry)
+                            .map_err(|_| linux_err(errno::EBADF))?;
+                        out.rights.push(held);
                     }
                 }
                 SCM_CREDENTIALS => {
@@ -40529,11 +40604,18 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
                             .and_then(|w| <[u8; 4]>::try_from(w).ok())
                             .unwrap_or([0; 4])
                     };
-                    out.cred = Some((
-                        i32::from_ne_bytes(word(16)),
-                        u32::from_ne_bytes(word(20)),
-                        u32::from_ne_bytes(word(24)),
-                    ));
+                    // Checked now, as `scm_check_creds` is, in order with the
+                    // rest. A stream checks them too, but reports its
+                    // connection's (unix_socket's "Credentials"). A negative
+                    // pid names no process; nor does 0, the kernel's.
+                    let claim = crate::ipc::channel::PeerCred {
+                        pid: u64::try_from(i32::from_ne_bytes(word(16))).unwrap_or(0),
+                        uid: u32::from_ne_bytes(word(20)),
+                        gid: u32::from_ne_bytes(word(24)),
+                    };
+                    out.cred = Some(
+                        crate::ipc::unix_socket::check_stated_cred(claim).map_err(unix_errno)?,
+                    );
                 }
                 _ => return Err(linux_err(errno::EINVAL)),
             }
@@ -40548,7 +40630,10 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
 /// `msg_name` if it names an address. Credentials the sender states
 /// (`SCM_CREDENTIALS`) are checked as Linux checks them and carried by a
 /// datagram; descriptors (`SCM_RIGHTS`) travel with the datagram, or on the
-/// bytes this send puts on a stream ([`take_rights`]).
+/// bytes this send puts on a stream ([`parse_send_control`] takes them,
+/// [`attach_rights`] charges them). Refusals come in Linux's order: the
+/// control's, message by message, then the size and the address, then
+/// `ETOOMANYREFS`.
 fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -40566,25 +40651,13 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let control = match parse_send_control(mh.msg_control, mh.msg_controllen) {
+    // First, as Linux's scm_send runs first: the stated credentials checked
+    // and the descriptors taken, in the order the control names them.
+    let mut control = match parse_send_control(mh.msg_control, mh.msg_controllen) {
         Ok(c) => c,
         Err(r) => return r,
     };
-    // Checked before anything is sent, as Linux's scm_send runs first. A
-    // stream checks them too, but reports its connection's (unix_socket's
-    // "Credentials").
-    let stated = match control.cred {
-        None => None,
-        Some((pid, uid, gid)) => {
-            // A negative pid names no process; nor does 0, the kernel's.
-            let pid = u64::try_from(pid).unwrap_or(0);
-            let claim = crate::ipc::channel::PeerCred { pid, uid, gid };
-            match unix_socket::check_stated_cred(claim) {
-                Ok(c) => Some(c),
-                Err(e) => return unix_errno(e),
-            }
-        }
-    };
+    let stated = control.cred;
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
@@ -40624,9 +40697,8 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
             Err(r) => return r,
         }
     };
-    // Last, as Linux's unix_attach_fds comes after the address and the size:
-    // a reference taken is a reference to give back.
-    let rights = match take_rights(&control.rights) {
+    // Last, as Linux's unix_attach_fds comes after the address and the size.
+    let rights = match attach_rights(&mut control) {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -40640,45 +40712,30 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     }
 }
 
-/// Take a reference to each descriptor `fds` names, for a send to carry
-/// (`SCM_RIGHTS`) -- `None` for none -- as Linux's `scm_fp_copy` and
-/// `unix_attach_fds` take them: each must be open (`EBADF`), and a sender
-/// whose user already has more descriptors in flight than its
-/// `RLIMIT_NOFILE` sends no more (`ETOOMANYREFS`; root is exempt, as
-/// `CAP_SYS_RESOURCE` is). What is taken counts against the sender's user
-/// until it is received or dropped ([`crate::ipc::passed`]).
-fn take_rights(fds: &[i32]) -> Result<Option<crate::ipc::passed::Bundle>, SyscallResult> {
-    use crate::ipc::passed::{self, Bundle, Passed};
-    if fds.is_empty() {
+/// The last step of a send carrying descriptors, as Linux's
+/// `unix_attach_fds`: refused with `ETOOMANYREFS` when the sender's user --
+/// not root, exempt as `CAP_SYS_RESOURCE` is -- already has more descriptors
+/// in flight than its `RLIMIT_NOFILE`; otherwise each reference
+/// [`parse_send_control`] took is charged to that user until it is received
+/// or dropped ([`crate::ipc::passed`]), and they become the message's bundle
+/// -- `None` for none. Refused, the references stay in `control`, whose drop
+/// gives them back.
+fn attach_rights(
+    control: &mut SendControl,
+) -> Result<Option<crate::ipc::passed::Bundle>, SyscallResult> {
+    use crate::ipc::passed::{self, Bundle};
+    if control.rights.is_empty() {
         return Ok(None);
     }
     let Some(pid) = caller_pid() else {
         return Err(linux_err(errno::EBADF));
     };
-    let mut taken = alloc::vec::Vec::new();
-    let mut refused = None;
-    for &fd in fds {
-        let held = lookup_caller_fd(fd)
-            .and_then(|entry| Passed::take(entry).map_err(|_| linux_err(errno::EBADF)));
-        match held {
-            Ok(p) => taken.push(p),
-            Err(r) => {
-                refused = Some(r);
-                break;
-            }
-        }
-    }
     let uid = pcb::process_uid(pid).unwrap_or(u32::MAX);
     let nofile = pcb::get_rlimit(pid, 7).map_or(u64::MAX, |(cur, _)| cur);
-    if refused.is_none() && uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
-        refused = Some(linux_err(errno::ETOOMANYREFS));
+    if uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
+        return Err(linux_err(errno::ETOOMANYREFS));
     }
-    if let Some(r) = refused {
-        // What was taken goes back.
-        drop(taken);
-        passed::drain();
-        return Err(r);
-    }
+    let mut taken = core::mem::take(&mut control.rights);
     for p in &mut taken {
         p.charge(uid);
     }
@@ -40699,6 +40756,24 @@ fn install_rights(
     at: u64,
     room: u64,
     cloexec: bool,
+) -> Result<(u64, bool), SyscallResult> {
+    install_rights_with(passed, at, room, cloexec, |msg| {
+        // SAFETY: `msg` holds `msg.len()` initialised bytes, no more than
+        // were validated writable at `at`; copy_to_user re-checks.
+        unsafe { crate::mm::user::copy_to_user(msg.as_ptr(), at, msg.len()) }
+    })
+}
+
+/// [`install_rights`], writing the finished control message with `write`:
+/// the copy into the caller's memory, or -- in
+/// [`self_test_install_rights_take_back`] -- a copy that fails, to drive the
+/// taking back that only a racing unmap could reach otherwise.
+fn install_rights_with(
+    passed: alloc::vec::Vec<crate::ipc::passed::Passed>,
+    at: u64,
+    room: u64,
+    cloexec: bool,
+    write: impl FnOnce(&[u8]) -> crate::error::KernelResult<()>,
 ) -> Result<(u64, bool), SyscallResult> {
     /// `sizeof(struct cmsghdr)`.
     const HDR: u64 = 16;
@@ -40725,6 +40800,9 @@ fn install_rights(
         return Err(linux_err(linux_errno_for(e)));
     }
     let mut fds: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    // Each descriptor installed, with the object it names: what the copy's
+    // failure below takes back.
+    let mut installed: alloc::vec::Vec<(i32, FdEntry)> = alloc::vec::Vec::new();
     let mut rest = passed.into_iter();
     if let Some(pid) = pid {
         for p in rest.by_ref().take(n) {
@@ -40734,6 +40812,12 @@ fn install_rights(
             } else {
                 0
             };
+            if fds.try_reserve(1).is_err() || installed.try_reserve(1).is_err() {
+                // No room to remember it by: not installed, as one past
+                // RLIMIT_NOFILE is not.
+                drop(p);
+                break;
+            }
             match pcb::linux_fd_install_passed(pid, entry) {
                 Ok((fd, held)) => {
                     if held {
@@ -40745,6 +40829,7 @@ fn install_rights(
                         let _ = p.land();
                     }
                     fds.push(fd);
+                    installed.push((fd, entry));
                 }
                 Err(_) => {
                     // Linux stops at the first it cannot install.
@@ -40769,14 +40854,130 @@ fn install_rights(
     for fd in &fds {
         msg.extend_from_slice(&fd.to_ne_bytes());
     }
-    // SAFETY: `msg` holds `msg.len()` initialised bytes, no more than were
-    // validated writable at `at`; copy_to_user re-checks.
-    if let Err(e) = unsafe { crate::mm::user::copy_to_user(msg.as_ptr(), at, msg.len()) } {
+    if let Err(e) = write(&msg) {
+        // The buffer was writable a moment ago; another thread has unmapped
+        // it since. A descriptor the program was never told of is one it
+        // cannot close, so each goes back out -- each only while its number
+        // still names what was put there (`linux_fd_take_last_if`), since a
+        // thread could have closed it and opened something else at it.
+        // Linux gets the same result by writing each number before the
+        // install (`scm_detach_fds`).
+        if let Some(pid) = pid {
+            for (fd, entry) in installed {
+                if let Some((taken, last)) =
+                    pcb::linux_fd_take_last_if(pid, fd, entry.kind, entry.raw_handle)
+                {
+                    linux_close_taken(pid, taken, last);
+                }
+            }
+        }
         return Err(linux_err(linux_errno_for(e)));
     }
     // CMSG_SPACE: the message padded to 8, as far as the buffer reaches.
     let space = len.saturating_add(7) & !7;
     Ok((space.min(room), cut))
+}
+
+/// Self-test: [`install_rights`] takes back what it installed when the
+/// descriptors' numbers cannot be written (known-issues
+/// `A-SCM-RIGHTS-DIFFERENCES`, item 2). A pipe's write end, received by a
+/// process whose control buffer passes the check and then fails the copy,
+/// is not left open at a number the process was never told; received with
+/// the copy working, it stays. A descriptor that names something else at the
+/// number now is not taken back. And once the process is gone the pipe's
+/// read end sees its end: no reference leaked either way.
+pub fn self_test_install_rights_take_back() -> crate::error::KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE, SYS_MMAP};
+    use crate::ipc::passed::{self, Passed};
+    use crate::ipc::pipe;
+    use crate::proc::linux_fd::{FdEntry, HandleKind};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    fn fail(what: &str) -> crate::error::KernelResult<()> {
+        crate::serial_println!("[linux]   FAIL: install_rights take-back: {}", what);
+        Err(KernelError::InternalError)
+    }
+    // The lowest number free after the three stdio descriptors.
+    const NEXT_FD: i32 = 3;
+
+    let pid = pcb::create("rights-take-back", 0);
+    let (rd, wr) = pipe::create();
+    let result = (|| -> crate::error::KernelResult<()> {
+        pcb::linux_fd_install_stdio(pid)?;
+        // A page of the process's own memory for the control buffer, so the
+        // check before the install passes as a real caller's would.
+        let mapped = self_test_as_process(pid, || {
+            super::dispatch::dispatch(
+                SYS_MMAP,
+                &SyscallArgs {
+                    arg0: 0,
+                    arg1: 0x4000,
+                    arg2: MAP_READ | MAP_WRITE,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
+            )
+            .value
+        });
+        let Ok(page) = u64::try_from(mapped) else {
+            return fail("could not map the process's memory");
+        };
+        let write_end = FdEntry::of(HandleKind::Pipe, wr.raw(), 0);
+
+        // The copy fails after the check: an error, and nothing installed.
+        let carried = alloc::vec![Passed::take(write_end)?];
+        let failed = self_test_in_process(pid, || {
+            install_rights_with(carried, page, 64, false, |_| {
+                Err(KernelError::InvalidAddress)
+            })
+            .is_err()
+        });
+        if failed != Some(true) {
+            return fail("a control message that could not be written was not an error");
+        }
+        if pcb::linux_fd_lookup(pid, NEXT_FD).is_some()
+            || pcb::owns_ipc_handle(pid, crate::cap::ResourceType::Pipe, wr.raw())
+        {
+            return fail("the descriptor stayed installed after its number could not be written");
+        }
+
+        // The copy works: installed, and kept.
+        let carried = alloc::vec![Passed::take(write_end)?];
+        let kept = self_test_in_process(pid, || {
+            matches!(
+                install_rights_with(carried, page, 64, false, |_| Ok(())),
+                Ok((_, false))
+            )
+        });
+        if kept != Some(true) || pcb::linux_fd_lookup(pid, NEXT_FD).is_none() {
+            return fail("a control message written in full did not keep its descriptor");
+        }
+
+        // The guard: a number that names another object now is left alone.
+        if pcb::linux_fd_take_last_if(pid, NEXT_FD, HandleKind::Pipe, rd.raw()).is_some()
+            || pcb::linux_fd_lookup(pid, NEXT_FD).is_none()
+        {
+            return fail("a descriptor naming another object was taken back");
+        }
+        Ok(())
+    })();
+    // The process's exit releases the write end it kept; then ours goes.
+    pcb::destroy(pid);
+    passed::drain();
+    pipe::close(wr);
+    let mut byte = [0u8; 1];
+    let ended = pipe::try_read(rd, &mut byte);
+    pipe::close(rd);
+    result?;
+    if ended != Ok(0) {
+        return fail("a reference to the write end leaked (the read end never saw it close)");
+    }
+    crate::serial_println!(
+        "[linux]   install_rights: numbers that cannot be written take their descriptors \
+         back, a number naming something else since is left alone, nothing leaked: OK"
+    );
+    Ok(())
 }
 
 /// `recvmsg(2)` on an `AF_UNIX` descriptor: one receive scattered across the

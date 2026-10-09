@@ -393,6 +393,26 @@ impl MemFsNode {
         }
     }
 
+    /// The bytes this node's contents hold against the size limit, as tmpfs
+    /// charges them: a file's data; a symlink's target only from
+    /// [`SHORT_SYMLINK_LEN`] up, where tmpfs moves it out of the inode into a
+    /// page of its own; nothing for a directory, socket or FIFO, which are
+    /// objects, counted against the object limit only. Not [`size`](Self::size),
+    /// which is what `stat` reports: a symlink's `st_size` is its length either
+    /// way.
+    fn held_bytes(&self) -> u64 {
+        match &self.kind {
+            MemFsNodeKind::File(data) => data.len() as u64,
+            MemFsNodeKind::Symlink(target) if target.len() >= SHORT_SYMLINK_LEN => {
+                target.len() as u64
+            }
+            MemFsNodeKind::Symlink(_)
+            | MemFsNodeKind::Dir(_)
+            | MemFsNodeKind::Socket
+            | MemFsNodeKind::Fifo => 0,
+        }
+    }
+
     /// Entry type for this node.
     fn entry_type(&self) -> EntryType {
         match &self.kind {
@@ -471,6 +491,21 @@ impl MemFsNode {
 // MemFs filesystem
 // ---------------------------------------------------------------------------
 
+/// How much a memfs may hold, in one of tmpfs's two measures: blocks of
+/// [`MEMFS_BLOCK_SIZE`] (`size=`) or objects (`nr_inodes=`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemFsLimit {
+    /// tmpfs's default: half of the machine's memory -- half its bytes for
+    /// the size, half its 4 KiB pages for the objects. Read when it is
+    /// checked rather than when the mount is made, so a mount made before
+    /// memory is counted gets it too.
+    HalfOfRam,
+    /// At most this many.
+    Exactly(u64),
+    /// No limit: tmpfs's `size=0` and `nr_inodes=0`.
+    Unlimited,
+}
+
 /// In-memory filesystem instance.
 pub struct MemFs {
     /// Every object in this filesystem, keyed by its inode number.
@@ -485,16 +520,215 @@ pub struct MemFs {
     /// The root has no parent entry naming it, so it is reachable only from
     /// here.  It is never removed for the lifetime of the mount.
     root_ino: u64,
+    /// Blocks held by the contents of every node -- a file's bytes, a
+    /// symlink's target -- each rounded up to whole [`MEMFS_BLOCK_SIZE`]
+    /// blocks, as tmpfs charges whole pages. Kept as they change
+    /// ([`Self::account`]), so that a write can be refused past
+    /// [`Self::size_limit`] without a walk of the tree.
+    held_blocks: u64,
+    /// How many blocks it may hold: tmpfs's `size=`.
+    size_limit: MemFsLimit,
+    /// How many objects it may hold: tmpfs's `nr_inodes=`.
+    inode_limit: MemFsLimit,
 }
 
 impl MemFs {
     /// Create a new empty in-memory filesystem.
+    ///
+    /// Limited as Linux's tmpfs is by default, to half of the machine's
+    /// memory and half its pages' worth of objects: past either a write or a
+    /// create is refused with `DiskFull` (`ENOSPC`). Until 2026-10-09 nothing
+    /// stopped a memfs taking all of memory (known-issues
+    /// `A-MEMFS-HAS-NO-SIZE-LIMIT`). [`Self::with_limits`] chooses others.
     pub fn new() -> Self {
+        Self::with_limits(MemFsLimit::HalfOfRam, MemFsLimit::HalfOfRam)
+    }
+
+    /// A new empty in-memory filesystem holding at most `size_limit` blocks
+    /// of [`MEMFS_BLOCK_SIZE`] and `inode_limit` objects (the root counts).
+    #[must_use]
+    pub fn with_limits(size_limit: MemFsLimit, inode_limit: MemFsLimit) -> Self {
         let root = MemFsNode::new_dir();
         let root_ino = root.ino;
         let mut inodes = BTreeMap::new();
         inodes.insert(root_ino, root);
-        Self { inodes, root_ino }
+        Self {
+            inodes,
+            root_ino,
+            held_blocks: 0,
+            size_limit,
+            inode_limit,
+        }
+    }
+
+    /// A new memfs as a tmpfs mount's options ask: `data` is the
+    /// comma-separated string `mount(2)` passes (`size=64m,mode=1777`).
+    ///
+    /// Taken, as Linux's tmpfs takes them: `size=` (bytes, with a `k`, `m`,
+    /// `g`, `t`, `p` or `e` suffix, or a percentage of memory with `%`),
+    /// `nr_blocks=` (in [`MEMFS_BLOCK_SIZE`] blocks), `nr_inodes=` (with
+    /// `k`, `m` or `g`) -- each `0` for no limit -- and `mode=` (octal),
+    /// `uid=` and `gid=` for the root directory. Ignored, as having no
+    /// meaning here: `huge=`, `mpol=`, `inode32`, `inode64`, `noswap`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` for an option tmpfs does not take or a value it
+    /// would refuse: Linux's `EINVAL`.
+    pub fn from_mount_data(data: &[u8]) -> KernelResult<Self> {
+        let mut size_limit = MemFsLimit::HalfOfRam;
+        let mut inode_limit = MemFsLimit::HalfOfRam;
+        let mut mode: Option<u16> = None;
+        let mut uid: Option<u32> = None;
+        let mut gid: Option<u32> = None;
+        let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
+        for option in text.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+            let (key, value) = option.split_once('=').unwrap_or((option, ""));
+            match key {
+                "size" => {
+                    let bytes = if let Some(percent) = value.strip_suffix('%') {
+                        let percent: u64 =
+                            percent.parse().map_err(|_| KernelError::InvalidArgument)?;
+                        ram_bytes()
+                            .ok_or(KernelError::InvalidArgument)?
+                            .checked_mul(percent)
+                            .ok_or(KernelError::InvalidArgument)?
+                            / 100
+                    } else {
+                        parse_suffixed(value, true)?
+                    };
+                    size_limit = limit_of(bytes.div_ceil(MEMFS_BLOCK_SIZE));
+                }
+                "nr_blocks" => size_limit = limit_of(parse_suffixed(value, true)?),
+                "nr_inodes" => inode_limit = limit_of(parse_suffixed(value, false)?),
+                "mode" => {
+                    let m =
+                        u16::from_str_radix(value, 8).map_err(|_| KernelError::InvalidArgument)?;
+                    if m > 0o7777 {
+                        return Err(KernelError::InvalidArgument);
+                    }
+                    mode = Some(m);
+                }
+                "uid" => uid = Some(value.parse().map_err(|_| KernelError::InvalidArgument)?),
+                "gid" => gid = Some(value.parse().map_err(|_| KernelError::InvalidArgument)?),
+                "huge" | "mpol" | "inode32" | "inode64" | "noswap" => {}
+                _ => return Err(KernelError::InvalidArgument),
+            }
+        }
+        let mut fs = Self::with_limits(size_limit, inode_limit);
+        let root_ino = fs.root_ino;
+        let root = fs.node_mut(root_ino)?;
+        if let Some(m) = mode {
+            root.permissions = m;
+        }
+        if let Some(u) = uid {
+            root.uid = u;
+        }
+        if let Some(g) = gid {
+            root.gid = g;
+        }
+        Ok(fs)
+    }
+
+    // -----------------------------------------------------------------------
+    // The size and object limits (tmpfs's `size=` and `nr_inodes=`)
+    // -----------------------------------------------------------------------
+
+    /// The most blocks this memfs may hold, `None` for no limit (or a
+    /// default that cannot yet be worked out: memory not counted).
+    fn max_blocks(&self) -> Option<u64> {
+        match self.size_limit {
+            MemFsLimit::HalfOfRam => ram_bytes().map(|b| b / 2 / MEMFS_BLOCK_SIZE),
+            MemFsLimit::Exactly(n) => Some(n),
+            MemFsLimit::Unlimited => None,
+        }
+    }
+
+    /// The most objects it may hold, `None` for no limit.
+    fn max_inodes(&self) -> Option<u64> {
+        match self.inode_limit {
+            // Linux's `totalram_pages() / 2`, in its 4 KiB pages.
+            MemFsLimit::HalfOfRam => ram_bytes().map(|b| b / 4096 / 2),
+            MemFsLimit::Exactly(n) => Some(n),
+            MemFsLimit::Unlimited => None,
+        }
+    }
+
+    /// Whether contents of `old` bytes may become `new` bytes: `DiskFull`
+    /// (`ENOSPC`) if the blocks that would take are past the limit. Shrinking
+    /// always may.
+    fn room_for(&self, old: u64, new: u64) -> KernelResult<()> {
+        let (old_blocks, new_blocks) = (blocks_of(old), blocks_of(new));
+        if new_blocks <= old_blocks {
+            return Ok(());
+        }
+        match self.max_blocks() {
+            Some(max)
+                if self
+                    .held_blocks
+                    .saturating_sub(old_blocks)
+                    .saturating_add(new_blocks)
+                    > max =>
+            {
+                Err(KernelError::DiskFull)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Record that contents of `old` bytes are now `new` bytes.
+    fn account(&mut self, old: u64, new: u64) {
+        self.held_blocks = self
+            .held_blocks
+            .saturating_sub(blocks_of(old))
+            .saturating_add(blocks_of(new));
+    }
+
+    /// Whether one more object may be made: `DiskFull` (`ENOSPC`, as tmpfs
+    /// answers) at the object limit.
+    fn room_for_inode(&self) -> KernelResult<()> {
+        match self.max_inodes() {
+            Some(max) if self.inodes.len() as u64 >= max => Err(KernelError::DiskFull),
+            _ => Ok(()),
+        }
+    }
+
+    /// Remove node `ino` from the table -- its last name and its last holder
+    /// gone -- and give back the blocks its contents held.
+    fn forget(&mut self, ino: u64) {
+        if let Some(node) = self.inodes.remove(&ino) {
+            self.account(node.held_bytes(), 0);
+        }
+    }
+
+    /// Write `data` at `offset` of node `ino`, within the size limit: every
+    /// write by path or by handle comes here.
+    fn write_node(&mut self, ino: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let node = self.node(ino)?;
+        if !node.is_file() {
+            return Err(node.not_a_file());
+        }
+        let old = node.size();
+        let end = offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        self.room_for(old, old.max(end))?;
+        self.node_mut(ino)?.write_range(offset, data)?;
+        let now = self.node(ino)?.size();
+        self.account(old, now);
+        Ok(())
+    }
+
+    /// Cut or zero-extend node `ino` to `size` bytes, within the size limit:
+    /// every truncate by path or by handle comes here.
+    fn set_len_node(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        let node = self.node(ino)?;
+        let old = node.size();
+        if node.is_file() {
+            self.room_for(old, size)?;
+        }
+        self.node_mut(ino)?.set_len(size)?;
+        let now = self.node(ino)?.size();
+        self.account(old, now);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -582,6 +816,9 @@ impl MemFs {
     /// the filesystem between the two statements.
     fn insert_new(&mut self, parent_ino: u64, name: PathBuf, node: MemFsNode) -> KernelResult<u64> {
         let ino = node.ino;
+        let held = node.held_bytes();
+        self.room_for_inode()?;
+        self.room_for(0, held)?;
         {
             let parent = self.node_mut(parent_ino)?;
             let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
@@ -589,6 +826,7 @@ impl MemFs {
             parent.touch_modified();
         }
         self.inodes.insert(ino, node);
+        self.account(0, held);
         Ok(ino)
     }
 
@@ -669,7 +907,7 @@ impl MemFs {
         };
         node.links = node.links.saturating_sub(1);
         if node.links == 0 && node.opens == 0 {
-            self.inodes.remove(&ino);
+            self.forget(ino);
         } else {
             // Still named elsewhere, or held open with no name left: the
             // file lives on, its link count changed.
@@ -1009,7 +1247,7 @@ impl FileSystem for MemFs {
 
         match self.child_ino(parent_ino, &filename)? {
             Some(existing_ino) => {
-                let existing = self.node_mut(existing_ino)?;
+                let existing = self.node(existing_ino)?;
                 if existing.is_dir() {
                     return Err(KernelError::IsADirectory);
                 }
@@ -1017,12 +1255,21 @@ impl FileSystem for MemFs {
                 // append-only one, which is written only at its end
                 // (`fs::attr_policy::may_rewrite`).
                 attr_policy::may_rewrite(existing.attributes)?;
+                if !existing.is_file() {
+                    return Err(existing.not_a_file());
+                }
+                // Within the size limit, checked before anything changes.
+                let old = existing.size();
+                let new = u64::try_from(data.len()).unwrap_or(u64::MAX);
+                self.room_for(old, new)?;
+                let existing = self.node_mut(existing_ino)?;
                 let not_a_file = existing.not_a_file();
                 let file_data = existing.file_data_mut().ok_or(not_a_file)?;
                 file_data.clear();
                 file_data.extend_from_slice(data);
                 // NLL: file_data borrow ends here (last use above).
                 existing.touch_modified();
+                self.account(old, new);
                 // Only the inode changed, so the directory's mtime is left
                 // alone — and every other name for this inode now reads the
                 // new bytes, which is what a hard link is for.  (The `None`
@@ -1107,20 +1354,21 @@ impl FileSystem for MemFs {
     }
 
     fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
-        let node = match self.resolve_mut(path) {
-            Ok(n) => n,
+        let ino = match self.resolve_ino(path) {
+            Ok(ino) => ino,
             Err(KernelError::NotFound) => {
                 // Create the file first (follows symlinks for creation target).
                 self.write_file(path, &[])?;
-                self.resolve_mut(path)?
+                self.resolve_ino(path)?
             }
             Err(e) => return Err(e),
         };
-        node.write_range(offset, data)
+        self.write_node(ino, offset, data)
     }
 
     fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
-        self.resolve_mut(path)?.set_len(size)
+        let ino = self.resolve_ino(path)?;
+        self.set_len_node(ino, size)
     }
 
     // --- An open file, by inode: what `fs::handle` uses for a file it holds ---
@@ -1146,7 +1394,7 @@ impl FileSystem for MemFs {
         node.opens = node.opens.saturating_sub(1);
         // The last handle on a file with no name left: it goes now.
         if node.opens == 0 && node.links == 0 {
-            self.inodes.remove(&ino);
+            self.forget(ino);
         }
     }
 
@@ -1160,18 +1408,17 @@ impl FileSystem for MemFs {
     }
 
     fn write_ino(&mut self, ino: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
-        self.node_mut(ino)?.write_range(offset, data)
+        self.write_node(ino, offset, data)
     }
 
     fn append_ino(&mut self, ino: u64, data: &[u8]) -> KernelResult<u64> {
-        let node = self.node_mut(ino)?;
-        let at = node.size();
-        node.write_range(at, data)?;
+        let at = self.node(ino)?.size();
+        self.write_node(ino, at, data)?;
         Ok(at)
     }
 
     fn truncate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
-        self.node_mut(ino)?.set_len(size)
+        self.set_len_node(ino, size)
     }
 
     fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
@@ -1189,6 +1436,7 @@ impl FileSystem for MemFs {
         }
         // Nothing is made in an immutable directory, named or not.
         attr_policy::may_create(parent.attributes)?;
+        self.room_for_inode()?;
         let mut node = MemFsNode::new(MemFsNodeKind::File(Vec::new()), mode & 0o7777);
         // No name, and one hold: the caller's (`pin_ino`'s count).
         node.links = 0;
@@ -1649,47 +1897,40 @@ impl FileSystem for MemFs {
         Ok(node.to_dir_entry(name))
     }
 
-    /// Report memfs usage.
-    ///
-    /// Since memfs is RAM-backed, total capacity is essentially unlimited
-    /// (bounded by heap size).  We report the current used byte count.
+    /// Report memfs usage, as tmpfs does: its limits are the totals --
+    /// `size=` the blocks, `nr_inodes=` the objects -- and what it holds is
+    /// taken from them. A memfs with no limit (`size=0`, or ramfs) reports
+    /// what it holds plus the free memory it could still take.
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
-        // The inode table *is* the object count, so this no longer walks the
-        // namespace.  That is not merely cheaper (O(1) rather than O(tree)):
-        // it is now correct in a case the walk could not express — a file
-        // reachable under two names is one inode, and the recursive count
-        // would have reported it twice.
+        // The inode table *is* the object count, so this does not walk the
+        // namespace -- and is right where a walk would not be: a file reachable
+        // under two names is one inode, and a recursive count would have
+        // reported it twice.
         let node_count = self.inodes.len() as u64;
-
-        // What this file system holds, in blocks: each file's bytes and each
-        // symlink's target, rounded up to whole blocks as tmpfs charges whole
-        // pages.
-        let held_blocks = self
-            .inodes
-            .values()
-            .map(|n| match &n.kind {
-                MemFsNodeKind::File(data) => blocks_for(data.len()),
-                MemFsNodeKind::Symlink(target) => blocks_for(target.as_bytes().len()),
-                MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
-            })
-            .fold(0u64, u64::saturating_add);
-        // memfs has no cap of its own: it grows until memory runs out. So its
-        // room is what it holds plus the free memory it could still take.
+        // Free memory, in blocks: the room of a memfs with no limit.
+        let free_ram =
+            crate::mm::frame::stats().map_or(0, |s| (s.free_bytes as u64) / MEMFS_BLOCK_SIZE);
         // This answered 0 blocks, 0 free and 0 inodes free until 2026-10-07,
         // which every caller reads as a full volume: `df` showed /tmp full,
         // and a program checking for room before a write refused it
         // (requests/d-a-memfs-reports-itself-full.md).
-        let free_blocks =
-            crate::mm::frame::stats().map_or(0, |s| (s.free_bytes as u64) / MEMFS_BLOCK_SIZE);
+        let (total_blocks, free_blocks) = match self.max_blocks() {
+            Some(max) => (max, max.saturating_sub(self.held_blocks)),
+            None => (self.held_blocks.saturating_add(free_ram), free_ram),
+        };
+        let (total_inodes, free_inodes) = match self.max_inodes() {
+            Some(max) => (max, max.saturating_sub(node_count)),
+            // One per block of room, as tmpfs's default once counted them.
+            None => (node_count.saturating_add(free_ram), free_ram),
+        };
         Ok(FsInfo {
             fs_type: String::from("memfs"),
             volume_label: String::new(),
             block_size: MEMFS_BLOCK_SIZE,
-            total_blocks: held_blocks.saturating_add(free_blocks),
+            total_blocks,
             free_blocks,
-            // Inodes as tmpfs counts them by default: one per block of room.
-            total_inodes: node_count.saturating_add(free_blocks),
-            free_inodes: free_blocks,
+            total_inodes,
+            free_inodes,
             max_name_len: 255,
             read_only: false,
         })
@@ -1701,9 +1942,57 @@ impl FileSystem for MemFs {
 /// blocks; the size is only the unit its room is counted in.
 const MEMFS_BLOCK_SIZE: u64 = 4096;
 
+/// The shortest symlink target that takes a block: tmpfs keeps one shorter
+/// than this in the inode itself, and charges it nothing against `size=`
+/// (`SHORT_SYMLINK_LEN` in Linux's `mm/shmem.c`).
+const SHORT_SYMLINK_LEN: usize = 128;
+
 /// Whole [`MEMFS_BLOCK_SIZE`] blocks needed for `len` bytes.
-fn blocks_for(len: usize) -> u64 {
-    (len as u64).div_ceil(MEMFS_BLOCK_SIZE)
+fn blocks_of(len: u64) -> u64 {
+    len.div_ceil(MEMFS_BLOCK_SIZE)
+}
+
+/// The machine's memory, in bytes: every frame the allocator manages.
+/// `None` before it is counted.
+fn ram_bytes() -> Option<u64> {
+    let stats = crate::mm::frame::stats()?;
+    let frames = u64::try_from(stats.total_frames).ok()?;
+    let frame = u64::try_from(crate::mm::frame::FRAME_SIZE).ok()?;
+    frames.checked_mul(frame)
+}
+
+/// A limit from a mount option's number: `0` is none, as tmpfs reads it.
+fn limit_of(n: u64) -> MemFsLimit {
+    if n == 0 {
+        MemFsLimit::Unlimited
+    } else {
+        MemFsLimit::Exactly(n)
+    }
+}
+
+/// A tmpfs option's number, with Linux's `memparse` suffixes: `k`, `m`,
+/// `g` -- and with `all`, also `t`, `p`, `e` -- each a power of 1024, in
+/// either case. `InvalidArgument` for anything else, or a number that
+/// overflows.
+fn parse_suffixed(value: &str, all: bool) -> KernelResult<u64> {
+    let (digits, shift) = match value.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => {
+            let shift = match c.to_ascii_lowercase() {
+                'k' => 10,
+                'm' => 20,
+                'g' => 30,
+                't' if all => 40,
+                'p' if all => 50,
+                'e' if all => 60,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            (value.get(..i).unwrap_or(""), shift)
+        }
+        _ => (value, 0),
+    };
+    let n: u64 = digits.parse().map_err(|_| KernelError::InvalidArgument)?;
+    n.checked_mul(1u64 << shift)
+        .ok_or(KernelError::InvalidArgument)
 }
 
 // ---------------------------------------------------------------------------
@@ -1966,7 +2255,193 @@ pub fn self_test() -> KernelResult<()> {
     // --- Non-UTF-8 name tests ---
     test_non_utf8_names(&mut fs)?;
 
+    // --- The size and object limits ---
+    test_limits()?;
+    test_mount_data()?;
+
     crate::serial_println!("[memfs] Self-test PASSED");
+    Ok(())
+}
+
+/// The blocks every node's contents hold, counted by walking them: what
+/// [`MemFs::held_blocks`] must always equal.
+fn walked_blocks(fs: &MemFs) -> u64 {
+    fs.inodes
+        .values()
+        .map(|n| blocks_of(n.held_bytes()))
+        .fold(0, u64::saturating_add)
+}
+
+/// The size limit refuses growth past it with `DiskFull` -- by write, by
+/// whole-file overwrite, by truncate, by handle -- and gives the room back
+/// when contents shrink or go; the object limit refuses a create past it;
+/// the running block count agrees with a walk throughout; and `statvfs`
+/// reports the limits as tmpfs does.
+fn test_limits() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        crate::serial_println!("[memfs]   FAILED: limits: {}", what);
+        Err(KernelError::IoError)
+    }
+    let block = usize::try_from(MEMFS_BLOCK_SIZE).unwrap_or(4096);
+    // Four blocks, five objects (the root is one).
+    let mut fs = MemFs::with_limits(MemFsLimit::Exactly(4), MemFsLimit::Exactly(5));
+    fs.write_file(Path::new("/a"), &alloc::vec![1u8; block.saturating_mul(3)])?;
+    fs.write_at(Path::new("/b"), 0, &alloc::vec![2u8; block])?;
+    if fs.write_at(Path::new("/b"), 1, b"x") != Ok(()) {
+        return fail("a write inside a block already held was refused");
+    }
+    if fs.write_at(Path::new("/b"), u64::try_from(block).unwrap_or(4096), b"y")
+        != Err(KernelError::DiskFull)
+    {
+        return fail("a write past the size limit was not DiskFull");
+    }
+    if fs.write_file(Path::new("/a"), &alloc::vec![1u8; block.saturating_mul(4)])
+        != Err(KernelError::DiskFull)
+    {
+        return fail("an overwrite past the size limit was not DiskFull");
+    }
+    if fs.truncate(Path::new("/b"), MEMFS_BLOCK_SIZE.saturating_mul(2))
+        != Err(KernelError::DiskFull)
+    {
+        return fail("a truncate past the size limit was not DiskFull");
+    }
+    if fs.read_file(Path::new("/a"))?.len() != block.saturating_mul(3)
+        || fs.held_blocks != walked_blocks(&fs)
+    {
+        return fail("a refused change changed something");
+    }
+    // Room comes back as contents shrink or go.
+    fs.truncate(Path::new("/a"), 0)?;
+    fs.write_file(Path::new("/c"), &alloc::vec![3u8; block.saturating_mul(2)])?;
+    fs.remove(Path::new("/c"))?;
+    let ino = fs.resolve_ino(Path::new("/b"))?;
+    fs.pin_ino(ino)?;
+    fs.remove(Path::new("/b"))?;
+    // Unlinked but held open: its block stays held until the last handle.
+    if fs.held_blocks != 1 || fs.held_blocks != walked_blocks(&fs) {
+        crate::serial_println!(
+            "[memfs]   FAILED: limits: {} blocks held, {} walked (want 1)",
+            fs.held_blocks,
+            walked_blocks(&fs)
+        );
+        return Err(KernelError::IoError);
+    }
+    // Through its handle it grows to the whole limit -- its own block is
+    // part of it -- and not a block past.
+    fs.write_ino(ino, 0, &alloc::vec![9u8; block.saturating_mul(4)])?;
+    if fs.write_ino(ino, 0, &alloc::vec![9u8; block.saturating_mul(5)])
+        != Err(KernelError::DiskFull)
+        || fs.held_blocks != 4
+    {
+        return fail("an open, unlinked file's handle grew it past the limit");
+    }
+    fs.unpin_ino(ino);
+    if fs.held_blocks != 0 || fs.held_blocks != walked_blocks(&fs) {
+        return fail("blocks were not given back when contents went");
+    }
+    fs.write_file(Path::new("/d"), &alloc::vec![4u8; block.saturating_mul(4)])?;
+    // statvfs: the limit is the total; what is held is taken from it.
+    let info = fs.statvfs()?;
+    if info.total_blocks != 4 || info.free_blocks != 0 {
+        crate::serial_println!(
+            "[memfs]   FAILED: limits: statvfs {} total, {} free (want 4, 0)",
+            info.total_blocks,
+            info.free_blocks
+        );
+        return Err(KernelError::IoError);
+    }
+    // Objects: the root, /a and /d make three; two more fit, a sixth not.
+    fs.mkdir(Path::new("/e"))?;
+    fs.symlink(Path::new("/f"), Path::new("a"))?;
+    if fs.mkdir(Path::new("/g")) != Err(KernelError::DiskFull) {
+        return fail("a create past the object limit was not DiskFull");
+    }
+    if fs.statvfs()?.free_inodes != 0 || fs.held_blocks != walked_blocks(&fs) {
+        return fail("statvfs did not report the objects used up, or the count drifted");
+    }
+    // Symlinks, as tmpfs charges them: a short target lives in the inode and
+    // takes no block, a long one takes one -- and stat reports either's length.
+    let mut links = MemFs::with_limits(MemFsLimit::Exactly(1), MemFsLimit::Unlimited);
+    let long = "t".repeat(SHORT_SYMLINK_LEN);
+    links.symlink(Path::new("/short"), Path::new("a"))?;
+    if links.held_blocks != 0 {
+        return fail("a short symlink was charged a block");
+    }
+    links.symlink(Path::new("/long"), Path::new(long.as_str()))?;
+    if links.held_blocks != 1
+        || links.symlink(Path::new("/long2"), Path::new(long.as_str()))
+            != Err(KernelError::DiskFull)
+        || links.lstat(Path::new("/short"))?.size != 1
+    {
+        return fail("a long symlink took no block, or a second fit past the limit");
+    }
+    links.remove(Path::new("/long"))?;
+    if links.held_blocks != 0 || links.held_blocks != walked_blocks(&links) {
+        return fail("a long symlink's block was not given back");
+    }
+    // No limit at all: nothing refused for size.
+    let mut open = MemFs::with_limits(MemFsLimit::Unlimited, MemFsLimit::Unlimited);
+    open.write_file(
+        Path::new("/big"),
+        &alloc::vec![0u8; block.saturating_mul(8)],
+    )?;
+    crate::serial_println!(
+        "[memfs]   size and object limits: DiskFull past each, room given back, counted as held: OK"
+    );
+    Ok(())
+}
+
+/// A tmpfs mount's options, as Linux's tmpfs reads them.
+fn test_mount_data() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        crate::serial_println!("[memfs]   FAILED: mount data: {}", what);
+        Err(KernelError::IoError)
+    }
+    let fs = MemFs::from_mount_data(b"size=8k,nr_inodes=5,mode=1777,uid=5,gid=6,noswap")?;
+    let root = fs.node(fs.root_ino)?;
+    if fs.size_limit != MemFsLimit::Exactly(2)
+        || fs.inode_limit != MemFsLimit::Exactly(5)
+        || root.permissions != 0o1777
+        || root.uid != 5
+        || root.gid != 6
+    {
+        return fail("size=8k,nr_inodes=5,mode=1777,uid=5,gid=6 was not read as given");
+    }
+    let unlimited = MemFs::from_mount_data(b"size=0,nr_inodes=0")?;
+    if unlimited.size_limit != MemFsLimit::Unlimited
+        || unlimited.inode_limit != MemFsLimit::Unlimited
+    {
+        return fail("size=0,nr_inodes=0 is not \"no limit\"");
+    }
+    let default = MemFs::from_mount_data(b"")?;
+    if default.size_limit != MemFsLimit::HalfOfRam || default.inode_limit != MemFsLimit::HalfOfRam {
+        return fail("no options did not give tmpfs's defaults");
+    }
+    if let Some(ram) = ram_bytes() {
+        let half = MemFs::from_mount_data(b"size=50%")?;
+        if half.size_limit != MemFsLimit::Exactly(ram.div_euclid(2).div_ceil(MEMFS_BLOCK_SIZE)) {
+            return fail("size=50% is not half of memory");
+        }
+    }
+    for bad in [
+        &b"bogus=1"[..],
+        b"size=12x",
+        b"nr_inodes=1t",
+        b"mode=99999",
+        b"size=",
+        b"uid=-1",
+    ] {
+        if MemFs::from_mount_data(bad).map(|_| ()) != Err(KernelError::InvalidArgument) {
+            crate::serial_println!(
+                "[memfs]   FAILED: mount data: {:?} was not refused",
+                core::str::from_utf8(bad).unwrap_or("?")
+            );
+            return Err(KernelError::IoError);
+        }
+    }
+    crate::serial_println!(
+        "[memfs]   tmpfs mount options (size, nr_inodes, mode, uid, gid; bad ones refused): OK"
+    );
     Ok(())
 }
 
@@ -2442,7 +2917,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   last unlink frees the inode: OK");
 
     // statvfs reports room: 4096-byte blocks, some free when memory is, and
-    // what is held -- total less free -- grows by a file's whole blocks.
+    // what is held -- total less free -- grows by a file's whole blocks. The
+    // objects used -- total less free -- are the inode table (the object
+    // limit, tmpfs's `nr_inodes`, is no longer one per block of room).
     let held = |info: &FsInfo| info.total_blocks.saturating_sub(info.free_blocks);
     let before = fs.statvfs()?;
     fs.write_file(Path::new("/room.bin"), &alloc::vec![7u8; 10_000])?;
@@ -2454,7 +2931,10 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         || (frames_known && after.free_blocks == 0)
         || held(&after) != held(&before).saturating_add(3)
         || held(&gone) != held(&before)
-        || after.free_inodes != after.free_blocks
+        // `after` was read with /room.bin still there: one object more
+        // than the table holds now.
+        || after.total_inodes.saturating_sub(after.free_inodes)
+            != (fs.inodes.len() as u64).saturating_add(1)
     {
         crate::serial_println!(
             "[memfs]   FAILED: statvfs room: bsize {}, free {}, held {} -> {} -> {}",

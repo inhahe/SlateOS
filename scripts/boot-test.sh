@@ -3847,8 +3847,10 @@ check_lane_signals() {
     fi
 
     echo "=== Checking whether another lane has asked everyone to stop ==="
+    # --no-sync: a gate judges, it does not act, so the integration tree's
+    # fast-forward is left to the lanes' own runs of this script.
     if run_checker check-lane-signals "$py" \
-            "$PROJECT_ROOT/scripts/check-lane-signals.py"; then
+            "$PROJECT_ROOT/scripts/check-lane-signals.py" --no-sync; then
         return 0
     fi
 

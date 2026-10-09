@@ -4797,37 +4797,19 @@ fn gen_search() -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Generate `/proc/tags` — file tagging system statistics.
+/// Generate `/proc/tags` — how many tag changes and searches there have been.
+///
+/// Counts only. A file's tags are its own `user.xdg.tags` attribute, read as
+/// the file allows; this file used to list every tag in use, to any reader,
+/// whether or not it could read the files carrying them (design-decisions
+/// §1560).
 fn gen_tags() -> Vec<u8> {
-    use crate::fs::tags;
-    let s = tags::stats();
-    let mut out = String::with_capacity(512);
-
-    out.push_str(&format!(
-        "File Tagging: {}\n\n",
-        if tags::is_enabled() {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    ));
-    out.push_str(&format!("  unique tags:     {}\n", s.unique_tags));
-    out.push_str(&format!("  tagged files:    {}\n", s.tagged_files));
-    out.push_str(&format!("  associations:    {}\n", s.total_associations));
+    let s = crate::fs::tags::stats();
+    let mut out = String::with_capacity(160);
+    out.push_str("File tags (each file's user.xdg.tags attribute)\n\n");
     out.push_str(&format!("  adds:            {}\n", s.adds));
     out.push_str(&format!("  removes:         {}\n", s.removes));
     out.push_str(&format!("  searches:        {}\n", s.searches));
-    out.push_str(&format!("  index built:     {}\n", s.index_built));
-
-    // List known tags if index is built.
-    let all_tags = tags::list_tags();
-    if !all_tags.is_empty() {
-        out.push_str("\nKnown Tags:\n");
-        for (tag, count) in &all_tags {
-            out.push_str(&format!("  {:20} {} file(s)\n", tag, count));
-        }
-    }
-
     out.into_bytes()
 }
 
@@ -5940,46 +5922,30 @@ fn gen_toolbar() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/queryable` — how many attribute changes, reads and
+/// queries there have been, and the well-known attribute names.
+///
+/// Counts only. Each attribute is the file's own `user.slate.<name>`
+/// attribute, read as the file allows; this used to report the in-memory
+/// store's contents and indexes, which are gone (design-decisions §1561).
 fn gen_queryable() -> Vec<u8> {
     use alloc::format;
+    let s = super::queryable::stats();
     let mut out = String::new();
-
-    let (files, total_attrs, sets, gets, queries, indexes) = super::queryable::stats();
-
-    out.push_str("Queryable File Metadata (BFS-inspired)\n");
-    out.push_str("======================================\n\n");
-    out.push_str(&format!("Files:       {}/{}\n", files, 65536));
-    out.push_str(&format!("Attributes:  {}\n", total_attrs));
-    out.push_str(&format!("Indexes:     {}/{}\n", indexes, 1024));
-    out.push_str(&format!("Set ops:     {}\n", sets));
-    out.push_str(&format!("Get ops:     {}\n", gets));
-    out.push_str(&format!("Queries:     {}\n\n", queries));
-
-    let indexed = super::queryable::list_indexes();
-    if !indexed.is_empty() {
-        out.push_str("Indexed attributes:\n");
-        for name in &indexed {
-            out.push_str(&format!("  {}\n", name));
-        }
-        out.push('\n');
-    }
-
-    let schemas = super::queryable::list_schemas();
-    if !schemas.is_empty() {
-        out.push_str(&format!("Schemas: {}\n", schemas.len()));
+    out.push_str("Queryable file attributes (each a user.slate.<name> attribute)\n\n");
+    out.push_str(&format!("Set ops:     {}\n", s.sets));
+    out.push_str(&format!("Get ops:     {}\n", s.gets));
+    out.push_str(&format!("Queries:     {}\n\n", s.queries));
+    out.push_str(&format!(
+        "{:22} {:6} {}\n",
+        "WELL-KNOWN NAME", "TYPE", "HOLDS"
+    ));
+    for w in super::queryable::WELL_KNOWN {
         out.push_str(&format!(
-            "{:30} {:8} {:8} {}\n",
-            "NAME", "TYPE", "INDEXED", "DESCRIPTION"
+            "{:22} {:6} {}\n",
+            w.name, w.value_type, w.description
         ));
-        for s in &schemas {
-            let idx = if s.indexed { "yes" } else { "no" };
-            out.push_str(&format!(
-                "{:30} {:8} {:8} {}\n",
-                s.name, s.value_type, idx, s.description
-            ));
-        }
     }
-
     out.into_bytes()
 }
 

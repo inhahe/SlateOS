@@ -601,7 +601,14 @@ struct FpuStop {
 /// Every stopped thread's FPU state, by task id. A tracer's access takes it
 /// before [`TRACEES`] (to see that the thread is still stopped); nothing
 /// takes it inside that lock.
-static FPU: Mutex<BTreeMap<TaskId, FpuStop>> = Mutex::new(BTreeMap::new());
+///
+/// Watched, unlike this file's other locks: [`TRACEES`]'s lock is taken
+/// under it -- by design, the order a stopped thread's way out takes them
+/// in -- and a lock with another taken under it is the deadlock detector's
+/// to watch (design-decisions 975, A-Q16). Taken only by a debugger's
+/// register calls and a stop's way out.
+static FPU: crate::sync::Mutex<BTreeMap<TaskId, FpuStop>> =
+    crate::sync::Mutex::named(BTreeMap::new(), b"PTRACE_FPU");
 
 // ---------------------------------------------------------------------------
 // Queries the rest of the kernel asks

@@ -1,7 +1,13 @@
 ### [A] On more than one CPU the application processors stop ticking, and no boot test runs more than one CPU -- 2026-10-08
 
-**Status:** OPEN -- the scheduling causes fixed on lane-a-wip 2026-10-09,
-awaiting a boot on main; no boot test runs more than one CPU yet.
+**Status:** OPEN -- for its second half only. The scheduling causes, and the
+rest the two-CPU boots found, are fixed and on main since b083cfeca (lane
+A's publish of 2026-10-09, boot-tested green at 3d83e0264); a two-CPU boot
+with every self-test on is clean. The intermittent two-CPU hang at the
+device-door test is a heap-lock deadlock, fixed on lane-a-wip 2026-10-09
+(design-decisions §1563; below), awaiting boots. No boot test runs more than
+one CPU by default yet: `boot-test.sh --smp=N` exists and nothing passes it --
+the default can change once the two-CPU boots run clean with the fix.
 
 **In short:** every boot test runs the kernel on a single CPU, so nothing has
 been checking that it works on more than one -- and on two or four it did
@@ -117,7 +123,116 @@ task's stack as the incoming one's context. `sched::SwitchIrqs` now clears
 the flag for the switch and gives each task back the one it entered with;
 `sched::self_test_switch_interrupt_flag` checks both states.
 
-**What would make it stay fixed:** a boot test on more than one CPU. Today
-`scripts/boot-test.sh` starts QEMU without `-smp`, so a multi-CPU
-regression is invisible to every gate. Once a full-self-test boot on two
-CPUs is clean, it should run at least in the release boot.
+**The first full-self-test boot on two CPUs (2026-10-09)** -- QEMU with
+`-smp 2 -accel tcg,thread=multi` and every self-test on (what
+`boot-test.sh --smp=2` now does) -- found four more, each fixed on
+lane-a-wip:
+
+- **An AP was told it was CPU 0 until every AP had started.**
+  `smp::current_cpu_index` answered 0 until the BSP set `SMP_INITIALIZED`
+  at the end of bring-up, so AP 1, starting, raised CPU 0's preempt count
+  taking a lock and lowered its own releasing it, leaving CPU 0's count at
+  1: every voluntary switch there was reported as made under a lock nobody
+  held, and once the affinity test's spinning task was pinned to CPU 0,
+  CPU 0 could never preempt it and the boot starved behind it. The gate
+  protected nothing (`fast_cpu_index`'s tier 0 covers the BSP's window);
+  `current_cpu_index` is now `fast_cpu_index`, and an AP writes its
+  `IA32_TSC_AUX` (the RDPID and rdtscp tiers) before its first lock.
+- **CPU 0 had no idle context of its own while the boot ran.** With task 0
+  -- the boot -- asleep, the scheduler's idle fallback idled on the stack
+  of whichever task had just stopped, which tied that task to CPU 0: the
+  affinity test's task pinned itself to CPU 1 and "returned on 0". CPU 0
+  now has a hidden boot-time idle task the fallback switches to
+  (`sched::BOOT_IDLE_ID`, design-decisions 1559).
+- **A container's init ran before it was in its container**
+  (`A-CONTAINER-INIT-RAN-BEFORE-IT-WAS-IN-ITS-CONTAINER`): `container::run`
+  made it runnable, then bound it to its cgroup, namespaces and root. Now
+  the process is spawned unstarted and started last.
+- **A task spawned suspended could be started by a stray wake.** Only
+  `sched::admit` starts one now (`Task::awaiting_admission`).
+
+And five self-tests that held only on one CPU, each now waiting for what it
+checks: the container `exec` and live health-check tests reaped once and
+checked the cgroup while the exited task was still finishing on the other
+CPU (`container::reap_until_gone`); the futex PI-timeout and service
+blocking-accept tests yielded a fixed number of times for a task the wake
+had placed on the other CPU (`selftest::wait_until`, bounded by the clock);
+and the container run/logs/port tests now pin their init to the CPU whose
+interrupts they hold off.
+
+**Verified (lane-a-wip, 2026-10-09):** two CPUs under multi-threaded TCG,
+every self-test on: BOOT_OK after 1628 s, no self-test failed or was carried
+past, no lockup, wedge or switch-under-lock report (fc6aa39db). The kexec
+restart works on two CPUs as well (`SYS_POWER_RELOAD`'s boot: AP 1 stopped
+by NMI, restarted by the new kernel).
+
+**What would make it stay fixed:** a boot test on more than one CPU.
+`scripts/boot-test.sh --smp=N` exists since 2026-10-09 (lane-a-wip):
+`-smp N` under multi-threaded TCG, recorded as a boot of the tree with its
+own `cpus` population, not as an experiment. Nothing runs it by default
+yet; once two-CPU boots are clean it should be the release boot's shape.
+
+**The first full two-CPU release boot test (2026-10-09, `main` at b083cfeca,
+`--smp=2 --profile=release`) panicked** at 180 s, in a sixth self-test that
+held only on one CPU: `sched::barrier`'s, which yielded ten times for its
+helper task and then asserted the helper had passed the barrier, while the
+helper -- released, on the other CPU -- was still on its way out
+(`barrier.rs:251`, "Task 896 exiting" interleaved with the panic). The
+release build is faster than the debug one that passed this test on two
+CPUs, which is all that changed. Fixed on lane-a-wip the same day: the test
+waits by the clock (`selftest::wait_until`), checks that exactly one of the
+two arrivals is the leader, and returns its failures instead of asserting
+them, so a failed check no longer stops the boot. The barrier itself was
+read for the same race and holds: a round's non-leaders stay blocked until
+its generation advances, so none can start the next round early. Serial
+log: `os-lane-a/build/serial-failures/20261009T143451Z-b083cfeca-rc1.txt`.
+
+**Then the rest of the class, found by looking for it (2026-10-09).** A
+two-CPU fast boot of `lane-a` with the barrier fix passed it and failed the
+very next self-test the same way: `sched::once_event`'s waited five and ten
+yields for a helper (`once_event.rs:284`). Rather than meet them one boot at a
+time, every fixed-count yield loop in `kernel/src` (32) was read for a wait on
+another task's work. Fixed with clock-bounded waits (`selftest::wait_until`),
+each now strict where it used to accept "partial" or "pending": `once_event`
+(also waiting until its helper is really blocked, so the signal wakes a
+blocked waiter), `kchannel`'s producer/consumer, `workqueue` (all three items
+run; the queue drained), `ktimer`'s one-shot, `ipc::semaphore`'s close- and
+signal-wake tests (which also checked nothing at all for close, and could leave
+a waiter running into the next test's semaphore), the futex PI test's three
+waits (the boost is now checked once H is parked, not merely past stage 2) and
+its wait-and-wake and timeout tests, and `proc::thread`'s spawn, zombie,
+spawn-into-zombie, leader-id and blocking-join tests. The kill test's victim
+is now spawned suspended: "no yield between spawn and kill" kept a Ready task
+from running only on one CPU. Tests that run before `smp::init` were fixed
+too, though only one CPU runs them today, so the boot order cannot hide them
+again.
+
+Reading them turned up a second, worse fault in the same tests: **a stack
+local handed to a spawned task by address** -- the PI futex word, the
+wait-and-wake word, the thread tests' counters. Where the task could still run
+after the test function returned (a failure, a timeout, or the PI test's H,
+whose last unlock comes after the stage it signals), it would write into
+whatever frame had taken the test's place. Each is a static now. That is the
+"written through a stale pointer into memory that is now this task's kernel
+stack" shape `A-SCHEDULE-INNER-RESUMED-ONTO-A-FRAME-HOLDING-MINUS-1001` reads
+its one crash as; none of these is shown to be that crash's source (its value,
+-1001, matches none of them), but they were real hazards of exactly that kind.
+
+**The hang at the native device-door test: found and fixed on lane-a-wip
+2026-10-09, awaiting boots.** One two-CPU debug fast boot of lane-a-wip
+(6c458082b) stopped mid-spawn of `spawn-test-device-door` -- after "Stored 1
+argv", before the scheduler's "Spawned task" -- and printed nothing for
+minutes (serial log: `os-lane-a-batch/build/fast-wave2-hang-serial.txt`). On
+2026-10-09 the fourth two-CPU boot run with the monitor and `hangcap.py`
+armed hung at the same line, and the capture named it: CPU 0 spinning, with
+interrupts off, on the heap lock inside a timer interrupt -- the timer's wake
+(`try_wake` -> `PerCpuScheduler::enqueue`) grew the idle second CPU's run
+queue, which allocated -- while the code it had interrupted, the device-door
+spawn's `Box::default` in `start_job_and_signals`, held that lock; CPU 1
+halted, idle. The heap lock now turns interrupts off while held, and refills
+outside the lock (design-decisions §1563;
+`heap::self_test_lock_irqs`, proven to fail without the fix). Two-CPU boots
+because only there was the wake's queue one that had never held a task.
+Whether the earlier -1001 crash at the same test is related is not shown: a
+deadlock does not write -1001 into a frame
+(`A-SCHEDULE-INNER-RESUMED-ONTO-A-FRAME-HOLDING-MINUS-1001`).

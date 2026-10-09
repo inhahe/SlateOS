@@ -1637,6 +1637,20 @@ extern "C" fn test_thread_entry(arg: u64) {
     counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// For the self-tests: wait, by the clock, until `counter` reaches `want`.
+///
+/// The threads these tests start are handed a counter to bump. A fixed number
+/// of yields waited for them only on one CPU, where a yield runs them; on more
+/// than one, a thread may be on another CPU and the yields return at once
+/// (`selftest::wait_until`). And each test's counter is a static of its own,
+/// not a local: a thread still running when a failing test returns would
+/// otherwise write into a stack frame that is some other call's by then.
+fn wait_for_count(counter: &core::sync::atomic::AtomicU64, want: u64) -> bool {
+    crate::selftest::wait_until(5_000, || {
+        counter.load(core::sync::atomic::Ordering::Relaxed) >= want
+    })
+}
+
 /// Run thread management self-tests.
 pub fn self_test() -> KernelResult<()> {
     test_spawn_thread()?;
@@ -1789,20 +1803,24 @@ fn test_exit_detaches_address_space() -> KernelResult<()> {
 fn test_kill_thread_cleans_up() -> KernelResult<()> {
     use core::sync::atomic::{AtomicU64, Ordering};
 
+    static KILL_VICTIM_RAN: AtomicU64 = AtomicU64::new(0);
+    KILL_VICTIM_RAN.store(0, Ordering::Relaxed);
     let pid = pcb::create("thread-test-kill", 0);
-    let counter = AtomicU64::new(0);
-    let counter_ptr = &counter as *const AtomicU64 as u64;
+    let counter_ptr = &KILL_VICTIM_RAN as *const AtomicU64 as u64;
 
-    let task_id = spawn(
+    // Spawned suspended: never runnable until admitted, so it cannot run on
+    // any CPU. "No yield between spawn and kill" kept a Ready victim from
+    // running only on one CPU; on two, the other CPU can take it at once.
+    let task_id = spawn_suspended_with_tls(
         pid,
         b"kill-victim",
         sched::task::DEFAULT_PRIORITY,
         test_thread_entry,
         counter_ptr,
+        0,
+        0,
     )?;
 
-    // No `yield_now` between spawn and here, so the victim is still Ready
-    // and has not executed an instruction.
     let fail = |msg: &str| -> KernelResult<()> {
         serial_println!("[thread]   FAIL: {}", msg);
         Err(KernelError::InternalError)
@@ -1810,10 +1828,10 @@ fn test_kill_thread_cleans_up() -> KernelResult<()> {
 
     if !kill_thread(task_id) {
         pcb::destroy(pid);
-        return fail("kill_thread should accept a Ready task");
+        return fail("kill_thread should accept a task that has not started");
     }
 
-    if counter.load(Ordering::Relaxed) != 0 {
+    if KILL_VICTIM_RAN.load(Ordering::Relaxed) != 0 {
         pcb::destroy(pid);
         return fail("victim ran despite never being scheduled");
     }
@@ -1966,12 +1984,14 @@ fn test_detached_exit_not_retained() -> KernelResult<()> {
 fn test_spawn_thread() -> KernelResult<()> {
     use core::sync::atomic::AtomicU64;
 
+    static SPAWN_RAN: AtomicU64 = AtomicU64::new(0);
+    SPAWN_RAN.store(0, core::sync::atomic::Ordering::Relaxed);
+
     // Create a process.
     let pid = pcb::create("thread-test-1", 0);
 
     // Track the counter.
-    let counter = AtomicU64::new(0);
-    let counter_ptr = &counter as *const AtomicU64 as u64;
+    let counter_ptr = &SPAWN_RAN as *const AtomicU64 as u64;
 
     // Spawn a thread in the process.
     let task_id = spawn(
@@ -2002,12 +2022,11 @@ fn test_spawn_thread() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // Let the thread run.
-    sched::yield_now();
-    sched::yield_now();
+    // Let the thread run, and wait for it.
+    wait_for_count(&SPAWN_RAN, 1);
 
     // Counter should have been incremented.
-    if counter.load(core::sync::atomic::Ordering::Relaxed) != 1 {
+    if SPAWN_RAN.load(core::sync::atomic::Ordering::Relaxed) != 1 {
         serial_println!("[thread]   FAIL: counter should be 1");
         pcb::destroy(pid);
         return Err(KernelError::InternalError);
@@ -2033,6 +2052,7 @@ fn test_leader_takes_the_process_id() -> KernelResult<()> {
     // Static, not on this stack: the threads may still be running when this
     // function returns.
     static RAN: AtomicU64 = AtomicU64::new(0);
+    RAN.store(0, core::sync::atomic::Ordering::Relaxed);
     let pid = pcb::create("thread-leader-id", 0);
     let arg = &RAN as *const AtomicU64 as u64;
     let prio = sched::task::DEFAULT_PRIORITY;
@@ -2055,12 +2075,15 @@ fn test_leader_takes_the_process_id() -> KernelResult<()> {
                     pid
                 );
             }
-            // Let both run, then retire them as the other tests do.
-            sched::yield_now();
-            sched::yield_now();
+            // Let both run, then retire them as the other tests do -- not
+            // before they have run, which on another CPU may take a moment.
+            let ran = wait_for_count(&RAN, 2);
+            if !ran {
+                serial_println!("[thread]   FAIL: the leader-id threads did not both run");
+            }
             on_thread_exit(first);
             on_thread_exit(second);
-            ok
+            ok && ran
         }
         (first, second) => {
             serial_println!(
@@ -2086,10 +2109,11 @@ fn test_leader_takes_the_process_id() -> KernelResult<()> {
 fn test_thread_exit_zombies_process() -> KernelResult<()> {
     use core::sync::atomic::AtomicU64;
 
+    static ZOMBIE_RAN: AtomicU64 = AtomicU64::new(0);
+    ZOMBIE_RAN.store(0, core::sync::atomic::Ordering::Relaxed);
     let pid = pcb::create("thread-test-2", 0);
 
-    let counter = AtomicU64::new(0);
-    let counter_ptr = &counter as *const AtomicU64 as u64;
+    let counter_ptr = &ZOMBIE_RAN as *const AtomicU64 as u64;
 
     // Spawn two threads.
     let t1 = spawn(
@@ -2107,13 +2131,11 @@ fn test_thread_exit_zombies_process() -> KernelResult<()> {
         counter_ptr,
     )?;
 
-    // Let both run.
-    sched::yield_now();
-    sched::yield_now();
-    sched::yield_now();
+    // Let both run, and wait for them.
+    wait_for_count(&ZOMBIE_RAN, 2);
 
     // Both counters fired.
-    if counter.load(core::sync::atomic::Ordering::Relaxed) != 2 {
+    if ZOMBIE_RAN.load(core::sync::atomic::Ordering::Relaxed) != 2 {
         serial_println!("[thread]   FAIL: counter should be 2");
         pcb::destroy(pid);
         return Err(KernelError::InternalError);
@@ -2152,11 +2174,12 @@ fn test_thread_exit_zombies_process() -> KernelResult<()> {
 fn test_spawn_into_zombie_fails() -> KernelResult<()> {
     use core::sync::atomic::AtomicU64;
 
+    static LATE_RAN: AtomicU64 = AtomicU64::new(0);
+    LATE_RAN.store(0, core::sync::atomic::Ordering::Relaxed);
     let pid = pcb::create("thread-test-3", 0);
-    let counter = AtomicU64::new(0);
-    let counter_ptr = &counter as *const AtomicU64 as u64;
+    let counter_ptr = &LATE_RAN as *const AtomicU64 as u64;
 
-    // Spawn and run a thread.
+    // Spawn and run a thread, and wait for it to have run.
     let t1 = spawn(
         pid,
         b"t3",
@@ -2164,8 +2187,12 @@ fn test_spawn_into_zombie_fails() -> KernelResult<()> {
         test_thread_entry,
         counter_ptr,
     )?;
-    sched::yield_now();
-    sched::yield_now();
+    if !wait_for_count(&LATE_RAN, 1) {
+        serial_println!("[thread]   FAIL: the thread spawned into the process never ran");
+        on_thread_exit(t1);
+        pcb::destroy(pid);
+        return Err(KernelError::InternalError);
+    }
 
     // Exit the thread → process becomes zombie.
     on_thread_exit(t1);
@@ -2348,12 +2375,9 @@ extern "C" fn bj_target_entry(arg: u64) {
     let task_id = sched::current_task_id();
 
     // Wait for the joiner to register itself on us — that is the exact
-    // moment it is about to park.
-    let mut spins = 0u32;
-    while bj_waiter_of(task_id).is_none() && spins < 100_000 {
-        sched::yield_now();
-        spins = spins.saturating_add(1);
-    }
+    // moment it is about to park. Bounded by the clock, not a count of
+    // yields: on another CPU the yields return at once (`selftest::wait_until`).
+    crate::selftest::wait_until(5_000, || bj_waiter_of(task_id).is_some());
     if bj_waiter_of(task_id).is_none() {
         BJ_FAIL.store(1, SeqCst);
         return;
@@ -2657,14 +2681,13 @@ fn run_blocking_join_phase(record_value: bool, expected: KernelResult<i64>) -> K
         target,
     )?;
 
-    // Both spawned tasks outrank the boot task, so this loop only makes
-    // progress once they are done (or the joiner is stuck parked with
-    // the target gone, which the bound below catches).
-    let mut spins = 0u32;
-    while BJ_DONE.load(SeqCst) == 0 && BJ_FAIL.load(SeqCst) == 0 && spins < 100_000 {
-        sched::yield_now();
-        spins = spins.saturating_add(1);
-    }
+    // Both spawned tasks outrank the boot task, so on one CPU this wait only
+    // makes progress once they are done (or the joiner is stuck parked with
+    // the target gone, which the bound catches). Bounded by the clock, not a
+    // count of yields, which on more than one CPU return at once.
+    crate::selftest::wait_until(10_000, || {
+        BJ_DONE.load(SeqCst) != 0 || BJ_FAIL.load(SeqCst) != 0
+    });
 
     match BJ_FAIL.load(SeqCst) {
         0 => {}
@@ -2686,10 +2709,7 @@ fn run_blocking_join_phase(record_value: bool, expected: KernelResult<i64>) -> K
     }
 
     if BJ_DONE.load(SeqCst) == 0 {
-        serial_println!(
-            "[thread]   FAIL: joiner still blocked {} yields after the target exited",
-            spins
-        );
+        serial_println!("[thread]   FAIL: joiner still blocked 10 s after the target exited");
         return bj_fail(pid, target, joiner);
     }
 

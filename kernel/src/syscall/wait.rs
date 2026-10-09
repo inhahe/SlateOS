@@ -411,9 +411,10 @@ pub fn wait_for_child_event(
             // Only handler-backed signals can be pending-and-deliverable at
             // a park point (`classify_post` drops no-handler default-ignore
             // signals and terminates on fatal ones), so a restart can never
-            // spuriously livelock here.
+            // spuriously livelock here. A freeze restarts the wait the same way,
+            // after the thaw (`proc::freezer`).
             let deliverable = !signal::blocked(parent_pid);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
+            if signal::wait_ends(parent_pid, deliverable) {
                 return Ok(WaitOutcome::Restart);
             }
             // A tracee that is not a child has no slot of the caller's on its
@@ -438,7 +439,7 @@ pub fn wait_for_child_event(
                 return Ok(WaitOutcome::Changed(found));
             }
             signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
+            if signal::wait_ends(parent_pid, deliverable) {
                 signal::deregister_signalfd_waiter(parent_pid, task_id);
                 if any_slot {
                     pcb::clear_wait_any_task(parent_pid, task_id);
@@ -506,12 +507,12 @@ pub fn wait_for_child_event(
                 return Err(KernelError::NoSuchProcess);
             }
             let deliverable = !signal::blocked(parent_pid);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
+            if signal::wait_ends(parent_pid, deliverable) {
                 pcb::clear_wait_any_task(parent_pid, task_id);
                 return Ok(WaitOutcome::Restart);
             }
             signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
-            if signal::has_pending_in_mask(parent_pid, deliverable) {
+            if signal::wait_ends(parent_pid, deliverable) {
                 signal::deregister_signalfd_waiter(parent_pid, task_id);
                 continue;
             }

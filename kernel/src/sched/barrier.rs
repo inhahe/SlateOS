@@ -157,100 +157,106 @@ impl Barrier {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Self-test for the barrier.
+/// Self-test for the barrier: construction, a one-participant barrier (never
+/// blocks, always the leader, reusable), and a two-task rendezvous with a
+/// spawned helper.
 ///
-/// Tests single-task barrier (count=1), construction, and generation
-/// counting.  Multi-task barrier testing requires spawning tasks.
+/// A failed check is returned as an error, not asserted: a self-test that
+/// panics takes the whole boot down with it, and the boot's report of which
+/// test failed is worth more than the stop.
+///
+/// The rendezvous waits for the helper by the clock ([`wait_until`]), never by
+/// a count of yields. Ten yields was the old wait, and it was one only on one
+/// CPU, where a yield runs the helper. On two the helper runs on the other
+/// CPU and the yields return at once: the first two-CPU release boot
+/// (2026-10-09) checked `HELPER_PASSED` while the helper was still on its way
+/// out of the barrier, and panicked.
+///
+/// [`wait_until`]: crate::selftest::wait_until
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
+    use core::sync::atomic::AtomicBool;
+
+    /// How long the helper may take to arrive, or to pass once released:
+    /// far beyond a working kernel's microseconds, and far short of a hung
+    /// boot.
+    const PATIENCE_MS: u64 = 5_000;
+
+    fn fail(what: &str) -> crate::error::KernelResult<()> {
+        crate::serial_println!("[barrier]   FAIL: {}", what);
+        Err(crate::error::KernelError::InternalError)
+    }
 
     serial_println!("[barrier] Running self-test...");
 
     // --- 1. Construction ---
-    {
-        let b = Barrier::new(4);
-        assert_eq!(b.count(), 4);
-        assert_eq!(b.generation(), 0);
-        assert_eq!(b.waiting_count(), 0);
+    let b = Barrier::new(4);
+    if b.count() != 4 || b.generation() != 0 || b.waiting_count() != 0 {
+        return fail("a new barrier for four is not at generation 0 with nobody waiting");
     }
     serial_println!("[barrier]   Construction: OK");
 
     // --- 2. Single-participant barrier (count=1) ---
-    // Should not block — we are immediately the leader.
-    {
-        let b = Barrier::new(1);
-        let result = b.wait();
-        assert!(result.is_leader());
-        assert_eq!(b.generation(), 1);
-        assert_eq!(b.waiting_count(), 0);
-
-        // Should be reusable.
-        let result2 = b.wait();
-        assert!(result2.is_leader());
-        assert_eq!(b.generation(), 2);
+    // Never blocks: every arrival is the last, so the leader.
+    let b = Barrier::new(1);
+    let first = b.wait();
+    if !first.is_leader() || b.generation() != 1 || b.waiting_count() != 0 {
+        return fail("a one-participant barrier did not trip at once with its caller as leader");
+    }
+    // Reusable.
+    let second = b.wait();
+    if !second.is_leader() || b.generation() != 2 {
+        return fail("a one-participant barrier did not trip a second time");
     }
     serial_println!("[barrier]   Single-participant: OK");
 
-    // --- 3. Leader detection ---
-    {
-        let b = Barrier::new(1);
-        let r = b.wait();
-        assert!(r.is_leader());
-    }
-    serial_println!("[barrier]   Leader detection: OK");
+    // --- 3. Multi-task barrier (count=2) ---
+    // A helper arrives first and must wait for us; our arrival releases it.
+    static TEST_BARRIER: Barrier = Barrier::new(2);
+    static HELPER_ARRIVED: AtomicBool = AtomicBool::new(false);
+    static HELPER_PASSED: AtomicBool = AtomicBool::new(false);
+    static HELPER_LED: AtomicBool = AtomicBool::new(false);
 
-    // --- 4. Multi-task barrier (count=2) ---
-    // Spawn a helper task that waits on the barrier, then we wait too.
-    {
-        use core::sync::atomic::AtomicBool;
-        static TEST_BARRIER: Barrier = Barrier::new(2);
-        static HELPER_ARRIVED: AtomicBool = AtomicBool::new(false);
-        static HELPER_PASSED: AtomicBool = AtomicBool::new(false);
+    HELPER_ARRIVED.store(false, Ordering::Relaxed);
+    HELPER_PASSED.store(false, Ordering::Relaxed);
+    HELPER_LED.store(false, Ordering::Relaxed);
 
-        // Reset for this test.
-        HELPER_ARRIVED.store(false, Ordering::Relaxed);
-        HELPER_PASSED.store(false, Ordering::Relaxed);
-
-        extern "C" fn barrier_helper(_: u64) {
-            HELPER_ARRIVED.store(true, Ordering::Release);
-            TEST_BARRIER.wait();
-            HELPER_PASSED.store(true, Ordering::Release);
-        }
-
-        let tid = crate::sched::spawn(
-            b"test-barrier",
-            crate::sched::task::DEFAULT_PRIORITY,
-            barrier_helper,
-            0,
-            0,
-        );
-        assert!(tid.is_ok());
-
-        // Yield a few times to let the helper task run and arrive.
-        for _ in 0..10 {
-            crate::sched::yield_now();
-        }
-
-        // Helper should have arrived but not yet passed (waiting for us).
-        assert!(HELPER_ARRIVED.load(Ordering::Acquire));
-        assert!(!HELPER_PASSED.load(Ordering::Acquire));
-
-        // Now we arrive — this should trip the barrier.
+    extern "C" fn barrier_helper(_: u64) {
+        HELPER_ARRIVED.store(true, Ordering::Release);
         let r = TEST_BARRIER.wait();
-        // One of us is the leader; the other is not.
-        // We can't predict which (depends on timing), but at least
-        // one must be the leader.
-        let _ = r;
-
-        // Yield to let helper complete.
-        for _ in 0..10 {
-            crate::sched::yield_now();
-        }
-
-        // Now helper should have passed.
-        assert!(HELPER_PASSED.load(Ordering::Acquire));
+        HELPER_LED.store(r.is_leader(), Ordering::Relaxed);
+        HELPER_PASSED.store(true, Ordering::Release);
     }
-    serial_println!("[barrier]   Multi-task barrier (2 tasks): OK");
+
+    if crate::sched::spawn(
+        b"test-barrier",
+        crate::sched::task::DEFAULT_PRIORITY,
+        barrier_helper,
+        0,
+        0,
+    )
+    .is_err()
+    {
+        return fail("could not spawn the helper task");
+    }
+    if !crate::selftest::wait_until(PATIENCE_MS, || HELPER_ARRIVED.load(Ordering::Acquire)) {
+        return fail("the helper never reached the barrier");
+    }
+    // Arrived (or about to), and held there: nothing passes a barrier for two
+    // until the second arrives, and that is us.
+    if HELPER_PASSED.load(Ordering::Acquire) {
+        return fail("the helper passed a barrier for two on its own");
+    }
+    let ours = TEST_BARRIER.wait();
+    if !crate::selftest::wait_until(PATIENCE_MS, || HELPER_PASSED.load(Ordering::Acquire)) {
+        return fail("the helper was not released when the second task arrived");
+    }
+    // Exactly one of the two is the leader -- which one depends on whether
+    // the helper had counted itself in before we arrived.
+    if ours.is_leader() == HELPER_LED.load(Ordering::Relaxed) {
+        return fail("the two arrivals did not get exactly one leader between them");
+    }
+    serial_println!("[barrier]   Multi-task barrier (2 tasks, one leader): OK");
 
     serial_println!("[barrier] Self-test PASSED");
     Ok(())

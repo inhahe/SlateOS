@@ -57,6 +57,7 @@
 //! | `semaphore` | a counting semaphore | its handle |
 //! | `service` | a connection to accept | the listener's handle |
 //! | `stopped` | to be continued (job control, a debugger) | -- |
+//! | `frozen` | to be thawed: a system freeze, or its container's pause | -- |
 //! | `wait` | something no blocking code has described | -- |
 //!
 //! ## Holders
@@ -132,11 +133,14 @@ pub enum WaitChannel {
     Service = 18,
     /// Stopped, until continued (job control, a debugger).
     Stopped = 19,
+    /// Frozen at the edge of user mode, until thawed ([`crate::proc::freezer`]):
+    /// the whole system's freeze, or its container's pause.
+    Frozen = 20,
 }
 
 /// How many kinds there are, [`WaitChannel::None`] included -- the length of
 /// [`WchanStats::by_channel`] and of [`WaitChannel::ALL`].
-pub const KINDS: usize = 20;
+pub const KINDS: usize = 21;
 
 impl WaitChannel {
     /// Every kind, in discriminant order: `ALL[k as usize] == k`.
@@ -161,6 +165,7 @@ impl WaitChannel {
         Self::Semaphore,
         Self::Service,
         Self::Stopped,
+        Self::Frozen,
     ];
 
     /// The word `/proc/<pid>/wchan` prints for this kind (the module doc's
@@ -188,6 +193,7 @@ impl WaitChannel {
             Self::Semaphore => "semaphore",
             Self::Service => "service",
             Self::Stopped => "stopped",
+            Self::Frozen => "frozen",
         }
     }
 
@@ -220,6 +226,8 @@ impl Wait {
     pub const UNDESCRIBED: Self = Self::new(WaitChannel::Other, 0);
     /// Stopped until continued.
     pub const STOPPED: Self = Self::new(WaitChannel::Stopped, 0);
+    /// Frozen until thawed ([`crate::proc::freezer`]).
+    pub const FROZEN: Self = Self::new(WaitChannel::Frozen, 0);
 
     /// A wait on `channel` with argument `arg`.
     #[must_use]
@@ -461,6 +469,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "an undescribed wait",
     )?;
     check(line(bare(Wait::STOPPED)) == "stopped", "a stopped task")?;
+    check(line(bare(Wait::FROZEN)) == "frozen", "a frozen task")?;
     check(
         line(Report {
             wait: Wait::new(WaitChannel::Channel, 12),

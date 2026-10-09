@@ -24,3 +24,26 @@ process group — the state in which a `^C` has somebody to signal — and leave
 the ring raw otherwise, which is the kernel shell's state. What has to be
 settled first is who owns keystrokes when both a session and the kernel shell
 are live, since today they simply race for each key.
+
+**Settled by reading the code (2026-10-09), and what it showed is in the
+way.** The question above -- who owns keystrokes when a session and the
+kernel shell are both live -- does not arise: the kernel shell starts only
+when init cannot be spawned (`main.rs`, the fallback after
+`spawn_process(INIT_ELF)`), so it never runs beside a session. But three
+programs read the keyboard's raw ring themselves with
+`SYS_CONSOLE_READ_CHAR`, past the terminal: `userspace/screen`,
+`userspace/telnet` and `services/init`'s `read_char`. Receiving at arrival
+would take their keys -- and turn `telnet`'s ^C, which it means to send to
+the remote host, into a local `SIGINT`. So they move first, to `SYS_TTY_READ`
+with raw mode set through `SYS_TTY_GET_TERMIOS`/`SET_TERMIOS`, as the C
+library already did (§114): `requests/a-bd-read-the-console-through-the-terminal-so-ctrl-c-can-stop-a-program-that-is-not-reading.md`.
+
+The kernel half, for when they have: a deferred item, submitted from the
+keyboard interrupt on a false-to-true edge as echo is, drains the ring into
+the console device through `tty::receive` while the console has a foreground
+process group, delivers any signal it produces to that group
+(`signal_foreground_group`), bumps a console-input generation and wakes the
+keyboard waiters. Console readers stop consuming the ring outside the device
+lock -- `console_wait_for`'s blocking step becomes a wait for "the ring is not
+empty, or the generation moved" that takes nothing, then loops back to the
+locked pull -- so the deferred item and a reader can never reorder two keys.

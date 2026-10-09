@@ -1944,13 +1944,20 @@ pub fn add_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelResult
         let _ = crate::proc::pcb::set_uts_ns(pid, uts_ns);
     }
 
-    // If the container is currently frozen (Docker `pause`), suspend the newly
-    // joined thread immediately so it cannot run while the rest of the
-    // container is halted.  Done outside the table lock (the scheduler has its
-    // own lock; never hold the container lock across a scheduler call).  The
-    // task stays Suspended until `unpause` resumes the whole container.
-    if frozen {
-        let _ = crate::sched::suspend(task_id);
+    // If the container is currently frozen (Docker `pause`), the newly joined
+    // process is frozen with it: its thread parks before its first
+    // instruction, until `unpause` thaws the whole container
+    // (`crate::proc::freezer`). Done outside the table lock. Not waited for:
+    // a thread not yet started is at rest already.
+    if frozen && let Err(e) = crate::proc::freezer::freeze_processes(&[pid], 0) {
+        // Every freezer slot is taken: the process runs in a paused
+        // container. Said, rather than refusing the join half done.
+        serial_println!(
+            "[container] process {} joined paused container {} but could not be frozen: {:?}",
+            pid,
+            id,
+            e
+        );
     }
 
     Ok(())
@@ -2011,6 +2018,10 @@ pub fn remove_process_task(id: ContainerId, pid: u64, task_id: u64) -> KernelRes
     // Back to the system's UTS namespace, symmetric with `add_process_task`.
     // A pid with no process record has nothing to move.
     let _ = crate::proc::pcb::set_uts_ns(pid, crate::utsns::ROOT_UTS);
+
+    // A process that leaves a paused container is not paused any more
+    // (`crate::proc::freezer`); a no-op for one that was not.
+    crate::proc::freezer::thaw_processes(&[pid]);
 
     Ok(())
 }
@@ -4754,26 +4765,40 @@ pub fn kill(id: ContainerId) -> KernelResult<usize> {
     Ok(killed)
 }
 
-/// Freeze a container, suspending all of its threads (Docker `pause`).
+/// How long [`pause`] waits for the container's threads to come to rest
+/// before it returns; any still running then are frozen when they next pass
+/// a checkpoint.
+const PAUSE_WAIT_NS: u64 = 2_000_000_000;
+
+/// Freeze a container (Docker `pause`): every thread of every tracked process
+/// stops at the edge of user mode, in the freezer (`crate::proc::freezer`),
+/// as cgroup v2's freezer stops them on Linux.
 ///
-/// Marks the container frozen and suspends every thread of every tracked
-/// process, so the whole container stops executing. While frozen, any process
-/// subsequently joined to the container (via [`add_process_task`] — e.g. an
-/// `exec` or a fresh `run`) is suspended on entry, so the freeze is complete:
-/// no thread of the container can run until [`unpause`] thaws it. The
-/// container's lifecycle state stays `Running` (pause is a sub-state of
-/// running, orthogonal to Created/Running/Stopped).
+/// A thread in a system call is pulled out of it first, and issues it again
+/// when thawed, so the programs in the container never see the pause; one
+/// computing in ring 3 is interrupted. None stops in the middle of kernel
+/// work -- holding a lock some other program needs -- which suspending each
+/// thread wherever it was, as this did until 2026-10-09, allowed. While
+/// frozen, any process joined to the container ([`add_process_task`] -- an
+/// `exec` or a fresh `run`) and any child of one is frozen too. A thread
+/// stopped by job control stays stopped through the thaw: the two are
+/// independent, as they are on Linux. The container's lifecycle state stays
+/// `Running` (pause is a sub-state of running, orthogonal to
+/// Created/Running/Stopped).
 ///
-/// Returns the number of threads suspended.
+/// Returns the number of threads at rest when it returns -- frozen, stopped
+/// or not yet started; it waits up to [`PAUSE_WAIT_NS`] for them.
 ///
 /// # Errors
 ///
 /// - [`KernelError::InvalidArgument`] if the container id is invalid/inactive,
 ///   is not in the `Running` state, or is already frozen.
+/// - [`KernelError::ResourceExhausted`] if the freezer has no room for its
+///   processes (`proc::freezer::FROZEN_SLOTS`); nothing is then paused.
 pub fn pause(id: ContainerId) -> KernelResult<usize> {
     // Set the frozen flag and snapshot the tracked PIDs under the table lock,
-    // then suspend threads outside it — `sched::suspend` takes the scheduler
-    // lock, which must never be held under the container table lock.
+    // then freeze them outside it -- the freezer waits, and takes the
+    // scheduler's and the process table's locks.
     let (process_ids, name) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
@@ -4792,29 +4817,36 @@ pub fn pause(id: ContainerId) -> KernelResult<usize> {
         ))
     })?;
 
-    let mut suspended = 0usize;
-    for pid in process_ids {
-        if let Some(threads) = crate::proc::pcb::get_threads(pid) {
-            for task_id in threads {
-                if crate::sched::suspend(task_id) {
-                    suspended = suspended.saturating_add(1);
+    let frozen = match crate::proc::freezer::freeze_processes(&process_ids, PAUSE_WAIT_NS) {
+        Ok(f) => f,
+        Err(e) => {
+            // Nothing was frozen: the container is not paused after all.
+            with_table(|table| {
+                if let Some(c) = table.containers.get_mut(id as usize) {
+                    c.frozen = false;
                 }
-            }
+            });
+            return Err(e);
         }
+    };
+    if frozen.pending != 0 {
+        serial_println!(
+            "[container] '{}' paused with {} thread(s) not yet at rest after {} ms; each \
+             freezes when it next leaves the kernel",
+            name,
+            frozen.pending,
+            PAUSE_WAIT_NS / 1_000_000
+        );
     }
     record_event(id, &name, ContainerEventKind::Pause, None);
-    Ok(suspended)
+    Ok(frozen.threads)
 }
 
-/// Thaw a frozen container, resuming all of its threads (Docker `unpause`).
+/// Thaw a frozen container (Docker `unpause`): every thread [`pause`] froze
+/// goes on, each issuing again the call it was pulled out of. A thread
+/// stopped by job control stays stopped -- the pause never had it.
 ///
-/// Clears the frozen flag and resumes every suspended thread of every tracked
-/// process, the inverse of [`pause`]. Only threads that were suspended by the
-/// freeze transition back to ready; a thread that was independently suspended
-/// for another reason would also be resumed, but in practice the freezer owns
-/// the suspend state of a frozen container's threads.
-///
-/// Returns the number of threads resumed.
+/// Returns the number of threads the container's processes have.
 ///
 /// # Errors
 ///
@@ -4836,18 +4868,14 @@ pub fn unpause(id: ContainerId) -> KernelResult<usize> {
         ))
     })?;
 
-    let mut resumed = 0usize;
-    for pid in process_ids {
-        if let Some(threads) = crate::proc::pcb::get_threads(pid) {
-            for task_id in threads {
-                if crate::sched::resume(task_id) {
-                    resumed = resumed.saturating_add(1);
-                }
-            }
-        }
-    }
+    crate::proc::freezer::thaw_processes(&process_ids);
+    let threads = process_ids
+        .iter()
+        .filter_map(|&pid| crate::proc::pcb::get_threads(pid))
+        .map(|t| t.len())
+        .sum();
     record_event(id, &name, ContainerEventKind::Unpause, None);
-    Ok(resumed)
+    Ok(threads)
 }
 
 /// Report whether a container is currently frozen (Docker `pause` sub-state).
@@ -6472,10 +6500,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // Test 19l: pause()/unpause() freeze and thaw a container (Docker
     // `pause`/`unpause`), managing the `frozen` flag and its state-machine
-    // guards.  Synthetic PIDs have no backing threads, so the suspended/resumed
-    // thread counts are 0 here; the real suspension of live threads is covered
-    // by the scheduler's own suspend/resume tests.  This verifies the freezer's
-    // lifecycle guards and the `is_frozen` accessor.
+    // guards.  Synthetic PIDs have no backing threads, so the frozen thread
+    // counts are 0 here; the freezing of live threads is
+    // `spawn::self_test_freezer`'s (ring 3).  This verifies the lifecycle
+    // guards, the `is_frozen` accessor and that the freezer is told.
     {
         // Invalid id is rejected by every freezer entry point.
         assert!(pause(MAX_CONTAINERS as ContainerId).is_err());
@@ -6496,12 +6524,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "synthetic PID has no threads"
         );
         assert_eq!(is_frozen(ct_pz), Some(true), "frozen after pause");
+        assert!(
+            crate::proc::freezer::process_frozen(72001),
+            "the freezer was not told"
+        );
 
         // Double-pause is rejected.
         assert!(pause(ct_pz).is_err(), "already frozen");
 
-        // A process joined while frozen is accepted (and would be suspended).
+        // A process joined while frozen is accepted, and frozen with the rest.
         add_process(ct_pz, 72002).expect("add 72002 while frozen");
+        assert!(
+            crate::proc::freezer::process_frozen(72002),
+            "a process joined while paused is not frozen"
+        );
 
         // Unpause thaws it.
         assert_eq!(
@@ -6510,6 +6546,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "no live threads to resume"
         );
         assert_eq!(is_frozen(ct_pz), Some(false), "not frozen after unpause");
+        assert!(
+            !crate::proc::freezer::process_frozen(72001)
+                && !crate::proc::freezer::process_frozen(72002),
+            "the freezer still holds the container's processes"
+        );
         // Double-unpause is rejected.
         assert!(unpause(ct_pz).is_err(), "not frozen");
 

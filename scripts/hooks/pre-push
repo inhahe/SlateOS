@@ -5485,7 +5485,9 @@ EOF
 fi
 
 if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
-    if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet >&2; then
+    # --no-sync: a hook must not write to another checkout (it would not
+    # anyway -- GIT_DIR is set here, and the script declines under it).
+    if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet --no-sync >&2; then
         echo "" >&2
         echo "pre-push: a halt is in force (details above)." >&2
         echo "  This push was allowed through deliberately -- pushing is what a" >&2

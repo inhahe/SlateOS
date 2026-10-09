@@ -1847,6 +1847,20 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Unix-domain sockets", selftest::Severity::Integrity, || {
                 ipc::unix_socket::self_test()
             });
+            // Descriptors passed by native programs (the native half of
+            // SCM_RIGHTS): a pipe end from one process to another.
+            selftest::dispatch_debug(
+                "native descriptor passing",
+                selftest::Severity::Integrity,
+                ipc::native_rights::self_test,
+            );
+            // A received descriptor whose number cannot be written back is
+            // taken back, not left open where its process cannot see it.
+            selftest::dispatch_debug(
+                "SCM_RIGHTS take-back",
+                selftest::Severity::Integrity,
+                syscall::linux::self_test_install_rights_take_back,
+            );
             // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
             selftest::dispatch_debug("page-cache", selftest::Severity::Diagnostic, || {
                 mm::page_cache::self_test()
@@ -1967,6 +1981,14 @@ extern "C" fn kernel_main() -> ! {
         "Lockdep lock-context",
         selftest::Severity::Integrity,
         || lockdep::self_test_lock_context(),
+    );
+
+    // The heap lock is held with interrupts off (design-decisions §1563): here,
+    // where there is an "on" for it to turn off and give back.
+    selftest::dispatch(
+        "Heap lock interrupt state",
+        selftest::Severity::Integrity,
+        || mm::heap::self_test_lock_irqs(),
     );
 
     // The boot runs in task 0, at the idle level: two tasks that never block
@@ -3729,6 +3751,12 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_native_cap_broker(),
     );
+    // The freezer (crate::proc::freezer, design-decisions 1562): programs in
+    // nanosleep, a pipe read, FUTEX_WAIT, wait4, SYS_SLEEP and ring 3 frozen
+    // and thawed with no call seeing it, then one process frozen alone.
+    selftest::dispatch_debug("freezer (ring 3)", selftest::Severity::Diagnostic, || {
+        proc::spawn::self_test_freezer()
+    });
     // The namespace calls for native programs, SYS_NAMESPACE_* (crate::nsfs):
     // with the Namespace right and without it.
     selftest::dispatch_debug(

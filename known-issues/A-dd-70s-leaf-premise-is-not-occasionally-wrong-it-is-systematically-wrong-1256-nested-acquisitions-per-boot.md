@@ -1,6 +1,6 @@
 ### [A] dd-70's "leaf" premise is not occasionally wrong, it is systematically wrong: 1256 nested acquisitions per boot -- 2026-09-17
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-09 (the leaf-claim check reads zero), awaiting a boot on main.
 
 Boot `eb764a380`, with the reports deduped by site pair:
 
@@ -83,3 +83,26 @@ From the older list, three more the same day: `clipboard`'s `CURRENT` and
 `HISTORY` are one lock (`CLIPBOARD`); `dragdrop` copies its drop zones out
 before taking the session's lock; `cgroupfs`' `STATE`, held across the
 kernel's cgroup calls by design, is converted (`CGROUPFS`).
+
+**2026-10-09 (lane-a-wip): the count is zero.** The full boot of that day
+reported 476 acquisitions on 43 site pairs, every one of them under one of
+fourteen outer locks. All fourteen are converted to `crate::sync::Mutex`,
+which lockdep watches -- design-decisions 975's answer for a lock that has
+another taken under it -- and named for its diagnostics:
+
+| outer lock | what is taken under it | taken |
+|---|---|---|
+| `STATE` of `devhotplug`, `udriver`, `devpower`, `vmguest`, `initproc`, `reslimit`, `drvmon`, `svcstart`, `syshealth` | the event log's `EVENT_RING` (an event logged while the state is held); `svcstart` also `servicemgr`'s | when a device, driver, service or limit changes -- no hot path |
+| `ipc::fifo`'s `FIFOS` | the pipe table's | when a FIFO is opened or forgotten |
+| `proc::ptrace`'s `FPU` | `TRACEES`, by design -- the order a stop's way out takes them in | a debugger's register calls |
+| `cnetwork`'s `TABLE` | the bridge's and the veth table's | when a container network changes |
+| `termsession`'s `TABLE` | the lock a new session's set-up takes | session calls |
+| `audio_mixer`'s `MIX_SCRATCH` | each stream's ring (`MIX_SCRATCH` -> ring, documented, never the reverse) | once per mixing period |
+
+None is a hot path, so none needed the "revert by measurement" half of 975:
+the tracking costs tens of nanoseconds on calls that come at most once per
+mixing period. The next boot (lane-a-wip, one CPU, every self-test on):
+`[sync] leaf-claim check: no lock was acquired inside a PreemptSpinMutex`,
+lockdep's interrupt-context check clean (`0 violation(s), 0 suspect(s)`), no
+ordering violation, BOOT_OK. What stays to be watched is the check itself:
+a new nesting under a `PreemptSpinMutex` is named on the next boot.

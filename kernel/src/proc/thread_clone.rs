@@ -475,6 +475,11 @@ extern "C" fn clone_thread_trampoline(image_raw: u64) {
         r15,
     };
 
+    // A freeze that began while the thread was being made: its first entry to
+    // ring 3 passes no signal checkpoint, so it is looked for here, before
+    // its first instruction (`proc::freezer`).
+    crate::proc::freezer::park_if_frozen();
+
     // A traced thread's first stop, before its first instruction
     // (`ptrace::first_entry`): its tracer may change the registers.
     crate::proc::ptrace::first_entry(&mut entry);

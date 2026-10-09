@@ -2,11 +2,15 @@
 //!
 //! This binary detects its personality from `argv[0]`:
 //!   - `systemctl`       — main service control (start/stop/status/enable/…)
-//!   - `systemd-cat`      — pipe stdin to journal
 //!   - `systemd-cgls`     — show cgroup hierarchy as a tree
 //!   - `systemd-cgtop`    — show cgroup resource usage
 //!   - `systemd-escape`   — escape strings for systemd unit names
 //!   - `systemd-path`     — show well-known system/user paths
+//!
+//! `systemd-cat` was a personality here until 2026-10-09, when it became a
+//! port of systemd 255's in coreutils (`userspace/coreutils/src/bin/
+//! systemd-cat.rs`): it filed standard input and nothing else, where upstream
+//! runs a command with its output in the journal.
 //!
 //! Until 2026-10-01 it also answered to `systemd-analyze`, `systemd-notify`
 //! and `systemd-tmpfiles`, and all three made their answers up (the §1045
@@ -27,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -45,7 +49,6 @@ const VERSION: &str = "0.1.0";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Personality {
     Systemctl,
-    Cat,
     Cgls,
     Cgtop,
     Escape,
@@ -56,7 +59,6 @@ impl Personality {
     fn name(self) -> &'static str {
         match self {
             Self::Systemctl => "systemctl",
-            Self::Cat => "systemd-cat",
             Self::Cgls => "systemd-cgls",
             Self::Cgtop => "systemd-cgtop",
             Self::Escape => "systemd-escape",
@@ -70,7 +72,6 @@ fn detect_personality(argv0: &str) -> Personality {
     let base = basename(argv0);
     let stem = base.strip_suffix(".exe").unwrap_or(base);
     match stem {
-        "systemd-cat" => Personality::Cat,
         "systemd-cgls" => Personality::Cgls,
         "systemd-cgtop" => Personality::Cgtop,
         "systemd-escape" => Personality::Escape,
@@ -1218,140 +1219,6 @@ fn cmd_list_dependencies(
 }
 
 // ============================================================================
-// systemd-cat
-// ============================================================================
-
-// ── systemd-cat ────────────────────────────────────────────────────
-
-/// What `systemd-cat` was asked to tag its lines with.
-#[derive(Debug)]
-struct CatOpts {
-    /// Canonical priority name, as `journalctl` reads it. `info` unless
-    /// `-p` says otherwise, which is what the reference defaults to.
-    priority: &'static str,
-    /// `SYSLOG_IDENTIFIER`. Measured: with no `-t`, the reference logs as
-    /// `cat`, not as `systemd-cat`.
-    identifier: String,
-    /// The process the lines are attributed to -- ours, as the reference
-    /// attributes them to its own.
-    pid: u32,
-}
-
-// Unused because nothing populates it, and until 2026-09-12 that was hidden
-// by a blanket allow. The unit model -- state enums, `UnitFile` with its
-// parser and verifier, specifier expansion, the list entry types -- has no
-// consumer because this system exposes no per-unit interface: `list-units`,
-// `status` and `is-active` refuse, and the commands that acted on units were
-// printing sentences and doing nothing until they were made to refuse too.
-//
-// Kept rather than deleted. It is the parser and vocabulary a real service
-// manager needs, it is exercised by the crate's tests, and the blocker is a
-// missing `/proc/servicemgr` interface rather than a missing design -- the
-// same standing as gdb's execution types under ptrace.
-#[allow(dead_code)]
-impl Default for CatOpts {
-    fn default() -> Self {
-        Self {
-            priority: "info",
-            identifier: "cat".to_string(),
-            pid: process::id(),
-        }
-    }
-}
-
-/// Read `-p` and `-t`, which the help has always advertised and nothing
-/// parsed.
-///
-/// `--pid` is deliberately absent: that option belonged to `systemd-notify`,
-/// which shared this file until 2026-10-01, and the sweep that found these
-/// reports per file rather than per personality.
-fn parse_cat_opts(args: &[String]) -> Result<CatOpts, String> {
-    let mut opts = CatOpts::default();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        let take_value = |inline: Option<&str>, i: &mut usize| -> Option<String> {
-            if let Some(v) = inline {
-                return Some(v.to_string());
-            }
-            *i = i.saturating_add(1);
-            args.get(*i).cloned()
-        };
-        if arg == "-p" || arg == "--priority" || arg.starts_with("--priority=") {
-            let raw = take_value(arg.strip_prefix("--priority="), &mut i)
-                .ok_or_else(|| "systemd-cat: --priority requires an argument".to_string())?;
-            opts.priority = journalrec::priority_name(&raw).ok_or_else(|| {
-                format!(
-                    "systemd-cat: {}: unknown priority",
-                    quoting::quoteaf(raw.as_bytes())
-                )
-            })?;
-        } else if arg == "-t" || arg == "--identifier" || arg.starts_with("--identifier=") {
-            opts.identifier = take_value(arg.strip_prefix("--identifier="), &mut i)
-                .ok_or_else(|| "systemd-cat: --identifier requires an argument".to_string())?;
-        }
-        i = i.saturating_add(1);
-    }
-    Ok(opts)
-}
-
-/// One journal record per input line, each handed to `sink` whole, its
-/// newline included.
-///
-/// Separated from the file handling so a test can read back what it wrote
-/// without a `/var/log` to write into.
-fn cat_records(
-    input: &mut dyn BufRead,
-    sink: &mut dyn FnMut(&[u8]) -> io::Result<()>,
-    opts: &CatOpts,
-    now: u64,
-) -> io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
-        let record = journalrec::Record {
-            ts: now,
-            level: opts.priority.to_string(),
-            service: opts.identifier.clone(),
-            msg: line,
-            pid: Some(opts.pid),
-        };
-        let mut line = record.to_json_line().into_bytes();
-        line.push(b'\n');
-        sink(&line)?;
-    }
-    Ok(())
-}
-
-fn run_cat_journal(out: &mut dyn Write, opts: &CatOpts) -> io::Result<i32> {
-    // This used to write `[journal] <line>` to stdout, which no reader ever
-    // sees: `journalctl` reads JSON-lines records, and the two tools that
-    // exist to be each other's ends did not meet.
-    let path = journalrec::MAIN_LOG_PATH;
-    // Opened first only to say at once when the log cannot be written. Each
-    // record is then appended on its own, under the journal's lock
-    // (design-decisions §1037): a descriptor held across the whole input
-    // would carry records into a file a vacuum or a rotation had already
-    // replaced -- and they would be lost with it.
-    if let Err(e) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        writeln!(out, "systemd-cat: {path}: {e}")?;
-        return Ok(1);
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let stdin = io::stdin();
-    let mut locked = stdin.lock();
-    let mut append = |line: &[u8]| journalio::append(std::path::Path::new(path), line);
-    match cat_records(&mut locked, &mut append, opts, now) {
-        Ok(()) => Ok(0),
-        Err(e) => {
-            writeln!(out, "systemd-cat: {path}: {e}")?;
-            Ok(1)
-        }
-    }
-}
-
-// ============================================================================
 // systemd-cgls
 // ============================================================================
 
@@ -1921,9 +1788,9 @@ fn print_systemctl_help(out: &mut dyn Write) -> io::Result<()> {
 /// Refuse an option this personality does not have.
 ///
 /// systemd's tools print exactly one line -- no `Try --help` pointer -- and
-/// use both of getopt's wordings. Measured: `systemd-cat --zzq` gives
-/// `unrecognized option '--zzq'`, `systemd-cat -z` gives
-/// `invalid option -- 'z'`, and all five exit 1.
+/// use both of getopt's wordings. Measured on systemd 255's `systemd-cat`,
+/// whose convention these share: `--zzq` gives `unrecognized option
+/// '--zzq'`, `-z` gives `invalid option -- 'z'`, and the status is 1.
 fn refuse_unknown_option(prog: &str, arg: &str) -> i32 {
     eprintln!("{prog}: {}", usageerror::unknown_option(arg.as_bytes()));
     1
@@ -1962,43 +1829,6 @@ fn main() {
 
     let result = match personality {
         Personality::Systemctl => run_systemctl(&rest),
-        Personality::Cat => {
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            if rest.iter().any(|a| a == "--help" || a == "-h") {
-                writeln!(out, "Usage: systemd-cat [OPTIONS]").ok();
-                writeln!(out, "Pipe stdin to the journal with optional priority.").ok();
-                writeln!(out).ok();
-                writeln!(out, "Options:").ok();
-                writeln!(out, "  -p, --priority=PRIO  Set syslog priority (0-7)").ok();
-                writeln!(out, "  -t, --identifier=ID  Set syslog identifier").ok();
-                Ok(0)
-            } else if rest.iter().any(|a| a == "--version") {
-                writeln!(out, "systemd-cat {}", VERSION).ok();
-                Ok(0)
-            } else if let Some(bad) = first_unknown_option(
-                &rest,
-                &[
-                    "--help",
-                    "-h",
-                    "--version",
-                    "-p",
-                    "--priority=",
-                    "-t",
-                    "--identifier=",
-                ],
-            ) {
-                Ok(refuse_unknown_option("systemd-cat", bad))
-            } else {
-                match parse_cat_opts(&rest) {
-                    Ok(opts) => run_cat_journal(&mut out, &opts),
-                    Err(why) => {
-                        writeln!(out, "{why}").ok();
-                        Ok(1)
-                    }
-                }
-            }
-        }
         Personality::Cgls => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
@@ -2085,101 +1915,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── systemd-cat ──
-
-    #[test]
-    fn cat_defaults_match_the_reference() {
-        let opts = parse_cat_opts(&[]).expect("no options is valid");
-        assert_eq!(opts.priority, "info");
-        // Measured: with no -t the reference logs as `cat`, not
-        // `systemd-cat`.
-        assert_eq!(opts.identifier, "cat");
-    }
-
-    #[test]
-    fn cat_reads_the_two_options_its_help_advertises() {
-        let both = argv(&["-p", "err", "-t", "myapp"]);
-        let opts = parse_cat_opts(&both).expect("valid");
-        assert_eq!(opts.priority, "err");
-        assert_eq!(opts.identifier, "myapp");
-
-        let inline = argv(&["--priority=3", "--identifier=other"]);
-        let opts = parse_cat_opts(&inline).expect("valid");
-        assert_eq!(opts.priority, "err", "3 is err");
-        assert_eq!(opts.identifier, "other");
-    }
-
-    /// A priority outside the eight is refused rather than quietly meaning
-    /// `info`, which is what a `_ =>` default would have done.
-    #[test]
-    fn an_unknown_priority_is_refused() {
-        let err = parse_cat_opts(&argv(&["-p", "chatty"])).unwrap_err();
-        assert!(err.contains("unknown priority"), "{err}");
-        assert!(err.contains("chatty"), "{err}");
-        assert!(parse_cat_opts(&argv(&["-p"])).is_err(), "missing value");
-    }
-
-    #[test]
-    fn each_line_becomes_one_record_journalctl_can_read() {
-        let opts = CatOpts {
-            priority: "err",
-            identifier: "myapp".to_string(),
-            pid: 7,
-        };
-        let mut input = io::Cursor::new(b"first\nsecond\n".to_vec());
-        let mut sink: Vec<u8> = Vec::new();
-        cat_records(
-            &mut input,
-            &mut |line| {
-                sink.extend_from_slice(line);
-                Ok(())
-            },
-            &opts,
-            1_716_000_000,
-        )
-        .expect("write");
-        let text = String::from_utf8(sink).expect("ascii");
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2, "{text}");
-        assert_eq!(
-            lines[0],
-            r#"{"ts":1716000000,"level":"err","service":"myapp","msg":"first","pid":7}"#
-        );
-        assert!(lines[1].contains(r#""msg":"second""#), "{text}");
-    }
-
-    /// The reason the escaper is shared. A line holding a quote must not be
-    /// able to close the field and write its own keys.
-    #[test]
-    fn a_hostile_line_cannot_forge_a_record() {
-        let opts = CatOpts {
-            priority: "info",
-            identifier: "cat".to_string(),
-            pid: 1,
-        };
-        let hostile = b"oops\",\"level\":\"emerg\n".to_vec();
-        let mut input = io::Cursor::new(hostile);
-        let mut sink: Vec<u8> = Vec::new();
-        let mut records = 0usize;
-        cat_records(
-            &mut input,
-            &mut |line| {
-                sink.extend_from_slice(line);
-                records += 1;
-                Ok(())
-            },
-            &opts,
-            1,
-        )
-        .expect("write");
-        // One record, delivered as one piece.
-        assert_eq!(records, 1);
-        let text = String::from_utf8(sink).expect("ascii");
-        assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains(r#""level":"info""#), "{text}");
-        assert!(!text.contains(r#""level":"emerg""#), "forged: {text}");
-    }
 
     // ── Refusing an option a personality does not have ──
 
@@ -2289,11 +2024,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_cat() {
-        assert_eq!(detect_personality("systemd-cat"), Personality::Cat);
-    }
-
-    #[test]
     fn test_detect_cgls() {
         assert_eq!(detect_personality("systemd-cgls"), Personality::Cgls);
     }
@@ -2315,7 +2045,7 @@ mod tests {
 
     #[test]
     fn test_detect_exe_suffix() {
-        assert_eq!(detect_personality("systemd-cat.exe"), Personality::Cat);
+        assert_eq!(detect_personality("systemd-cgls.exe"), Personality::Cgls);
     }
 
     #[test]
@@ -3316,7 +3046,6 @@ mod tests {
     #[test]
     fn test_personality_names() {
         assert_eq!(Personality::Systemctl.name(), "systemctl");
-        assert_eq!(Personality::Cat.name(), "systemd-cat");
         assert_eq!(Personality::Cgls.name(), "systemd-cgls");
         assert_eq!(Personality::Cgtop.name(), "systemd-cgtop");
         assert_eq!(Personality::Escape.name(), "systemd-escape");

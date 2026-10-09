@@ -237,6 +237,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
 | `scripts/gen-script-index.py` | Generate a searchable one-line index of every script, and refuse a stale one. |
+| `scripts/gen-terminfo-captab.py` | Write userspace/terminfo/src/captab.rs: the terminfo compiler's tables, from the reference's libtinfo. |
 | `scripts/gen-terminfo-fallback.py` | Write userspace/terminfo/src/fallback_data.rs from the reference's compiled terminfo entries. |
 | `scripts/gen-terminfo-names.py` | Write userspace/terminfo/src/names.rs: the capability names, from the reference's libtinfo. |
 | `scripts/getconf-diff.sh` | getconf-diff.sh — compare our `getconf` against glibc's, inside WSL. |
@@ -456,6 +457,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/sysctl-diff.sh` | Differential test: our `sysctl` against procps-ng 4.0.4's, built from the |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
 | `scripts/syslogd-diff.sh` | Differential test: `syslogd daemon` against systemd-journald, the program |
+| `scripts/systemd-cat-diff.sh` | Differential test: systemd 255's systemd-cat, ours against Ubuntu's. |
 | `scripts/tac-diff.sh` | tac-diff.sh — compare our `tac` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
@@ -518,6 +520,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-straddle-check.py` | Regression tests for `scripts/straddle-check.py`. |
 | `scripts/test-verify_mutations.py` | Regression tests for `scripts/verify_mutations.py`. |
 | `scripts/test-worktree.sh` | Self-test for `slate_ensure_src` in scripts/lib/worktree.sh. |
+| `scripts/tic-diff.sh` | Differential test: ncurses 6.4's tic, captoinfo, infotocap, infocmp and toe, ours against Ubuntu's. |
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
@@ -560,4 +563,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_550 scripts._
+_553 scripts._

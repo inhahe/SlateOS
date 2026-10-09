@@ -1,4 +1,13 @@
-## B-MESG-AND-WRITE-UNTIL-PORTED — `mesg`, `write` and `talk` were deleted for fabricating; `mesg` and `write` are POSIX utilities to port (lane B, 2026-10-01) — **Status: DEFERRED (needs a design: `deferred-questions.md` DQ5)**
+## B-MESG-AND-WRITE-UNTIL-PORTED — `mesg`, `write` and `talk` were deleted for fabricating; `mesg` and `write` are POSIX utilities to port (lane B, 2026-10-01) — **Status: PORTED 2026-10-08 for Linux; OPEN on SlateOS, which needs a design (`deferred-questions.md` DQ5)**
+
+**Since 2026-10-08:** `mesg` and `write` are util-linux 2.39.3's, ported into
+coreutils with `wall` (`33c08184d`), and agree with Ubuntu's on every case
+of `scripts/wall-diff.sh` (240) but the three `-V`s, which name this build. They are faithful to
+Linux: `write` and `wall` open the recipient's terminal by its path and
+`mesg` sets the group-write bit on the caller's -- which is exactly what
+SlateOS does not allow (below). So the half of this entry that was a port
+is done, and the half that is a design is DQ5, unchanged: on SlateOS the
+three still cannot reach another user's terminal.
 
 **In short:** `userspace/mesg` answered as `mesg`, `write` and `talk`, and the
 three agreed with one another through files no other program reads, rather
@@ -28,5 +37,6 @@ ambient authority the design removes, so the tools need a service that holds
 the terminals and delivers with consent first -- a design question, recorded
 as `deferred-questions.md` DQ5 with its trigger.
 
-**Where:** new crates `userspace/mesg` and `userspace/write`; the deleted
-crate is in history at `userspace/mesg`.
+**Where:** `userspace/coreutils/src/bin/{mesg,write,wall}.rs`; the deleted
+crate is in history at `userspace/mesg`. What DQ5 decides is what they
+talk to on SlateOS instead of a terminal's path.

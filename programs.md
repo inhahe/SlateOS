@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**489 programs; 330 on the image, 6 carried inside the kernel.**
+**493 programs; 334 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 304
+## Userland utilities and services (`userspace/`, lane B) -- 308
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -124,6 +124,7 @@ two disagree.
 | `ifconfig` | Classic network interface configuration utility. | yes |  |  |
 | `indexer` | Background File Indexer | yes |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) | yes |  |  |
+| `infocmp` | `infocmp`: ncurses 6.4's (`progs/infocmp.c`, 20240113), ported. | yes | `coreutils` |  |
 | `inotifywait` | Filesystem event monitoring utility. | yes | `inotify` | `inotifywatch` |
 | `install` | Copy files and set their attributes. | yes | `coreutils` |  |
 | `iostat` | I/O Statistics Utility | yes |  |  |
@@ -267,6 +268,7 @@ two disagree.
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
+| `systemd-cat` | `systemd-cat`: systemd 255's (`src/journal/cat.c`), ported. | yes | `coreutils` |  |
 | `tabs` | `tabs`: ncurses 6.4's (`progs/tabs.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tac` | Write each file to standard output, last record first. | yes | `coreutils` |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
@@ -275,8 +277,10 @@ two disagree.
 | `tee` | Copy standard input to each FILE, and also to standard output. | yes | `coreutils` |  |
 | `telnet` | `Slate OS` Telnet Client | yes |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
+| `tic` | `tic`: ncurses 6.4's (`progs/tic.c`, 20240113), ported -- with its aliases `captoinfo` (`-I`) and `infotocap` (`-C`). | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
+| `toe` | `toe`: ncurses 6.4's (`progs/toe.c`, 20240113), ported -- the table of terminfo entries. | yes | `coreutils` |  |
 | `top` | Interactive Process Monitor | yes |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
 | `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` | `clear`, `reset`, `tset` |

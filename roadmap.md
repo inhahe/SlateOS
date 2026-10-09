@@ -5496,6 +5496,28 @@ _Port ext4 first. Don't write a custom filesystem._
   a terminal and `putp`'s padding; `scripts/tput-diff.sh`: 1260 cases agree and 11 differ on purpose,
   each side on a pseudo-terminal of its own, compared by what it wrote and
   the settings and window it left);
+  `tic`, `infocmp` and `toe` (2026-10-09, ncurses 6.4's `progs/`, `captoinfo`
+  and `infotocap` being `tic` by other names: the terminfo compiler, on a new
+  `terminfo::compile` -- ncurses' scanner, parser, `use=` resolution and
+  merging of extended capabilities, termcap translated both ways, the
+  compiled-file writer and `dump_entry`'s formatter, each quirk kept where
+  what is printed depends on it -- with every check `tic -v` makes, the
+  comparisons and C initialisers of `infocmp`, and `toe`'s listings and
+  `use=` reports; `scripts/tic-diff.sh`: 6330 cases agree and 10 differ on
+  purpose, compiling upstream's whole `terminfo.src` under every option and
+  comparing the written databases file by file);
+  `systemd-cat` (2026-10-09, systemd 255's `src/journal/cat.c`, until then a
+  personality of `systemctl` that copied standard input and nothing else: the
+  command run in this process's place with sockets for its standard output
+  and error, the header `sd_journal_stream_fd` writes, and a detached helper
+  per stream doing journald's part -- its header protocol, its cuts at a
+  newline, a NUL or 48 KiB, its trimming and `<N>` prefixes, each line filed
+  under the process that wrote it from the socket's credentials, the writer
+  named as journald's context cache names it -- plus systemd's own log for
+  its messages, every `SYSTEMD_LOG_*` setting and its colours; through new
+  `libcall::socket` and `libcall::fd`; `scripts/systemd-cat-diff.sh`: 100
+  cases agree and 1 differs on purpose, ours in namespaces of its own with a
+  private `/var/log`, the reference's records read back from WSL's journald);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5632,6 +5654,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] install: copy files with attributes (octal/symbolic mode parsing, backup, compare, strip, ownership, -D parent creation)
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/clear/tset/reset/tabs: ncurses 6.4's, coreutils programs since 2026-10-08 (see the coreutils item) -- capabilities, `-S`, `init`/`reset`, the init and reset strings, margins, tab stops, `tset`'s mappings and questions, the line put right, `tabs`' lists, through `userspace/terminfo` (`scripts/tput-diff.sh`)
+  - [x] tic/captoinfo/infotocap/infocmp/toe: ncurses 6.4's terminfo compiler and its tools, coreutils programs since 2026-10-09 (see the coreutils item) -- compiling terminfo and termcap sources, translating between them, `tic -v`'s checks, `infocmp`'s dumps and comparisons, `toe`'s tables, through `userspace/terminfo`'s `compile` (`scripts/tic-diff.sh`). The image has no terminfo database to use them on yet: `requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md`
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)
@@ -5689,7 +5712,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ldconfig: shared library cache manager (ELF header parsing, soname extraction, /etc/ld.so.conf)
   - [x] mdadm/mdmon: RAID management (superblock v1.2, RAID 0/1/5/6/10, bitmap tracking, UUID generation, 143 tests)
   - [x] updatedb/locate/mlocate/plocate: file database (differential path encoding, glob/regex search, PRUNEPATHS/FS/NAMES, 132 tests)
-  - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests)
+  - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests) -- `systemd-cat` left on 2026-10-09 for its port in coreutils (see the coreutils item)
   - [x] getent: NSS database lookup (passwd/group/hosts/services/protocols/networks/shadow)
   - [x] nologin/false/true: login refusal and exit-code shells
   - [x] flock/lockfile: advisory file locking from shell scripts — flock is now a port of util-linux 2.39.3's (real `flock(2)`, where the old one created `FILE.lock` files; `-w` polls `LOCK_NB` because SlateOS's blocking `flock()` cannot be interrupted, TD-B-FLOCK-WAIT-POLLS; checked by `scripts/flock-diff.sh`); lockfile is procmail 3.24's, ported function by function (2026-10-01; `scripts/lockfile-diff.sh`, 46 cases against Ubuntu's agree, files left behind included)

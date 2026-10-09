@@ -1,6 +1,7 @@
-//! A compiled terminfo entry: `_nc_read_termtype` (`read_entry.c`), and the
-//! quick-dump spellings `_nc_read_tic_entry` accepts in place of a
-//! directory.
+//! A terminal as `setupterm` leaves it: a compiled entry read by
+//! `_nc_read_termtype` ([`crate::termtype::read_termtype`]) and then made
+//! the program's by `_nc_setup_tinfo` -- and the quick-dump spellings
+//! `_nc_read_tic_entry` accepts in place of a directory.
 //!
 //! The file is little-endian 16-bit words: a header of six (the magic, then
 //! the sizes of the names, booleans, numbers, string offsets and string
@@ -8,10 +9,11 @@
 //! number each (16 bits, or 32 with the magic 01036), an offset per string
 //! into the table that follows, and then, optionally, the same again for
 //! the *extended* capabilities, which carry their names with them. Every
-//! check upstream makes is made here, in its order, and a failure is
+//! check upstream makes is made, in its order, and a failure is
 //! `TGETENT_NO` -- the entry is not there -- exactly as upstream's is, so
 //! the search goes on to the next directory.
 
+use crate::termtype::{Str, TermType};
 use crate::{Kind, names};
 
 /// `BOOLCOUNT`: the standard booleans.
@@ -26,15 +28,9 @@ pub const ABSENT_NUMERIC: i32 = -1;
 /// `CANCELLED_NUMERIC`: a number the entry cancels.
 pub const CANCELLED_NUMERIC: i32 = -2;
 
-/// `MAGIC`: the classic format, numbers in 16 bits.
-const MAGIC: u16 = 0o432;
-/// `MAGIC2`: the extended-numbers format, numbers in 32 bits.
-const MAGIC2: u16 = 0o1036;
 /// `MAX_NAME_SIZE`: the longest name field read, and the longest terminal
 /// name `setupterm` accepts.
 pub(crate) const MAX_NAME_SIZE: usize = 512;
-/// `MAX_ENTRY_SIZE1`: the size limit of a classic entry.
-const MAX_ENTRY_SIZE1: usize = 4096;
 /// `MAX_ENTRY_SIZE`: the size limit of an entry, and how much of a file is
 /// read (one byte more).
 pub(crate) const MAX_ENTRY_SIZE: usize = 32768;
@@ -203,316 +199,40 @@ pub enum TiString<'a> {
     Value(&'a [u8]),
 }
 
-/// `LOW_MSB`.
-fn low_msb(b: &[u8], at: usize) -> u16 {
-    let lo = b.get(at).copied().unwrap_or(0);
-    let hi = b.get(at.saturating_add(1)).copied().unwrap_or(0);
-    u16::from_le_bytes([lo, hi])
-}
-
-/// `MyNumber`: `(short) LOW_MSB`.
-fn my_number(b: &[u8], at: usize) -> i32 {
-    i32::from(i16::from_le_bytes(low_msb(b, at).to_le_bytes()))
-}
-
-/// The usize of a count already checked to be non-negative.
-fn as_count(n: i32) -> usize {
-    usize::try_from(n).unwrap_or(0)
-}
-
-/// `fake_read`: up to `want` bytes from where the last read stopped.
-struct Reader<'a> {
-    buffer: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn read(&mut self, want: usize) -> &'a [u8] {
-        let have = self.buffer.len().saturating_sub(self.offset);
-        let n = want.min(have);
-        let start = self.offset;
-        self.offset = self.offset.saturating_add(n);
-        self.buffer
-            .get(start..start.saturating_add(n))
-            .unwrap_or_default()
-    }
-
-    /// `even_boundary (value)`: a byte skipped after an odd count.
-    fn even_boundary(&mut self, value: usize) {
-        if !value.is_multiple_of(2) {
-            self.read(1);
+impl Entry {
+    /// What `_nc_setup_tinfo` makes of a description it has read: a boolean
+    /// that is neither 0 nor 1 false, a cancelled string absent.
+    ///
+    /// It is also how `tic`'s checks see an entry they are given as the
+    /// current terminal: `tparm`, `tigetflag` and `tigetstr` answer alike
+    /// for a cancelled capability and an absent one, so the difference this
+    /// loses is one none of them could see.
+    #[must_use]
+    pub fn from_termtype(t: TermType) -> Self {
+        Self {
+            names: t.term_names,
+            booleans: t.booleans.iter().map(|&b| b == 1).collect(),
+            numbers: t.numbers,
+            strings: t
+                .strings
+                .into_iter()
+                .map(|s| match s {
+                    Str::Value(v) => Some(v),
+                    Str::Absent | Str::Cancelled => None,
+                })
+                .collect(),
+            ext_names: t.ext_names,
+            ext_booleans: t.ext_booleans,
+            ext_numbers: t.ext_numbers,
+            ext_strings: t.ext_strings,
         }
     }
 }
 
-/// `convert_strings`: a string per offset, or `None` for corrupt data.
-/// `always` is for the extended names, which must all be there.
-fn convert_strings(
-    offsets: &[u8],
-    count: usize,
-    size: usize,
-    table: &[u8],
-    always: bool,
-) -> Option<Vec<Option<Vec<u8>>>> {
-    let mut out = Vec::with_capacity(count);
-    let size_i = i32::try_from(size).unwrap_or(i32::MAX);
-    for i in 0..count {
-        let at = i.saturating_mul(2);
-        let pair = (
-            offsets.get(at).copied().unwrap_or(0),
-            offsets.get(at.saturating_add(1)).copied().unwrap_or(0),
-        );
-        let nn = my_number(offsets, at);
-        // First the offset: absent (-1), cancelled (-2, which
-        // `_nc_setup_tinfo` makes absent), past the table (absent), in it,
-        // or corrupt -- below -2, or at the table's very end.
-        let start = if pair == (0o377, 0o377) || pair == (0o376, 0o377) || nn > size_i {
-            None
-        } else if nn >= 0 && nn < size_i {
-            Some(as_count(nn))
-        } else {
-            return None;
-        };
-        // Then the string: one with no NUL before the end is ignored; with
-        // `always`, an empty one or none at all is corrupt.
-        let value = match start {
-            Some(start) => {
-                // Upstream scans to `table + size`, which for the extended
-                // names runs past the table they are in; stopping at the end
-                // of the bytes there are is upstream's verdict without its
-                // over-read: no NUL, so no string.
-                let rest = table.get(start..).unwrap_or_default();
-                let limit = size.saturating_sub(start).min(rest.len());
-                match rest
-                    .get(..limit)
-                    .and_then(|r| r.iter().position(|&b| b == 0))
-                {
-                    None => None,
-                    Some(0) if always => return None,
-                    Some(end) => Some(rest.get(..end).unwrap_or_default().to_vec()),
-                }
-            }
-            None if always => return None,
-            None => None,
-        };
-        out.push(value);
-    }
-    Some(out)
-}
-
-/// `valid_shorts`: whether any of `n` words is positive.
-fn valid_shorts(b: &[u8], n: usize) -> bool {
-    (0..n).any(|k| my_number(b, k.saturating_mul(2)) > 0)
-}
-
-/// Numbers of `width` bytes each: sign-extended from 16 bits, or 32 as
-/// they are.
-fn convert_numbers(b: &[u8], n: usize, width: usize) -> Vec<i32> {
-    (0..n)
-        .map(|k| {
-            let at = k.saturating_mul(width);
-            if width == 2 {
-                my_number(b, at)
-            } else {
-                let q = |o: usize| b.get(at.saturating_add(o)).copied().unwrap_or(0);
-                i32::from_le_bytes([q(0), q(1), q(2), q(3)])
-            }
-        })
-        .collect()
-}
-
-/// `_nc_read_termtype`: the entry in `buffer`, or `None` -- `TGETENT_NO` --
-/// for anything upstream rejects.
-#[allow(
-    clippy::too_many_lines,
-    reason = "upstream's _nc_read_termtype, in one piece so it reads against it"
-)]
+/// `_nc_read_termtype`, then `_nc_setup_tinfo`: the terminal in `buffer`,
+/// or `None` -- `TGETENT_NO` -- for anything upstream rejects.
 pub(crate) fn read_termtype(buffer: &[u8]) -> Option<Entry> {
-    let mut r = Reader { buffer, offset: 0 };
-    let header = r.read(12);
-    if header.len() != 12 {
-        return None;
-    }
-    let magic = low_msb(header, 0);
-    let (number_width, max_entry_size) = match magic {
-        MAGIC2 => (4usize, MAX_ENTRY_SIZE),
-        MAGIC => (2usize, MAX_ENTRY_SIZE1),
-        _ => return None,
-    };
-    let name_size = my_number(header, 2);
-    let bool_count = my_number(header, 4);
-    let num_count = my_number(header, 6);
-    let str_count = my_number(header, 8);
-    let str_size = my_number(header, 10);
-    if name_size < 0
-        || bool_count < 0
-        || num_count < 0
-        || str_count < 0
-        || as_count(bool_count) > BOOLCOUNT
-        || as_count(num_count) > NUMCOUNT
-        || as_count(str_count) > STRCOUNT
-        || str_size < 0
-    {
-        return None;
-    }
-    let (name_size, bool_count, num_count, str_count, str_size) = (
-        as_count(name_size),
-        as_count(bool_count),
-        as_count(num_count),
-        as_count(str_count),
-        as_count(str_size),
-    );
-    if str_count.saturating_mul(2) >= max_entry_size {
-        return None;
-    }
-
-    // The names: as much of the field as fits, a short read zero-filled.
-    let want = MAX_NAME_SIZE.min(name_size);
-    let raw = r.read(want);
-    let names = raw
-        .get(..raw.iter().position(|&b| b == 0).unwrap_or(raw.len()))
-        .unwrap_or_default()
-        .to_vec();
-
-    let raw_bools = r.read(bool_count);
-    if raw_bools.len() < bool_count {
-        return None;
-    }
-    let mut booleans: Vec<bool> = raw_bools.iter().map(|&b| b == 1).collect();
-    r.even_boundary(name_size.saturating_add(bool_count));
-
-    let raw_numbers = r.read(num_count.saturating_mul(number_width));
-    if raw_numbers.len() != num_count.saturating_mul(number_width) {
-        return None;
-    }
-    let mut numbers = convert_numbers(raw_numbers, num_count, number_width);
-
-    let mut strings: Vec<Option<Vec<u8>>> = Vec::new();
-    if str_count > 0 {
-        let offsets = r.read(str_count.saturating_mul(2));
-        if offsets.len() != str_count.saturating_mul(2) {
-            return None;
-        }
-        let table = r.read(str_size);
-        if table.len() != str_size {
-            return None;
-        }
-        strings = convert_strings(offsets, str_count, str_size, table, false)?;
-    }
-    booleans.resize(BOOLCOUNT, false);
-    numbers.resize(NUMCOUNT, ABSENT_NUMERIC);
-    strings.resize(STRCOUNT, None);
-
-    let mut entry = Entry {
-        names,
-        booleans,
-        numbers,
-        strings,
-        ext_names: Vec::new(),
-        ext_booleans: 0,
-        ext_numbers: 0,
-        ext_strings: 0,
-    };
-
-    // The extended capabilities, if the file goes on.
-    r.even_boundary(str_size);
-    let ext_header = r.read(10);
-    if ext_header.len() == 10 && valid_shorts(ext_header, 5) {
-        let ext_bool_count = my_number(ext_header, 0);
-        let ext_num_count = my_number(ext_header, 2);
-        let ext_str_count = my_number(ext_header, 4);
-        let ext_str_usage = my_number(ext_header, 6);
-        let ext_str_limit = my_number(ext_header, 8);
-        let need_i = ext_bool_count
-            .saturating_add(ext_num_count)
-            .saturating_add(ext_str_count);
-        let half = i32::try_from(max_entry_size / 2).unwrap_or(i32::MAX);
-        let max_i = i32::try_from(max_entry_size).unwrap_or(i32::MAX);
-        if need_i >= half
-            || ext_str_usage >= max_i
-            || ext_str_limit >= max_i
-            || ext_bool_count < 0
-            || ext_num_count < 0
-            || ext_str_count < 0
-            || ext_str_usage < 0
-            || ext_str_limit < 0
-        {
-            return None;
-        }
-        let (ext_bools, ext_nums, ext_strs, ext_limit) = (
-            as_count(ext_bool_count),
-            as_count(ext_num_count),
-            as_count(ext_str_count),
-            as_count(ext_str_limit),
-        );
-        let need = ext_bools.saturating_add(ext_nums).saturating_add(ext_strs);
-
-        if ext_bools != 0 {
-            let b = r.read(ext_bools);
-            if b.len() != ext_bools {
-                return None;
-            }
-            entry.booleans.extend(b.iter().map(|&x| x == 1));
-        }
-        r.even_boundary(ext_bools);
-
-        if ext_nums != 0 {
-            let b = r.read(ext_nums.saturating_mul(number_width));
-            if b.len() != ext_nums.saturating_mul(number_width) {
-                return None;
-            }
-            entry
-                .numbers
-                .extend(convert_numbers(b, ext_nums, number_width));
-        }
-
-        if ext_strs.saturating_add(need) >= max_entry_size / 2 {
-            return None;
-        }
-        let offsets = if ext_strs != 0 || need != 0 {
-            let b = r.read(ext_strs.saturating_add(need).saturating_mul(2));
-            if b.len() != ext_strs.saturating_add(need).saturating_mul(2) {
-                return None;
-            }
-            b
-        } else {
-            &[][..]
-        };
-
-        let ext_table = if ext_limit != 0 {
-            let t = r.read(ext_limit);
-            if t.len() != ext_limit {
-                return None;
-            }
-            t
-        } else {
-            &[][..]
-        };
-
-        let mut base = 0usize;
-        if ext_strs != 0 {
-            let values = convert_strings(offsets, ext_strs, ext_limit, ext_table, false)?;
-            for v in values.iter().flatten() {
-                base = base.saturating_add(v.len()).saturating_add(1);
-            }
-            entry.strings.extend(values);
-        }
-
-        if need != 0 {
-            if ext_strs >= max_entry_size / 2 {
-                return None;
-            }
-            let name_offsets = offsets
-                .get(ext_strs.saturating_mul(2)..)
-                .unwrap_or_default();
-            let name_table = ext_table.get(base..).unwrap_or_default();
-            entry.ext_names = convert_strings(name_offsets, need, ext_limit, name_table, true)?;
-        }
-        entry.ext_booleans = ext_bools;
-        entry.ext_numbers = ext_nums;
-        entry.ext_strings = ext_strs;
-    }
-    Some(entry)
+    crate::termtype::read_termtype(buffer, true).map(Entry::from_termtype)
 }
 
 /// `_nc_name_match (names, name, "|")`: whether `name` is one of the
@@ -620,6 +340,7 @@ fn hex_digit(c: u8) -> Option<u8> {
 )]
 pub(crate) mod tests {
     use super::*;
+    use crate::termtype::{MAGIC, MAGIC2};
 
     /// A compiled entry: `names`, booleans, numbers (16-bit unless
     /// `wide`), and strings by offset into the table that follows.

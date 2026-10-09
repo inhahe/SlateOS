@@ -56,14 +56,18 @@ pub const FACILITYNAMES: [(&str, i32); 22] = [
     ("local7", 23 << 3),
 ];
 
-/// The name glibc's table gives facility value `fac` -- the first, so `auth`
-/// rather than its deprecated alias `security` -- for a journal record.
+/// The name glibc's table gives facility value `fac` (shifted, as `-p`
+/// leaves it: `daemon` is `3 << 3`) -- the first, so `auth` rather than its
+/// alias `security` -- for a journal record. `journalrec`'s, which every
+/// writer of a `facility` field shares.
 #[must_use]
 pub fn facility_name(fac: i32) -> Option<&'static str> {
-    FACILITYNAMES
-        .iter()
-        .find(|&&(_, v)| v == fac)
-        .map(|&(n, _)| n)
+    if fac % 8 != 0 {
+        return None;
+    }
+    u32::try_from(fac / 8)
+        .ok()
+        .and_then(journalrec::facility_name)
 }
 
 /// Why `-p` was refused: `errx(EXIT_FAILURE, ...)` with the half that failed,

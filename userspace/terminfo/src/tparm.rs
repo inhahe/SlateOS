@@ -318,6 +318,10 @@ fn printf(format: &[u8], num: i32, text: &[u8]) -> Vec<u8> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tparm {
     static_vars: [i32; NUM_VARS],
+    /// `_nc_tparm_err`: the last expansion's errors -- a pop from an empty
+    /// stack, a push onto a full one, or (when there was no other) items
+    /// left on the stack at the end. Cleared as each expansion starts.
+    pub err: u32,
 }
 
 /// The parameters of one call.
@@ -374,6 +378,19 @@ impl Tparm {
         Self::default()
     }
 
+    /// `_nc_reset_tparm (term)`: the static variables cleared.
+    pub fn reset(&mut self) {
+        self.static_vars = [0; NUM_VARS];
+    }
+
+    /// `tiparm (string, ...)` -- numbers only, as `TIPARM_9` passes them:
+    /// as [`Tparm::tparm`], every parameter a number.
+    #[must_use]
+    pub fn tiparm(&mut self, entry: &Entry, string: &[u8], params: &[i64]) -> Option<Vec<u8>> {
+        let args: Vec<Arg<'_>> = params.iter().map(|&p| Arg::Num(p)).collect();
+        self.tparm(entry, string, &args)
+    }
+
     /// `tparm (string, ...)` -- the variable-argument form -- for the
     /// terminal `entry`: `None` for a capability that takes string
     /// parameters and is not one of those that may. The first
@@ -381,6 +398,7 @@ impl Tparm {
     /// where `%s` or `%l` reads one, a `long` elsewhere.
     #[must_use]
     pub fn tparm(&mut self, entry: &Entry, string: &[u8], args: &[Arg<'_>]) -> Option<Vec<u8>> {
+        self.err = 0;
         let analysis = analyze(string);
         let tparm_type = analysis.tparm_type();
         // `ValidCap (TRUE)`.
@@ -434,6 +452,7 @@ impl Tparm {
         string: &[u8],
         params: &[i32],
     ) -> Option<Vec<u8>> {
+        self.err = 0;
         let analysis = analyze(string);
         // `ValidCap (FALSE)`: numbers only.
         if analysis.tparm_type() != 0 {
@@ -487,20 +506,10 @@ impl Tparm {
     )]
     fn tparam_internal(&mut self, string: &[u8], data: &mut Data) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
-        let mut stack: Vec<Item> = Vec::new();
-        let push = |stack: &mut Vec<Item>, item: Item| {
-            if stack.len() < STACKSIZE {
-                stack.push(item);
-            }
-        };
-        let npop = |stack: &mut Vec<Item>| match stack.pop() {
-            Some(Item::Num(n)) => n,
-            _ => 0,
-        };
-        let spop = |stack: &mut Vec<Item>| match stack.pop() {
-            Some(Item::Str(s)) => s,
-            _ => Vec::new(),
-        };
+        let mut stack = Stack::default();
+        let push = |stack: &mut Stack, item: Item| stack.push(item);
+        let npop = |stack: &mut Stack| stack.npop();
+        let spop = |stack: &mut Stack| stack.spop();
         // `(char) ((c == 0) ? 0200 : c)`.
         let save_char = |out: &mut Vec<u8>, c: i32| {
             out.push(if c == 0 {
@@ -666,7 +675,8 @@ impl Tparm {
                                 {
                                     *p = p.wrapping_add(1);
                                     let v = as_int(*p);
-                                    if termcap_hack && let Some(Item::Num(slot)) = stack.get_mut(k)
+                                    if termcap_hack
+                                        && let Some(Item::Num(slot)) = stack.items.get_mut(k)
                                     {
                                         *slot = v;
                                     }
@@ -734,11 +744,60 @@ impl Tparm {
             }
             cp = cp.saturating_add(1);
         }
+        // "tparm: stack has items on return" counts when nothing else did.
+        if !stack.items.is_empty() && stack.err == 0 {
+            stack.err = 1;
+        }
+        self.err = self.err.saturating_add(stack.err);
         // The result is a C string.
         if let Some(nul) = out.iter().position(|&b| b == 0) {
             out.truncate(nul);
         }
         out
+    }
+}
+
+/// `TPS (stack)`: the stack, and the errors `npush`, `npop` and the
+/// others count into `_nc_tparm_err`.
+#[derive(Default)]
+struct Stack {
+    items: Vec<Item>,
+    err: u32,
+}
+
+impl Stack {
+    /// `npush`, `spush`: onto the stack, or an error when it is full.
+    fn push(&mut self, item: Item) {
+        if self.items.len() < STACKSIZE {
+            self.items.push(item);
+        } else {
+            self.err = self.err.saturating_add(1);
+        }
+    }
+
+    /// `npop`: a number -- 0 for a string -- or an error and 0 when empty.
+    fn npop(&mut self) -> i32 {
+        match self.items.pop() {
+            Some(Item::Num(n)) => n,
+            Some(Item::Str(_)) => 0,
+            None => {
+                self.err = self.err.saturating_add(1);
+                0
+            }
+        }
+    }
+
+    /// `spop`: a string -- empty for a number -- or an error and an empty
+    /// one when the stack is.
+    fn spop(&mut self) -> Vec<u8> {
+        match self.items.pop() {
+            Some(Item::Str(s)) => s,
+            Some(Item::Num(_)) => Vec::new(),
+            None => {
+                self.err = self.err.saturating_add(1);
+                Vec::new()
+            }
+        }
     }
 }
 

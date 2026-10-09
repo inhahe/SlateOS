@@ -22430,7 +22430,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"`1O' is not a mount namespace id",
         );
         assert_eq!(last_exit(), 1, "`namespace mounts 1O` errors");
-        assert_output_lacks("and no namespace's mounts were listed", &out, b"/ ");
+        // The wrong run's own words: a word read as far as it parses would
+        // be id 1, and the arm answers an id it does not know with this.
+        assert_output_lacks(
+            "and the word is not read as a number the arm then looks up",
+            &out,
+            b"No mount namespace",
+        );
 
         let out = capture_command("pidns create 1O");
         assert_output_contains(

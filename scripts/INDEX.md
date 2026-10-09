@@ -562,6 +562,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/vmstat-diff.sh` | Differential test: our `vmstat` against procps-ng 4.0.4's, built from the |
 | `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wall-diff.sh` | Differential test: our `wall`, `write` and `mesg` against util-linux |
+| `scripts/watch-diff.sh` | Differential test: our watch against procps-ng 4.0.4's. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
@@ -578,4 +579,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_568 scripts._
+_569 scripts._

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Run a program on a pseudo-terminal of its own, for curses-diff.sh.
 
-Usage: curses-ptyrun.py [--then ACTION]... ROWS COLS OUT ERR PROG [ARG...]
+Usage: curses-ptyrun.py [--then ACTION]... [--tty-stderr] ROWS COLS OUT ERR
+                        PROG [ARG...]
 
 The terminal is ROWS by COLS and is PROG's controlling terminal: PROG leads a
 new session (`pty.fork`). Its standard input and output are the terminal; its
-standard error goes to the file ERR. Everything the terminal is sent is
-written to the file OUT once PROG has exited, and its exit status is then
-appended to ERR as "exit N" (N negative for a signal).
+standard error goes to the file ERR -- or with --tty-stderr stays on the
+terminal, as it is for a program run from one, which matters to a program
+that measures the terminal on its standard error (procps's `watch`). Everything
+the terminal is sent is written to the file OUT once PROG has exited, and its
+exit status is then appended to ERR as "exit N" (N negative for a signal).
 
 PROG is found on `PATH` when it has no slash, so that its `argv[0]` can be
 the bare name.
@@ -101,10 +104,17 @@ def act(step, pid, master):
 
 def main(argv):
     actions = []
+    tty_stderr = False
     args = argv[1:]
-    while len(args) >= 2 and args[0] == "--then":
-        actions.append(args[1])
-        args = args[2:]
+    while args:
+        if len(args) >= 2 and args[0] == "--then":
+            actions.append(args[1])
+            args = args[2:]
+        elif args[0] == "--tty-stderr":
+            tty_stderr = True
+            args = args[1:]
+        else:
+            break
     if len(args) < 5:
         sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
         return 1
@@ -115,7 +125,8 @@ def main(argv):
         if pid == 0:
             try:
                 fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-                os.dup2(err.fileno(), 2)
+                if not tty_stderr:
+                    os.dup2(err.fileno(), 2)
                 os.execvp(prog[0], prog)
             finally:
                 os._exit(127)

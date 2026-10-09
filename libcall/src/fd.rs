@@ -62,6 +62,7 @@ mod sys {
         // `void *`, as the C library and Rust's runtime declare them.
         pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
         pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
+        pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
     }
 }
 
@@ -90,6 +91,33 @@ fn write_one(fd: i32, buf: &[u8]) -> Result<usize, i32> {
 
 #[cfg(not(unix))]
 fn write_one(_fd: i32, _buf: &[u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// A pipe: `pipe`, as the read end and the write end. Neither is
+/// close-on-exec, as `pipe` leaves them -- what a program handing one end to
+/// a child it forks wants.
+///
+/// # Errors
+///
+/// `EMFILE`, `ENFILE`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn pipe() -> Result<(i32, i32), i32> {
+    pipe_one()
+}
+
+#[cfg(unix)]
+fn pipe_one() -> Result<(i32, i32), i32> {
+    let mut fds = [-1i32; 2];
+    // SAFETY: `fds` is two writable `int`s, which is what the call fills.
+    if unsafe { sys::pipe2(fds.as_mut_ptr(), 0) } == 0 {
+        Ok((fds[0], fds[1]))
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn pipe_one() -> Result<(i32, i32), i32> {
     Err(ENOSYS)
 }
 

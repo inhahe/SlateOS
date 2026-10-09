@@ -130,7 +130,6 @@ userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
-userspace/watch
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

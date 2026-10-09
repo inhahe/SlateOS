@@ -319,7 +319,7 @@ two disagree.
 | `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
 | `wall` | Write a message to all users: util-linux 2.39.3's, ported, with Ubuntu's fix for CVE-2024-28085. | yes | `coreutils` |  |
-| `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
+| `watch` | Run a command again and again, its output shown full screen: procps-ng 4.0.4's `watch`, ported -- built as Debian builds it, with `--enable-watch8bit`, so th... | yes | `coreutils` |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility | yes |  |  |
 | `which` | Locate a command, the way GNU which 2.21 does. | yes | `coreutils` |  |

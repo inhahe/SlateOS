@@ -303,6 +303,15 @@ pub fn attrset(attrs: Attr) -> bool {
     })
 }
 
+/// `attr_set (attrs, pair, NULL)`: the attributes but for their colour, and
+/// the pair, set whole.
+pub fn attr_set(attrs: Attr, pair: i16) -> bool {
+    on_stdscr(|w, _| {
+        w.wattr_set(attrs, pair);
+        true
+    })
+}
+
 /// `standout ()`.
 pub fn standout() -> bool {
     on_stdscr(|w, _| {

@@ -853,6 +853,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "vmstat-diff.sh",
         "w-diff.sh",
         "wall-diff.sh",
+        "watch-diff.sh",
         "wc-diff.sh",
         "which-diff.sh",
         "who-diff.sh",

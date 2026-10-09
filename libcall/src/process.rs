@@ -61,7 +61,33 @@ mod sys {
         pub fn getuid() -> u32;
         pub fn geteuid() -> u32;
         pub fn mlockall(flags: i32) -> i32;
+        pub fn system(command: *const u8) -> i32;
     }
+}
+
+/// Run `command` through the shell and wait for it: the C library's
+/// `system`, which is `/bin/sh -c` -- with `SIGINT` and `SIGQUIT` ignored and
+/// `SIGCHLD` blocked in this process meanwhile, as POSIX has it. The status
+/// word, as `waitpid` encodes it ([`WaitStatus`]); -1 when no shell could be
+/// started at all.
+///
+/// For a program whose command is meant to run exactly as a C program's
+/// `system` runs it -- `watch`'s, whose manual promises `sh -c`.
+#[must_use]
+pub fn system(command: &CStr) -> WaitStatus {
+    WaitStatus(system_one(command))
+}
+
+#[cfg(unix)]
+fn system_one(command: &CStr) -> i32 {
+    // SAFETY: `command` is a NUL-terminated string that lives for the call,
+    // which only reads it.
+    unsafe { sys::system(command.as_ptr().cast()) }
+}
+
+#[cfg(not(unix))]
+fn system_one(_command: &CStr) -> i32 {
+    -1
 }
 
 /// What [`fork`] returned, in the process that is reading it.

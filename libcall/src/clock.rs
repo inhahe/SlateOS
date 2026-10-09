@@ -25,7 +25,38 @@ mod sys {
 
     unsafe extern "C" {
         pub fn clock_gettime(clock: i32, tp: *mut Timespec) -> i32;
+        pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
     }
+}
+
+/// Sleep for `seconds` and `nanos`, once: `nanosleep`. A signal that a
+/// handler catches ends it early with `EINTR`, as it ends C's `usleep` and
+/// `sleep` early -- which a program that redraws at once on `SIGWINCH`
+/// relies on -- where `std::thread::sleep` would sleep the rest.
+///
+/// # Errors
+///
+/// `EINTR` for a sleep a signal ended, `EINVAL` for `nanos` of a second or
+/// more; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn nanosleep(seconds: u64, nanos: u32) -> Result<(), i32> {
+    nanosleep_one(seconds, nanos)
+}
+
+#[cfg(unix)]
+fn nanosleep_one(seconds: u64, nanos: u32) -> Result<(), i32> {
+    let req = sys::Timespec {
+        tv_sec: i64::try_from(seconds).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(nanos),
+    };
+    // SAFETY: `req` is a live `struct timespec` the call only reads; a null
+    // `rem` asks for nothing back.
+    let rc = unsafe { sys::nanosleep(&raw const req, core::ptr::null_mut()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn nanosleep_one(_seconds: u64, _nanos: u32) -> Result<(), i32> {
+    Err(ENOSYS)
 }
 
 /// How long the machine has been up, suspended time included:

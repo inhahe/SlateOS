@@ -36,10 +36,6 @@
 //! # Deliberate differences
 //!
 //! - `--version` names SlateOS coreutils, as every program here does.
-//! - `-m` sorts the caches by name bytewise, where upstream calls `strcoll`.
-//!   The two agree under `C` and `C.UTF-8`; under a locale with a collation
-//!   order of its own they need not -- there is no collation table in this
-//!   tree to consult (`comm`'s module docs say more).
 //! - When `/proc/vmstat` or `/proc/stat` stops reading part way through a
 //!   run, upstream dereferences the null that `procps_vmstat_get` or
 //!   `procps_stat_get` returns and dies of `SIGSEGV`; this port says
@@ -184,6 +180,11 @@ struct Run {
     sz_data_unit: u8,
     partition: Vec<u8>,
     zone: localtime::Zone,
+    /// `errno` as upstream's calls before the report leave it: the
+    /// `ENOTTY` of `winhi`'s `ioctl` on an output that is no terminal, or 0.
+    /// The slab report reads it when the library's first read fails without
+    /// setting one (see `slabformat`).
+    errno: i32,
 }
 
 /// Why the run ended early.
@@ -220,6 +221,11 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     stdfd::restore();
+    // `setlocale (LC_ALL, "")`, whose one effect here is `-m`'s order by
+    // name, which is `strcoll`'s. A locale the environment names that does
+    // not exist leaves the program in `C`, as it leaves upstream.
+    let mut locale = [0u8; 256];
+    let _ = libcall::locale::select_from_env(libcall::locale::LC_ALL, &mut locale);
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     // Buffered as stdio buffers it until `run` reaches upstream's
     // `setlinebuf (stdout)`, which comes after the options: `--help`,
@@ -263,6 +269,7 @@ fn run(argv: &[OsString], out: &mut Stream) -> Result<(), Stop> {
         sz_data_unit: b'K',
         partition: Vec::new(),
         zone: localtime::Zone::from_env(),
+        errno: 0,
     };
     let mut operands: Vec<Vec<u8>> = Vec::new();
     for item in VMSTAT.parse(argv, SHORT_OPTIONS, LONG_OPTIONS) {
@@ -334,7 +341,11 @@ fn run(argv: &[OsString], out: &mut Stream) -> Result<(), Stop> {
     }
 
     if run.moreheaders {
-        let wheight = winhi().saturating_sub(3);
+        let (rows, errno) = winhi();
+        if let Some(e) = errno {
+            run.errno = e;
+        }
+        let wheight = rows.saturating_sub(3);
         run.height = u32::try_from(wheight).ok().filter(|&h| h > 0).unwrap_or(22);
     }
     // `setlinebuf (stdout)`: each report line is written as it is finished --
@@ -368,11 +379,13 @@ fn strtol_or_err(text: &[u8]) -> Result<i64, Stop> {
     })
 }
 
-/// `winhi`: the rows of the terminal on standard output, or 24.
-fn winhi() -> i32 {
+/// `winhi`: the rows of the terminal on standard output, or 24 -- and the
+/// `errno` its `ioctl` set when it failed.
+fn winhi() -> (i32, Option<i32>) {
     match libcall::pty::window_size(1) {
-        Ok(w) if w.rows > 0 => i32::from(w.rows),
-        _ => 24,
+        Ok(w) if w.rows > 0 => (i32::from(w.rows), None),
+        Ok(_) => (24, None),
+        Err(e) => (24, Some(e)),
     }
 }
 
@@ -880,12 +893,18 @@ fn slabheader(out: &mut Stream) {
 }
 
 fn slabformat(run: &Run, out: &mut Stream) -> Result<(), Stop> {
-    let mut info = SlabInfo::new().map_err(|e| {
+    let created = |e: i32| {
         fatal_errno(
             "Unable to create slabinfo structure",
             &std::io::Error::from_raw_os_error(e),
         )
-    })?;
+    };
+    let mut info = SlabInfo::new().map_err(created)?;
+    // A first read that set no `errno` (a file empty to its version line)
+    // makes `procps_slabinfo_new` return `-errno` -- whatever `winhi` left.
+    if info.is_null() && run.errno != 0 {
+        return Err(created(run.errno));
+    }
     if !run.moreheaders {
         slabheader(out);
     }
@@ -895,9 +914,11 @@ fn slabformat(run: &Run, out: &mut Stream) -> Result<(), Stop> {
             .reap()
             .map_err(|_| fatal("Unable to get slabinfo node data"))?
             .to_vec();
-        // `procps_slabinfo_sort (…, SLAB_NAME, SLABINFO_SORT_ASCEND)`, by
-        // bytes rather than `strcoll` -- see the module docs.
-        nodes.sort_by(|x, y| x.name.cmp(&y.name));
+        // `procps_slabinfo_sort (…, SLAB_NAME, SLABINFO_SORT_ASCEND)`:
+        // `strcoll`'s order, kept stable as glibc 2.39's `qsort_r` keeps it.
+        // A name holds no NUL: the library's `%128s` stops at the first.
+        let c = |n: &[u8]| std::ffi::CString::new(n.to_vec()).unwrap_or_default();
+        nodes.sort_by(|x, y| libcall::locale::strcoll(&c(&x.name), &c(&y.name)));
         for (j, node) in nodes.iter().enumerate() {
             if header_due(run, j) {
                 slabheader(out);

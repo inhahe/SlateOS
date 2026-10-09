@@ -654,6 +654,10 @@ WORLD=emptydisk; run_case -d
 WORLD=noslab; run_case -m
 WORLD=oldslab; run_case -m
 WORLD=badslab; run_case -m
+# An empty file: the library's priming read fails without setting errno, so
+# it reports success and hands back no info, which the read after refuses.
+WORLD=emptyslab; run_case -m
+WORLD=emptyslab; run_case -m 1 2
 WORLD=nocpuinfo; run_case
 WORLD=nocpuinfo; run_case -s
 

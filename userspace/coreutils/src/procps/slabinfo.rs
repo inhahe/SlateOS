@@ -308,6 +308,16 @@ impl SlabInfo {
         }
     }
 
+    /// Whether this is the null pointer a first read that set no `errno`
+    /// left (see [`SlabInfo::new`]). Upstream's `procps_slabinfo_new`
+    /// returned `-errno` then, so a caller whose own earlier calls left
+    /// `errno` set saw a failure, reported with that `errno`, and only one
+    /// with `errno` 0 went on to be refused by the next read.
+    #[must_use]
+    pub fn is_null(&self) -> bool {
+        self.open.is_none()
+    }
+
     /// `procps_slabinfo_reap`: read, then every cache, in the file's order.
     ///
     /// # Errors

@@ -361,6 +361,21 @@ impl FdEntry {
         }
     }
 
+    /// Construct an entry for a descriptor of any `kind`, with no
+    /// descriptor flags and no owner: what one process's descriptor is when
+    /// it arrives in another's hands (`ipc::native_rights`).
+    #[must_use]
+    pub const fn of(kind: HandleKind, handle: u64, status_flags: u32) -> Self {
+        Self {
+            kind,
+            raw_handle: handle,
+            fd_flags: 0,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
     /// Construct an entry for a freshly opened VFS file.
     #[must_use]
     pub const fn file(handle: u64, status_flags: u32) -> Self {

@@ -26520,7 +26520,9 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
              pipe2, sendmsg, read, no end of file; 0x1F a descriptor not open not EBADF; \
              0x20-0x25 SOCK_SEQPACKET: socketpair, the two sends, a short recvmsg not cut \
              with MSG_TRUNC, the next read not the next message, no end of file after the \
-             peer closed, a send to it not EPIPE)",
+             peer closed, a send to it not EPIPE; 0x26-0x28 the order of refusals: a \
+             descriptor not open on too big a datagram not EBADF, one before a message past \
+             253 not EBADF, that message alone not EINVAL)",
             exit_code,
             OK_EXIT
         );
@@ -26529,8 +26531,9 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux SCM_RIGHTS (ring 3: a datagram and a stream carry a pipe's write \
          end, MSG_CMSG_CLOEXEC, the stream's marked bytes, a held object kept once, \
-         MSG_CTRUNC, read(2) releasing, EBADF, every pipe's end of file on time; \
-         SOCK_SEQPACKET's whole messages and end of file): OK"
+         MSG_CTRUNC, read(2) releasing, EBADF ahead of a datagram's size and a later \
+         message's count, every pipe's end of file on time; SOCK_SEQPACKET's whole \
+         messages and end of file): OK"
     );
     Ok(())
 }

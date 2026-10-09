@@ -69,3 +69,14 @@ reference when a process took back a descriptor it already shared, and
 **Revisit** if the collector's scan shows in a profile -- Linux moved to an
 incremental graph in 6.10 for the same reason -- or when the native door is
 built (a `Passed` would then hold a native handle as well as an `FdEntry`).
+
+**Update, 2026-10-09 -- the native door is built** (`SYS_UNIX_SENDMSG`/
+`SYS_UNIX_RECVMSG`, 1169/1170, `kernel/src/ipc/native_rights.rs`). The revisit
+it called for turned out not to be needed: a native descriptor is the pair
+the C library keeps -- a handle and a type -- which is exactly an `FdEntry`'s
+kind and raw handle, so a native send builds the same `FdEntry` a Linux one
+would and a `Passed` carries it unchanged. Both kinds of program pass to each
+other through one representation. The receive keeps this decision's
+one-reference-per-object rule: a descriptor for an object the receiver held
+already reports the handle it had, which the C library installs as it does a
+`dup`.

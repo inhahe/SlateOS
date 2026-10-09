@@ -1454,7 +1454,11 @@ list moved to lane D on 2026-09-22):
       here: a negative PID is its group). `killall` leaves the image with
       `userspace/kill` (`requests/b-d-killall-is-not-kill-under-another-name-any-more.md`)
       until the next item.
-    - `[ ]` `[B]` psmisc's `killall`, ported (`pstree` is already psmisc's).
+    - `[x]` `[B]` psmisc's `killall`, ported (`pstree` is already psmisc's).
+      Done 2026-10-09: `userspace/coreutils/src/bin/killall.rs`, held to
+      Ubuntu's by `scripts/killall-diff.sh`, each case in a PID namespace of
+      its own with four named victims. On SlateOS it signals with `kill(2)`:
+      no pidfds there, the case upstream falls back for.
     - `[ ]` `[A]` The kernel half: a lifecycle endpoint each process registers
       at start, found by PID under a signal's permission rule -- offered by
       lane A 2026-10-09 and accepted; its request carries the interface.

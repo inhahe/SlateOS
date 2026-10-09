@@ -1,9 +1,11 @@
-# B → D: `killall = kill` comes out of the manifest -- `kill` is procps' now, which takes no name
+# B → D: `killall = kill` comes out of the manifest -- `kill` is procps' now, and `killall` is a program of its own
 
 **Filed:** 2026-10-09 by lane B. **Addressed to:** lane D
 (`scripts/rootfs-bin-manifest.txt`). **Status:** OPEN. **Priority:** medium
--- with the line in place the image's `killall firefox` says
-`killall: failed to parse argument: 'firefox'` and stops nothing.
+-- with the line in place `/bin/killall` is either the real `killall` or
+procps' `kill` under its name, whichever the recipe stages last; as `kill`,
+`killall firefox` says `killall: failed to parse argument: 'firefox'` and
+stops nothing.
 
 ## In short
 
@@ -26,8 +28,9 @@ whatever it is called.
    describes is still right; the example is no longer true, whenever you are
    next in that file.
 
-`killall` comes back as psmisc 23.7's, ported into coreutils as `pstree`
-was; it is next on lane B's roadmap, and it will be an ordinary program of
-the workspace, staged with the rest, so it needs no manifest line. Until
-then there is no `killall` on the image, which is better than one that
-cannot do its job (design-decisions §1006).
+`killall` is back already: psmisc 23.7's, ported into coreutils as `pstree`
+was (`userspace/coreutils/src/bin/killall.rs`, held to Ubuntu's by
+`scripts/killall-diff.sh`), an ordinary program of the workspace that the
+recipe stages with the rest. That makes the line worse than stale: as long
+as it is there, the alias would put a copy of `kill` where the real
+`killall` belongs. So the one thing asked is still to delete it.

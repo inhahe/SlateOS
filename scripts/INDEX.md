@@ -272,6 +272,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/key-survey.py` | Which apps answer keys they never name on screen? |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
 | `scripts/kill-diff.sh` | Differential test: our `kill` against procps-ng 4.0.4's, which is Ubuntu's |
+| `scripts/killall-diff.sh` | Differential test: our `killall` against psmisc 23.7's, Ubuntu's |
 | `scripts/lane-claims.py` | Say, where every lane can see it at once, that you have started a task. |
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/last-diff.sh` | Differential test: our `last` and `lastb` against util-linux 2.39.3's. |
@@ -580,4 +581,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_570 scripts._
+_571 scripts._

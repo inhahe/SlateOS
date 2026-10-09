@@ -34,6 +34,10 @@ mod sys {
 /// program sizing a buffer for `gethostname` asks rather than assumes.
 pub const SC_HOST_NAME_MAX: i32 = 180;
 
+/// `_SC_CLK_TCK`: 2 in glibc and SlateOS's library alike -- the clock ticks
+/// a second that `/proc/PID/stat`'s times count in (100 on both).
+pub const SC_CLK_TCK: i32 = 2;
+
 /// `MAXHOSTNAMELEN` in glibc's `<sys/param.h>`: util-linux's fallback.
 const MAXHOSTNAMELEN: usize = 64;
 
@@ -136,6 +140,14 @@ mod tests {
     #[test]
     fn the_names_are_the_librarys() {
         assert_eq!(SC_HOST_NAME_MAX, posix::unistd::_SC_HOST_NAME_MAX);
+        assert_eq!(SC_CLK_TCK, posix::unistd::_SC_CLK_TCK);
+    }
+
+    /// The real library counts 100 ticks a second, as Linux and SlateOS do.
+    #[cfg(unix)]
+    #[test]
+    fn the_library_ticks_a_hundred_times_a_second() {
+        assert_eq!(sysconf(SC_CLK_TCK), 100);
     }
 
     /// The real library has a limit for host names, and util-linux's

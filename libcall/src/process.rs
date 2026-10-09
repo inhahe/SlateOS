@@ -55,6 +55,7 @@ mod sys {
         pub fn setgid(gid: u32) -> i32;
         pub fn setuid(uid: u32) -> i32;
         pub fn getpgrp() -> i32;
+        pub fn getpgid(pid: i32) -> i32;
         pub fn getsid(pid: i32) -> i32;
         pub fn setsid() -> i32;
         pub fn pidfd_open(pid: i32, flags: u32) -> i32;
@@ -550,6 +551,75 @@ fn pidfd_open_one(pid: i32, flags: u32) -> Result<i32, i32> {
 #[cfg(not(unix))]
 fn pidfd_open_one(_pid: i32, _flags: u32) -> Result<i32, i32> {
     Err(ENOSYS)
+}
+
+/// glibc's `pidfd_send_signal`, a Linux host's only: SlateOS's library has the
+/// symbol, but see [`pidfd_send_signal`] for why it is not called there.
+#[cfg(all(unix, not(target_vendor = "slateos")))]
+mod linux_pidfd {
+    unsafe extern "C" {
+        pub fn pidfd_send_signal(
+            pidfd: i32,
+            sig: i32,
+            info: *const core::ffi::c_void,
+            flags: u32,
+        ) -> i32;
+    }
+}
+
+/// Send `sig` to the process `pidfd` refers to: `pidfd_send_signal (pidfd,
+/// sig, NULL, 0)`. On Linux the descriptor of a `/proc/PID` directory is one
+/// too, which is how psmisc's `killall` signals the very process it read,
+/// not whatever reused its number since.
+///
+/// # Errors
+///
+/// The `errno` from `pidfd_send_signal`: `ESRCH` when the process has ended,
+/// `EPERM`, `EINVAL`, `EBADF` for a descriptor that refers to no process.
+/// [`ENOSYS`](crate::ENOSYS) where there are no pidfds -- off Unix, and on
+/// SlateOS: its kernel has no pidfd objects, and its library's
+/// `pidfd_send_signal` answers every open descriptor `EBADF`, which a caller
+/// would take for "this is not a process" when the truth is "this system has
+/// no such call" -- the case psmisc falls back to `kill(2)` for, and only
+/// when told `ENOSYS`.
+pub fn pidfd_send_signal(pidfd: i32, sig: i32) -> Result<(), i32> {
+    #[cfg(all(unix, not(target_vendor = "slateos")))]
+    {
+        // SAFETY: a descriptor and a signal number in, no `siginfo_t` (null,
+        // which the call takes as "fill it in yourself"), no memory of ours.
+        let rc = unsafe { linux_pidfd::pidfd_send_signal(pidfd, sig, core::ptr::null(), 0) };
+        if rc == 0 { Ok(()) } else { Err(last_errno()) }
+    }
+    #[cfg(not(all(unix, not(target_vendor = "slateos"))))]
+    {
+        let _ = (pidfd, sig);
+        Err(ENOSYS)
+    }
+}
+
+/// The process group of process `pid` -- 0 for this one: `getpgid`.
+///
+/// # Errors
+///
+/// The `errno` from `getpgid`: `ESRCH` for no such process, `EPERM` for one
+/// in another session where the system will not say. [`ENOSYS`](crate::ENOSYS)
+/// off Unix.
+pub fn getpgid(pid: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: a number in, a number or -1 out; no memory of ours.
+        let pgid = unsafe { sys::getpgid(pid) };
+        if pgid >= 0 {
+            Ok(pgid)
+        } else {
+            Err(last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err(ENOSYS)
+    }
 }
 
 /// End this process now, with `status`: `_exit`.

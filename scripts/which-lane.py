@@ -692,6 +692,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "journalfwd-diff.sh",
         "journalfwd-walltest.py",
         "kill-diff.sh",
+        "killall-diff.sh",
         "last-diff.sh",
         "lastlog-diff.sh",
         "ln-diff.sh",

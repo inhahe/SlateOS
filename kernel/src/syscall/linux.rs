@@ -30837,8 +30837,10 @@ fn mount_source(source: Option<&[u8]>) -> Result<crate::fs::path::PathBuf, Sysca
 /// `MS_RDONLY`, `MS_NOSUID`, `MS_NOEXEC` and `MS_NOATIME` are the mount's
 /// options -- a remount naming no atime flag keeps the mount's, as Linux's
 /// does; the rest (`MS_NODEV`, `MS_RELATIME`, `MS_SILENT`...) are taken and
-/// change nothing, and the `data` options are not read (known-issues
-/// A-LINUX-MOUNT-GAPS). A new mount, a bind or a move onto a mount point
+/// change nothing. The `data` options are read for a new tmpfs -- `size=`,
+/// `nr_inodes=`, `mode=` and the rest of what Linux's takes, `EINVAL` for one
+/// it does not ([`crate::fs::new_filesystem_with_data`]) -- and for no other
+/// type yet (known-issues A-LINUX-MOUNT-GAPS). A new mount, a bind or a move onto a mount point
 /// goes on top of what is there, which it covers until it goes, as Linux
 /// stacks them (`fs::Vfs::mount_on_top`); refused with `EBUSY` until
 /// 2026-10-08.
@@ -30965,7 +30967,17 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
             }
             _ => {}
         }
-        match crate::fs::new_filesystem(fstype, source) {
+        // The options, for a type that reads them (tmpfs's `size=` and the
+        // rest); any other type's are not read, as before.
+        let data = if crate::fs::reads_mount_data(fstype) {
+            match optional_mount_string(args.arg4) {
+                Ok(d) => d.unwrap_or_default(),
+                Err(r) => return r,
+            }
+        } else {
+            alloc::vec::Vec::new()
+        };
+        match crate::fs::new_filesystem_with_data(fstype, source, &data) {
             Ok(fs) => Vfs::mount_on_top(&target, fs, options),
             Err(KernelError::NotSupported) => return linux_err(errno::ENODEV),
             Err(e) => Err(e),

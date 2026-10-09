@@ -29,44 +29,11 @@ pub struct Creds {
     pub gid: u32,
 }
 
-/// glibc's `facilitynames`, by value -- the name `logger` and `journalctl`
-/// use for a facility. Twelve to fifteen have none there; nor does anything
-/// past twenty-three, which `<PRI>` can still say (journald does not check).
-const FACILITY_NAMES: [Option<&str>; 24] = [
-    Some("kern"),
-    Some("user"),
-    Some("mail"),
-    Some("daemon"),
-    Some("auth"),
-    Some("syslog"),
-    Some("lpr"),
-    Some("news"),
-    Some("uucp"),
-    Some("cron"),
-    Some("authpriv"),
-    Some("ftp"),
-    None,
-    None,
-    None,
-    None,
-    Some("local0"),
-    Some("local1"),
-    Some("local2"),
-    Some("local3"),
-    Some("local4"),
-    Some("local5"),
-    Some("local6"),
-    Some("local7"),
-];
-
-/// The name glibc gives facility number `facility`, if it gives one.
+/// The name glibc gives facility number `facility`, if it gives one --
+/// `journalrec`'s, which every writer of a `facility` field shares.
 #[must_use]
 pub fn facility_name(facility: u32) -> Option<&'static str> {
-    usize::try_from(facility)
-        .ok()
-        .and_then(|i| FACILITY_NAMES.get(i))
-        .copied()
-        .flatten()
+    journalrec::facility_name(facility)
 }
 
 /// A `[pid]` that is a process number: ASCII digits only, as journald's

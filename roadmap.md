@@ -6001,6 +6001,18 @@ _Port ext4 first. Don't write a custom filesystem._
   `use=` reports; `scripts/tic-diff.sh`: 6330 cases agree and 10 differ on
   purpose, compiling upstream's whole `terminfo.src` under every option and
   comparing the written databases file by file);
+  `systemd-cat` (2026-10-09, systemd 255's `src/journal/cat.c`, until then a
+  personality of `systemctl` that copied standard input and nothing else: the
+  command run in this process's place with sockets for its standard output
+  and error, the header `sd_journal_stream_fd` writes, and a detached helper
+  per stream doing journald's part -- its header protocol, its cuts at a
+  newline, a NUL or 48 KiB, its trimming and `<N>` prefixes, each line filed
+  under the process that wrote it from the socket's credentials, the writer
+  named as journald's context cache names it -- plus systemd's own log for
+  its messages, every `SYSTEMD_LOG_*` setting and its colours; through new
+  `libcall::socket` and `libcall::fd`; `scripts/systemd-cat-diff.sh`: 100
+  cases agree and 1 differs on purpose, ours in namespaces of its own with a
+  private `/var/log`, the reference's records read back from WSL's journald);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6195,7 +6207,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ldconfig: shared library cache manager (ELF header parsing, soname extraction, /etc/ld.so.conf)
   - [x] mdadm/mdmon: RAID management (superblock v1.2, RAID 0/1/5/6/10, bitmap tracking, UUID generation, 143 tests)
   - [x] updatedb/locate/mlocate/plocate: file database (differential path encoding, glob/regex search, PRUNEPATHS/FS/NAMES, 132 tests)
-  - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests)
+  - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests) -- `systemd-cat` left on 2026-10-09 for its port in coreutils (see the coreutils item)
   - [x] getent: NSS database lookup (passwd/group/hosts/services/protocols/networks/shadow)
   - [x] nologin/false/true: login refusal and exit-code shells
   - [x] flock/lockfile: advisory file locking from shell scripts — flock is now a port of util-linux 2.39.3's (real `flock(2)`, where the old one created `FILE.lock` files; `-w` polls `LOCK_NB` because SlateOS's blocking `flock()` cannot be interrupted, TD-B-FLOCK-WAIT-POLLS; checked by `scripts/flock-diff.sh`); lockfile is procmail 3.24's, ported function by function (2026-10-01; `scripts/lockfile-diff.sh`, 46 cases against Ubuntu's agree, files left behind included)

@@ -50,6 +50,13 @@ cprintf = { path = "../cprintf" }
 # a program links (design-decisions 768). `hostname` is upstream's calls to
 # those, and nothing else would give the answer every C program gets.
 libcall = { path = "../../libcall" }
+# The journal `systemd-cat` files its lines in: the record journald would make
+# of each (`journalrec`, shared with `syslogd` and `logger`), appended under
+# the journal's lock so that a vacuum or a rotation meanwhile loses none
+# (`journalio`, design-decisions §1037). Both are what `userspace/systemctl`
+# used for its `systemd-cat` personality, which this replaces.
+journalrec = { path = "../journalrec" }
+journalio = { path = "../journalio" }
 # util-linux's lib/strutils.c number parsing -- `cal -c`, `cal -n`, the year
 # operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
 # the util-linux ports outside coreutils (logger's -S and --id=).

@@ -450,6 +450,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/sysctl-diff.sh` | Differential test: our `sysctl` against procps-ng 4.0.4's, built from the |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
 | `scripts/syslogd-diff.sh` | Differential test: `syslogd daemon` against systemd-journald, the program |
+| `scripts/systemd-cat-diff.sh` | Differential test: systemd 255's systemd-cat, ours against Ubuntu's. |
 | `scripts/tac-diff.sh` | tac-diff.sh — compare our `tac` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
@@ -548,4 +549,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_538 scripts._
+_539 scripts._

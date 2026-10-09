@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**492 programs; 333 on the image, 6 carried inside the kernel.**
+**493 programs; 334 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 307
+## Userland utilities and services (`userspace/`, lane B) -- 308
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -268,6 +268,7 @@ two disagree.
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
+| `systemd-cat` | `systemd-cat`: systemd 255's (`src/journal/cat.c`), ported. | yes | `coreutils` |  |
 | `tabs` | `tabs`: ncurses 6.4's (`progs/tabs.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tac` | Write each file to standard output, last record first. | yes | `coreutils` |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |

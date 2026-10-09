@@ -8,3 +8,5 @@ description = "util-linux's lib/colors.c and lib/color-names.c: --color, termina
 workspace = true
 
 [dependencies]
+# ncurses' terminfo layer: whether `TERM` is set up, and its `colors`.
+terminfo = { path = "../terminfo" }

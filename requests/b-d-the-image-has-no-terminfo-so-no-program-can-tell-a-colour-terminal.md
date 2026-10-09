@@ -36,3 +36,24 @@ enough; nothing on SlateOS needs `tic` itself to use them.
 `DIR/<first letter>/<name>`. Either directory works.
 
 — lane B
+
+## Update 2026-10-08 (lane B): `xterm-256color` is now built in
+
+The search is now `userspace/terminfo`, a port of ncurses' own (it adds
+`/lib/terminfo` to the list above), and `ulcolors` and `pstree` ask through
+it. That library now carries one entry built in -- `xterm-256color`, the
+reference's compiled file -- as ncurses does the names given to
+`--with-fallbacks`: consulted only when the database has nothing for the name
+(design-decisions §1066). So SlateOS's own terminal is known with no database
+on the image, and colours where Linux colours.
+
+This was not only about colour any more: `pstree` on a terminal in a
+non-UTF-8 locale asks `setupterm` and, refused, exits -- as it does upstream
+-- so without the built-in entry it would have failed on every SlateOS
+terminal in the C locale. That is covered now.
+
+**The request stands for every other name**: a session from elsewhere
+(`ssh` from a Linux console, `TERM=linux`), `screen`, `tmux`, `vt100` and
+the rest still find nothing. Option A above is still the real answer, and
+once the database is staged it wins over the built-in entry for
+`xterm-256color` too.

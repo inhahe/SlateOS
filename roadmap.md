@@ -5464,6 +5464,38 @@ _Port ext4 first. Don't write a custom filesystem._
   same standalone answered to by its `argv[0]`; `scripts/lastlog-diff.sh`: 177
   cases agree, run in a user namespace and chrooted with `-R` into fixture
   roots, `-S` and `-C` judged by the file each leaves);
+  `wall`, `write` and `mesg` (2026-10-08, util-linux 2.39.3's `term-utils`,
+  `wall` with Ubuntu's fix for CVE-2024-28085, replacing `userspace/wall`,
+  which read logins from a text file nothing writes and wrote to every
+  terminal device there was: `ttymsg`'s writing, upstream's quirks kept --
+  the `fcntl` on the wrong descriptor, the `fsync` that turns a failed write
+  into `Invalid argument`, the group test that reads one past the list;
+  `scripts/wall-diff.sh`: 240 cases agree and 3 differ on purpose, in a user
+  and mount namespace over a fixture utmp and fixture terminals, as root and
+  as a user);
+  `pstree` (2026-10-08, psmisc 23.7's, replacing `userspace/pstree`, which
+  drew a tree of its own shape (`├── `, four columns a level) and had none of
+  `-s`, `-g`, `-S`, `-N`, `-t`, `-T`, `-Z`, `-G`, `-U` or `-C`: upstream's tree --
+  threads under their process, compaction, the column-counted cut at the
+  width, `out_int`'s silent 0 and the bracket `while (closing--)` loses --
+  and its terminal handling through the new `userspace/terminfo`, ncurses
+  6.4's `setupterm`/`tgetent` verdicts, `tgetstr`'s trimmed `sgr0`, `tparm`
+  and `tputs`' padding, which `ulcolors` now answers through too;
+  `scripts/pstree-diff.sh`: 629 cases agree and 2 differ on purpose, each run
+  in a fresh pid namespace whose tree a fixture builds one process at a time,
+  so that every pid, thread, zombie, uid and namespace is the same on both
+  sides);
+  `tput`, `clear`, `tset` and `tabs` (2026-10-08, ncurses 6.4's `progs/`,
+  `reset` being `tset` by another name, replacing `userspace/tput`, which
+  carried a table of five terminals of its own rather than reading the
+  terminfo database: capabilities and their parameters -- numbers, and the
+  strings `pfkey`, `Cs` and `Ms` take -- `-S`, `init` and `reset` with every
+  init and reset string, file and program, margins and tab stops, `tset`'s
+  mappings, its questions and the line put right, `tabs`' lists and ruler,
+  through `userspace/terminfo`, which learned the two copies ncurses keeps of
+  a terminal and `putp`'s padding; `scripts/tput-diff.sh`: 1260 cases agree and 11 differ on purpose,
+  each side on a pseudo-terminal of its own, compared by what it wrote and
+  the settings and window it left);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5599,7 +5631,7 @@ _Port ext4 first. Don't write a custom filesystem._
     as upstream's -- and checked against Ubuntu's build by `scripts/uu-diff.sh` (433 cases), 2026-09-27.
   - [x] install: copy files with attributes (octal/symbolic mode parsing, backup, compare, strip, ownership, -D parent creation)
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
-  - [x] tput/reset/clear: terminal capability tools (built-in terminfo database, parameterized string expansion, terminal reset)
+  - [x] tput/clear/tset/reset/tabs: ncurses 6.4's, coreutils programs since 2026-10-08 (see the coreutils item) -- capabilities, `-S`, `init`/`reset`, the init and reset strings, margins, tab stops, `tset`'s mappings and questions, the line put right, `tabs`' lists, through `userspace/terminfo` (`scripts/tput-diff.sh`)
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)
@@ -5651,7 +5683,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] useradd/userdel/usermod/groupadd/groupdel/groupmod/newgrp: user management (atomic file I/O, UID/GID auto-assign, skel copy, 106 tests)
   - [x] cron/crontab/anacron/at/atd/batch/atq/atrm: job scheduling (cron expressions, time parsing, 8 special strings, 103 tests)
   - [x] cryptsetup/veritysetup/integritysetup: disk encryption (SHA-256, PBKDF2, LUKS header, key slots, cipher benchmark, 144 tests)
-  - [x] pstree: process tree display (Unicode/ASCII tree drawing, PID/UID/threads, compact mode)
+  - [x] pstree: psmisc 23.7's, a coreutils program since 2026-10-08 (see the coreutils item) -- the tree, compaction, threads, `-a`/`-p`/`-g`/`-u`/`-S`/`-Z`, `-N`, `-s`, `-h`/`-H` through `userspace/terminfo` (`scripts/pstree-diff.sh`, 629 cases)
   - [x] findmnt/mountpoint: mounted filesystem finder (/proc/mountinfo, tree/list/JSON/raw/pairs output) -- since 2026-09-26 ports of util-linux 2.39.3's `findmnt` (with `--verify` and `--poll`) and `mountpoint`, reading tables through `userspace/ulmount` (libmount's table code, and libblkid's device cache) and printing through `smartcols`; `scripts/findmnt-diff.sh`: 4954 cases agree, 8 more where only upstream never finishes; `scripts/mountpoint-diff.sh` (400 cases); since 2026-09-27 devices are probed through `userspace/ulblkid`, the libblkid port, for every format libblkid knows
   - [x] lsns: namespace listing (8 namespace types, JSON output, per-PID filtering) -- since 2026-09-26 a port of util-linux 2.39.3's, printing through `smartcols` (process, owner and parent trees; NETNSID over netlink; NSFS and persistent namespaces through `ulmount`'s mountinfo); `scripts/lsns-diff.sh`: 483 cases agree inside a namespace world the harness builds, 4 more where only upstream crashes. On SlateOS itself it lists nothing: SlateOS's `/proc` has no `PID/ns` links, since it isolates with capabilities rather than Linux namespaces
   - [x] ldconfig: shared library cache manager (ELF header parsing, soname extraction, /etc/ld.so.conf)

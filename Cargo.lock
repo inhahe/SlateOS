@@ -685,6 +685,7 @@ dependencies = [
  "sm3",
  "stdfdguard",
  "sysroot-dep",
+ "terminfo",
  "ulclosestream",
  "ulcolors",
  "ulstrutils",
@@ -3186,14 +3187,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pstree"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "pv"
 version = "0.1.0"
 dependencies = [
@@ -4263,6 +4256,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminfo"
+version = "0.1.0"
+dependencies = [
+ "cstrtol",
+ "libcall",
+]
+
+[[package]]
 name = "tetris"
 version = "0.1.0"
 dependencies = [
@@ -4368,14 +4369,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tput"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
-]
-
-[[package]]
 name = "traceroute"
 version = "0.1.0"
 dependencies = [
@@ -4464,6 +4457,9 @@ dependencies = [
 [[package]]
 name = "ulcolors"
 version = "0.1.0"
+dependencies = [
+ "terminfo",
+]
 
 [[package]]
 name = "ulmount"
@@ -4703,15 +4699,6 @@ dependencies = [
  "safeio",
  "scratchdir",
  "textline",
-]
-
-[[package]]
-name = "wall"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "quoting",
- "userdb",
 ]
 
 [[package]]

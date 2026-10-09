@@ -294,6 +294,96 @@ Two measured examples:
   `**Never logged in**`. **What the loser knew that the winner did not:**
   nothing util-linux or shadow-utils has. Nothing to port.
 
+* **`wall`** — **RETIRED 2026-10-08, with `write` and `mesg` beside it.**
+  `coreutils/src/bin/wall.rs`, `write.rs` and `mesg.rs` are util-linux
+  2.39.3's `term-utils/wall.c` (with Ubuntu's fix for CVE-2024-28085, which
+  escapes a command-line message too), `write.c` and `mesg.c`.
+  `userspace/wall`, written from the manuals, was all three by its `argv[0]`,
+  though only `wall` reached the image: no alias named the other two.
+  `scripts/wall-diff.sh` runs both sides in a user and mount namespace over a
+  fixture utmp and fixture terminals, and compares what each wrote into them:
+
+      coreutils wall/write/mesg   240 passed,   0 differed,  3 differ on purpose
+      userspace/wall               27 passed, 213 differed,  3 differ on purpose
+
+  It read who was logged in from `/var/run/utmp.txt`, a text file of its own
+  that nothing writes, and then wrote to every `/dev/pts/*` and `/dev/tty0`
+  to `tty11` that existed, logged in or not; it named the sender from
+  `/etc/users.yaml` and refused to send at all when it found nobody there
+  (`cannot determine who you are ...; refusing`) -- every `wall` case here. It
+  had no `-t`, wrapped nothing, and wrote a message's escape sequences to every
+  screen as they were. As `write`, it looked the recipient up in the same text
+  file, so every user was `not logged in`; as `mesg`, `y` set only the group's
+  write bit where Ubuntu's sets the others' too, `n` exited 0 where upstream
+  exits 1, and a `chmod` that failed went unreported. Its passes are `mesg`
+  asked a question (`is y`, `is n`) or told `y` on a terminal that already
+  had both bits, `write` to a user nobody is, and one `--help` with standard
+  output closed. **What the loser knew that the winner
+  did not:** refusing an anonymous broadcast. Upstream sends one as
+  `<someone>` after a warning, and that stands: the banner then says plainly
+  that the sender is unknown. Nothing to port.
+
+* **`pstree`** — **RETIRED 2026-10-08.** `coreutils/src/bin/pstree.rs` is
+  psmisc 23.7's `src/pstree.c`, its terminal handling through
+  `userspace/terminfo` (ncurses 6.4's, ported for it). `userspace/pstree`,
+  written from the manuals, called itself a multi-personality binary --
+  `pstree` and "a `pgrep` variant with a tree view" -- though only `pstree`
+  reached the image. `scripts/pstree-diff.sh` runs each case in a fresh pid
+  namespace over a tree a fixture builds one process at a time, so both sides
+  see the same pids:
+
+      coreutils pstree      629 passed,   0 differed,  2 differ on purpose
+      userspace/pstree        8 passed, 621 differed,  2 differ on purpose
+
+  It put every child on a line of its own -- `├──` and four columns a level,
+  in Unicode even through a pipe -- where upstream runs a chain along one line
+  (`python3---alpha---worker`) and draws ASCII off a terminal; it compacted
+  leaves but dropped whatever hung under a compacted subtree (`2*[group]`,
+  its `leaf` gone), went on compacting under `-p`, which upstream's `-p`
+  turns off, and showed no threads at all. It had none of `-s`, `-g`, `-S`,
+  `-N`, `-t`, `-T`, `-Z`, `-G`, `-U` or `-C` (`pstree: unknown option: -s`);
+  a user operand drew the tree of one process of the user's where upstream
+  draws every top-most one; and a user nobody is was `pstree: user
+  'nosuchuser' not found` where upstream says `No such user name:
+  nosuchuser`. Its eight passes are two processes with no children drawn
+  alone -- `pstree 7` and `pstree 9`, with and without `-p`, one line either
+  way -- and four runs whose standard output was closed or full, where
+  nothing written is seen. **What the loser knew that the winner did
+  not:** `-k` (`--show-kernel`), kernel threads hidden unless asked for.
+  psmisc has no such option and hides nothing. Nothing to port.
+
+* **`tput`** — **RETIRED 2026-10-08.** `coreutils/src/bin/tput.rs`,
+  `clear.rs` and `tset.rs` are ncurses 6.4's `progs/tput.c`, `clear.c` and
+  `tset.c` (with `tabs.c` beside them, new), sharing `coreutils::ncurses` --
+  `tty_settings.c`, `reset_cmd.c`, `clear_cmd.c` -- over `userspace/terminfo`.
+  `userspace/tput`, written from the manuals, was `tput`, `clear`, `reset`
+  and `tset` by its `argv[0]`, through the manifest aliases. Measured by
+  `scripts/tput-diff.sh` on its `tput`, `clear` and `tset` cases (before
+  `tabs` joined it), each side on a pseudo-terminal of its own:
+
+      coreutils tput/clear/tset   957 passed,   0 differed,  9 differ on purpose
+      userspace/tput              120 passed, 836 differed,  9 differ on purpose, 1 never ended
+
+  It read no terminfo database: it carried a table of its own for five
+  terminals (`xterm`, `vt100`, `linux`, `dumb` and `slateos`), so every
+  other name was its idea of an xterm and every crafted entry the harness
+  compiles was refused, and even the five were wrong where they mattered --
+  `sgr0` `\E[0m` where xterm's is `\E(B\E[m`, `clear` without the
+  scrollback's `E3`, a `longname` of its own invention with a newline after
+  it. A boolean it did not list, `bw` among them, was an unknown
+  capability, and an unknown capability exited 1 where ncurses exits 4.
+  As `tset` and `reset` it took no options at all -- `tset -q` was
+  `invalid option -- 'q'` -- and sent a hard reset of its own (`\Ec`, the
+  screen cleared, the cursor shown) and then `Terminal reset to sane
+  state.`, where ncurses sends the terminal's own init or reset strings
+  and reports the erase, interrupt and kill characters it changed. As
+  `init` it was plain `tput`, so `init -S` sat waiting on the terminal for
+  commands -- the case that never ended -- where ncurses refuses `-S` from
+  its other names. Its 120 passes are capabilities its table happened to
+  hold as the database does, `cols`, `colors`, `bold` and `el` on the
+  xterms among them. **What the loser knew that the winner did not:**
+  nothing that ships.
+
 * **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
   Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
   option **became the message**: `logger -Q` logged the string `-Q` and

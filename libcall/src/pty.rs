@@ -394,6 +394,8 @@ mod sys {
     pub const TIOCSWINSZ: u64 = 0x5414;
     /// `TIOCGWINSZ`: read a terminal's window size.
     pub const TIOCGWINSZ: u64 = 0x5413;
+    /// `TIOCMGET`: read a line's modem-control bits.
+    pub const TIOCMGET: u64 = 0x5415;
     /// `waitpid`: do not block.
     pub const WNOHANG: i32 = 1;
     /// `waitid`: the id names one process.
@@ -667,6 +669,42 @@ fn window_size_one(_fd: i32) -> Result<WinSize, i32> {
     Err(crate::ENOSYS)
 }
 
+/// The modem-control bits of the line on `fd`: `ioctl (fd, TIOCMGET,
+/// &bits)`.
+///
+/// `reset` and `tset` ask only to learn whether the line is a modem's --
+/// they then leave `CLOCAL` as it is -- so what matters most is whether
+/// there is an answer at all: a pseudo-terminal has no modem lines, and
+/// says so with an error.
+///
+/// # Errors
+///
+/// `EINVAL` or `ENOTTY` for a terminal without modem lines or something
+/// that is no terminal, `EBADF`; [`ENOSYS`](crate::ENOSYS) on a host with no
+/// C library of ours.
+pub fn modem_bits(fd: i32) -> Result<i32, i32> {
+    if fd < 0 {
+        return Err(EBADF);
+    }
+    #[cfg(unix)]
+    {
+        let mut bits: i32 = 0;
+        // SAFETY: `TIOCMGET` writes one `int` through the pointer, which is
+        // `bits`, live and writable for the whole call.
+        let rc = unsafe { sys::ioctl(fd, sys::TIOCMGET, &raw mut bits) };
+        if rc == 0 {
+            Ok(bits)
+        } else {
+            Err(crate::last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
 #[cfg(not(unix))]
 fn try_wait_one(_pid: i32) -> Result<ChildState, i32> {
     Err(crate::ENOSYS)
@@ -762,6 +800,10 @@ mod tests {
         assert_eq!(sys::FD_CLOEXEC, i64::from(posix::fdtable::FD_CLOEXEC));
         assert_eq!(sys::TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
         assert_eq!(sys::TIOCGWINSZ, posix::ioctl::TIOCGWINSZ);
+        assert_eq!(
+            sys::TIOCMGET,
+            u64::from(posix::linux_tty_user_types::TIOCMGET)
+        );
         assert_eq!(sys::WNOHANG, posix::process::WNOHANG);
         assert_eq!(sys::P_PID, posix::process::P_PID);
         assert_eq!(sys::WEXITED, posix::process::WEXITED);
@@ -851,6 +893,12 @@ mod tests {
     #[test]
     fn window_size_refuses_a_negative_descriptor() {
         assert_eq!(window_size(-1), Err(EBADF));
+    }
+
+    /// And for the modem lines.
+    #[test]
+    fn modem_bits_refuses_a_negative_descriptor() {
+        assert_eq!(modem_bits(-1), Err(EBADF));
     }
 
     /// On a host every call declines once the checks have passed, rather than

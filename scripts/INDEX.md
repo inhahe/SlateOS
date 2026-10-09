@@ -237,6 +237,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
 | `scripts/gen-script-index.py` | Generate a searchable one-line index of every script, and refuse a stale one. |
+| `scripts/gen-terminfo-fallback.py` | Write userspace/terminfo/src/fallback_data.rs from the reference's compiled terminfo entries. |
+| `scripts/gen-terminfo-names.py` | Write userspace/terminfo/src/names.rs: the capability names, from the reference's libtinfo. |
 | `scripts/getconf-diff.sh` | getconf-diff.sh — compare our `getconf` against glibc's, inside WSL. |
 | `scripts/getconf-gen.py` | Generate `userspace/getconf`'s variable table from glibc 2.39's getconf.c. |
 | `scripts/getopt-ambiguity-check.py` | Differential check: does our long-option resolution agree with GNU's? |
@@ -364,6 +366,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/prune-build-cache.py` | Prune the parts of a cargo `target/` that no recent build has used. |
 | `scripts/prune-build-trees.py` | List the cargo build trees in this worktree, and delete the unsanctioned ones. |
 | `scripts/ps-diff.sh` | Differential test: our `ps` against procps-ng 4.0.4's, built as SlateOS's |
+| `scripts/pstree-diff.sh` | Differential test: our `pstree` against psmisc 23.7's. |
 | `scripts/ptx-diff.sh` | ptx-diff.sh — compare our `ptx` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pwd-diff.sh` | pwd-diff.sh — run our `pwd` and GNU coreutils' `pwd` side by side and report |
 | `scripts/q45_apply.py` | Q45: give every `RenderCommand::Text` construction an explicit `overflow`. |
@@ -518,6 +521,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
+| `scripts/tput-diff.sh` | Differential test: ncurses 6.4's `tput`, `clear`, `tset` and `tabs`, ours against Ubuntu's. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |
 | `scripts/true-diff.sh` | Differential test: our `true` and `false` against GNU coreutils 9.4's. |
 | `scripts/truncate-diff.sh` | truncate-diff.sh — compare our `truncate` against the real GNU one, in WSL. |
@@ -539,6 +543,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/verify_mutations.py` | Check `mutate.py` tables against the source they claim to break. |
 | `scripts/vmstat-diff.sh` | Differential test: our `vmstat` against procps-ng 4.0.4's, built from the |
 | `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
+| `scripts/wall-diff.sh` | Differential test: our `wall`, `write` and `mesg` against util-linux |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
@@ -555,4 +560,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_545 scripts._
+_550 scripts._

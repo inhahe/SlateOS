@@ -380,7 +380,7 @@ fn run(argv: &[OsString], out: &mut ulclosestream::Stdout) -> u8 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

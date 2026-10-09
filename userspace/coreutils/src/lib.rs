@@ -544,6 +544,7 @@ pub mod locale;
 pub mod ls;
 pub mod mbswidth;
 pub mod mkdirp;
+pub mod ncurses;
 pub mod nproc;
 pub mod overwrite;
 pub mod parse_datetime;

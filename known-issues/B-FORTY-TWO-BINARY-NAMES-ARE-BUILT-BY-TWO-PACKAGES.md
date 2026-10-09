@@ -26,7 +26,17 @@ in `coreutils`, `userspace/look` retired in the same commit. And `last`:
 util-linux's in `coreutils` -- `lastb` by its `argv[0]` -- with shadow-utils'
 `lastlog` beside it, and `userspace/last`, which had been all three by its
 `argv[0]` through the manifest aliases `lastb = last` and `lastlog = last`,
-retired in the commit that added both.
+retired in the commit that added both. And `wall`: util-linux's in
+`coreutils` with `write` and `mesg`, `userspace/wall` -- all three by its
+`argv[0]`, though no alias put the other two on the image -- retired in the
+same commit. And `pstree`: psmisc's in `coreutils`, `userspace/pstree`
+retired in the same commit. And `tput`: ncurses' in `coreutils`, with
+`clear`, `tset` and `tabs` beside it, and `userspace/tput` -- `tput`,
+`clear`, `reset` and `tset` by its `argv[0]` through the manifest aliases
+`clear = tput`, `reset = tput` and `tset = tput` -- retired in the same
+commit; until lane D's manifest says `reset = tset`
+(`requests/b-d-clear-reset-and-tset-are-their-own-programs-now.md`),
+`reset` is coreutils' `tput` in its `reset` alias mode.
 
 
 **In short:** Forty-two of our command-line utilities exist *twice* in this

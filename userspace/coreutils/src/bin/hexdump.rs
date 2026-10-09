@@ -1574,7 +1574,7 @@ fn size_arg(arg: &OsString, errmsg: &str) -> Result<i64, Fatal> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

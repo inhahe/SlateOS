@@ -466,33 +466,12 @@ fn read_error(e: Option<std::io::Error>) -> std::io::Error {
     e.unwrap_or_else(|| std::io::Error::from_raw_os_error(0))
 }
 
-/// `ctime`'s text, `Thu Oct  8 13:00:00 2026`, without its newline: glibc's
-/// `"%.3s %.3s%3d %.2d:%.2d:%.2d %d\n"`.
+/// `ctime_r`'s text, `Thu Oct  8 13:00:00 2026`, without its newline. A
+/// 32-bit time's year always has four digits, so glibc never refuses one
+/// here; were it to, upstream would print its uninitialized buffer, and this
+/// prints nothing.
 fn ctime(zone: &localtime::Zone, t: i64) -> Vec<u8> {
-    let tm = zone.localtime(t, 0);
-    let wday = usize::try_from(tm.wday)
-        .ok()
-        .and_then(|w| localtime::WDAY_ABBR.get(w))
-        .copied()
-        .unwrap_or(b"???");
-    let mon = usize::try_from(tm.month)
-        .ok()
-        .and_then(|m| m.checked_sub(1))
-        .and_then(|m| localtime::MON_ABBR.get(m))
-        .copied()
-        .unwrap_or(b"???");
-    let mut s = Vec::with_capacity(26);
-    s.extend_from_slice(wday);
-    s.push(b' ');
-    s.extend_from_slice(mon);
-    s.extend_from_slice(
-        format!(
-            "{:3} {:02}:{:02}:{:02} {}",
-            tm.day, tm.hour, tm.minute, tm.second, tm.year
-        )
-        .as_bytes(),
-    );
-    s
+    localtime::asctime(&zone.localtime(t, 0)).unwrap_or_default()
 }
 
 /// `time_formatter`: one time in one format -- into a buffer of `room`
@@ -1432,7 +1411,11 @@ fn run(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**484 programs; 325 on the image, 6 carried inside the kernel.**
+**489 programs; 330 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 299
+## Userland utilities and services (`userspace/`, lane B) -- 304
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -47,6 +47,7 @@ two disagree.
 | `chpasswd` | Set many passwords at once, from standard input. | yes |  |  |
 | `chroot` | Run a command with its root directory changed. | yes | `coreutils` |  |
 | `cksum` | Print or verify checksums, by default POSIX's 32-bit CRC. | yes | `coreutils` |  |
+| `clear` | `clear`: ncurses 6.4's (`progs/clear.c`, 20240113), ported. | yes | `coreutils` |  |
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |
 | `column` | Columnate lists, or lay input out as a table. | yes |  |  |
 | `comm` | Compare two sorted files line by line. | yes | `coreutils` |  |
@@ -169,6 +170,7 @@ two disagree.
 | `make` | Build automation tool |  |  |  |
 | `man` | Manual Page Viewer | yes |  |  |
 | `md5sum` | Print or check MD5 (128-bit) checksums. | yes | `coreutils` |  |
+| `mesg` | Control write access of other users to your terminal: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `mkdir` | Make directories. | yes | `coreutils` |  |
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems | yes |  |  |
@@ -213,7 +215,7 @@ two disagree.
 | `printf` | Format and print data. | yes | `coreutils` |  |
 | `prlimit` | Get and set process resource limits. | yes |  |  |
 | `ps` | Report a snapshot of the current processes. | yes | `coreutils` |  |
-| `pstree` | Process tree display utilities. | yes |  |  |
+| `pstree` | Display a tree of processes: psmisc 23.7's, ported. | yes | `coreutils` |  |
 | `ptx` | Produce a permuted index of file contents. | yes | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). | yes |  |  |
 | `pwd` | Print the full filename of the current working directory. | yes | `coreutils` |  |
@@ -265,6 +267,7 @@ two disagree.
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop` |
+| `tabs` | `tabs`: ncurses 6.4's (`progs/tabs.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tac` | Write each file to standard output, last record first. | yes | `coreutils` |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
 | `tar` | Tape archive utility. | yes | `coreutils` |  |
@@ -276,11 +279,12 @@ two disagree.
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
 | `top` | Interactive Process Monitor | yes |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
-| `tput` | Terminal capability tools | yes |  | `clear`, `reset`, `tset` |
+| `tput` | `tput`: ncurses 6.4's (`progs/tput.c`, 20240113), ported. | yes | `coreutils` | `clear`, `reset`, `tset` |
 | `tr` | Translate, squeeze, and/or delete bytes. | yes | `coreutils` |  |
 | `traceroute` | Network Traceroute Utility | yes |  |  |
 | `true` | Do nothing, successfully. | yes | `coreutils` |  |
 | `truncate` | Shrink or extend the size of a file to the specified size. | yes | `coreutils` |  |
+| `tset` | `tset`, and `reset`: ncurses 6.4's (`progs/tset.c`, 20240113), ported. | yes | `coreutils` |  |
 | `tsort` | Order a set of items so that every recorded "before" holds. | yes | `coreutils` |  |
 | `tty` | Print the file name of the terminal connected to standard input. | yes | `coreutils` |  |
 | `udevd` | Device Manager Daemon (udevd / udevadm) | yes |  |  |
@@ -302,7 +306,7 @@ two disagree.
 | `visudo` | Edit the sudoers file with syntax checking. | yes | `sudo` |  |
 | `vmstat` | Report virtual memory statistics: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `w` | Show who is logged on and what they are doing. | yes | `coreutils` |  |
-| `wall` | Terminal messaging utilities for Slate OS | yes |  |  |
+| `wall` | Write a message to all users: util-linux 2.39.3's, ported, with Ubuntu's fix for CVE-2024-28085. | yes | `coreutils` |  |
 | `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility | yes |  |  |
@@ -312,6 +316,7 @@ two disagree.
 | `whois` | WHOIS Lookup Utility | yes |  |  |
 | `wipefs` | Wipe signatures from a device. | yes |  |  |
 | `wpa` | WiFi Protected Access multi-personality binary. | yes |  |  |
+| `write` | Send a message to another user: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
 | `xdg-open` | XDG File Association Tools | yes | `xdg` | `xdg-mime`, `mimeopen` |
 | `xxd` | Make a hex dump, or turn one back into binary: vim 9.1.0016's, ported. | yes | `coreutils` |  |

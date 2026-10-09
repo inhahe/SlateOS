@@ -805,6 +805,7 @@ impl Program {
             keep_going: false,
             long_only: false,
             distinct_entries: false,
+            short_only: false,
             done: false,
         }
     }
@@ -870,6 +871,8 @@ pub struct Parser<'a> {
     long_only: bool,
     /// See [`Parser::distinct_entries`].
     distinct_entries: bool,
+    /// See [`Parser::short_only`].
+    short_only: bool,
     done: bool,
 }
 
@@ -1003,6 +1006,18 @@ impl<'a> Parser<'a> {
     #[must_use]
     pub fn distinct_entries(mut self, set: bool) -> Self {
         self.distinct_entries = set;
+        self
+    }
+
+    /// Plain `getopt`, which has no long options at all: a word that starts
+    /// with two dashes (and is not just `--`) is a bundle of short options
+    /// like any other, its second dash the first of them. So `tput
+    /// --version` says `invalid option -- '-'`, where `getopt_long` with an
+    /// empty table would say `unrecognized option '--version'`. Measured
+    /// against ncurses' `tput`, `clear` and `tset`.
+    #[must_use]
+    pub fn short_only(mut self, set: bool) -> Self {
+        self.short_only = set;
         self
     }
 
@@ -1193,8 +1208,8 @@ impl<'a> Parser<'a> {
             return Some(Ok(Opt::Operand(arg)));
         }
         Some(match bytes.strip_prefix(b"--") {
-            Some(body) => self.take_long(body, &bytes),
-            None => {
+            Some(body) if !self.short_only => self.take_long(body, &bytes),
+            _ => {
                 let body = bytes.get(1..).unwrap_or_default();
                 // `strchr(optstring, c)`, as glibc asks it: any byte of the
                 // option string counts, `:` included, which is what decides
@@ -2431,6 +2446,34 @@ mod tests {
         assert_eq!(
             every(GETOPT.parse(&args, "W", &longs)),
             vec![Ok(Opt::Short(b'W', None))]
+        );
+    }
+
+    #[test]
+    fn plain_getopt_reads_two_dashes_as_short_options() {
+        // `tput --version`: the second dash is an option letter, and not one
+        // the string lists.
+        let args = argv(&["--version"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "ST:Vvx", &[]).short_only(true)),
+            vec![Err("invalid option -- '-'".into())]
+        );
+        // One that is listed is taken, and so is the rest of the bundle; a
+        // bare `--` still ends the options.
+        let args = argv(&["--x", "--", "--V"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "x-", &[]).short_only(true)),
+            vec![
+                Ok(Opt::Short(b'-', None)),
+                Ok(Opt::Short(b'x', None)),
+                Ok(Opt::Operand(&args[2])),
+            ]
+        );
+        // Without it, the same word is a long option.
+        let args = argv(&["--version"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "ST:Vvx", &[])),
+            vec![Err("unrecognized option '--version'".into())]
         );
     }
 

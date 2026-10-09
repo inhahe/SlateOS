@@ -110,7 +110,6 @@ userspace/oils  # bare deny(clippy::all)
 userspace/passwd
 userspace/ping
 userspace/pkg
-userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
 userspace/rfkill  # bare deny(clippy::all)
@@ -124,7 +123,6 @@ userspace/ss
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
 userspace/top
-userspace/tput
 userspace/traceroute
 userspace/udevd
 userspace/unshare  # bare deny(clippy::all)
@@ -132,7 +130,6 @@ userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
-userspace/wall
 userspace/watch
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg

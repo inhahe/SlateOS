@@ -129,6 +129,21 @@ impl Stdout {
     /// write -- at a newline on a terminal, when the buffer overflows
     /// otherwise.
     pub fn write(&mut self, data: &[u8]) {
+        // A failure is the stream's error flag, which `fwrite` has set and
+        // `close_stdout` reports; `fputs`'s own answer is not looked at.
+        let _ = self.fwrite(data);
+    }
+
+    /// `fwrite (data, 1, len, stdout)` with its answer looked at: as
+    /// [`Stdout::write`], and the failure of a write this call forced out of
+    /// the buffer -- what makes `fwrite` come back short -- returned, its
+    /// `errno` with it. A program that checks (ncurses' `cat_file`) reports
+    /// it there; held in the buffer, the bytes have not failed yet.
+    ///
+    /// # Errors
+    ///
+    /// The failed `write(2)`'s, after which the stream's error flag is set.
+    pub fn fwrite(&mut self, data: &[u8]) -> io::Result<()> {
         self.held.extend_from_slice(data);
         self.held_units = self.held_units.saturating_add(self.units(data));
         let buffering = *self.buffering.get_or_insert_with(allocate);
@@ -143,13 +158,19 @@ impl Stdout {
         if let Some(n) = due {
             let chunk: Vec<u8> = self.held.drain(..n).collect();
             self.held_units = self.units(&self.held);
-            if let Err(e) = sys::write_all(sys::STDOUT, &chunk)
-                && self.failed.is_none()
-            {
-                // glibc drops what it could not write and sets the flag.
-                self.failed = Some(e);
+            if let Err(e) = sys::write_all(sys::STDOUT, &chunk) {
+                let answer = e.raw_os_error().map_or_else(
+                    || io::Error::new(e.kind(), e.to_string()),
+                    io::Error::from_raw_os_error,
+                );
+                if self.failed.is_none() {
+                    // glibc drops what it could not write and sets the flag.
+                    self.failed = Some(e);
+                }
+                return Err(answer);
             }
         }
+        Ok(())
     }
 
     /// `fflush(stdout)`: what is held, written now. A failure sets the

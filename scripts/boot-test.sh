@@ -2117,6 +2117,20 @@ for arg in "$@"; do
         # exists to prevent, so record_boot_history() adds one -- the run is
         # excluded from the consecutive-clean streak in both directions.
         --no-rootfs) NO_ROOTFS=1 ;;
+        # Anything else is refused, for --profile's reason: a flag this loop
+        # does not know used to fall through the `case` and be dropped, so the
+        # run went ahead in its default shape under a name that said otherwise.
+        # `--release` -- natural, and not a flag here -- produced a 54-minute
+        # *debug* boot on 2026-10-09 that its author took for the release boot
+        # the pre-push staleness gate asks for. Refusing costs one re-type; the
+        # silent default cost the whole run, and could as easily have cost a
+        # soak that was not the soak it was labelled.
+        *)
+            echo "ERROR: boot-test.sh does not take '$arg'." >&2
+            echo "       The flags it takes are listed under 'Usage:' at the top of" >&2
+            echo "       scripts/boot-test.sh. For a release build: --profile=release." >&2
+            exit 1
+            ;;
     esac
 done
 

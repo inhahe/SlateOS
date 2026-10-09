@@ -2080,22 +2080,30 @@ fn open_capture_log(id: ContainerId) -> Option<(String, u64)> {
 ///
 /// 1. Verifies the container exists and is in [`Created`](ContainerState::Created)
 ///    state (a container can only be run once).
-/// 2. Spawns the process from `elf_data`.  The new process's initial
-///    thread is enqueued but does **not** execute until the scheduler
-///    next picks it, so the cgroup/namespace binding in step 3 is
-///    guaranteed to be in place before the process runs its first
-///    instruction.
+/// 2. Spawns the process from `elf_data`, unstarted
+///    ([`spawn_process_suspended`](crate::proc::spawn::spawn_process_suspended)).
 /// 3. Binds the process into the container via [`add_process_task`]:
-///    cgroup resource billing (Q14), PID-namespace mapping, and the
-///    user/network namespaces.  Because the binding uses the spawn
-///    result's *task id* for the scheduler resources, the process is
+///    cgroup resource billing (Q14), PID-namespace mapping, the
+///    user/network/UTS namespaces and the root jail.  Because the binding
+///    uses the spawn's *task id* for the scheduler resources, the process is
 ///    correctly charged to the container's cgroup.
 /// 4. Records the process as the container's init PID and transitions
 ///    the container to [`Running`](ContainerState::Running).
+/// 5. Installs the container's published ports.
+/// 6. Only then starts the process.
 ///
-/// On any failure after the spawn, the just-created process is torn down
-/// (threads killed, address space freed) so a failed `run` never leaks
-/// an un-billed process.
+/// So the init's first instruction runs inside the container, with its
+/// ports open, and its exit -- however soon -- finds it recorded as the
+/// init ([`notify_init_exit`]). Until 2026-10-09 the spawn started it at
+/// step 2, on the word that it would "not execute until the scheduler next
+/// picks it": on more than one CPU another CPU picked it at once, and it ran
+/// outside its container's root and namespaces, unbilled, until step 3
+/// caught up -- and if it exited before step 4, its container stayed
+/// `Running` with no init.
+///
+/// On any failure the just-created process is undone, never having run, and
+/// the container left as it was, so a failed `run` never leaks an un-billed
+/// process.
 ///
 /// Returns the global PID of the launched init process.
 ///
@@ -2112,28 +2120,35 @@ pub fn run(
 ) -> KernelResult<u64> {
     // Auto-detect the init binary's ABI (the default for real containers:
     // Docker images carry glibc/Linux ELFs, which `spawn_process` classifies
-    // as Linux from their markers).
-    run_with_abi(id, elf_data, options, None)
+    // as Linux from their markers), on any CPU.
+    run_with(id, elf_data, options, None, None)
 }
 
-/// [`run`], but with an explicit ABI override for the init process instead of
-/// auto-detecting it from the ELF markers.
+/// [`run`], with two choices it makes for itself made by the caller.
 ///
-/// `abi` is passed straight through to
-/// [`spawn_process_with_abi`](crate::proc::spawn::spawn_process_with_abi) when
-/// `Some`; `None` auto-detects (the [`run`] default).  The override exists so
-/// callers that already know the binary's ABI — and the container self-test,
-/// which needs a Linux-ABI init to exercise the `logs` capture path with the
-/// embedded (natively-marked) test ELF — can state it explicitly rather than
-/// relying on the marker heuristic.
+/// `abi` overrides the init's ABI, which [`run`] (`None`) auto-detects from
+/// the ELF's markers. The override exists so callers that already know the
+/// binary's ABI -- and the container self-test, which needs a Linux-ABI init
+/// to exercise the `logs` capture path with the embedded (natively-marked)
+/// test ELF -- can state it explicitly rather than relying on the marker
+/// heuristic.
+///
+/// `affinity` restricts the init to the CPUs in the mask (bit N = CPU N),
+/// as `sched_setaffinity` would, from its first instruction; `None` leaves
+/// it the CPUs a spawn gives it. The self-tests that inspect a container
+/// whose init must not run yet pin it to their own CPU, whose interrupts
+/// they hold off: on more than one CPU, nothing else stops another CPU
+/// running it the moment it starts.
 ///
 /// # Errors
-/// Same as [`run`].
-fn run_with_abi(
+/// Same as [`run`], and [`KernelError::InvalidArgument`] if `affinity` names
+/// no CPU that is online.
+fn run_with(
     id: ContainerId,
     elf_data: &[u8],
     options: &crate::proc::spawn::SpawnOptions<'_>,
     abi: Option<crate::proc::pcb::AbiMode>,
+    affinity: Option<u64>,
 ) -> KernelResult<u64> {
     use crate::proc::linux_fd::O_WRONLY;
 
@@ -2157,39 +2172,33 @@ fn run_with_abi(
     let capture = open_capture_log(id);
     let capture_handle = capture.as_ref().map(|(_, h)| *h);
 
-    // Step 2: spawn the init process with stdout+stderr (fd 1 and fd 2) both
-    // redirected to the capture file — one shared handle (dup2 semantics) so
-    // `container logs` can read the interleaved output back.  The redirect binds
-    // only for a Linux-ABI child (a glibc `write` consults this table); a native
-    // child ignores it and the spawn closes the handle.  The spawn OWNS the
-    // handle on every path (moved into the child on success, closed on failure),
-    // so a spawn error needs no manual close here.  The child is enqueued but
-    // not yet run.
-    let result = match (capture_handle, abi) {
-        (Some(h), Some(m)) => {
-            let redirects = [(1i32, h, O_WRONLY), (2i32, h, O_WRONLY)];
-            crate::proc::spawn::spawn_process_with_abi_and_redirects(
-                elf_data, options, m, &redirects,
-            )?
-        }
-        (Some(h), None) => {
-            let redirects = [(1i32, h, O_WRONLY), (2i32, h, O_WRONLY)];
-            crate::proc::spawn::spawn_process_with_redirects(elf_data, options, &redirects)?
-        }
-        (None, Some(m)) => crate::proc::spawn::spawn_process_with_abi(elf_data, options, m)?,
-        (None, None) => crate::proc::spawn::spawn_process(elf_data, options)?,
-    };
+    // Step 2: spawn the init process, unstarted, with stdout+stderr (fd 1 and
+    // fd 2) both redirected to the capture file — one shared handle (dup2
+    // semantics) so `container logs` can read the interleaved output back.  The
+    // redirect binds only for a Linux-ABI child (a glibc `write` consults this
+    // table); a native child ignores it and the spawn closes the handle.  The
+    // spawn OWNS the handle on every path (moved into the child on success,
+    // closed on failure), so a spawn error needs no manual close here.  From
+    // here until step 6 every error return drops `spawned`, which undoes the
+    // never-run process -- the capture handle with it, through `destroy`'s
+    // handle cleanup.
+    let capture_redirects = capture_handle.map(|h| [(1i32, h, O_WRONLY), (2i32, h, O_WRONLY)]);
+    let spawned = crate::proc::spawn::spawn_process_suspended(
+        elf_data,
+        options,
+        abi,
+        capture_redirects.as_ref().map_or(&[][..], |r| &r[..]),
+        crate::proc::spawn::CapInherit::All,
+        crate::proc::spawn::SpawnAttrs::default(),
+    )?;
+    let (init_pid, init_task) = (spawned.pid(), spawned.task_id());
+    if let Some(mask) = affinity {
+        crate::sched::set_affinity(init_task, mask)?;
+    }
 
     // Step 3: bind it into the container (cgroup billing + namespaces),
-    // keyed on the spawn result's task id for the scheduler resources.
-    if let Err(e) = add_process_task(id, result.pid, result.task_id) {
-        // Roll back the spawn so a failed run leaks nothing.  The capture handle
-        // (if any) was moved into the child and registered as an ipc-handle, so
-        // `destroy`'s cleanup reclaims it — no manual close needed here.
-        crate::proc::thread::kill_process_threads(result.pid);
-        crate::proc::pcb::destroy(result.pid);
-        return Err(e);
-    }
+    // keyed on the spawn's task id for the scheduler resources.
+    add_process_task(id, init_pid, init_task)?;
 
     // The capture log's host path (for `logs(id)` read-back); `None` when
     // capture was skipped.
@@ -2197,14 +2206,19 @@ fn run_with_abi(
 
     // Step 4: record init PID and flip Created → Running atomically under
     // the table lock.  Snapshot the network namespace, container IP, and
-    // published ports for step 5 while we hold the lock.
-    let port_install: Option<PortInstall> = with_table(|table| {
-        let idx = id as usize;
-        if idx >= MAX_CONTAINERS || !table.containers[idx].active {
-            return None;
-        }
-        table.containers[idx].init_pid = Some(result.pid);
-        table.containers[idx].state = ContainerState::Running;
+    // published ports for step 5 while we hold the lock.  Step 1's check is
+    // repeated here, where it decides: a second `run` of the same container
+    // can pass step 1 alongside this one, and only one may become its init.
+    let port_install: Result<Option<PortInstall>, KernelError> = with_table(|table| {
+        let Some(ct) = table
+            .containers
+            .get_mut(id as usize)
+            .filter(|ct| ct.active && ct.state == ContainerState::Created)
+        else {
+            return Err(KernelError::InvalidArgument);
+        };
+        ct.init_pid = Some(init_pid);
+        ct.state = ContainerState::Running;
         // Persist the init process's working directory so a later
         // `exec_path` (docker exec / container run-in) with no explicit cwd
         // starts in the same directory (Docker inherits the image/--workdir
@@ -2212,10 +2226,10 @@ fn run_with_abi(
         // `-w`, else the image's WorkingDir, else `None`. A path is bytes;
         // this one always originates from a UTF-8 image-config/CLI string,
         // so store it as such (empty when the init had no cwd override).
-        table.containers[idx].working_dir.clear();
+        ct.working_dir.clear();
         if let Some(dir) = options.cwd {
             if let Ok(s) = core::str::from_utf8(dir) {
-                table.containers[idx].working_dir.push_str(s);
+                ct.working_dir.push_str(s);
             }
         }
         // A launched container is, by definition, not user-stopped; clear
@@ -2223,25 +2237,33 @@ fn run_with_abi(
         // auto-restart counter is *not* reset here — that would let an
         // `on-failure:N` container loop forever; it is reset only by a
         // manual start/restart.)
-        table.containers[idx].user_stopped = false;
+        ct.user_stopped = false;
         // Record the capture-log path (if the redirect above succeeded) so
         // `logs(id)` knows where to read from.  Empty when capture was
         // skipped.
-        table.containers[idx].log_path.clear();
+        ct.log_path.clear();
         if let Some(ref p) = captured_log_path {
-            table.containers[idx].log_path.push_str(p);
+            ct.log_path.push_str(p);
         }
         // Only install port forwards when the container has both an IP
         // (forward target) and at least one published port.
-        match table.containers[idx].container_ip {
-            Some(ip) if !table.containers[idx].published_ports.is_empty() => Some((
-                table.containers[idx].net_ns,
-                ip,
-                table.containers[idx].published_ports.clone(),
-            )),
+        Ok(match ct.container_ip {
+            Some(ip) if !ct.published_ports.is_empty() => {
+                Some((ct.net_ns, ip, ct.published_ports.clone()))
+            }
             _ => None,
-        }
+        })
     });
+    let port_install = match port_install {
+        Ok(install) => install,
+        Err(e) => {
+            // Gone, or another `run` won: unbind ours (a no-op if the
+            // container is gone), and the drop of `spawned` undoes it.
+            let _ = remove_process_task(id, init_pid, init_task);
+            return Err(e);
+        }
+    };
+    let forwards_net_ns = port_install.as_ref().map(|(net_ns, _, _)| *net_ns);
 
     // Step 5: install the container's published-port NAT rules (the
     // `-p host:container` forwards).  Done after the state flip and outside
@@ -2279,6 +2301,29 @@ fn run_with_abi(
             }
         }
     }
+
+    // Step 6: everything is in place -- start the init.
+    let result = match spawned.start() {
+        Ok(result) => result,
+        Err(e) => {
+            // Killed while it waited (a `kill` of the container between steps
+            // 3 and 6), and undone by `start`. Leave the container as `run`
+            // found it, unless whatever killed the init has moved it on.
+            let _ = remove_process_task(id, init_pid, init_task);
+            with_table(|table| {
+                if let Some(ct) = table.containers.get_mut(id as usize).filter(|ct| ct.active)
+                    && ct.state == ContainerState::Running
+                    && ct.init_pid.is_none()
+                {
+                    ct.state = ContainerState::Created;
+                }
+            });
+            if let Some(net_ns) = forwards_net_ns {
+                crate::net::nat::flush_port_forwards(net_ns);
+            }
+            return Err(e);
+        }
+    };
 
     let run_name = info(id).map_or(String::new(), |ci| ci.name);
     serial_println!(
@@ -4552,8 +4597,8 @@ pub fn exec_path_env(
     let host_path = resolve_in_rootfs(&root_path, guest_str)?;
     let elf = crate::fs::vfs::Vfs::read_file(&host_path).map_err(|_| KernelError::NotFound)?;
 
-    // 3. Spawn the process (enqueued, not yet run) with the requested argv and
-    //    an `exe_path` of the *guest* command (backs /proc/<pid>/exe). ABI is
+    // 3. Spawn the process, unstarted, with the requested argv and an
+    //    `exe_path` of the *guest* command (backs /proc/<pid>/exe). ABI is
     //    auto-detected from the ELF markers, matching `run`.
     let mut opts = crate::proc::spawn::SpawnOptions::new(guest_str);
     opts.argv = argv;
@@ -4570,15 +4615,32 @@ pub fn exec_path_env(
         opts.cwd = Some(dir);
     }
     opts.exe_path = Some(guest_cmd);
-    let result = crate::proc::spawn::spawn_process(&elf, &opts)?;
+    // Unstarted, for `run`'s reason: bound into the container (step 4) before
+    // its first instruction, on whichever CPU runs it. An error return before
+    // step 5 drops `spawned`, which undoes the never-run process.
+    let spawned = crate::proc::spawn::spawn_process_suspended(
+        &elf,
+        &opts,
+        None,
+        &[],
+        crate::proc::spawn::CapInherit::All,
+        crate::proc::spawn::SpawnAttrs::default(),
+    )?;
+    let (pid, task_id) = (spawned.pid(), spawned.task_id());
 
-    // 4. Bind it into the container. On failure, tear the spawn down so a
-    //    failed exec leaks nothing (same rollback as `run`).
-    if let Err(e) = add_process_task(id, result.pid, result.task_id) {
-        crate::proc::thread::kill_process_threads(result.pid);
-        crate::proc::pcb::destroy(result.pid);
-        return Err(e);
-    }
+    // 4. Bind it into the container. A frozen container's new member is
+    //    suspended here, and stays so past its start until the thaw.
+    add_process_task(id, pid, task_id)?;
+
+    // 5. Start it. Killed while it waited, it was undone by `start`: unbind
+    //    it.
+    let result = match spawned.start() {
+        Ok(result) => result,
+        Err(e) => {
+            let _ = remove_process_task(id, pid, task_id);
+            return Err(e);
+        }
+    };
 
     serial_println!(
         "[container] exec id={} '{}': pid={} task={} entry={:#x}",
@@ -4991,6 +5053,17 @@ pub fn cgroup(id: ContainerId) -> Option<u32> {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// The affinity mask naming only the CPU this runs on: what a self-test pins
+/// an init to when it holds that CPU (interrupts or preemption off), so that
+/// the init cannot run until the test lets it. Read inside that hold, where
+/// the caller cannot move.
+fn this_cpu_only() -> u64 {
+    u32::try_from(crate::sched::current_cpu_id())
+        .ok()
+        .and_then(|cpu| 1u64.checked_shl(cpu))
+        .unwrap_or(0)
+}
+
 /// Comprehensive self-test for the container lifecycle manager.
 pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[container] Running self-test...");
@@ -5316,8 +5389,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // can never be *scheduled* before `destroy()` removes it. This is the
         // "synthetic-PID" determinism of Tests 18/19 without giving up the real
         // `run()` path. See known-issues.md B-CONTAINER-JAIL-TESTRACE.
+        //
+        // Interrupts off holds only *this* CPU, so the init is pinned to it:
+        // on more than one CPU another would otherwise run it at once (and
+        // did, 2026-10-09, on the first two-CPU boot to run these tests).
         crate::cpu::without_interrupts(|| {
-            let pid = run(ct_run, HELLO_ELF, &opts).expect("run init process");
+            let pid = run_with(ct_run, HELLO_ELF, &opts, None, Some(this_cpu_only()))
+                .expect("run init process");
 
             // After run: Running, init pid recorded, one tracked process,
             // and exactly one task billed to the container's cgroup.
@@ -6833,7 +6911,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 19t: `logs` — running a container redirects its init process's
     // stdout+stderr to a per-container capture file, and `logs(id)` reads that
     // file back.  As in Test 17 the init process is enqueued but never
-    // scheduled (interrupts off + immediate teardown), so this test verifies
+    // scheduled (pinned to this CPU, interrupts off, immediate teardown), so
+    // this test verifies
     // the capture *wiring* deterministically — run() creates and truncates the
     // log at the expected path, logs() reads its current contents, and delete()
     // removes it — without depending on the child actually executing (the
@@ -6859,8 +6938,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let opts = crate::proc::spawn::SpawnOptions::new("logs-init");
         crate::cpu::without_interrupts(|| {
-            let pid = run_with_abi(ct, HELLO_ELF, &opts, Some(crate::proc::pcb::AbiMode::Linux))
-                .expect("run logs init");
+            let pid = run_with(
+                ct,
+                HELLO_ELF,
+                &opts,
+                Some(crate::proc::pcb::AbiMode::Linux),
+                Some(this_cpu_only()),
+            )
+            .expect("run logs init");
 
             // run() created and truncated the capture file, so logs() returns
             // Ok with the current (empty) contents.
@@ -6973,11 +7058,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // enqueues (but does not run) the init and installs the forwards; the
         // init's death handler is the only thing that flushes them.  Keeping
         // preemption disabled from just before run() through the read-back
-        // ensures the init cannot be scheduled to exit-and-flush in between on
-        // this single-CPU boot self-test.  We snapshot the forwards inside the
-        // window and assert on the snapshot after re-enabling preemption.
+        // ensures the init cannot be scheduled to exit-and-flush in between --
+        // on this CPU, which is the one the init is pinned to: on more than one
+        // CPU another would run it at once.  We snapshot the forwards inside
+        // the window and assert on the snapshot after re-enabling preemption.
         crate::sched::preempt_disable();
-        let pid = run(ct_port, HELLO_ELF, &opts).expect("run port container");
+        let pid = run_with(ct_port, HELLO_ELF, &opts, None, Some(this_cpu_only()))
+            .expect("run port container");
         let tcp_snapshot = crate::net::nat::lookup_port_forward(NatProto::Tcp, 8080);
         let udp_snapshot = crate::net::nat::lookup_port_forward(NatProto::Udp, 5353);
         crate::sched::preempt_enable();

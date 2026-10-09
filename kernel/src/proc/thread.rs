@@ -423,30 +423,44 @@ pub fn admit(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     // scheduled.  Only after this point can the child run (and possibly
     // exit), guaranteeing `THREAD_OWNERS`/`add_thread` are already in place.
     if !sched::admit(task_id) {
-        // The task should be exactly Blocked here (we just created it
-        // suspended and nothing else touched it).  If admit failed it means
-        // the task was concurrently killed; surface it as an internal error
-        // after unwinding the registration we just did.
+        // The task is awaiting admission here (we created it suspended, and
+        // only `admit` starts such a task). If admit failed it means the task
+        // was concurrently killed; surface it as an internal error after
+        // unwinding the registration we just did.
         serial_println!(
             "[thread] Failed to admit task {} in process {}",
             task_id,
             pid
         );
-        {
-            let mut owners = THREAD_OWNERS.lock();
-            owners.remove(&task_id);
-        }
-        crate::proc::signal::on_thread_exit(pid, task_id);
-        // Detach the thread we just registered.  The task never ran, so it
-        // accrued no CPU time / faults — zero accounting is exact.  Ignore
-        // the return: on this unwinding path there are no join waiters to
-        // wake (the child was never observable).
-        let _ = pcb::remove_thread(pid, task_id, pcb::ThreadExitAccounting::default());
-        sched::kill_task(task_id);
+        abandon(pid, task_id);
         return Err(KernelError::InternalError);
     }
 
     Ok(())
+}
+
+/// Undo [`spawn_suspended_with_tls`] for a thread that is never to be
+/// admitted: unregister it from its process and kill it, as if it had never
+/// been created. Its creator's error path, when something it had to do
+/// between the two phases failed -- and [`admit`]'s, when the thread was
+/// killed first.
+///
+/// Nothing of an exit runs: the thread never ran, so there is nothing to
+/// account, no joiner can be waiting, and no parent is told. Harmless on a
+/// thread already unregistered or dead, so a caller need not know whether
+/// `admit` got as far as calling it.
+pub fn abandon(pid: ProcessId, task_id: TaskId) {
+    {
+        let mut owners = THREAD_OWNERS.lock();
+        owners.remove(&task_id);
+    }
+    crate::proc::signal::on_thread_exit(pid, task_id);
+    // Detach the thread.  The task never ran, so it accrued no CPU time /
+    // faults — zero accounting is exact.  Ignore the return: there are no
+    // join waiters to wake (the thread was never observable), and a thread
+    // already detached is what this was asked to leave.
+    let _ = pcb::remove_thread(pid, task_id, pcb::ThreadExitAccounting::default());
+    sched::kill_task(task_id);
 }
 
 /// Spawn a new **userspace** thread within an existing process.

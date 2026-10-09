@@ -31816,7 +31816,7 @@ fn cmd_fsearch(args: &str) {
     }
 }
 
-/// `tag` — file tagging system for BFS-style metadata queries.
+/// `tag` — a file's tags, its `user.xdg.tags` attribute (`fs::tags`).
 ///
 /// Subcommands:
 ///   tag add `<path>` `<tag>`           — add a tag to a file
@@ -31826,8 +31826,7 @@ fn cmd_fsearch(args: &str) {
 ///   tag clear `<path>`               — remove all tags from a file
 ///   tag search `<tag>` [path]        — find files with a tag
 ///   tag find <tag1,tag2> [path]    — find files with ALL tags
-///   tag list                       — list all known tags
-///   tag index [path]               — build/rebuild tag index
+///   tag list [path]                — every tag in use under a path
 ///   tag stats                      — show tag statistics
 fn cmd_tag(args: &str) {
     use crate::fs::tags;
@@ -31943,22 +31942,22 @@ fn cmd_tag(args: &str) {
                 return;
             }
 
-            let tag_list: Vec<&str> = tag_str.split(',').collect();
-            let results = if tag_list.len() == 1 {
-                tags::search(tag_list[0], root)
-            } else {
-                tags::search_multi(&tag_list, root)
-            };
-
-            match results {
-                Ok(files) => {
-                    if files.is_empty() {
+            let tag_list: Vec<&str> = tag_str.split(',').map(str::trim).collect();
+            match tags::search_multi(&tag_list, root) {
+                Ok(found) => {
+                    if found.files.is_empty() {
                         shell_println!("No files found.");
                     } else {
-                        shell_println!("Found {} file(s):", files.len());
-                        for f in &files {
+                        shell_println!("Found {} file(s):", found.files.len());
+                        for f in &found.files {
                             shell_println!("  {} [{}]", f.path.display(), f.tags.join(", "));
                         }
+                    }
+                    if found.incomplete {
+                        shell_println!(
+                            "(not everything under '{}' could be read: there may be more)",
+                            root
+                        );
                     }
                 }
                 Err(e) => {
@@ -31968,47 +31967,39 @@ fn cmd_tag(args: &str) {
             }
         }
         "list" => {
-            let all_tags = tags::list_tags();
-            if all_tags.is_empty() {
-                shell_println!("No tags in index. Run 'tag index' to build.");
-            } else {
-                shell_println!("{} unique tag(s):", all_tags.len());
-                for (tag, count) in &all_tags {
-                    shell_println!("  {:20} {} file(s)", tag, count);
-                }
-            }
-        }
-        "index" | "rebuild" => {
             let root = if rest.is_empty() { "/" } else { rest };
-            shell_println!("Building tag index from '{}'...", root);
-            match tags::build_index(root) {
-                Ok(count) => shell_println!("Indexed {} tagged file(s)", count),
+            match tags::list_tags(root) {
+                Ok(census) => {
+                    if census.tags.is_empty() {
+                        shell_println!("No tags under '{}'.", root);
+                    } else {
+                        shell_println!("{} tag(s) under '{}':", census.tags.len(), root);
+                        for (tag, count) in &census.tags {
+                            shell_println!("  {:20} {} file(s)", tag, count);
+                        }
+                    }
+                    if census.incomplete {
+                        shell_println!(
+                            "(not everything under '{}' could be read: there may be more)",
+                            root
+                        );
+                    }
+                }
                 Err(e) => {
-                    shell_println!("tag index: {:?}", e);
+                    shell_println!("tag list: {:?}", e);
                     set_exit(1);
                 }
             }
         }
         "stats" | "status" => {
             let s = tags::stats();
-            shell_println!(
-                "File Tagging: {}",
-                if tags::is_enabled() {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            );
-            shell_println!("  unique tags:   {}", s.unique_tags);
-            shell_println!("  tagged files:  {}", s.tagged_files);
-            shell_println!("  associations:  {}", s.total_associations);
+            shell_println!("File tags (each file's user.xdg.tags attribute):");
             shell_println!("  adds:          {}", s.adds);
             shell_println!("  removes:       {}", s.removes);
             shell_println!("  searches:      {}", s.searches);
-            shell_println!("  index built:   {}", s.index_built);
         }
         _ => {
-            shell_println!("Usage: tag <add|rm|get|set|clear|search|find|list|index|stats>");
+            shell_println!("Usage: tag <add|rm|get|set|clear|search|find|list|stats>");
             shell_println!();
             shell_println!("Subcommands:");
             shell_println!("  add <path> <tag>           Add a tag to a file");
@@ -32018,8 +32009,7 @@ fn cmd_tag(args: &str) {
             shell_println!("  clear <path>               Remove all tags");
             shell_println!("  search <tag> [path]        Find files with a tag");
             shell_println!("  find <t1,t2,...> [path]    Find files with ALL tags");
-            shell_println!("  list                       List all known tags");
-            shell_println!("  index [path]               Build tag index");
+            shell_println!("  list [path]                Every tag in use under a path");
             shell_println!("  stats                      Show statistics");
             set_exit(1);
         }
@@ -37587,7 +37577,8 @@ fn cmd_toolbar(args: &str) {
     }
 }
 
-/// `queryable` / `qattr` — queryable file metadata (BFS-inspired).
+/// `queryable` / `qattr` — typed file attributes, each the file's own
+/// `user.slate.<name>` attribute (`fs::queryable`), and queries over them.
 fn cmd_queryable(args: &str) {
     use crate::fs::queryable;
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -37763,19 +37754,27 @@ fn cmd_queryable(args: &str) {
                 op,
                 value,
             };
-            // Transitional: `resolve_path` still yields a `String`. The
-            // `Path::new` wrapper collapses to `root.as_deref()` once §261
-            // reaches it.
-            let results = queryable::query(
-                &[pred],
-                queryable::QueryMode::All,
-                root.as_deref().map(Path::new),
-            );
+            let root = root.unwrap_or_else(|| PathBuf::from("/"));
+            let found = match queryable::query(&[pred], queryable::QueryMode::All, &root) {
+                Ok(found) => found,
+                Err(e) => {
+                    shell_println!("qattr query: {:?}", e);
+                    set_exit(1);
+                    return;
+                }
+            };
+            let results = &found.results;
+            if found.incomplete {
+                shell_println!(
+                    "(not everything under '{}' could be read: there may be more)",
+                    root.display()
+                );
+            }
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
                 shell_println!("{} results:", results.len());
-                for r in &results {
+                for r in results {
                     let vals: Vec<String> = r
                         .matched_attrs
                         .iter()
@@ -37795,96 +37794,14 @@ fn cmd_queryable(args: &str) {
                 }
             }
         }
-        "index" => {
-            let idx_sub = parts.get(1).copied().unwrap_or("");
-            match idx_sub {
-                "create" => {
-                    let attr_name = parts.get(2).copied().unwrap_or("");
-                    if attr_name.is_empty() {
-                        shell_println!("Usage: qattr index create <attr_name>");
-                        set_exit(1);
-                        return;
-                    }
-                    match queryable::create_index(attr_name) {
-                        Ok(()) => shell_println!("Index created for {}", attr_name),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                "drop" => {
-                    let attr_name = parts.get(2).copied().unwrap_or("");
-                    if attr_name.is_empty() {
-                        shell_println!("Usage: qattr index drop <attr_name>");
-                        set_exit(1);
-                        return;
-                    }
-                    match queryable::drop_index(attr_name) {
-                        Ok(()) => shell_println!("Index dropped for {}", attr_name),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
-                }
-                "list" | "" => {
-                    let indexes = queryable::list_indexes();
-                    if indexes.is_empty() {
-                        shell_println!("No indexed attributes");
-                    } else {
-                        shell_println!("{} indexed attributes:", indexes.len());
-                        for name in &indexes {
-                            let count = queryable::count_with_attr(name);
-                            shell_println!("  {} ({} files)", name, count);
-                        }
-                    }
-                }
-                _ => {
-                    shell_println!("Usage: qattr index <create|drop|list> [attr_name]");
-                    set_exit(1);
-                }
-            }
-        }
-        "schema" => {
-            let schema_sub = parts.get(1).copied().unwrap_or("");
-            match schema_sub {
-                "init" => match queryable::register_builtins() {
-                    Ok(()) => shell_println!("Built-in schemas registered"),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                },
-                "list" | "" => {
-                    let schemas = queryable::list_schemas();
-                    if schemas.is_empty() {
-                        shell_println!("No schemas registered (use 'qattr schema init')");
-                    } else {
-                        shell_println!("{} schemas:", schemas.len());
-                        shell_println!(
-                            "{:30} {:8} {:8} {}",
-                            "NAME",
-                            "TYPE",
-                            "INDEXED",
-                            "DESCRIPTION"
-                        );
-                        for s in &schemas {
-                            let idx = if s.indexed { "yes" } else { "no" };
-                            shell_println!(
-                                "{:30} {:8} {:8} {}",
-                                s.name,
-                                s.value_type,
-                                idx,
-                                s.description
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    shell_println!("Usage: qattr schema <init|list>");
-                    set_exit(1);
-                }
+        "names" | "schema" => {
+            shell_println!(
+                "{} well-known attribute names (any name may be set):",
+                queryable::WELL_KNOWN.len()
+            );
+            shell_println!("{:22} {:6} {}", "NAME", "TYPE", "HOLDS");
+            for w in queryable::WELL_KNOWN {
+                shell_println!("{:22} {:6} {}", w.name, w.value_type, w.description);
             }
         }
         "test" => match queryable::self_test() {
@@ -37895,18 +37812,15 @@ fn cmd_queryable(args: &str) {
             }
         },
         "stats" => {
-            let (files, total_attrs, sets, gets, queries, indexes) = queryable::stats();
-            shell_println!("Files:      {}", files);
-            shell_println!("Attributes: {}", total_attrs);
-            shell_println!("Indexes:    {}", indexes);
-            shell_println!("Set ops:    {}", sets);
-            shell_println!("Get ops:    {}", gets);
-            shell_println!("Queries:    {}", queries);
+            let s = queryable::stats();
+            shell_println!("Queryable attributes (each a user.slate.<name> attribute):");
+            shell_println!("Set ops:    {}", s.sets);
+            shell_println!("Get ops:    {}", s.gets);
+            shell_println!("Queries:    {}", s.queries);
         }
         "reset" => {
-            queryable::clear_all();
             queryable::reset_stats();
-            shell_println!("Queryable store cleared and stats reset");
+            shell_println!("Queryable statistics reset");
         }
         _ => {
             shell_println!("Usage: qattr <subcommand>");
@@ -37917,11 +37831,10 @@ fn cmd_queryable(args: &str) {
             shell_println!("  clear <path>            Remove all attributes");
             shell_println!("  query <attr> <op> <val> [root]");
             shell_println!("    ops: = != < <= > >= contains starts-with ends-with");
-            shell_println!("  index create|drop|list  Manage attribute indexes");
-            shell_println!("  schema init|list        Manage attribute schemas");
+            shell_println!("  names                   The well-known attribute names");
             shell_println!("  test                    Run self-tests");
             shell_println!("  stats                   Show statistics");
-            shell_println!("  reset                   Clear all data and stats");
+            shell_println!("  reset                   Reset statistics");
             set_exit(1);
         }
     }

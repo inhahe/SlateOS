@@ -3962,20 +3962,31 @@ extern "C" fn futex_waiter_task(addr: u64) {
 
 /// Test 3: Blocking wait + wake via spawned task.
 fn test_blocking_wait_wake() -> KernelResult<()> {
+    /// The futex word: a static, since the waiter uses it by address and may
+    /// still be inside `futex_wait` when a failing test returns.
+    static WORD: AtomicU32 = AtomicU32::new(1);
+
     FUTEX_TEST_RESULT.store(0, Ordering::SeqCst);
 
     // The futex word starts at 1 (locked).
-    let futex_word = AtomicU32::new(1);
-    let addr = (&raw const futex_word) as u64;
+    WORD.store(1, Ordering::SeqCst);
+    let addr = (&raw const WORD) as u64;
 
     // Spawn a task that will block on futex_wait(addr, 1).
-    sched::spawn(b"futex-test", 16, futex_waiter_task, addr, 0)?;
+    let waiter = sched::spawn(b"futex-test", 16, futex_waiter_task, addr, 0)?;
 
-    // Yield to let the waiter run and block.
-    sched::yield_now();
+    // Wait, by the clock, until the waiter is parked on the word: a single
+    // yield waited for it only on one CPU, where the yield runs it
+    // (`selftest::wait_until`), and a wake before the park wakes nobody.
+    crate::selftest::wait_until(5_000, || {
+        matches!(
+            sched::task_state(waiter),
+            Some(sched::task::TaskState::Blocked)
+        )
+    });
 
     // "Unlock" the futex and wake the waiter.
-    futex_word.store(0, Ordering::Release);
+    WORD.store(0, Ordering::Release);
     let woken = futex_wake(addr, 1);
 
     if woken != 1 {
@@ -3983,9 +3994,8 @@ fn test_blocking_wait_wake() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // Yield to let the waiter resume and store its result.
-    sched::yield_now();
-    sched::yield_now();
+    // Wait for the waiter to resume and store its result.
+    crate::selftest::wait_until(5_000, || FUTEX_TEST_RESULT.load(Ordering::SeqCst) == 42);
 
     let result = FUTEX_TEST_RESULT.load(Ordering::SeqCst);
     if result != 42 {
@@ -4409,18 +4419,31 @@ extern "C" fn pi_high_task(addr: u64) {
 /// 5. H acquires, signals, unlocks.
 /// 6. Verify everything completed and L's priority is back to 24.
 fn test_priority_inheritance() -> KernelResult<()> {
+    /// The PI futex word. A static, not a local: L and H use it by address,
+    /// and H's last unlock comes after the stage-4 store this test waits for,
+    /// so a word on this function's stack could be written after the function
+    /// had returned -- into whatever frame took its place.
+    static PI_FUTEX_WORD: AtomicU32 = AtomicU32::new(0);
+
     PI_TEST_STAGE.store(0, Ordering::SeqCst);
     PI_CONTROL.store(1, Ordering::SeqCst);
 
-    // Create the PI futex word (initially unlocked).
-    let futex_word = AtomicU32::new(0);
-    let addr = (&raw const futex_word) as u64;
+    // The PI futex word, initially unlocked.
+    PI_FUTEX_WORD.store(0, Ordering::SeqCst);
+    let addr = (&raw const PI_FUTEX_WORD) as u64;
 
     // Spawn L at low priority (24).
     let l_id = sched::spawn(b"pi-low", 24, pi_low_task, addr, 0)?;
 
-    // Yield to let L run: L locks the futex and blocks on PI_CONTROL.
-    sched::yield_now();
+    // Wait, by the clock, for L to lock the futex and park on PI_CONTROL. A
+    // single yield waited for it only on one CPU, where the yield runs it
+    // (`selftest::wait_until`).
+    let parked = |id: sched::task::TaskId| {
+        matches!(sched::task_state(id), Some(sched::task::TaskState::Blocked))
+    };
+    crate::selftest::wait_until(5_000, || {
+        PI_TEST_STAGE.load(Ordering::SeqCst) == 1 && parked(l_id)
+    });
 
     let stage = PI_TEST_STAGE.load(Ordering::SeqCst);
     if stage != 1 {
@@ -4434,9 +4457,14 @@ fn test_priority_inheritance() -> KernelResult<()> {
     // Spawn H at high priority (8).
     let h_id = sched::spawn(b"pi-high", 8, pi_high_task, addr, 0)?;
 
-    // Yield → H runs, sets stage 2, tries to lock → blocks with PI
-    // boost on L.  Then idle/main resumes.
-    sched::yield_now();
+    // Wait for H to run, set stage 2, try the lock and park on it -- the
+    // park is what boosts L, and it comes after stage 2, so waiting for the
+    // stage alone could check L's priority a moment too soon.
+    crate::selftest::wait_until(5_000, || {
+        PI_TEST_STAGE.load(Ordering::SeqCst) == 2
+            && parked(h_id)
+            && sched::get_effective_priority(l_id) == Some(8)
+    });
 
     let stage = PI_TEST_STAGE.load(Ordering::SeqCst);
     if stage != 2 {
@@ -4464,12 +4492,10 @@ fn test_priority_inheritance() -> KernelResult<()> {
     let ctrl_addr = (&raw const PI_CONTROL) as u64;
     futex_wake(ctrl_addr, 1);
 
-    // Yield to let L run (boosted to 8), unlock, transfer to H.
-    // Then H runs (prio 8), acquires, signals stage 4, unlocks, exits.
-    // Then L's function returns and it exits too.
-    for _ in 0..6 {
-        sched::yield_now();
-    }
+    // Wait for L to run (boosted to 8), unlock and hand the lock to H, and
+    // for H to take it, signal stage 4 and unlock -- by the clock, not six
+    // yields (`selftest::wait_until`).
+    crate::selftest::wait_until(5_000, || PI_TEST_STAGE.load(Ordering::SeqCst) == 4);
 
     // Verify H completed.
     let stage = PI_TEST_STAGE.load(Ordering::SeqCst);
@@ -4499,14 +4525,23 @@ fn test_priority_inheritance() -> KernelResult<()> {
         }
     }
 
+    // Both tasks finish before the test does: neither may be left running
+    // into the next test.
+    let ended = |id: sched::task::TaskId| {
+        matches!(
+            sched::task_state(id),
+            None | Some(sched::task::TaskState::Dead)
+        )
+    };
+    if !crate::selftest::wait_until(5_000, || ended(l_id) && ended(h_id)) {
+        serial_println!("[futex]   PI FAIL: L or H did not finish within 5 s");
+        return Err(KernelError::InternalError);
+    }
+
     // Clean up dead tasks.
     sched::reap_dead_tasks();
 
     serial_println!("[futex]   Priority inheritance: OK");
-
-    // Suppress "unused variable" since we use h_id for spawning only.
-    let _ = h_id;
-
     Ok(())
 }
 
@@ -4935,8 +4970,12 @@ extern "C" fn timeout_waker_task(addr_raw: u64) {
 
 /// Timeout test B: Woken before deadline — should return Ok(true).
 fn test_timeout_woken_before_deadline() -> KernelResult<()> {
-    let futex_word = AtomicU32::new(7);
-    let addr = (&raw const futex_word) as u64;
+    /// A static, not a local: the waker keys its wakes on this address, and
+    /// the next test's local would sit at the same stack address -- a waker
+    /// still trying after a failure here could wake that test's waiter.
+    static WORD: AtomicU32 = AtomicU32::new(7);
+    WORD.store(7, Ordering::SeqCst);
+    let addr = (&raw const WORD) as u64;
 
     TIMEOUT_TEST_RESULT.store(0, Ordering::SeqCst);
 
@@ -4961,8 +5000,10 @@ fn test_timeout_woken_before_deadline() -> KernelResult<()> {
         }
     }
 
-    // Verify the waker actually ran.
-    sched::yield_now();
+    // Verify the waker actually ran: it records that after its wake, so on
+    // another CPU it may not have yet -- wait by the clock, not one yield
+    // (`selftest::wait_until`).
+    crate::selftest::wait_until(5_000, || TIMEOUT_TEST_RESULT.load(Ordering::SeqCst) == 1);
     if TIMEOUT_TEST_RESULT.load(Ordering::SeqCst) != 1 {
         serial_println!("[futex]   FAIL: waker task didn't run");
         return Err(KernelError::InternalError);

@@ -183,3 +183,45 @@ them, so a failed check no longer stops the boot. The barrier itself was
 read for the same race and holds: a round's non-leaders stay blocked until
 its generation advances, so none can start the next round early. Serial
 log: `os-lane-a/build/serial-failures/20261009T143451Z-b083cfeca-rc1.txt`.
+
+**Then the rest of the class, found by looking for it (2026-10-09).** A
+two-CPU fast boot of `lane-a` with the barrier fix passed it and failed the
+very next self-test the same way: `sched::once_event`'s waited five and ten
+yields for a helper (`once_event.rs:284`). Rather than meet them one boot at a
+time, every fixed-count yield loop in `kernel/src` (32) was read for a wait on
+another task's work. Fixed with clock-bounded waits (`selftest::wait_until`),
+each now strict where it used to accept "partial" or "pending": `once_event`
+(also waiting until its helper is really blocked, so the signal wakes a
+blocked waiter), `kchannel`'s producer/consumer, `workqueue` (all three items
+run; the queue drained), `ktimer`'s one-shot, `ipc::semaphore`'s close- and
+signal-wake tests (which also checked nothing at all for close, and could leave
+a waiter running into the next test's semaphore), the futex PI test's three
+waits (the boost is now checked once H is parked, not merely past stage 2) and
+its wait-and-wake and timeout tests, and `proc::thread`'s spawn, zombie,
+spawn-into-zombie, leader-id and blocking-join tests. The kill test's victim
+is now spawned suspended: "no yield between spawn and kill" kept a Ready task
+from running only on one CPU. Tests that run before `smp::init` were fixed
+too, though only one CPU runs them today, so the boot order cannot hide them
+again.
+
+Reading them turned up a second, worse fault in the same tests: **a stack
+local handed to a spawned task by address** -- the PI futex word, the
+wait-and-wake word, the thread tests' counters. Where the task could still run
+after the test function returned (a failure, a timeout, or the PI test's H,
+whose last unlock comes after the stage it signals), it would write into
+whatever frame had taken the test's place. Each is a static now. That is the
+"written through a stale pointer into memory that is now this task's kernel
+stack" shape `A-SCHEDULE-INNER-RESUMED-ONTO-A-FRAME-HOLDING-MINUS-1001` reads
+its one crash as; none of these is shown to be that crash's source (its value,
+-1001, matches none of them), but they were real hazards of exactly that kind.
+
+**Still open: a hang at the native device-door test, seen once.** One two-CPU
+debug fast boot of lane-a-wip (6c458082b) stopped mid-spawn of
+`spawn-test-device-door` -- after "Stored 1 argv", before the scheduler's
+"Spawned task" -- and printed nothing for minutes; the QEMU had no monitor, so
+where each CPU was is unknown (serial log:
+`os-lane-a-batch/build/fast-wave2-hang-serial.txt`). The same test is where
+the -1001 crash happened, on one CPU, after the same audio tests. A repro boot
+with a monitor attached passed it. The next two-CPU boots run with the monitor
+and `hangcap.py` armed (stall 100 s: registers, frame-pointer chains and stacks
+of every CPU).

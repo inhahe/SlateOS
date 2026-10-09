@@ -3676,6 +3676,11 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
         ..crate::proc::user_entry::UserEntry::default()
     };
 
+    // A freeze that began while the process or thread was being made: its
+    // first entry to ring 3 passes no signal checkpoint, so it is looked for
+    // here, before its first instruction (`proc::freezer`).
+    crate::proc::freezer::park_if_frozen();
+
     // A traced thread's first stop, before its first instruction -- a native
     // thread its traced creator made (`ptrace::first_entry`).
     crate::proc::ptrace::first_entry(&mut entry);
@@ -26197,6 +26202,292 @@ pub fn self_test_native_cap_broker() -> KernelResult<()> {
         "[spawn]   native capability broker (ring 3: refused with no handler, the handler told \
          and listing, its own request refused, allow grants, deny, what cannot be asked for, \
          a timed-out wait and a cancel, unregistration): OK"
+    );
+    Ok(())
+}
+
+/// Thaws whatever a freezer test froze, on every way out of it: a failed check
+/// must not leave the system's programs stopped.
+struct ThawOnDrop {
+    /// Processes frozen one by one, to thaw.
+    processes: alloc::vec::Vec<ProcessId>,
+}
+
+impl Drop for ThawOnDrop {
+    fn drop(&mut self) {
+        crate::proc::freezer::thaw_system();
+        crate::proc::freezer::thaw_processes(&self.processes);
+    }
+}
+
+/// Ring-3 test of the freezer (`crate::proc::freezer`, design-decisions
+/// 1562), through both ABIs at once: [`elf::build_linux_freezer_test_elf`]
+/// (`build/freezetest.c`) -- a parent in `wait4` and five children asleep in
+/// `nanosleep`, blocked on a pipe, in `FUTEX_WAIT`, about to write, and
+/// computing in ring 3 -- and [`elf::build_native_freezer_test_elf`]
+/// (`build/freezenative.c`), asleep in `SYS_SLEEP`.
+///
+/// While they are busy the system is frozen: every one of their threads must
+/// be parked, and the one computing must make no progress for the second it
+/// is held. Thawed, each blocking call must go on as if nothing had happened
+/// -- no `EINTR`, and the sleeps ending at their own deadlines, not a sleep's
+/// length after the thaw -- which the programs check themselves. Then the
+/// computing child is frozen alone, as a container's pause freezes its
+/// processes, while the others are not.
+pub fn self_test_freezer() -> KernelResult<()> {
+    use crate::proc::freezer;
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 30_000_000_000;
+    const HOLD_MS: u64 = 1000;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: freezer (ring 3) -- {}", what);
+        Err(KernelError::InternalError)
+    }
+    // The CPU time thread `task` has had, in scheduler ticks.
+    fn ticks(task: TaskId) -> u64 {
+        crate::sched::task_info(task).map_or(0, |i| i.total_ticks)
+    }
+    // Every thread of every process in `pids` is parked by the freezer.
+    fn all_parked(pids: &[ProcessId]) -> Option<(ProcessId, TaskId)> {
+        for &pid in pids {
+            for task in pcb::get_threads(pid).unwrap_or_default() {
+                if !freezer::is_parked(task) {
+                    return Some((pid, task));
+                }
+            }
+        }
+        None
+    }
+
+    serial_println!("[spawn] Running freezer (ring 3) integration test...");
+    let parks_before = freezer::stats().parks;
+    let spawn = |elf: &[u8], name: &'static str| {
+        let argv: &[&[u8]] = &[name.as_bytes()];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let options = SpawnOptions {
+            name,
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &[],
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+        spawn_process(elf, &options)
+    };
+    let linux = match spawn(&elf::build_linux_freezer_test_elf(), "spawn-test-freezer") {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: freezer (ring 3) -- spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let native = match spawn(
+        &elf::build_native_freezer_test_elf(),
+        "spawn-test-freezer-native",
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            teardown_fixture(linux.pid, linux.task_id);
+            serial_println!(
+                "[spawn]   FAIL: freezer (ring 3) -- native spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    let outcome = (|| -> KernelResult<()> {
+        // The five children, in the order they were forked: sleeper, reader,
+        // writer, futex waiter, computer.
+        let children = |parent: ProcessId| -> alloc::vec::Vec<ProcessId> {
+            let mut kids: alloc::vec::Vec<ProcessId> = pcb::pids()
+                .into_iter()
+                .filter(|&p| pcb::parent(p) == Some(parent))
+                .collect();
+            kids.sort_unstable();
+            kids
+        };
+        // Wait for all five to exist and the parent to be in wait4. Polled by
+        // sleeping, not yielding: this runs at the idle level, and a yield
+        // there gives nothing below it a turn.
+        let ready = || {
+            children(linux.pid).len() == 5
+                && crate::sched::wait_of(linux.task_id)
+                    .is_some_and(|w| w.channel == crate::wchan::WaitChannel::Child)
+        };
+        let give_up = crate::hrtimer::now_ns().saturating_add(5_000_000_000);
+        while !ready() && crate::hrtimer::now_ns() < give_up {
+            crate::sched::sleep_ms(2);
+        }
+        if !ready() {
+            return fail("the parent did not fork its five children and wait for them in 5 s");
+        }
+        let kids = children(linux.pid);
+        let computer = *kids.get(4).ok_or(KernelError::InternalError)?;
+        let computer_task = pcb::get_threads(computer)
+            .and_then(|t| t.first().copied())
+            .ok_or(KernelError::InternalError)?;
+        let mut everyone = kids.clone();
+        everyone.push(linux.pid);
+        everyone.push(native.pid);
+        let mut guard = ThawOnDrop {
+            processes: alloc::vec::Vec::new(),
+        };
+
+        // ---- the whole system ----
+        let frozen = match freezer::freeze_system(5_000_000_000) {
+            Ok(f) => f,
+            Err(None) => return fail("the system was frozen already"),
+            Err(Some(stragglers)) => {
+                for s in stragglers.iter().take(8) {
+                    serial_println!(
+                        "[spawn]     would not freeze: process {} thread {} ({}, waiting on {})",
+                        s.pid,
+                        s.task,
+                        s.state,
+                        s.wait
+                    );
+                }
+                return fail("the system could not be frozen in 5 s");
+            }
+        };
+        if let Some((pid, task)) = all_parked(&everyone) {
+            serial_println!(
+                "[spawn]     process {} thread {} is not parked: {}",
+                pid,
+                task,
+                unfinished_report(task)
+            );
+            return fail("a thread of the test is not parked while the system is frozen");
+        }
+        let before = ticks(computer_task);
+        crate::sched::sleep_ms(HOLD_MS);
+        let after = ticks(computer_task);
+        if all_parked(&everyone).is_some() {
+            return fail("a thread came unparked while the system was frozen");
+        }
+        if after.saturating_sub(before) > 1 {
+            return fail("the computing child ran while the system was frozen");
+        }
+        serial_println!(
+            "[spawn]     froze {} thread(s) in {} us; held {} ms",
+            frozen.threads,
+            frozen.took_ns / 1000,
+            HOLD_MS
+        );
+        freezer::thaw_system();
+
+        // ---- one process alone, as a container's pause ----
+        crate::sched::sleep_ms(50);
+        if pcb::state(computer).is_some_and(|s| s != pcb::ProcessState::Zombie) {
+            guard.processes.push(computer);
+            let Ok(f) = freezer::freeze_processes(&[computer], 2_000_000_000) else {
+                return fail("the computing child could not be frozen alone: no room");
+            };
+            if f.pending != 0 {
+                return fail("the computing child alone did not freeze in 2 s");
+            }
+            if !freezer::is_parked(computer_task) {
+                return fail("the computing child, frozen alone, is not parked");
+            }
+            if freezer::is_parked(linux.task_id) {
+                return fail("the parent was frozen with its child");
+            }
+            let before = ticks(computer_task);
+            crate::sched::sleep_ms(300);
+            if ticks(computer_task).saturating_sub(before) > 1 {
+                return fail("the computing child ran while frozen alone");
+            }
+            freezer::thaw_processes(&[computer]);
+            guard.processes.clear();
+        }
+        drop(guard);
+
+        // ---- each program judges its own calls ----
+        let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+        while [linux.pid, native.pid]
+            .iter()
+            .any(|&p| pcb::state(p) != Some(pcb::ProcessState::Zombie))
+            && crate::hrtimer::now_ns() < deadline
+        {
+            crate::sched::sleep_ms(5);
+        }
+        for (r, which) in [(&linux, "Linux"), (&native, "native")] {
+            if pcb::state(r.pid) != Some(pcb::ProcessState::Zombie) {
+                serial_println!(
+                    "[spawn]     the {} program did not end: {}",
+                    which,
+                    unfinished_report(r.task_id)
+                );
+                return fail("a program did not end within 30 s of the thaw");
+            }
+        }
+        let linux_code = pcb::exit_code(linux.pid);
+        if linux_code != Some(PASS) {
+            let what = match linux_code {
+                Some(0x30) => "setting up the shared page, the pipe or a fork failed",
+                Some(0x31) => "nanosleep came back nonzero (EINTR?) across the freeze",
+                Some(0x32) => "nanosleep ended before its time",
+                Some(0x33) => "nanosleep ended late: restarted from scratch after the thaw",
+                Some(0x34) => "the pipe read did not get the writer's byte",
+                Some(0x35) => "the writer's sleep or write failed",
+                Some(0x36) => "FUTEX_WAIT came back with an error (EINTR?) across the freeze",
+                Some(0x37) => "the computing child could not make itself SCHED_IDLE",
+                Some(0x38) => "wait4 failed (EINTR?) across the freeze",
+                Some(0x39) => "a child was killed by a signal",
+                None => "no exit code: the program died",
+                _ => "unexpected exit code",
+            };
+            serial_println!(
+                "[spawn]   FAIL: freezer (ring 3) -- Linux program exit {:?}: {}",
+                linux_code,
+                what
+            );
+            return Err(KernelError::InternalError);
+        }
+        let native_code = pcb::exit_code(native.pid);
+        if native_code != Some(PASS) {
+            let what = match native_code {
+                Some(0x41) => "SYS_SLEEP came back nonzero across the freeze",
+                Some(0x42) => "SYS_SLEEP ended before its time",
+                Some(0x43) => "SYS_SLEEP ended late: restarted from scratch after the thaw",
+                None => "no exit code: the program died",
+                _ => "unexpected exit code",
+            };
+            serial_println!(
+                "[spawn]   FAIL: freezer (ring 3) -- native program exit {:?}: {}",
+                native_code,
+                what
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+
+    teardown_fixture(native.pid, native.task_id);
+    teardown_fixture(linux.pid, linux.task_id);
+    outcome?;
+    // The freezer's own account agrees: threads parked (seven at least: the
+    // parent, five children and the native program), and none parked now.
+    let stats = freezer::stats();
+    if stats.parks.saturating_sub(parks_before) < 7 || stats.parked_threads != 0 {
+        serial_println!(
+            "[spawn]   FAIL: freezer (ring 3) -- its counters: {} park(s) in the test, {} thread(s) \
+             still parked",
+            stats.parks.saturating_sub(parks_before),
+            stats.parked_threads
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   freezer (ring 3: a system freeze parks every thread -- in nanosleep, a pipe \
+         read, FUTEX_WAIT, wait4, SYS_SLEEP and ring 3 -- the thaw resumes each call to its own \
+         deadline with no EINTR, and one process freezes alone): OK"
     );
     Ok(())
 }

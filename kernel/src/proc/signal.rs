@@ -2879,6 +2879,17 @@ pub fn has_pending_in_mask(pid: ProcessId, mask: u64) -> bool {
     })
 }
 
+/// Whether an interruptible wait of the calling thread of `pid`, which a
+/// signal in `mask` would end, is to end now: such a signal is pending, or
+/// the thread is to freeze ([`crate::proc::freezer::interrupt_pending`]),
+/// which ends the wait as a signal does. What every interruptible wait loop
+/// asks; [`has_pending_in_mask`] alone is for the questions that are about
+/// signals only (a `signalfd`'s readiness, which signal to take).
+#[must_use]
+pub fn wait_ends(pid: ProcessId, mask: u64) -> bool {
+    has_pending_in_mask(pid, mask) || crate::proc::freezer::interrupt_pending(pid)
+}
+
 /// Cheap fast-path gate: `true` if any signal might be pending anywhere.
 ///
 /// The syscall-return delivery path calls this before doing any

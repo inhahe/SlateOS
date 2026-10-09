@@ -3751,6 +3751,12 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_native_cap_broker(),
     );
+    // The freezer (crate::proc::freezer, design-decisions 1562): programs in
+    // nanosleep, a pipe read, FUTEX_WAIT, wait4, SYS_SLEEP and ring 3 frozen
+    // and thawed with no call seeing it, then one process frozen alone.
+    selftest::dispatch_debug("freezer (ring 3)", selftest::Severity::Diagnostic, || {
+        proc::spawn::self_test_freezer()
+    });
     // The namespace calls for native programs, SYS_NAMESPACE_* (crate::nsfs):
     // with the Namespace right and without it.
     selftest::dispatch_debug(

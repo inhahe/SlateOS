@@ -461,7 +461,8 @@ fn exit_to_user_mode(frame: *mut InterruptStackFrame) {
     if cs & 3 != 3 {
         return;
     }
-    let mut signals = crate::proc::signal::any_pending();
+    // A freeze is looked for where a signal is (`crate::proc::freezer`).
+    let mut signals = crate::proc::signal::any_pending() || crate::proc::freezer::any();
     loop {
         // SAFETY: the frame is ours until the stub's `iretq`, and no other
         // reference to it is live while this one is.

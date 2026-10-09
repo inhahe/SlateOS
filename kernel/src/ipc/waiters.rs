@@ -139,12 +139,18 @@ pub fn current_user_pid() -> u64 {
     crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
 }
 
-/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+/// `true` if a deliverable (unblocked) signal is pending for `pid` -- or the
+/// calling thread is to freeze ([`crate::proc::freezer::interrupt_pending`]),
+/// which ends a wait exactly as a signal does: the call returns
+/// `Interrupted`, its restart sentinel at the system-call layer, and the
+/// thread parks at the checkpoint, to issue the call again when thawed.
 ///
 /// Always `false` for `pid == 0` (kernel task — no signal context).
 #[must_use]
 pub fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+    pid != 0
+        && (crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+            || crate::proc::freezer::interrupt_pending(pid))
 }
 
 /// Park the current task on a blocking IPC object, interruptibly for user
@@ -171,9 +177,12 @@ pub fn park_interruptible(pid: u64, task: TaskId, wait: crate::wchan::Wait) {
     }
     let deliverable = !crate::proc::signal::blocked(pid);
     crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
-    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
-        // A signal arrived between enqueue and registration — don't block; the
-        // caller's loop will observe the pending signal and return Interrupted.
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable)
+        || crate::proc::freezer::interrupt_pending(pid)
+    {
+        // A signal (or a freeze) arrived between enqueue and registration —
+        // don't block; the caller's loop will observe it and return
+        // Interrupted.
         crate::proc::signal::deregister_signalfd_waiter(pid, task);
         return;
     }

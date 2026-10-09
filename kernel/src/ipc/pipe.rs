@@ -1238,6 +1238,18 @@ pub fn readable_bytes(handle: PipeHandle) -> u64 {
     }
 }
 
+/// The bytes in the pipe, unread, whichever end `handle` is: Linux's
+/// `FIONREAD` on a pipe (`pipe_ioctl`), which counts the buffer for either
+/// end. [`readable_bytes`] answers the write end with the room left instead.
+/// 0 for a pipe that does not exist.
+#[must_use]
+pub fn queued_bytes(handle: PipeHandle) -> u64 {
+    PIPES
+        .lock()
+        .get(&handle.pipe_id())
+        .map_or(0, |pipe| pipe.len as u64)
+}
+
 // ---------------------------------------------------------------------------
 // Named pipes ([`crate::ipc::fifo`])
 // ---------------------------------------------------------------------------

@@ -10329,8 +10329,10 @@ pub mod ioctl_cmd {
     /// to `fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) & ~FD_CLOEXEC)`.
     /// Takes no argument.
     pub const FIONCLEX: u32 = 0x5450;
-    /// `FIOCLEX` — set the `FD_CLOEXEC` flag on `fd`.  Equivalent to
-    /// `fcntl(fd, F_SETFD, FD_CLOEXEC)`.  Takes no argument.
+    /// `FIONREAD` (also `TIOCINQ` and `SIOCINQ`, the same number) -- how
+    /// many bytes a read would find waiting, into `*arg` as an `int`. See
+    /// `fionread` for what each kind of descriptor counts.
+    pub const FIONREAD: u32 = 0x541B;
     /// `BLKDISCARD` -- tell the device the byte range `{ start, length }` no
     /// longer holds useful data (TRIM/UNMAP). Argument is a pointer to
     /// `[u64; 2]`. Destroys data, so the fd must be open for writing.
@@ -10358,6 +10360,8 @@ pub mod ioctl_cmd {
     /// `FS_IOC32_SETFLAGS`.
     pub const FS_IOC32_SETFLAGS: u32 = 0x4004_6602;
 
+    /// `FIOCLEX` — set the `FD_CLOEXEC` flag on `fd`.  Equivalent to
+    /// `fcntl(fd, F_SETFD, FD_CLOEXEC)`.  Takes no argument.
     pub const FIOCLEX: u32 = 0x5451;
     /// `FIONBIO` — toggle `O_NONBLOCK` on `fd`.  `arg` is a pointer
     /// to an `int`: non-zero sets `O_NONBLOCK`, zero clears it.
@@ -11053,6 +11057,7 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
+        ioctl_cmd::FIONREAD => fionread(pid, fd, args.arg2),
         ioctl_cmd::BLKDISCARD | ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => {
             block_discard_ioctl(pid, fd, request, args.arg2)
         }
@@ -11090,6 +11095,85 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
             }
             linux_err(errno::ENOTTY)
         }
+    }
+}
+
+/// `FIONREAD` (`TIOCINQ`, `SIOCINQ`): how many bytes a read of `fd` would find
+/// waiting, written to `*arg` as an `int`. Each kind counts as Linux's own
+/// handler for it does:
+///
+/// | descriptor | the count |
+/// |---|---|
+/// | regular file, memfd | its size less the offset (`do_vfs_ioctl`) -- negative past the end, as there |
+/// | pipe, either end | the bytes in the pipe (`pipe_ioctl`) |
+/// | terminal | its input queue, complete lines only in canonical mode (`n_tty`'s `inq_canon`) |
+/// | Unix-domain socket | a stream's or sequenced-packet socket's bytes, a datagram socket's next datagram; `EINVAL` on a listener (`unix_inq_len`) |
+/// | anything else | `ENOTTY`, the request being unknown to it |
+///
+/// An `AF_INET` socket answers `ENOTTY` too, for now: its bytes are the
+/// netstack daemon's, and nothing yet asks it for a count (known-issues
+/// `A-LINUX-FIONREAD-ON-AN-INET-SOCKET-IS-ENOTTY`).
+///
+/// Until 2026-10-09 every descriptor answered `ENOTTY`.
+fn fionread(pid: pcb::ProcessId, fd: i32, arg: u64) -> SyscallResult {
+    let count = match fionread_count(pid, fd) {
+        Ok(count) => count,
+        Err(code) => return linux_err(code),
+    };
+    if arg == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // Linux stores it with `put_user` into an `int`: the low 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let value = count as i32;
+    // SAFETY: copy_to_user validates that the 4 user bytes at `arg` are mapped
+    // and writable and does the SMAP dance; `value` is a live kernel `i32`.
+    match unsafe { crate::mm::user::copy_to_user(core::ptr::addr_of!(value).cast::<u8>(), arg, 4) }
+    {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// [`fionread`]'s count for process `pid`'s descriptor `fd`, or the errno it
+/// answers instead: `EBADF` for no such descriptor, `ENOTTY` for a kind
+/// without the request, `EINVAL` for a listening socket.
+fn fionread_count(pid: pcb::ProcessId, fd: i32) -> Result<i64, i32> {
+    use crate::proc::linux_fd::HandleKind;
+    let entry = pcb::linux_fd_lookup(pid, fd).ok_or(errno::EBADF)?;
+    let wide = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    match entry.kind {
+        HandleKind::File => {
+            let meta = crate::fs::handle::fstat(entry.raw_handle).map_err(linux_errno_for)?;
+            // Linux answers only for a regular file; a directory or a device
+            // node goes to its own handler, which does not know the request.
+            if meta.entry_type != crate::fs::vfs::EntryType::File {
+                return Err(errno::ENOTTY);
+            }
+            let offset =
+                crate::fs::handle::current_offset(entry.raw_handle).map_err(linux_errno_for)?;
+            Ok(wide(meta.size).saturating_sub(wide(offset)))
+        }
+        HandleKind::MemFd => {
+            use crate::ipc::memfd::{self, MemFdHandle};
+            let h = MemFdHandle::from_raw(entry.raw_handle);
+            let size = memfd::size(h).map_err(linux_errno_for)?;
+            let offset = memfd::offset(h).map_err(linux_errno_for)?;
+            Ok(wide(size).saturating_sub(wide(offset)))
+        }
+        HandleKind::Pipe => Ok(wide(crate::ipc::pipe::queued_bytes(
+            crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle),
+        ))),
+        HandleKind::Console => Ok(i64::try_from(crate::tty::input_bytes(handlers::caller_tty(
+            pid,
+        )))
+        .unwrap_or(i64::MAX)),
+        HandleKind::UnixSocket => crate::ipc::unix_socket::readable_bytes(
+            crate::ipc::unix_socket::UnixHandle::from_raw(entry.raw_handle),
+        )
+        .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+        .map_err(linux_errno_for),
+        _ => Err(errno::ENOTTY),
     }
 }
 
@@ -70314,6 +70398,100 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             pcb::destroy(test_pid);
         }
+        Ok(())
+    }
+
+    crate::selftest::step(self_test_ioctl_fionread())?;
+
+    /// `FIONREAD`: each kind of descriptor counts as Linux's own handler does
+    /// (`fionread_count`) -- a pipe's bytes from either end, a datagram
+    /// socket's next datagram only, a listener `EINVAL`, a descriptor without
+    /// the request `ENOTTY`, none at all `EBADF` -- on a synthetic Linux
+    /// process holding the descriptors. Until 2026-10-09 every one was
+    /// `ENOTTY`.
+    #[inline(never)]
+    fn self_test_ioctl_fionread() -> crate::error::KernelResult<()> {
+        use crate::ipc::unix_socket::{self, Kind};
+        use crate::ipc::{eventfd, pipe};
+        use crate::proc::linux_fd::FdEntry;
+        use crate::serial_println;
+
+        // Wired into the dispatch: from kernel context the caller-pid gate
+        // answers first, as for FIONBIO -- not the catch-all's ENOTTY.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: u64::from(ioctl_cmd::FIONREAD),
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::IOCTL, &a).value != i64::from(errno::EBADF).wrapping_neg() {
+            serial_println!("[syscall/linux]   FAIL: FIONREAD is not wired into ioctl");
+            return Err(KernelError::InternalError);
+        }
+
+        let (rd, wr) = pipe::create();
+        let (dgram, dgram_peer) = unix_socket::pair(Kind::Dgram)?;
+        let listener = unix_socket::create(Kind::Stream)?;
+        let efd = eventfd::create(0);
+        let test_pid = pcb::create("ioctl-fionread-test", 0);
+        let outcome = (|| -> Result<(), &'static str> {
+            pcb::linux_fd_install_stdio(test_pid).map_err(|_| "installing stdio failed")?;
+            let install = |entry| pcb::linux_fd_install(test_pid, entry, 3);
+            let rfd = install(FdEntry::pipe(rd.raw(), 0)).map_err(|_| "install failed")?;
+            let wfd = install(FdEntry::pipe(wr.raw(), 1)).map_err(|_| "install failed")?;
+            let dfd =
+                install(FdEntry::unix_socket(dgram.raw(), 0, 2)).map_err(|_| "install failed")?;
+            let lfd = install(FdEntry::unix_socket(listener.raw(), 0, 2))
+                .map_err(|_| "install failed")?;
+            let efd_no = install(FdEntry::eventfd(efd.raw(), 2)).map_err(|_| "install failed")?;
+
+            if fionread_count(test_pid, rfd) != Ok(0) {
+                return Err("an empty pipe did not count 0");
+            }
+            pipe::try_write(wr, b"hello").map_err(|_| "pipe write failed")?;
+            if fionread_count(test_pid, rfd) != Ok(5) || fionread_count(test_pid, wfd) != Ok(5) {
+                return Err("a pipe's bytes were not counted from both ends");
+            }
+            unix_socket::send(dgram_peer, b"abc", true).map_err(|_| "send failed")?;
+            unix_socket::send(dgram_peer, b"defghij", true).map_err(|_| "send failed")?;
+            if fionread_count(test_pid, dfd) != Ok(3) {
+                return Err("a datagram socket did not count its next datagram alone");
+            }
+            unix_socket::bind_abstract(listener, b"slate-selftest-linux-fionread")
+                .map_err(|_| "bind failed")?;
+            unix_socket::listen(listener, 1).map_err(|_| "listen failed")?;
+            if fionread_count(test_pid, lfd) != Err(errno::EINVAL) {
+                return Err("a listening socket was not EINVAL");
+            }
+            if fionread_count(test_pid, efd_no) != Err(errno::ENOTTY) {
+                return Err("an eventfd, which has no such request, was not ENOTTY");
+            }
+            if fionread_count(test_pid, 99) != Err(errno::EBADF) {
+                return Err("a descriptor that is not open was not EBADF");
+            }
+            if fionread_count(test_pid, 0).is_err() {
+                return Err("the terminal did not answer");
+            }
+            Ok(())
+        })();
+        // The descriptors were installed without holds of their own (no
+        // `ipc_handles` entries), so the process's end closes nothing.
+        pcb::destroy(test_pid);
+        pipe::close(rd);
+        pipe::close(wr);
+        unix_socket::close(dgram);
+        unix_socket::close(dgram_peer);
+        unix_socket::close(listener);
+        eventfd::close(efd);
+        if let Err(why) = outcome {
+            serial_println!("[syscall/linux]   FAIL: FIONREAD: {}", why);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   ioctl(FIONREAD): pipe either end, datagram the next, listener EINVAL, eventfd ENOTTY, closed EBADF: OK"
+        );
         Ok(())
     }
 

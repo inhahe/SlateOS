@@ -860,6 +860,115 @@ pub fn self_test_blocking_recv_waits_for_late_data() -> KernelResult<Option<()>>
     Ok(Some(()))
 }
 
+/// [`readable_bytes`] (`FIONREAD`) on a loopback TCP connection and around it:
+/// 0 with nothing sent, the bytes sent once they arrive, what a partial
+/// receive left after it, `InvalidArgument` on the listener, 0 on an unbound
+/// datagram socket. The count is the daemon's, carried in its poll completion
+/// (`netipc::ring::POLL_COUNTED`).
+///
+/// Returns `Ok(None)` when the interface has no IPv4 address yet: the loopback
+/// divert keys on a non-zero local IP.
+///
+/// # Errors
+///
+/// `Err` when the setup fails or a count is not the one Linux would give.
+pub fn self_test_fionread() -> KernelResult<Option<()>> {
+    /// Loopback port, unused by the other self-tests.
+    const PORT: u16 = 9109;
+    /// What the client sends.
+    const MSG: &[u8] = b"twelve bytes";
+    /// Polls allowed for the bytes to reach the accepted side.
+    const ARRIVAL_POLLS: u32 = 200;
+
+    let me_ip = crate::net::interface::ip().0;
+    if me_ip == [0, 0, 0, 0] {
+        return Ok(None);
+    }
+    let srv = create(2)?;
+    let setup = (|| {
+        bind_stream(srv, PORT)?;
+        listen(srv, 1)?;
+        let c = create(2)?;
+        if let Err(e) = connect(c, &me_ip, PORT, true) {
+            close(c);
+            return Err(e);
+        }
+        let mut last = KernelError::WouldBlock;
+        for _ in 0..64u32 {
+            match accept(srv) {
+                Ok((a, _)) => return Ok((c, a)),
+                Err(e) => {
+                    last = e;
+                    crate::sched::yield_now();
+                }
+            }
+        }
+        close(c);
+        Err(last)
+    })();
+    let (c, a) = match setup {
+        Ok(pair) => pair,
+        Err(e) => {
+            close(srv);
+            crate::serial_println!("[netsock]   FAIL: FIONREAD setup failed: {:?}", e);
+            return Err(e);
+        }
+    };
+    let checks = (|| -> Result<(), &'static str> {
+        if readable_bytes(a) != Ok(0) {
+            return Err("a connection with nothing sent did not count 0");
+        }
+        if readable_bytes(srv) != Err(KernelError::InvalidArgument) {
+            return Err("a listener was not InvalidArgument (EINVAL)");
+        }
+        if send(c, MSG, false) != Ok(i32::try_from(MSG.len()).unwrap_or(0)) {
+            return Err("the send was not taken whole");
+        }
+        let want = u32::try_from(MSG.len()).unwrap_or(0);
+        let mut seen = 0u32;
+        for _ in 0..ARRIVAL_POLLS {
+            seen = readable_bytes(a).unwrap_or(0);
+            if seen >= want {
+                break;
+            }
+            crate::sched::yield_now();
+        }
+        if seen != want {
+            return Err("the bytes sent were not counted once they arrived");
+        }
+        let mut five = [0u8; 5];
+        if recv(a, &mut five, true, false) != Ok(5) {
+            return Err("a 5-byte receive did not take 5 bytes");
+        }
+        if readable_bytes(a) != Ok(want.saturating_sub(5)) {
+            return Err("a receive did not take its share off the count");
+        }
+        Ok(())
+    })();
+    close(a);
+    close(c);
+    close(srv);
+    let dgram = create_dgram(2)?;
+    let unbound = readable_bytes(dgram);
+    close(dgram);
+    let outcome = checks.and_then(|()| {
+        if unbound == Ok(0) {
+            Ok(())
+        } else {
+            Err("an unbound datagram socket did not count 0")
+        }
+    });
+    if let Err(why) = outcome {
+        crate::serial_println!("[netsock]   FAIL: FIONREAD: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[netsock]   FIONREAD: 0, then the {} bytes sent, then what a receive left; listener EINVAL; unbound datagram 0: OK",
+        MSG.len()
+    );
+    Ok(Some(()))
+}
+
 /// Set by the spawned reader immediately before it blocks, so the main task can
 /// wait for it to be *inside* `recv` rather than merely spawned.
 static HOL_READER_IN_RECV: core::sync::atomic::AtomicBool =
@@ -1173,6 +1282,37 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
             Err(KernelError::NotConnected) => Ok((false, false, false)),
             Err(e) => Err(e),
         },
+    }
+}
+
+/// How many bytes a receive on the socket would find waiting -- `FIONREAD`
+/// (`SIOCINQ`), as Linux's `tcp_ioctl` and `udp_ioctl` answer it: a
+/// connected stream's buffered in-order bytes, a datagram socket's next
+/// datagram's payload, 0 for a stream not connected (yet, or any more) and for
+/// an unbound datagram socket, which can hold nothing. A listener is
+/// `InvalidArgument` (`EINVAL`), as on Linux. The daemon counts
+/// ([`NetstackConn::readable_bytes_on`]); nothing is consumed.
+///
+/// # Errors
+///
+/// - `InvalidHandle` -- closed handle.
+/// - `InvalidArgument` -- a listening socket.
+/// - protocol faults propagated from the daemon round trip.
+pub fn readable_bytes(handle: SocketHandle) -> KernelResult<u32> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind == SockKind::Dgram {
+        if !guard.bound {
+            return Ok(0);
+        }
+        let conn = guard.owned_conn_mut()?;
+        let cid = conn.conn_id();
+        return conn.readable_bytes_on(cid);
+    }
+    match guard.state {
+        SockState::Connected => guard.with_stream_conn(|c, cid| c.readable_bytes_on(cid)),
+        SockState::Listening => Err(KernelError::InvalidArgument),
+        SockState::Created | SockState::Connecting | SockState::Failed => Ok(0),
     }
 }
 

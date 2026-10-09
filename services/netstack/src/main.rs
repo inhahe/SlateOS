@@ -3491,6 +3491,16 @@ impl UdpSock {
     fn has_data(&self) -> bool {
         self.count > 0
     }
+
+    /// The payload length of the next datagram a receive would take, 0 when
+    /// none is queued: `OP_POLL`'s count for a UDP socket
+    /// ([`netipc::ring::POLL_COUNTED`]), as Linux's `SIOCINQ` answers one.
+    fn next_len(&self) -> usize {
+        if self.count == 0 {
+            return 0;
+        }
+        self.q.get(self.head).map_or(0, |dg| dg.len)
+    }
 }
 
 /// Table of bound UDP datagram sockets, keyed by the caller-chosen ring
@@ -4571,6 +4581,9 @@ fn ring_tcp_process(
     let mut processed = 0u32;
     let mut stop = false;
     while let Some(sqe) = ring.sq_pop() {
+        // The completion's `flags`: 0 but for an op that reports more than
+        // its result (`OP_POLL`'s count).
+        let mut cqe_flags = 0u32;
         let result = match sqe.op {
             netipc::ring::OP_NOP => 0,
             netipc::ring::OP_STOP => {
@@ -4722,18 +4735,21 @@ fn ring_tcp_process(
                 // fall through to a bound UDP datagram socket. A UDP socket is always
                 // writable (a datagram send never blocks) and readable when a
                 // datagram is queued.
-                let tcp = ring_tcp_poll(net, key(id_space, sqe.conn_id), me, next_hop_mac);
+                // Every answer that is not `-1` counts what a receive would
+                // find, in the completion's `flags` (`POLL_COUNTED`).
+                let (tcp, tcp_count) =
+                    ring_tcp_poll(net, key(id_space, sqe.conn_id), me, next_hop_mac);
                 if tcp >= 0 {
-                    tcp
+                    cqe_flags = tcp_count;
+                    tcp | netipc::ring::POLL_COUNTED
                 } else if net.udp.get_mut(key(id_space, sqe.conn_id)).is_some() {
                     pump(net, me, next_hop_mac);
-                    let mut bits = netipc::ring::POLL_WRITABLE;
-                    if net
-                        .udp
-                        .get_mut(key(id_space, sqe.conn_id))
-                        .is_some_and(|s| s.has_data())
-                    {
-                        bits |= netipc::ring::POLL_READABLE;
+                    let mut bits = netipc::ring::POLL_WRITABLE | netipc::ring::POLL_COUNTED;
+                    if let Some(s) = net.udp.get_mut(key(id_space, sqe.conn_id)) {
+                        if s.has_data() {
+                            bits |= netipc::ring::POLL_READABLE;
+                        }
+                        cqe_flags = u32::try_from(s.next_len()).unwrap_or(u32::MAX);
                     }
                     bits
                 } else {
@@ -5045,7 +5061,7 @@ fn ring_tcp_process(
         let cqe = netipc::ring::Cqe {
             user_data: sqe.user_data,
             result,
-            flags: 0,
+            flags: cqe_flags,
         };
         if !ring.cq_push(&cqe) {
             return (false, stop); // CQ full — would drop a completion; treat as failure
@@ -5281,7 +5297,11 @@ fn ring_tcp_recv(
 /// Returns a non-negative readiness bitmask
 /// ([`POLL_READABLE`](netipc::ring::POLL_READABLE) |
 /// [`POLL_WRITABLE`](netipc::ring::POLL_WRITABLE) |
-/// [`POLL_ERR`](netipc::ring::POLL_ERR)), or `-1` if there is no such connection.
+/// [`POLL_ERR`](netipc::ring::POLL_ERR)), or `-1` if there is no such
+/// connection -- with the bytes a receive would find waiting, which the caller
+/// reports in the completion's `flags` ([`netipc::ring::POLL_COUNTED`]): the
+/// connection's buffered in-order bytes, 0 for a listener or a handshake still
+/// in flight.
 ///
 /// A connection still completing a non-blocking handshake (SYN_SENT) is reported as
 /// *neither* readable nor writable — the kernel keeps waiting for `POLLOUT`. Once
@@ -5307,16 +5327,16 @@ fn ring_tcp_recv(
 /// kernel reads as "not connected" and reports as no events at all: no
 /// `poll`/`select`/`epoll` caller was ever woken by an incoming connection
 /// (lane F's `requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
-fn ring_tcp_poll(net: &mut Net, target_id: Key, me: &IfInfo, next_hop_mac: &[u8; 6]) -> i32 {
+fn ring_tcp_poll(net: &mut Net, target_id: Key, me: &IfInfo, next_hop_mac: &[u8; 6]) -> (i32, u32) {
     if net.conns.get_mut(target_id).is_none() {
         if net.listeners.get_mut(target_id).is_none() {
-            return -1; // neither a connection nor a listener
+            return (-1, 0); // neither a connection nor a listener
         }
         // Route arrived frames first, as `ring_tcp_accept` does before it
         // dequeues: a handshake whose final ACK is waiting completes here, so
         // poll and accept judge the same backlog.
         pump(net, me, next_hop_mac);
-        return if net
+        let bits = if net
             .listeners
             .get_mut(target_id)
             .is_some_and(|l| l.has_established())
@@ -5325,6 +5345,7 @@ fn ring_tcp_poll(net: &mut Net, target_id: Key, me: &IfInfo, next_hop_mac: &[u8;
         } else {
             0
         };
+        return (bits, 0);
     }
     // Non-destructive: route any arrived frames into their owners (this completes a
     // pending handshake via `ingest_seg` if the SYN-ACK has arrived), then peek.
@@ -5335,20 +5356,24 @@ fn ring_tcp_poll(net: &mut Net, target_id: Key, me: &IfInfo, next_hop_mac: &[u8;
     }
     match net.conns.get_mut(target_id) {
         Some(c) => {
+            let count = u32::try_from(c.rx_len).unwrap_or(u32::MAX);
             if c.connect_failed {
                 // Failed connect: signal POLLOUT (so poll wakes) with the error bit;
                 // the kernel then reports getsockopt(SO_ERROR) = ECONNREFUSED.
-                return netipc::ring::POLL_ERR | netipc::ring::POLL_WRITABLE;
+                return (netipc::ring::POLL_ERR | netipc::ring::POLL_WRITABLE, 0);
             }
             if !c.established {
-                return 0; // SYN_SENT: not yet writable, keep waiting for POLLOUT.
+                return (0, 0); // SYN_SENT: not yet writable, keep waiting for POLLOUT.
             }
             if c.timed_out {
                 // Ready, in the sense that matters: a recv or a send now answers
                 // ETIMEDOUT at once, so a poller must wake to hear it.
-                return netipc::ring::POLL_ERR
-                    | netipc::ring::POLL_READABLE
-                    | netipc::ring::POLL_WRITABLE;
+                return (
+                    netipc::ring::POLL_ERR
+                        | netipc::ring::POLL_READABLE
+                        | netipc::ring::POLL_WRITABLE,
+                    count,
+                );
             }
             // Writable only when the send window has room: our single-outstanding-
             // segment sender cannot accept a new segment while a prior one is still
@@ -5366,9 +5391,9 @@ fn ring_tcp_poll(net: &mut Net, target_id: Key, me: &IfInfo, next_hop_mac: &[u8;
             if c.rx_len > 0 || c.peer_fin || c.read_shut {
                 bits |= netipc::ring::POLL_READABLE;
             }
-            bits
+            (bits, count)
         }
-        None => -1,
+        None => (-1, 0),
     }
 }
 

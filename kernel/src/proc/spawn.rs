@@ -5635,6 +5635,27 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     }
 
+    // FIONREAD on a TCP connection: the count the daemon carries in its poll
+    // completion, as the Linux `ioctl` reports it.
+    match crate::net::socket::self_test_fionread() {
+        // The check prints its own OK line.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   net::socket FIONREAD: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket FIONREAD ({:?}) — the count of bytes waiting is wrong",
+                e
+            );
+            crate::selftest::report_debug(
+                "net::socket FIONREAD",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
     // The same two witnesses on design B of A-Q15 (design-decisions §972): a ring
     // per socket, each its own daemon session. Both designs run in every boot, so
     // neither rots while the other is the default. The ring mode is restored

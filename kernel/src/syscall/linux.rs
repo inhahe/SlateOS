@@ -11108,11 +11108,8 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
 /// | pipe, either end | the bytes in the pipe (`pipe_ioctl`) |
 /// | terminal | its input queue, complete lines only in canonical mode (`n_tty`'s `inq_canon`) |
 /// | Unix-domain socket | a stream's or sequenced-packet socket's bytes, a datagram socket's next datagram; `EINVAL` on a listener (`unix_inq_len`) |
+/// | `AF_INET` socket | a TCP connection's buffered bytes, a UDP socket's next datagram, counted by the netstack daemon; 0 unconnected; `EINVAL` on a listener (`tcp_ioctl`, `udp_ioctl`) |
 /// | anything else | `ENOTTY`, the request being unknown to it |
-///
-/// An `AF_INET` socket answers `ENOTTY` too, for now: its bytes are the
-/// netstack daemon's, and nothing yet asks it for a count (known-issues
-/// `A-LINUX-FIONREAD-ON-AN-INET-SOCKET-IS-ENOTTY`).
 ///
 /// Until 2026-10-09 every descriptor answered `ENOTTY`.
 fn fionread(pid: pcb::ProcessId, fd: i32, arg: u64) -> SyscallResult {
@@ -11172,6 +11169,11 @@ fn fionread_count(pid: pcb::ProcessId, fd: i32) -> Result<i64, i32> {
             crate::ipc::unix_socket::UnixHandle::from_raw(entry.raw_handle),
         )
         .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+        .map_err(linux_errno_for),
+        HandleKind::Socket => crate::net::socket::readable_bytes(
+            crate::net::socket::SocketHandle::from_raw(entry.raw_handle),
+        )
+        .map(i64::from)
         .map_err(linux_errno_for),
         _ => Err(errno::ENOTTY),
     }

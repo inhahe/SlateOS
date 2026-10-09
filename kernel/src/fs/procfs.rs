@@ -1510,7 +1510,7 @@ fn gen_diskstats() -> Vec<u8> {
         // Writing to a `String` cannot fail.
         let _ = writeln!(
             text,
-            "{:4} {:7} {} {} 0 {} {} {} 0 {} {} 0 {} {} {} 0 {} {} 0 0",
+            "{:4} {:7} {} {} 0 {} {} {} 0 {} {} 0 {} {} {} 0 {} {} {} {}",
             num.major,
             num.minor,
             dev.name,
@@ -1525,6 +1525,8 @@ fn gen_diskstats() -> Vec<u8> {
             st.discards,
             st.discard_sectors,
             ms(st.discard_ns),
+            st.flushes,
+            ms(st.flush_ns),
         );
     }
     text.into_bytes()
@@ -19380,18 +19382,20 @@ fn self_test_diskstats(fs: &mut ProcFs) -> KernelResult<()> {
         }
     }
 
-    // One read of four sectors, one write of two, one discard of eight.
+    // One read of four sectors, one write of two, one discard of eight, one
+    // cache flush.
     let mut four = [0u8; 4 * SECTOR_SIZE];
     let two = [0x5Au8; 2 * SECTOR_SIZE];
     let io = blkdev::with_device(NAME, |dev| {
         dev.read_sectors(0, 4, &mut four)?;
         dev.write_sectors(8, 2, &two)?;
-        dev.discard(16, 8)
+        dev.discard(16, 8)?;
+        dev.flush()
     });
     if !matches!(io, Some(Ok(()))) {
         blkdev::unregister(NAME);
         serial_println!("[procfs]   (scratch disk I/O gave {:?})", io);
-        return fail("the scratch disk's read, write or discard failed");
+        return fail("the scratch disk's read, write, discard or flush failed");
     }
     let line = disk_line(fs, NAME);
     let pgpgin_after = vmstat_key(fs, "pgpgin");
@@ -19415,10 +19419,13 @@ fn self_test_diskstats(fs: &mut ProcFs) -> KernelResult<()> {
     if (field(13), field(15)) != (1, 8) {
         return fail("/diskstats did not count one discard of eight sectors");
     }
-    if field(3) != 0 || field(7) != 0 || field(10) != 0 || field(14) != 0 || field(17) != 0 {
-        return fail("/diskstats shows merges, flushes or I/O in flight nothing here does");
+    if field(17) != 1 {
+        return fail("/diskstats did not count one cache flush");
     }
-    if field(11) < field(5).max(field(9)).max(field(16)) || field(12) != field(11) {
+    if field(3) != 0 || field(7) != 0 || field(10) != 0 || field(14) != 0 {
+        return fail("/diskstats shows merges or I/O in flight nothing here does");
+    }
+    if field(11) < field(5).max(field(9)).max(field(16)).max(field(18)) || field(12) != field(11) {
         return fail("/diskstats' busy time is not every request's time");
     }
     // pgpgin and pgpgout are KiB: the four sectors read are 2 more at least
@@ -19432,8 +19439,9 @@ fn self_test_diskstats(fs: &mut ProcFs) -> KernelResult<()> {
         return fail("/vmstat's pgpgin and pgpgout did not count the scratch disk's KiB");
     }
     serial_println!(
-        "[procfs]   /diskstats: Linux 6.6's twenty fields, a read, a write and a discard \
-         counted; /vmstat: pgpgin, pgpgout, pswpin and pswpout beside the native keys: OK"
+        "[procfs]   /diskstats: Linux 6.6's twenty fields, a read, a write, a discard and a \
+         cache flush counted; /vmstat: pgpgin, pgpgout, pswpin and pswpout beside the native \
+         keys: OK"
     );
     Ok(())
 }

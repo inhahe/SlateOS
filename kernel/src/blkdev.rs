@@ -160,6 +160,19 @@ pub trait BlockDevice: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// Make every write the device has completed durable: a disk with a
+    /// volatile write cache writes it out now (ATA FLUSH CACHE EXT, virtio's
+    /// `VIRTIO_BLK_T_FLUSH`, NVMe's Flush). Without this a completed write
+    /// may still be only in the disk's own memory, and a power cut loses it
+    /// -- what `fsync` exists to rule out.
+    ///
+    /// The default is `Ok(())`: right for a device with nothing volatile (a
+    /// RAM disk, a write-through device), and the driver of one with a cache
+    /// overrides it.
+    fn flush(&mut self) -> KernelResult<()> {
+        Ok(())
+    }
+
     /// The PCI function behind this device, if it is one.
     ///
     /// For diagnostics that must tie a registered disk to its interrupt pin,
@@ -191,6 +204,10 @@ impl BlockDevice for crate::virtio::blk::VirtioBlkDevice {
 
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
         self.write_sector(lba, buf)
+    }
+
+    fn flush(&mut self) -> KernelResult<()> {
+        crate::virtio::blk::VirtioBlkDevice::flush(self)
     }
 
     fn pci_address(&self) -> Option<crate::pci::PciAddress> {
@@ -306,6 +323,11 @@ pub struct DeviceStats {
     pub discard_sectors: u64,
     /// Nanoseconds they took.
     pub discard_ns: u64,
+    /// Cache flushes completed ([`BlockDevice::flush`]): `/proc/diskstats`'
+    /// "flush requests completed".
+    pub flushes: u64,
+    /// Nanoseconds they took: its "time spent flushing".
+    pub flush_ns: u64,
     /// When the first request of any kind began (`hrtimer::now_ns`); 0
     /// until there has been one.
     pub first_io_ns: u64,
@@ -322,6 +344,7 @@ impl DeviceStats {
         self.read_ns
             .saturating_add(self.write_ns)
             .saturating_add(self.discard_ns)
+            .saturating_add(self.flush_ns)
     }
 }
 
@@ -331,6 +354,7 @@ enum Direction {
     Read,
     Write,
     Discard,
+    Flush,
 }
 
 /// A registered device seen through its statistics: each request a caller
@@ -372,6 +396,10 @@ impl Accounted<'_> {
                 s.discards = s.discards.saturating_add(1);
                 s.discard_sectors = s.discard_sectors.saturating_add(sectors);
                 s.discard_ns = s.discard_ns.saturating_add(took);
+            }
+            Direction::Flush => {
+                s.flushes = s.flushes.saturating_add(1);
+                s.flush_ns = s.flush_ns.saturating_add(took);
             }
         }
     }
@@ -422,6 +450,13 @@ impl BlockDevice for Accounted<'_> {
         if !matches!(r, Err(KernelError::NotSupported)) {
             self.count(Direction::Discard, count, start, &r);
         }
+        r
+    }
+
+    fn flush(&mut self) -> KernelResult<()> {
+        let start = crate::hrtimer::now_ns();
+        let r = self.device.flush();
+        self.count(Direction::Flush, 0, start, &r);
         r
     }
 
@@ -593,6 +628,36 @@ pub fn supports_discard(name: &str) -> Option<bool> {
 /// do not support discard return [`KernelError::NotSupported`]).
 pub fn discard(name: &str, start_lba: u64, count: u64) -> Option<KernelResult<()>> {
     with_device(name, |dev| dev.discard(start_lba, count))
+}
+
+/// Flush device `name`'s write cache ([`BlockDevice::flush`]), counted in its
+/// statistics. `None` if no such device is registered.
+pub fn flush(name: &str) -> Option<KernelResult<()>> {
+    with_device(name, |dev| dev.flush())
+}
+
+/// Flush every registered device's write cache, for `sync` and the power
+/// switches: every device tried whatever another answers, and the worst
+/// failure reported -- one stubborn disk must not leave the others' caches
+/// unflushed.
+///
+/// # Errors
+///
+/// The first device's failure, if any failed.
+pub fn flush_all() -> KernelResult<()> {
+    let mut registry = REGISTRY.lock();
+    let mut first_err = None;
+    for entry in registry.iter_mut() {
+        let r = Accounted {
+            device: entry.device.as_mut(),
+            stats: &mut entry.stats,
+        }
+        .flush();
+        if let Err(e) = r {
+            first_err.get_or_insert(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
 }
 
 /// Metadata for one registered block device, by name.

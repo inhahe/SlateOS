@@ -6,10 +6,15 @@
 //!
 //! ## Protocol
 //!
-//! Each request consists of a 3-descriptor chain:
+//! Each read or write consists of a 3-descriptor chain:
 //! 1. Header (device-readable): type, reserved, sector number
 //! 2. Data buffer (device-readable for write, device-writable for read)
 //! 3. Status byte (device-writable): 0=OK, 1=IOERR, 2=UNSUPP
+//!
+//! A cache flush (`VIRTIO_BLK_T_FLUSH`) is the header and the status byte
+//! alone. The driver accepts `VIRTIO_BLK_F_FLUSH` when the device offers it --
+//! the write cache, which a device not told otherwise must run write-through --
+//! and flushes it on `BlockDevice::flush`, which `sync` and `fsync` reach.
 //!
 //! ## Completion
 //!
@@ -52,6 +57,15 @@ const VIRTIO_BLK_DEVICE: u16 = 0x1001;
 const VIRTIO_BLK_T_IN: u32 = 0;
 /// Write operation.
 const VIRTIO_BLK_T_OUT: u32 = 1;
+/// Flush the device's write cache: a header and a status byte, no data.
+const VIRTIO_BLK_T_FLUSH: u32 = 4;
+
+/// Feature bit: the device has a write cache and takes [`VIRTIO_BLK_T_FLUSH`]
+/// (`VIRTIO_BLK_F_FLUSH`, legacy `VIRTIO_BLK_F_WCE`). A device that offers it
+/// and is not told the driver accepts it must act write-through -- QEMU does,
+/// syncing its host file after every write -- so accepting it is both what
+/// makes a flush possible and what lets writes be fast.
+const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
 
 /// Sector size in bytes.
 pub const SECTOR_SIZE: usize = 512;
@@ -275,6 +289,9 @@ pub struct VirtioBlkDevice {
     dma_virt: *mut u8,
     /// The PCI function this device is, for [`Self::pci_address`].
     pci_address: PciAddress,
+    /// The features this driver accepted (`VIRTIO_BLK_F_FLUSH`, or none): set
+    /// again on every reset ([`Self::recover`]).
+    guest_features: u32,
 }
 
 // SAFETY: The device is accessed from a single thread (the shell).
@@ -330,8 +347,9 @@ impl VirtioBlkDevice {
         // 4. Feature negotiation.
         let features = transport.device_features();
         crate::serial_println!("[virtio-blk] Device features: {:#010x}", features);
-        // Accept no optional features for the MVP.
-        transport.set_guest_features(0);
+        // Accept the write cache and its flush, when offered; nothing else.
+        let guest_features = features & VIRTIO_BLK_F_FLUSH;
+        transport.set_guest_features(guest_features);
 
         // 5. Set up virtqueue 0 (the request queue).
         transport.select_queue(0);
@@ -381,6 +399,7 @@ impl VirtioBlkDevice {
             dma_frame,
             dma_virt,
             pci_address: pci_dev.address,
+            guest_features,
         })
     }
 
@@ -517,7 +536,7 @@ impl VirtioBlkDevice {
         self.transport.reset();
         self.transport.set_status(STATUS_ACKNOWLEDGE);
         self.transport.set_status(STATUS_DRIVER);
-        self.transport.set_guest_features(0);
+        self.transport.set_guest_features(self.guest_features);
 
         // Re-select queue 0 and verify the size is unchanged.
         self.transport.select_queue(0);
@@ -690,6 +709,56 @@ impl VirtioBlkDevice {
         self.queue.free_chain(completed_head);
 
         self.check_status("Write", sector)
+    }
+
+    /// Whether the device has a write cache this driver flushes
+    /// (`VIRTIO_BLK_F_FLUSH` accepted). Without it the device writes through,
+    /// and [`Self::flush`] has nothing to do.
+    #[must_use]
+    pub fn has_write_cache(&self) -> bool {
+        self.guest_features & VIRTIO_BLK_F_FLUSH != 0
+    }
+
+    /// Write the device's cache out (`VIRTIO_BLK_T_FLUSH`): every write it has
+    /// completed is durable once this returns `Ok`. A no-op on a device
+    /// without the feature, which is write-through.
+    // DMA offset arithmetic uses known small constants. The header is at
+    // offset 0 of a frame-aligned (16 KiB) DMA frame, so the cast to its
+    // 8-aligned type is aligned.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_ptr_alignment)]
+    pub fn flush(&mut self) -> KernelResult<()> {
+        if !self.has_write_cache() {
+            return Ok(());
+        }
+        // SAFETY: dma_virt is the start of an exclusively-owned 16 KiB frame;
+        // the header is 16 bytes at offset 0. Volatile: the device reads it.
+        let header_ptr = self.dma_virt as *mut VirtioBlkReqHeader;
+        unsafe {
+            core::ptr::write_volatile(
+                header_ptr,
+                VirtioBlkReqHeader {
+                    type_: VIRTIO_BLK_T_FLUSH,
+                    reserved: 0,
+                    sector: 0,
+                },
+            );
+        }
+        // SAFETY: DMA_STATUS_OFFSET (4608) < 16384; the sentinel tells "not
+        // written yet" from a status.
+        unsafe {
+            core::ptr::write_volatile(self.dma_virt.add(DMA_STATUS_OFFSET), 0xFF);
+        }
+        let dma_phys = self.dma_frame.addr();
+        // A header and a status byte: a flush carries no data.
+        let chain = [
+            (dma_phys + DMA_HEADER_OFFSET as u64, 16, 0u16),
+            (dma_phys + DMA_STATUS_OFFSET as u64, 1, VRING_DESC_F_WRITE),
+        ];
+        let head = self.queue.submit(&chain)?;
+        self.transport.notify_queue(0);
+        let completed_head = self.wait_completion(head, "Flush", 0)?;
+        self.queue.free_chain(completed_head);
+        self.check_status("Flush", 0)
     }
 }
 

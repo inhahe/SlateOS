@@ -146,6 +146,15 @@ fn flush_filesystems() {
             e
         );
     }
+    // And every disk's own write cache, mounted or not: a filesystem's sync
+    // flushes its own device, and a disk written raw (swap, `dd`) has no
+    // filesystem to do it.
+    if let Err(e) = crate::blkdev::flush_all() {
+        serial_println!(
+            "[power] WARNING: flushing a disk's write cache failed ({:?}); switching anyway",
+            e
+        );
+    }
 }
 
 /// Attempt to shut down the system (enter ACPI S5 state).

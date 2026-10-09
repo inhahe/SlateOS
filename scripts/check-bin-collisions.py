@@ -117,9 +117,12 @@ REPO = Path(__file__).resolve().parent.parent
 #
 # THE LIST MAY ONLY SHRINK. An entry that no longer collides is a failure too,
 # so it cannot rot into a record of things that used to be true.
-KNOWN_COLLISIONS: dict[str, tuple[str, ...]] = {
-    "kill": ("coreutils", "kill"),
-}
+KNOWN_COLLISIONS: dict[str, tuple[str, ...]] = {}
+# `kill` was here and is RESOLVED (2026-10-09). The operator's answer to B-Q22
+# (design-decisions 1072) keeps one `kill`, procps-ng 4.0.4's, ported into
+# coreutils; `userspace/kill`, which sent a shutdown message to a service that
+# was never written and then ended the process outright, is deleted.
+#
 # `logger` was here and is RESOLVED (2026-09-16). `userspace/coreutils/src/bin/
 # logger.rs` is deleted; `userspace/logger` is the only program of that name.
 # It was not a straight deletion -- the applet had two things the survivor

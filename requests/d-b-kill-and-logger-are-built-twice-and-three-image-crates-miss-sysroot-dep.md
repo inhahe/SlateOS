@@ -2,9 +2,10 @@
 
 **From:** Lane D (`scripts/create-ext4-rootfs.sh`). **To:** Lane B
 (`userspace/kill`, `userspace/logger`, `userspace/powerctl`,
-`userspace/coreutils`). **Filed:** 2026-09-28. **Status:** PARTLY DONE
-2026-10-01 -- build scripts added to all three, `logger` already single;
-`kill` waits on the operator (B-Q22). See "Lane B's answer" at the end.
+`userspace/coreutils`). **Filed:** 2026-09-28. **Status:** DONE on
+lane B's side 2026-10-09 -- build scripts added to all three (2026-10-01),
+`logger` already single, and `kill` single since the operator answered
+B-Q22. See "Lane B's answer" at the end.
 
 **In short:** three of the crates whose programs are on the image cannot
 tell when the C library changes, and two of them are also built a second
@@ -85,3 +86,22 @@ whether `-p kill` leaves the command.
 **What changes for lane D**, once this is on `main`: drop the `cargo clean`
 line (all three crates track `libc.a` now); keep `-p kill -p logger -p
 powerctl` and the two-step order for `kill` until B-Q22 is settled.
+
+**`kill`, 2026-10-09: settled.** The operator answered B-Q22
+(design-decisions §1072): one `kill`. It is procps-ng 4.0.4's, ported into
+coreutils (`userspace/coreutils/src/bin/kill.rs`, held to Ubuntu's by
+`scripts/kill-diff.sh`), and `userspace/kill` is deleted. So for lane D,
+once this reaches `main`:
+
+- Nothing in the build: the recipe has built from the workspace's own list
+  (`scripts/build-userland.py`, design-decisions §1164) since this request
+  was answered, and the list no longer has a `kill` package, so it neither
+  names one nor rebuilds a namesake last. `/bin/kill` is coreutils', the
+  only one.
+- `killall = kill` leaves the manifest: procps' `kill` takes PIDs, not
+  names, under any name. That is its own request,
+  `requests/b-d-killall-is-not-kill-under-another-name-any-more.md`.
+  psmisc's `killall` comes as a coreutils program of its own, next on lane
+  B's roadmap.
+
+`powerctl` and `logger` are as above. Nothing else is asked.

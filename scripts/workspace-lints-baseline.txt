@@ -78,7 +78,6 @@ userspace/ipcalc  # bare deny(clippy::all)
 userspace/iptables  # bare deny(clippy::all)
 userspace/irqbalance  # bare deny(clippy::all)
 userspace/jq
-userspace/kill
 userspace/ldconfig  # bare deny(clippy::all)
 userspace/less
 userspace/lex

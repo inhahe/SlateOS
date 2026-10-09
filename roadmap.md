@@ -1437,11 +1437,15 @@ list moved to lane D on 2026-09-22):
   - **One `kill`, three requests** (§1072, B-Q22: close, terminate, force,
     sent as SlateOS's message to a program that answers it and as a Linux
     signal to one that does not):
-    - `[ ]` `[B]` procps-ng 4.0.4's `kill`, ported, replacing coreutils'
+    - `[x]` `[B]` procps-ng 4.0.4's `kill`, ported, replacing coreutils'
       `kill.rs` and deleting `userspace/kill` -- `kill PID` is `SIGTERM`
       everywhere from then on, never the forced end it was whenever the build
-      linked `userspace/kill` last; a `kill-diff.sh` harness. `killall` leaves
-      the image with it (lane D's manifest line) until the next item.
+      linked `userspace/kill` last. Done 2026-10-09: `scripts/kill-diff.sh`
+      runs every case in a PID namespace of its own, which is what let it
+      measure upstream's `kill -9 -12` signalling -1 (a deliberate difference
+      here: a negative PID is its group). `killall` leaves the image with
+      `userspace/kill` (`requests/b-d-killall-is-not-kill-under-another-name-any-more.md`)
+      until the next item.
     - `[ ]` `[B]` psmisc's `killall`, ported (`pstree` is already psmisc's).
     - `[ ]` `[A]` The kernel half: a lifecycle endpoint each process registers
       at start, found by PID under a signal's permission rule -- offered by

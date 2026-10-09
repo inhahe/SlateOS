@@ -1,9 +1,12 @@
-## B-THIRTEEN-PROGRAMS-HAVE-NO-DIFFERENTIAL-HARNESS (lane B, 2026-10-07)
+## B-THIRTEEN-PROGRAMS-HAVE-NO-DIFFERENTIAL-HARNESS (lane B, 2026-10-07) -- FIXED on lane-b, pending a boot test on main
 
-**Status:** OPEN (lane B), for `kill` alone: every other program here with
-an upstream has a harness now (see Progress), and `fetch` has none to be
-held to. `kill`'s waits on open question B-Q22, which decides whether it is
-procps' or util-linux's.
+**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
+then it moves to `known-issues-resolved/`. The last of them, `kill`, has
+`scripts/kill-diff.sh` now: B-Q22's answer (design-decisions §1072) made it
+procps-ng 4.0.4's, ported, and the harness holds it to Ubuntu's
+`/usr/bin/kill` in a PID namespace of its own. Every other program here with
+an upstream already had one (see Progress), and `fetch` has none to be held
+to.
 
 **In short:** almost every program in `userspace/coreutils` is checked against
 its upstream by a `scripts/*-diff.sh` harness, which runs both on the same
@@ -21,7 +24,7 @@ device`, status 1), and no harness was there to show it.
 
 | program | upstream to measure against |
 |---|---|
-| `kill` | procps or util-linux -- open question B-Q22 decides which, so its harness waits for that |
+| `kill` | procps-ng 4.0.4 -- B-Q22's answer; `scripts/kill-diff.sh` since 2026-10-09 |
 | `fetch` | none: a SlateOS program, so its tests are its own |
 
 **The fix:** a harness for each, written the way the rest are -- every option,

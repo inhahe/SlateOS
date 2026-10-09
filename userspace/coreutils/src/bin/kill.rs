@@ -1,835 +1,634 @@
-//! `kill` — send a signal to a process or a process group.
+//! `kill` -- send a signal to a process: procps-ng 4.0.4's `kill.c`, ported,
+//! as Ubuntu ships it at `/usr/bin/kill`.
 //!
 //! ```text
-//! kill [-s SIGNAL | -n NUMBER | -SIGNAL] PID...
-//! kill -l [EXIT_STATUS...]
+//! kill [options] <pid> [...]
+//! kill -l [<signal>]
 //! kill -L
 //! ```
 //!
-//! Our OS uses IPC messages rather than Unix signals for process *control*,
-//! but it implements POSIX signals for compatibility, so `kill` is a thin
-//! wrapper over the POSIX layer's `kill(2)`. That layer does the real work,
-//! including the whole process-group fanout; see `posix/src/signal.rs`.
+//! It is the one `kill` (design-decisions §1072, the operator's answer to
+//! B-Q22). Until 2026-10-09 there were two, and which one the image got
+//! depended on the order the build linked them: this program's predecessor,
+//! written here from the manual, and `userspace/kill`, which asked a service
+//! that was never written to stop the process and, when that failed -- every
+//! time -- ended it on the spot. So a plain `kill PID` was sometimes
+//! `kill -9 PID`. Both are gone; `kill PID` is `SIGTERM` everywhere.
+//! SlateOS's own ways of asking a program to stop -- *close*, which may ask
+//! the user to save, and *terminate* as a message rather than a signal --
+//! join this program when the lifecycle protocol exists (§1072).
 //!
-//! # The signal spec is the *first* argument, and only the first
+//! # How upstream reads its command line
 //!
-//! This is the rule that makes negative PIDs possible, and it is worth stating
-//! because the previous implementation did not follow it. That version scanned
-//! every argument and treated anything matching `-SOMETHING` as a signal, which
-//! meant a PID could never be negative — and a negative PID is not an exotic
-//! case, it is POSIX's spelling for "the whole process group":
+//! In two passes, and the first is procps' own:
 //!
-//! | You type | Old behaviour | Correct behaviour |
-//! |---|---|---|
-//! | `kill -TERM -1234` | signal silently becomes 1234, then `kill: missing PID` | `SIGTERM` to process group 1234 |
-//! | `kill -9 -1234 567` | `kill(567, 1234)` — the wrong signal, to the wrong set | `SIGKILL` to group 1234 *and* to process 567 |
+//! 1. `skill_sig_option` takes the **first** word anywhere after the
+//!    program's name that is `-` and a signal -- `-9`, `-KILL`, `-sigterm`,
+//!    `-RTMIN+3` -- out of argv. Anywhere: `kill 123 -9` sends `SIGKILL` to
+//!    123, and so does `kill -- 123 -9`. Without one the signal is `SIGTERM`.
+//! 2. `getopt_long` reads the rest, with `opterr = 0`, so getopt says
+//!    nothing itself: a word it cannot use is `invalid argument X` and the
+//!    usage, on standard error, unless what it choked on was a digit -- see
+//!    the first deliberate difference.
 //!
-//! The second row is the dangerous one: nothing about the outcome resembles
-//! what was asked for, and nothing in the output says so. A shell script that
-//! does `kill -TERM -$PGID` — the ordinary way to shut down a job — got a
-//! `missing PID` error and a live process group.
+//! `-l` takes its argument attached (`-lTERM`, `--list=TERM`), or else peeks
+//! at the next word, which it uses only if that does not begin with `-` --
+//! without consuming it, since the program ends there. Whatever it names is
+//! translated with `strtosig` (a number to a name, a name to a number, the
+//! table's names only), and an unknown one is a warning with status 0. `-s`
+//! takes any name `signal_name_to_number` knows; one it does not becomes the
+//! signal -1, which `kill(2)` refuses for each process as `Invalid
+//! argument`. `-q` sends with `sigqueue` and the value given.
 //!
-//! So: argument 0 may be a signal spec (or `-l`, `-L`, `-s`, `-n`, or `--`).
-//! Everything after it is a PID, sign and all. `--` may also appear after a
-//! signal spec, for `kill -9 -- -1`.
+//! Each operand is read with `strtol_or_err` -- the first that is not a
+//! number ends the run, after the ones before it were signalled -- and cut to
+//! a `pid_t` as C casts it, so `4294967297` is process 1. A failure is
+//! reported per process, `kill: (PID): reason`, and makes the status 1.
 //!
-//! # Which signals exist
+//! # Deliberate differences
 //!
-//! Exactly the ones this platform can name: the null signal 0, and 1 through
-//! 31, matching the `SIGNAL_NAMES` table in `posix/src/signal.rs` that
-//! `strsignal` reads. Real-time signals (34–64 on Linux) have no names there,
-//! so `kill -l` does not claim they exist and a numeric spec in that range is
-//! rejected rather than passed through to fail obscurely later. When the POSIX
-//! layer names them, [`SIGNALS`] is the one place to extend.
+//! 1. **A negative PID that is not after `--` is that process group.**
+//!    Upstream's `getopt_long` reads `-1234` as the options `-1`, `-2`...,
+//!    stops at the first, and upstream turns the *first digit* into the
+//!    process `'0' - '1'`: so `kill -9 -1234` sends `SIGKILL` to process -1,
+//!    which is **every process the caller may signal**, and then reports
+//!    success as failure and failure as success (`if
+//!    (!execute_kill(...)) exitvalue = EXIT_FAILURE`). Measured on Ubuntu's
+//!    procps-ng 4.0.4 with the null signal, which sends nothing:
+//!    `kill -0 -1234` succeeds silently with status 1, where `kill -0 --
+//!    -1234` says `kill: (-1234): No such process`. Here the word is the
+//!    operand it was meant to be -- a negative PID, the process group
+//!    `1234`, read with `strtol_or_err` like any other -- and the run goes
+//!    on with the words after it. Copying a command that kills every
+//!    process is not fidelity.
+//! 2. **`-l SIG9` is an unknown signal name**, as upstream's `strtosig`
+//!    meant it to be: there it strips `SIG` for the digit test but parses
+//!    the word with it, finds no number, and frees a pointer three bytes
+//!    into its copy, which glibc answers by aborting the program.
+//! 3. **`-V` names this build**: `kill from SlateOS coreutils 0.1.0`.
+//! 4. **A failed write to standard output is reported**, `kill: write
+//!    error: No space left on device`, status 1 -- the listings, the usage,
+//!    the version. Upstream registers no `close_stdout`, so it exits as if
+//!    all was well; every other procps program here does register it, and
+//!    design-decisions §1071 settles the rest.
+//! 5. **An empty PID or `-q` value is reported with no reason**: `kill:
+//!    failed to parse argument: ''`. Upstream's `strtol_or_err` skips the
+//!    conversion for an empty string and reports whatever `errno` an earlier
+//!    call left behind -- `No such file or directory` on Ubuntu, from its
+//!    start-up -- which is `free`'s and `vmstat`'s divergence too
+//!    ([`coreutils::procps::strutils`]).
 //!
-//! The previous table had twelve entries and was missing, among others,
-//! `USR1` and `USR2` — which after `TERM`, `HUP` and `KILL` are the signals
-//! scripts send most.
+//! On SlateOS `sigqueue` is not delivered yet, so `-q` reports `Function not
+//! implemented` for each process, as `pkill -q` does.
+//!
+//! `scripts/kill-diff.sh` holds it to Ubuntu's `/usr/bin/kill`, signalling
+//! only the harness's own processes, and probing everything else -- the
+//! process groups, the broadcast -- with the null signal, which sends
+//! nothing.
 
-use coreutils::diag;
-use coreutils::stdfd;
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::io::{self, ErrorKind, Write};
+use std::ffi::OsString;
+use std::io::Write;
 use std::process::ExitCode;
 
-use coreutils::errmsg::strerror;
-use coreutils::quote::{os_bytes, quote};
+use coreutils::getopt::{Opt, Optopt, Program, Takes};
+use coreutils::procps::signals::{
+    NUMBER_OF_SIGNALS, pretty_print_signals, signal_name_to_number, signal_number_to_name,
+    skill_sig_option, unix_print_signals,
+};
+use coreutils::procps::{scanf, strutils};
+use coreutils::quote::os_bytes;
+use coreutils::stdfd::{self, Stream};
 
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
+coreutils::guard_std_fds!();
 
-/// Every signal this platform names, in number order.
-///
-/// Kept in step with `SIGNAL_NAMES` in `posix/src/signal.rs`: a name here that
-/// `strsignal` cannot describe would make `kill -l` a list of things you cannot
-/// actually send.
-const SIGNALS: &[(i32, &str)] = &[
-    (1, "HUP"),
-    (2, "INT"),
-    (3, "QUIT"),
-    (4, "ILL"),
-    (5, "TRAP"),
-    (6, "ABRT"),
-    (7, "BUS"),
-    (8, "FPE"),
-    (9, "KILL"),
-    (10, "USR1"),
-    (11, "SEGV"),
-    (12, "USR2"),
-    (13, "PIPE"),
-    (14, "ALRM"),
-    (15, "TERM"),
-    (16, "STKFLT"),
-    (17, "CHLD"),
-    (18, "CONT"),
-    (19, "STOP"),
-    (20, "TSTP"),
-    (21, "TTIN"),
-    (22, "TTOU"),
-    (23, "URG"),
-    (24, "XCPU"),
-    (25, "XFSZ"),
-    (26, "VTALRM"),
-    (27, "PROF"),
-    (28, "WINCH"),
-    (29, "IO"),
-    (30, "PWR"),
-    (31, "SYS"),
+/// The parser's name. It never prints: `opterr` is 0, and every message is
+/// the program's own.
+const KILL: Program = Program::new("kill", 1);
+
+/// Upstream's option string.
+const SHORTS: &str = "l::Ls:hVq:";
+
+/// Upstream's `longopts`, in its order.
+const LONGS: &[(&str, Takes)] = &[
+    ("list", Takes::Optional),
+    ("table", Takes::Nothing),
+    ("signal", Takes::Required),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("queue", Takes::Required),
 ];
 
-/// Aliases: names that mean the same number as an entry in [`SIGNALS`], but
-/// which `-l` must not list a second time.
-///
-/// `POLL` is Linux's second name for 29; `IOT` is the historical name for
-/// `ABRT`. Both are accepted on input because other systems' scripts use them.
-const ALIASES: &[(i32, &str)] = &[(29, "POLL"), (6, "IOT"), (6, "ABRT")];
-
-/// The default signal, when the command line names none.
+/// `SIGTERM`, the signal with none named.
 const SIGTERM: i32 = 15;
 
-/// What the parsed argv asks for.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum KillAction {
-    /// `-l` / `-L` / `--list` / `--table`. With no operands, list every signal;
-    /// with operands, translate each one between name and number.
-    List {
-        operands: Vec<OsString>,
-        table: bool,
-    },
-    /// Send `signal` to each of `pids`. A negative PID is a process group and
-    /// is passed through as written.
-    Send { signal: i32, pids: Vec<OsString> },
+/// What the program asks of the system: a fake in the tests, which must
+/// signal nothing.
+trait System {
+    /// `kill (pid, sig)`, `pid` as `kill(2)` takes it.
+    fn kill(&self, pid: i32, sig: i32) -> Result<(), i32>;
+    /// `sigqueue (pid, sig, value)`.
+    fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32>;
+    /// The C library's `SIGRTMIN`.
+    fn rtmin(&self) -> i32;
 }
 
-/// Look up a signal name, with or without a `SIG` prefix, in any case.
-///
-/// Returns `None` for a name this platform does not have, which the caller
-/// turns into `invalid signal` rather than sending something arbitrary.
-fn signal_by_name(token: &str) -> Option<i32> {
-    let upper = token.to_uppercase();
-    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
-    SIGNALS
-        .iter()
-        .chain(ALIASES.iter())
-        .find(|&&(_, n)| n == bare)
-        .map(|&(num, _)| num)
-}
+/// The C library.
+struct Libc;
 
-/// The name for a signal number, without the `SIG` prefix.
-fn signal_by_number(num: i32) -> Option<&'static str> {
-    SIGNALS
-        .iter()
-        .find(|&&(n, _)| n == num)
-        .map(|&(_, name)| name)
-}
-
-/// Is `num` something `kill()` can be asked to send?
-///
-/// 0 is included: it is the null signal, POSIX's "does this process exist and
-/// may I signal it" probe, and the POSIX layer implements it as exactly that.
-fn is_sendable(num: i32) -> bool {
-    num == 0 || signal_by_number(num).is_some()
-}
-
-/// Resolve a signal spec — the text after `-`, or the argument to `-s`/`-n`.
-///
-/// Accepts a decimal number or a name. A number outside the range this
-/// platform names is rejected here rather than handed to `kill()`, which would
-/// fail with `EINVAL` and a diagnostic that named the PID rather than the
-/// signal.
-fn resolve_signal(token: &str) -> Option<i32> {
-    if let Ok(n) = token.parse::<i32>() {
-        return is_sendable(n).then_some(n);
-    }
-    signal_by_name(token)
-}
-
-/// An argument as text, if it is text.
-///
-/// An argument that is not valid UTF-8 is not an option, not a signal name and
-/// not a number, so every decision below wants `None` for it and the right
-/// diagnostic falls out on its own. The thing that must not happen — and what
-/// `env::args()` did — is a panic *before* any of those decisions is reached:
-/// `std::env::args`'s iterator is `…into_string().unwrap()`, so a single
-/// mistyped byte killed the program instead of producing a message about it.
-fn text(arg: &OsStr) -> Option<String> {
-    std::str::from_utf8(&os_bytes(arg))
-        .ok()
-        .map(ToString::to_string)
-}
-
-/// Parse kill's argv. The error string is wordable as `kill: {e}`.
-fn parse_args(args: &[OsString]) -> Result<KillAction, String> {
-    let Some(first) = args.first() else {
-        return Err("missing operand".to_string());
-    };
-    let rest = args.get(1..).unwrap_or(&[]);
-    let head = text(first);
-
-    // Options, all of which may only appear first. `-` alone is not an option;
-    // it falls through to be parsed (and rejected) as a PID, which is what GNU
-    // does and what keeps the "everything after argv[0] is a PID" rule true.
-    let (signal, operands): (i32, &[OsString]) = match head.as_deref() {
-        Some("-l" | "--list") => {
-            return Ok(KillAction::List {
-                operands: rest.to_vec(),
-                table: false,
-            });
-        }
-        Some("-L" | "--table") => {
-            return Ok(KillAction::List {
-                operands: rest.to_vec(),
-                table: true,
-            });
-        }
-        Some("--") => (SIGTERM, rest),
-        Some(opt @ ("-s" | "-n" | "--signal")) => {
-            let Some(spec) = rest.first() else {
-                return Err(format!("option {opt} requires an argument"));
-            };
-            let Some(sig) = text(spec).as_deref().and_then(resolve_signal) else {
-                return Err(format!("{}: invalid signal", quote(&os_bytes(spec))));
-            };
-            (sig, rest.get(1..).unwrap_or(&[]))
-        }
-        Some(f) if f.starts_with("--signal=") => {
-            let spec = f.strip_prefix("--signal=").unwrap_or_default();
-            let Some(sig) = resolve_signal(spec) else {
-                return Err(format!("{}: invalid signal", quote(spec.as_bytes())));
-            };
-            (sig, rest)
-        }
-        // Every long option this program has was matched above, so anything
-        // else starting with `--` is a typo, not a signal named `-foo`.
-        Some(f) if f.starts_with("--") => {
-            return Err(format!("unrecognized option {}", quote(f.as_bytes())));
-        }
-        // Not text at all. It cannot be an option or a signal name, so the
-        // only question left is whether it was *meant* as one: a leading `-`
-        // says yes, and gets the signal diagnostic rather than a confusing
-        // complaint about a process id.
-        None => {
-            let bytes = os_bytes(first);
-            if let Some(body) = bytes.strip_prefix(b"-")
-                && !body.is_empty()
-            {
-                return Err(format!("{}: invalid signal", quote(body)));
-            }
-            (SIGTERM, args)
-        }
-        Some(f) => {
-            match f.strip_prefix('-').filter(|body| !body.is_empty()) {
-                Some(body) => {
-                    // The whole body is tried as a signal spec *first*, so
-                    // `-segv` is SIGSEGV. Only if that fails is it re-read as
-                    // an attached option argument (`-s9`, `-nTERM`). getopt's
-                    // rule is the other way round, which silently turns
-                    // `kill -segv $$` into `kill -s egv $$` — a spelling a
-                    // user can reach by accident, since this program accepts
-                    // lower-case signal names everywhere else.
-                    let sig = resolve_signal(body)
-                        .or_else(|| body.strip_prefix('s').and_then(resolve_signal))
-                        .or_else(|| body.strip_prefix('n').and_then(resolve_signal));
-                    let Some(sig) = sig else {
-                        return Err(format!("{}: invalid signal", quote(body.as_bytes())));
-                    };
-                    (sig, rest)
-                }
-                // No signal spec at all: every argument, this one included,
-                // is a PID. (A bare `-` reaches here and is rejected later as
-                // an invalid process id, which is what it is.)
-                None => (SIGTERM, args),
-            }
-        }
-    };
-
-    // `kill -9 -- -1`: a `--` may separate the signal from the PIDs too.
-    let pids = match operands.first() {
-        Some(sep) if sep == "--" => operands.get(1..).unwrap_or(&[]),
-        _ => operands,
-    };
-
-    if pids.is_empty() {
-        return Err("missing operand".to_string());
+impl System for Libc {
+    fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
+        libcall::kill_any(pid, sig)
     }
 
-    Ok(KillAction::Send {
-        signal,
-        pids: pids.to_vec(),
-    })
-}
-
-/// Render `-l`'s full listing: every name, space-separated, one line.
-///
-/// This is GNU's format — `HUP INT QUIT …` — not one signal per line. Scripts
-/// read it with `$(kill -l)` and expect a word list.
-fn format_signal_list() -> String {
-    let names: Vec<&str> = SIGNALS.iter().map(|&(_, name)| name).collect();
-    let mut s = names.join(" ");
-    s.push('\n');
-    s
-}
-
-/// Render `-L`'s table: `NUM) SIGNAME`, four to a line.
-fn format_signal_table() -> String {
-    let mut s = String::new();
-    for (i, &(num, name)) in SIGNALS.iter().enumerate() {
-        s.push_str(&format!("{num:>2}) SIG{name:<9}"));
-        if i % 4 == 3 {
-            // Trailing blanks on a padded final column are noise.
-            while s.ends_with(' ') {
-                s.pop();
-            }
-            s.push('\n');
-        }
+    fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32> {
+        libcall::sigqueue_any(pid, sig, value)
     }
-    if !s.ends_with('\n') {
-        while s.ends_with(' ') {
-            s.pop();
-        }
-        s.push('\n');
-    }
-    s
-}
 
-/// Translate one `-l` operand.
-///
-/// A number becomes a name, a name becomes a number. A number of 128 or more
-/// is a wait status rather than a signal — `$?` for a process killed by signal
-/// *n* is `128 + n` — so 128 is subtracted first. That is the whole reason the
-/// synopsis says `EXIT_STATUS` and not `SIGNAL`: the usual call is
-/// `kill -l $?`.
-fn translate_operand(operand: &OsStr) -> Result<String, String> {
-    let bytes = os_bytes(operand);
-    let Some(operand) = text(operand) else {
-        return Err(format!("{}: invalid signal", quote(&bytes)));
-    };
-    let operand = operand.as_str();
-    if let Ok(n) = operand.parse::<i32>() {
-        let sig = if n >= 128 { n.saturating_sub(128) } else { n };
-        return signal_by_number(sig)
-            .map(ToString::to_string)
-            .ok_or_else(|| format!("{}: invalid signal", quote(operand.as_bytes())));
-    }
-    signal_by_name(operand)
-        .map(|n| n.to_string())
-        .ok_or_else(|| format!("{}: invalid signal", quote(operand.as_bytes())))
-}
-
-/// The `strerror` text for an errno that `kill()` can report.
-///
-/// These three are the only ones `posix::signal::kill` produces, and none of
-/// them survives std's `ErrorKind` normalisation intact — `ESRCH` in
-/// particular has no `ErrorKind` at all, so the generic path would print the
-/// host's "Uncategorized" wording for the single most common outcome of
-/// running `kill`. The previous implementation printed one fixed string,
-/// `No such process or permission denied`, for every failure, which spared
-/// itself the choice by refusing to make it: a script could not tell a dead
-/// PID from one it lacked the authority to touch.
-fn errno_text(raw: Option<i32>, err: &io::Error) -> String {
-    match raw {
-        Some(1) => "Operation not permitted".to_string(),
-        Some(3) => "No such process".to_string(),
-        Some(22) => "Invalid argument".to_string(),
-        _ => strerror(err),
+    fn rtmin(&self) -> i32 {
+        libcall::sigrtmin()
     }
 }
 
-/// Write `text` to stdout, treating a closed pipe as success.
-///
-/// `kill -l | head -1` closes the pipe under us. That is the reader's choice,
-/// not our failure, and it is the one write error that must not become a
-/// diagnostic — but every *other* one must, which is why this is not a bare
-/// `print!`. `print!` panics on a write error, so the old code turned a full
-/// disk into a panic message and a closed pipe into one too.
-fn write_out(text: &str) -> u8 {
-    let mut out = io::stdout().lock();
-    let write = out.write_all(text.as_bytes()).and_then(|()| out.flush());
-    match write {
-        Ok(()) => 0,
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
-        Err(e) => {
-            diag!("kill: write error: {}", strerror(&e));
-            1
-        }
-    }
+/// The two names upstream prints under: `program_invocation_name` (argv[0]
+/// as given), which `error()` -- and so `xwarnx` -- prefixes; and the short
+/// name after its last `/`, which the usage and the version use.
+struct Names {
+    full: Vec<u8>,
+    short: Vec<u8>,
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
-fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
-}
-
-fn run_main() -> ExitCode {
-    let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let action = match parse_args(&args) {
-        Ok(a) => a,
-        Err(e) => {
-            diag!("kill: {e}");
-            diag!("Usage: kill [-s SIGNAL | -SIGNAL] PID...");
-            diag!("       kill -l [EXIT_STATUS...]");
-            return ExitCode::from(1);
-        }
-    };
-
-    let status = match action {
-        KillAction::List {
-            operands,
-            table: true,
-        } if operands.is_empty() => write_out(&format_signal_table()),
-        KillAction::List { operands, .. } if operands.is_empty() => {
-            write_out(&format_signal_list())
-        }
-        KillAction::List { operands, .. } => {
-            let mut status = 0;
-            let mut lines = String::new();
-            for operand in &operands {
-                match translate_operand(operand) {
-                    Ok(text) => {
-                        lines.push_str(&text);
-                        lines.push('\n');
-                    }
-                    Err(e) => {
-                        diag!("kill: {e}");
-                        status = 1;
-                    }
-                }
-            }
-            write_out(&lines).max(status)
-        }
-        KillAction::Send { signal, pids } => send_all(signal, &pids),
-    };
-    ExitCode::from(status)
-}
-
-/// Send `signal` to every PID, reporting each failure and continuing.
-///
-/// Continuing matters: `kill -9 111 222` must still try 222 after 111 turns
-/// out to be gone. The exit status is 1 if *any* target failed, which is what
-/// a caller testing `if kill …` is asking about.
-fn send_all(signal: i32, pids: &[OsString]) -> u8 {
-    let mut status = 0;
-    for pid_str in pids {
-        let Some(pid) = text(pid_str).and_then(|t| t.parse::<i32>().ok()) else {
-            diag!("kill: {}: invalid process id", quote(&os_bytes(pid_str)));
-            status = 1;
-            continue;
+impl Names {
+    fn of(argv0: &[u8]) -> Self {
+        let short = match argv0.iter().rposition(|&b| b == b'/') {
+            Some(at) => argv0.get(at.saturating_add(1)..).unwrap_or_default(),
+            None => argv0,
         };
-        if let Err(err) = send_one(pid, signal) {
-            diag!(
-                "kill: {}: {}",
-                quote(&os_bytes(pid_str)),
-                errno_text(err.raw_os_error(), &err)
-            );
-            status = 1;
+        Self {
+            full: argv0.to_vec(),
+            short: short.to_vec(),
         }
     }
-    status
-}
 
-/// Send one signal, or report why not.
-///
-/// This function is the *entire* platform-specific part of the program, and it
-/// is this small on purpose. When the diagnostic-building lived inside the
-/// `cfg` too, everything that shaped an error message was invisible to a build
-/// on the Windows development host — including the tests for it, which is how
-/// the old one-size-fits-all `No such process or permission denied` string
-/// survived. Everything above and below this is compiled, and tested,
-/// everywhere.
-#[cfg(target_os = "linux")]
-fn send_one(pid: i32, signal: i32) -> io::Result<()> {
-    // SAFETY: `kill` is the POSIX layer's own function; both arguments are
-    // plain integers and it dereferences nothing.
-    let ret = unsafe { kill(pid, signal) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    /// `xwarnx (...)`, which is `error (0, 0, ...)`: `name: message`.
+    fn warnx(&self, msg: &[u8]) {
+        let mut line = self.full.clone();
+        line.extend_from_slice(b": ");
+        line.extend_from_slice(msg);
+        line.push(b'\n');
+        stdfd::diag_bytes(&line);
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn send_one(_pid: i32, _signal: i32) -> io::Result<()> {
-    Err(io::Error::new(
-        ErrorKind::Unsupported,
-        "no signal interface on this platform",
-    ))
+/// `print_usage (out)`'s text.
+fn usage_text(short: &[u8]) -> Vec<u8> {
+    let mut t = b"\nUsage:\n ".to_vec();
+    t.extend_from_slice(short);
+    t.extend_from_slice(
+        b" [options] <pid> [...]\n\
+          \nOptions:\n \
+          <pid> [...]            send signal to every <pid> listed\n \
+          -<signal>, -s, --signal <signal>\n                        \
+          specify the <signal> to be sent\n \
+          -q, --queue <value>    integer value to be sent with the signal\n \
+          -l, --list=[<signal>]  list all signal names, or convert one to a name\n \
+          -L, --table            list all signal names in a nice table\n\
+          \n -h, --help     display this help and exit\n \
+          -V, --version  output version information and exit\n\
+          \nFor more details see kill(1).\n",
+    );
+    t
+}
+
+/// Where `print_usage` writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum To {
+    Out,
+    Err,
+}
+
+/// `strtosig (s)`: a number becomes the table's name for it, a name the
+/// table's number for it; anything else, or a number the table does not
+/// have, is `None`. Case does not matter, and `SIG` may lead a name.
+///
+/// Upstream tests for a digit *after* `SIG` but parses the word *with* it,
+/// so `SIG9` is no number; what it does next is free a pointer into the
+/// middle of its copy, and abort. Here `SIG9` is simply unknown -- the
+/// second deliberate difference.
+fn strtosig(s: &[u8]) -> Option<Vec<u8>> {
+    let upper = s.to_ascii_uppercase();
+    let p = upper.strip_prefix(b"SIG").unwrap_or(&upper);
+    let mut numsignal: i32 = 0;
+    if p.first().is_some_and(u8::is_ascii_digit) {
+        // `strtol (s, &endp, 10)` on the word as given, which must be wholly
+        // a number, into an `int`: cut as C cuts it, so 4294967305 is 9.
+        let (value, used) = scanf::strtol(s);
+        if used == 0 || used != s.len() {
+            return None;
+        }
+        numsignal = scanf::low_i32(value);
+    }
+    if numsignal != 0 {
+        // `get_sigtable_num (i)` for each row: the rows hold 1 to 31.
+        (1..=NUMBER_OF_SIGNALS)
+            .contains(&numsignal)
+            .then(|| signal_number_to_name(numsignal, 0).into_bytes())
+    } else {
+        (1..=NUMBER_OF_SIGNALS)
+            .find(|&n| signal_number_to_name(n, 0).as_bytes() == p)
+            .map(|n| n.to_string().into_bytes())
+    }
+}
+
+/// The run: argv with its name first, on `sys`, writing standard output to
+/// `out`. Answers the status `main` exits with.
+fn run(mut argv: Vec<Vec<u8>>, sys: &dyn System, out: &mut dyn Write) -> u8 {
+    let names = Names::of(argv.first().map_or(b"kill".as_slice(), Vec::as_slice));
+    let rtmin = sys.rtmin();
+    let usage = |to: To, out: &mut dyn Write| -> u8 {
+        let text = usage_text(&names.short);
+        match to {
+            To::Out => {
+                // `main`'s writer is a `Stream`, whose writes never fail: a
+                // failure is kept for the close.
+                let _ = out.write_all(&text);
+                0
+            }
+            To::Err => {
+                stdfd::diag_bytes(&text);
+                1
+            }
+        }
+    };
+
+    if argv.len() < 2 {
+        return usage(To::Err, out);
+    }
+
+    let mut signo = skill_sig_option(&mut argv, rtmin);
+    if signo < 0 {
+        signo = SIGTERM;
+    }
+    let words: Vec<OsString> = argv
+        .iter()
+        .skip(1)
+        .map(|w| coreutils::quote::os_from_bytes(w))
+        .collect();
+
+    let mut queue: Option<i32> = None;
+    let mut operands: Vec<Vec<u8>> = Vec::new();
+    let mut parser = KILL.parse(&words, SHORTS, LONGS).keep_going(true);
+    while let Some(item) = parser.next() {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(_) => {
+                let optopt = match parser.optopt() {
+                    Optopt::Short(c) => c,
+                    Optopt::Long(name) => long_val(name),
+                    Optopt::None => 0,
+                };
+                if optopt.is_ascii_digit() {
+                    // The first deliberate difference: the word is a
+                    // negative PID, and the walk goes on after it.
+                    if let Some(word) = parser.current_word() {
+                        operands.push(os_bytes(word).into_owned());
+                    }
+                    parser.abandon_word();
+                    continue;
+                }
+                let mut msg = b"invalid argument ".to_vec();
+                // `%c` of `optopt`, which is 0 -- a NUL byte -- for a long
+                // option that names nothing.
+                msg.push(optopt);
+                names.warnx(&msg);
+                return usage(To::Err, out);
+            }
+        };
+        match opt {
+            Opt::Operand(word) => operands.push(os_bytes(word).into_owned()),
+            Opt::Short(b'l', value) | Opt::Long("list", value) => {
+                let sig_option = match value {
+                    Some(v) => Some(os_bytes(&v).into_owned()),
+                    None => words
+                        .get(parser.optind())
+                        .map(|w| os_bytes(w).into_owned())
+                        .filter(|w| w.first() != Some(&b'-')),
+                };
+                match sig_option {
+                    Some(name) => match strtosig(&name) {
+                        Some(converted) => {
+                            let _ = out.write_all(&converted);
+                            let _ = out.write_all(b"\n");
+                        }
+                        None => {
+                            let mut msg = b"unknown signal name ".to_vec();
+                            msg.extend_from_slice(&name);
+                            names.warnx(&msg);
+                        }
+                    },
+                    None => {
+                        let _ = out.write_all(&unix_print_signals(rtmin));
+                    }
+                }
+                return 0;
+            }
+            Opt::Short(b'L', _) | Opt::Long("table", _) => {
+                let _ = out.write_all(&pretty_print_signals(rtmin));
+                return 0;
+            }
+            Opt::Short(b's', value) | Opt::Long("signal", value) => {
+                let name = value.as_ref().map(|v| os_bytes(v).into_owned());
+                signo = signal_name_to_number(name.as_deref().unwrap_or_default(), rtmin);
+            }
+            Opt::Short(b'h', _) | Opt::Long("help", _) => return usage(To::Out, out),
+            Opt::Short(b'V', _) | Opt::Long("version", _) => {
+                let mut text = names.short.clone();
+                text.extend_from_slice(b" from SlateOS coreutils 0.1.0\n");
+                let _ = out.write_all(&text);
+                return 0;
+            }
+            Opt::Short(b'q', value) | Opt::Long("queue", value) => {
+                let text = value.as_ref().map(|v| os_bytes(v).into_owned());
+                let text = text.unwrap_or_default();
+                match strutils::strtol(&text) {
+                    // `sigval.sival_int = strtol_or_err (...)`: a `long` cut
+                    // to `int`.
+                    Ok(v) => queue = Some(scanf::low_i32(v)),
+                    Err(fault) => {
+                        error_exit(
+                            &names,
+                            b"must be an integer value to be passed with the signal.",
+                            &text,
+                            fault,
+                        );
+                        return 1;
+                    }
+                }
+            }
+            // Unreachable: every option in the tables has its case above.
+            Opt::Short(..) | Opt::Long(..) => return usage(To::Err, out),
+        }
+    }
+
+    if operands.is_empty() {
+        return usage(To::Err, out);
+    }
+
+    let mut exitvalue = 0;
+    for word in &operands {
+        let pid = match strutils::strtol(word) {
+            Ok(pid) => pid,
+            Err(fault) => {
+                error_exit(&names, b"failed to parse argument", word, fault);
+                return 1;
+            }
+        };
+        let sent = match queue {
+            Some(value) => sys.sigqueue(scanf::low_i32(pid), signo, value),
+            None => sys.kill(scanf::low_i32(pid), signo),
+        };
+        if let Err(errno) = sent {
+            // `error (0, errno, "(%ld)", pid)`: the `long`, not the cut
+            // `pid_t` the call was made with.
+            let mut line = names.full.clone();
+            line.extend_from_slice(format!(": ({pid}): ").as_bytes());
+            line.extend_from_slice(
+                coreutils::errmsg::strerror(&std::io::Error::from_raw_os_error(errno)).as_bytes(),
+            );
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            exitvalue = 1;
+        }
+    }
+    exitvalue
+}
+
+/// A long option's `val`, which `optopt` holds after an error about it:
+/// upstream's table maps each to its short letter.
+fn long_val(name: &str) -> u8 {
+    match name {
+        "list" => b'l',
+        "table" => b'L',
+        "signal" => b's',
+        "help" => b'h',
+        "version" => b'V',
+        "queue" => b'q',
+        _ => 0,
+    }
+}
+
+/// `strtol_or_err`'s failure: `error (EXIT_FAILURE, errno, "%s: '%s'",
+/// errmesg, str)`.
+fn error_exit(names: &Names, errmesg: &[u8], text: &[u8], fault: strutils::NumFault) {
+    let mut line = names.full.clone();
+    line.extend_from_slice(b": ");
+    line.extend_from_slice(errmesg);
+    line.extend_from_slice(b": '");
+    line.extend_from_slice(text);
+    line.push(b'\'');
+    line.extend_from_slice(fault.suffix().as_bytes());
+    line.push(b'\n');
+    stdfd::diag_bytes(&line);
+}
+
+fn main() -> ExitCode {
+    stdfd::restore();
+    let argv: Vec<Vec<u8>> = std::env::args_os()
+        .map(|a| os_bytes(&a).into_owned())
+        .collect();
+    // Upstream's other complaints are `error ()`'s, under argv[0] as given:
+    // `kill` does not set `program_invocation_name` to the short name, as
+    // most procps programs do. The fourth deliberate difference speaks the
+    // same way.
+    let name = Names::of(argv.first().map_or(b"kill".as_slice(), Vec::as_slice)).full;
+    let mut out = Stream::stdout();
+    let status = run(argv, &Libc, &mut out);
+    stdfd::close_stdout_procps(&name, out, ExitCode::from(status))
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use super::*;
+    use super::{System, run, strtosig};
+    use std::cell::RefCell;
 
-    /// Arguments as the operating system hands them over: owned, and *not*
-    /// required to be UTF-8. Every test goes through this rather than through
-    /// `String`, so that the parser is exercised on the same type `main` will
-    /// actually give it.
-    fn s(items: &[&str]) -> Vec<OsString> {
-        items.iter().map(OsString::from).collect()
+    /// One send: the call, the PID, the signal, and `sigqueue`'s value.
+    type Sent = (&'static str, i32, i32, Option<i32>);
+
+    /// A system that records what it was asked to send and sends nothing.
+    /// `ESRCH` for PID 999999, as for a process that does not exist.
+    #[derive(Default)]
+    struct Fake {
+        sent: RefCell<Vec<Sent>>,
     }
 
-    /// The signal and PID list of a `Send`, or a panic naming what came back.
-    fn sent(args: &[&str]) -> (i32, Vec<OsString>) {
-        match parse_args(&s(args)).unwrap() {
-            KillAction::Send { signal, pids } => (signal, pids),
-            other @ KillAction::List { .. } => panic!("expected a Send, got {other:?}"),
-        }
-    }
-
-    // ---------------- the table itself ----------------
-
-    #[test]
-    fn signal_numbers_match_the_posix_layer() {
-        // Spot-checks against `posix/src/signal.rs`. These are the constants
-        // the platform's own headers define; a `kill` that disagreed would
-        // send a different signal than the name it was given.
-        assert_eq!(signal_by_name("HUP"), Some(1));
-        assert_eq!(signal_by_name("USR1"), Some(10));
-        assert_eq!(signal_by_name("SEGV"), Some(11));
-        assert_eq!(signal_by_name("USR2"), Some(12));
-        assert_eq!(signal_by_name("TERM"), Some(15));
-        assert_eq!(signal_by_name("CHLD"), Some(17));
-        assert_eq!(signal_by_name("CONT"), Some(18));
-        assert_eq!(signal_by_name("STOP"), Some(19));
-        assert_eq!(signal_by_name("TSTP"), Some(20));
-        assert_eq!(signal_by_name("WINCH"), Some(28));
-        assert_eq!(signal_by_name("SYS"), Some(31));
-    }
-
-    #[test]
-    fn the_table_is_dense_and_ordered() {
-        // 1..=31 with no gaps and no repeats: the platform names all of them.
-        let nums: Vec<i32> = SIGNALS.iter().map(|&(n, _)| n).collect();
-        assert_eq!(nums, (1..=31).collect::<Vec<i32>>());
-    }
-
-    #[test]
-    fn usr1_and_usr2_are_present() {
-        // The old twelve-entry table had neither, so `kill -USR1` — a routine
-        // way to ask a daemon to reopen its logs — was `unknown signal`.
-        assert_eq!(resolve_signal("USR1"), Some(10));
-        assert_eq!(resolve_signal("SIGUSR2"), Some(12));
-    }
-
-    // ---------------- resolve_signal ----------------
-
-    #[test]
-    fn resolve_number() {
-        assert_eq!(resolve_signal("9"), Some(9));
-        assert_eq!(resolve_signal("15"), Some(15));
-    }
-
-    #[test]
-    fn resolve_zero_is_the_null_signal() {
-        assert_eq!(resolve_signal("0"), Some(0));
-    }
-
-    #[test]
-    fn resolve_name_bare_and_prefixed_and_lowercase() {
-        assert_eq!(resolve_signal("KILL"), Some(9));
-        assert_eq!(resolve_signal("SIGKILL"), Some(9));
-        assert_eq!(resolve_signal("sigterm"), Some(15));
-        assert_eq!(resolve_signal("Hup"), Some(1));
-    }
-
-    #[test]
-    fn resolve_aliases() {
-        assert_eq!(resolve_signal("POLL"), Some(29));
-        assert_eq!(resolve_signal("IOT"), Some(6));
-    }
-
-    #[test]
-    fn resolve_unknown_returns_none() {
-        assert_eq!(resolve_signal("NOPE"), None);
-        assert_eq!(resolve_signal("SIGNOPE"), None);
-        assert_eq!(resolve_signal(""), None);
-    }
-
-    #[test]
-    fn out_of_range_numbers_are_rejected_here_not_by_the_kernel() {
-        // The old code accepted any integer, so `kill -1234 $$` reached
-        // `kill()`, failed with EINVAL, and was reported as though the *PID*
-        // were at fault.
-        assert_eq!(resolve_signal("32"), None);
-        assert_eq!(resolve_signal("64"), None);
-        assert_eq!(resolve_signal("1234"), None);
-        assert_eq!(resolve_signal("-1"), None);
-    }
-
-    // ---------------- negative PIDs: the headline fix ----------------
-
-    #[test]
-    fn a_negative_pid_is_a_process_group_not_a_signal() {
-        // The whole bug in one assertion. `kill -TERM -1234` means "SIGTERM to
-        // process group 1234"; the old parser made the signal 1234 and then
-        // complained there was no PID.
-        assert_eq!(sent(&["-TERM", "-1234"]), (15, s(&["-1234"])));
-    }
-
-    #[test]
-    fn a_negative_pid_mixed_with_a_positive_one() {
-        assert_eq!(sent(&["-9", "-1234", "567"]), (9, s(&["-1234", "567"])));
-    }
-
-    #[test]
-    fn a_lone_leading_negative_number_is_a_signal_not_a_pid() {
-        // `kill -1` has meant "send SIGHUP" for forty years, so a bare
-        // leading `-N` cannot also mean "process group N" — the grammar has
-        // no room for both. `--` is how you say you meant the group, which is
-        // exactly why POSIX gives `kill` a `--`.
-        assert!(
-            parse_args(&s(&["-1234"]))
-                .unwrap_err()
-                .contains("invalid signal")
-        );
-        assert_eq!(sent(&["-1", "99"]), (1, s(&["99"])));
-        assert_eq!(sent(&["--", "-1234"]), (15, s(&["-1234"])));
-    }
-
-    #[test]
-    fn pid_zero_is_the_callers_own_group() {
-        assert_eq!(sent(&["-HUP", "0"]), (1, s(&["0"])));
-    }
-
-    #[test]
-    fn only_the_first_argument_can_be_a_signal() {
-        // The old implementation scanned every argument, so this parsed as
-        // "signal 9, PIDs 100 and 200" and a test asserted that it did. It is
-        // the reason a negative PID was unreachable, and POSIX puts the signal
-        // first precisely so the two cannot be confused.
-        assert_eq!(sent(&["100", "-9", "200"]), (15, s(&["100", "-9", "200"])));
-    }
-
-    // ---------------- the `--` separator ----------------
-
-    #[test]
-    fn double_dash_alone_introduces_pids() {
-        assert_eq!(sent(&["--", "-1"]), (15, s(&["-1"])));
-    }
-
-    #[test]
-    fn double_dash_may_follow_a_signal() {
-        assert_eq!(sent(&["-9", "--", "-1"]), (9, s(&["-1"])));
-    }
-
-    // ---------------- -s / -n / --signal ----------------
-
-    #[test]
-    fn dash_s_takes_a_separate_argument() {
-        // POSIX's own spelling — `kill -s TERM pid` — and the old code read
-        // the `s` as a signal name and died with `unknown signal: s`.
-        assert_eq!(sent(&["-s", "TERM", "123"]), (15, s(&["123"])));
-        assert_eq!(sent(&["-s", "KILL", "1", "2"]), (9, s(&["1", "2"])));
-    }
-
-    #[test]
-    fn dash_s_takes_an_attached_argument() {
-        assert_eq!(sent(&["-sTERM", "123"]), (15, s(&["123"])));
-    }
-
-    #[test]
-    fn dash_n_takes_a_number() {
-        assert_eq!(sent(&["-n", "9", "123"]), (9, s(&["123"])));
-        assert_eq!(sent(&["-n9", "123"]), (9, s(&["123"])));
-    }
-
-    #[test]
-    fn long_signal_option() {
-        assert_eq!(sent(&["--signal", "HUP", "5"]), (1, s(&["5"])));
-        assert_eq!(sent(&["--signal=HUP", "5"]), (1, s(&["5"])));
-    }
-
-    #[test]
-    fn dash_s_without_an_argument_errors() {
-        let err = parse_args(&s(&["-s"])).unwrap_err();
-        assert!(err.contains("requires an argument"), "{err}");
-    }
-
-    #[test]
-    fn dash_s_with_a_bad_signal_errors() {
-        let err = parse_args(&s(&["-s", "NOPE", "1"])).unwrap_err();
-        assert!(err.contains("invalid signal"), "{err}");
-    }
-
-    // ---------------- ordinary parsing ----------------
-
-    #[test]
-    fn parse_empty_errors() {
-        assert!(parse_args(&s(&[])).unwrap_err().contains("missing operand"));
-    }
-
-    #[test]
-    fn default_signal_is_term() {
-        assert_eq!(sent(&["1234"]), (15, s(&["1234"])));
-    }
-
-    #[test]
-    fn numeric_and_named_signals() {
-        assert_eq!(sent(&["-9", "1234"]).0, 9);
-        assert_eq!(sent(&["-KILL", "1234"]).0, 9);
-        assert_eq!(sent(&["-SIGTERM", "1"]).0, 15);
-        assert_eq!(sent(&["-0", "1"]).0, 0);
-    }
-
-    #[test]
-    fn multiple_pids() {
-        assert_eq!(
-            sent(&["-INT", "100", "200", "300"]).1,
-            s(&["100", "200", "300"])
-        );
-    }
-
-    #[test]
-    fn unknown_signal_errors() {
-        assert!(
-            parse_args(&s(&["-NOPE", "1"]))
-                .unwrap_err()
-                .contains("invalid signal")
-        );
-    }
-
-    #[test]
-    fn a_signal_with_no_pid_errors() {
-        assert!(
-            parse_args(&s(&["-9"]))
-                .unwrap_err()
-                .contains("missing operand")
-        );
-    }
-
-    #[test]
-    fn a_mistyped_long_option_is_not_a_signal() {
-        let err = parse_args(&s(&["--kill", "1"])).unwrap_err();
-        assert!(err.contains("unrecognized option"), "{err}");
-    }
-
-    // ---------------- -l ----------------
-
-    #[test]
-    fn dash_l_with_no_operands_lists_everything() {
-        match parse_args(&s(&["-l"])).unwrap() {
-            KillAction::List { operands, table } => {
-                assert!(operands.is_empty());
-                assert!(!table);
+    impl System for Fake {
+        fn kill(&self, pid: i32, sig: i32) -> Result<(), i32> {
+            self.sent.borrow_mut().push(("kill", pid, sig, None));
+            if sig < 0 {
+                Err(22)
+            } else if pid == 999_999 {
+                Err(3)
+            } else {
+                Ok(())
             }
-            other @ KillAction::Send { .. } => panic!("expected a List, got {other:?}"),
+        }
+        fn sigqueue(&self, pid: i32, sig: i32, value: i32) -> Result<(), i32> {
+            self.sent
+                .borrow_mut()
+                .push(("sigqueue", pid, sig, Some(value)));
+            Ok(())
+        }
+        fn rtmin(&self) -> i32 {
+            34
         }
     }
 
+    /// The status, what was sent, and standard output.
+    fn go(words: &[&str]) -> (u8, Vec<Sent>, String) {
+        let sys = Fake::default();
+        let mut argv = vec![b"kill".to_vec()];
+        argv.extend(words.iter().map(|w| w.as_bytes().to_vec()));
+        let mut out = Vec::new();
+        let status = run(argv, &sys, &mut out);
+        let sent = sys.sent.borrow().clone();
+        (status, sent, String::from_utf8(out).unwrap())
+    }
+
     #[test]
-    fn dash_capital_l_asks_for_the_table() {
-        match parse_args(&s(&["-L"])).unwrap() {
-            KillAction::List { table, .. } => assert!(table),
-            other @ KillAction::Send { .. } => panic!("expected a List, got {other:?}"),
+    fn a_pid_alone_is_sigterm() {
+        let (status, sent, _) = go(&["123"]);
+        assert_eq!(status, 0);
+        assert_eq!(sent, vec![("kill", 123, 15, None)]);
+    }
+
+    #[test]
+    fn the_signal_word_is_taken_from_anywhere() {
+        assert_eq!(go(&["-9", "123"]).1, vec![("kill", 123, 9, None)]);
+        assert_eq!(go(&["123", "-9"]).1, vec![("kill", 123, 9, None)]);
+        assert_eq!(go(&["--", "123", "-KILL"]).1, vec![("kill", 123, 9, None)]);
+        assert_eq!(go(&["-sigint", "5"]).1, vec![("kill", 5, 2, None)]);
+        assert_eq!(go(&["-RTMIN+1", "5"]).1, vec![("kill", 5, 35, None)]);
+        // The first one only: the second is an option getopt refuses.
+        let (status, sent, _) = go(&["-9", "-HUP", "5"]);
+        assert_eq!((status, sent.len()), (1, 0));
+    }
+
+    #[test]
+    fn s_takes_any_name_and_an_unknown_one_is_minus_one() {
+        assert_eq!(
+            go(&["-s", "HUP", "5", "6"]).1,
+            vec![("kill", 5, 1, None), ("kill", 6, 1, None)]
+        );
+        assert_eq!(go(&["--signal=USR1", "5"]).1, vec![("kill", 5, 10, None)]);
+        assert_eq!(go(&["-s", "IO", "5"]).1, vec![("kill", 5, 29, None)]);
+        // kill(5, -1) fails, Invalid argument, and the status is 1.
+        let (status, sent, _) = go(&["-s", "FOO", "5"]);
+        assert_eq!((status, sent), (1, vec![("kill", 5, -1, None)]));
+    }
+
+    #[test]
+    fn a_failure_is_per_process_and_the_status_is_one() {
+        let (status, sent, _) = go(&["5", "999999", "6"]);
+        assert_eq!(status, 1);
+        assert_eq!(sent.len(), 3, "the PIDs after the failure are signalled");
+    }
+
+    #[test]
+    fn a_pid_that_is_no_number_ends_the_run_where_it_stands() {
+        let (status, sent, _) = go(&["5", "abc", "6"]);
+        assert_eq!(status, 1);
+        assert_eq!(sent, vec![("kill", 5, 15, None)]);
+        assert_eq!(go(&["abc"]).0, 1);
+        assert_eq!(go(&[""]).0, 1);
+    }
+
+    #[test]
+    fn a_pid_is_cut_to_a_pid_t() {
+        assert_eq!(go(&["4294967297"]).1, vec![("kill", 1, 15, None)]);
+    }
+
+    /// The first deliberate difference: upstream sends to -1 -- every
+    /// process -- for `kill -9 -1234`; here it is the group 1234, and the
+    /// words after it are read too.
+    #[test]
+    fn a_negative_pid_is_its_process_group_with_or_without_dashes() {
+        assert_eq!(go(&["-9", "-1234"]).1, vec![("kill", -1234, 9, None)]);
+        assert_eq!(go(&["-9", "--", "-1234"]).1, vec![("kill", -1234, 9, None)]);
+        assert_eq!(
+            go(&["-0", "-12", "-34", "56"]).1,
+            vec![
+                ("kill", -12, 0, None),
+                ("kill", -34, 0, None),
+                ("kill", 56, 0, None)
+            ]
+        );
+        // And never -1 unless asked for in so many words.
+        assert!(go(&["-9", "-1234"]).1.iter().all(|s| s.1 != -1));
+    }
+
+    #[test]
+    fn q_sends_with_sigqueue_and_its_value_cut_to_an_int() {
+        assert_eq!(go(&["-q", "5", "7"]).1, vec![("sigqueue", 7, 15, Some(5))]);
+        assert_eq!(
+            go(&["--queue=4294967297", "-s", "USR1", "7"]).1,
+            vec![("sigqueue", 7, 10, Some(1))]
+        );
+        let (status, sent, _) = go(&["-q", "x", "7"]);
+        assert_eq!((status, sent.len()), (1, 0));
+    }
+
+    #[test]
+    fn l_lists_or_translates_and_never_signals() {
+        let (status, sent, out) = go(&["-l"]);
+        assert_eq!((status, sent.len()), (0, 0));
+        assert!(out.starts_with("HUP INT QUIT"), "{out}");
+        assert_eq!(go(&["-l", "9"]).2, "KILL\n");
+        assert_eq!(go(&["-lTERM"]).2, "15\n");
+        assert_eq!(go(&["--list=sigkill"]).2, "9\n");
+        assert_eq!(go(&["--list", "kill"]).2, "9\n");
+        // The next word is used only if it does not begin with `-`.
+        assert!(go(&["-l", "--", "9"]).2.starts_with("HUP"));
+        // An unknown name is a warning, and the status is still 0.
+        let (status, _, out) = go(&["-l", "nosuch"]);
+        assert_eq!((status, out.as_str()), (0, ""));
+        // `-L` is the table.
+        assert!(go(&["-L"]).2.starts_with(" 1 HUP      2 INT"));
+    }
+
+    #[test]
+    fn usage_errors_and_help() {
+        assert_eq!(go(&[]).0, 1);
+        assert_eq!(go(&["-9"]).0, 1, "a signal and no PID");
+        assert_eq!(go(&["-Z", "5"]), (1, vec![], String::new()));
+        assert_eq!(go(&["--nosuch", "5"]).0, 1);
+        assert_eq!(go(&["-s"]).0, 1);
+        let (status, _, out) = go(&["-h"]);
+        assert_eq!(status, 0);
+        assert!(
+            out.starts_with("\nUsage:\n kill [options] <pid> [...]\n"),
+            "{out}"
+        );
+        assert!(out.ends_with("\nFor more details see kill(1).\n"), "{out}");
+        assert_eq!(go(&["-V"]).2, "kill from SlateOS coreutils 0.1.0\n");
+    }
+
+    #[test]
+    fn strtosig_is_procps_but_never_frees_what_it_should_not() {
+        let s = |w: &str| strtosig(w.as_bytes()).map(|v| String::from_utf8(v).unwrap());
+        assert_eq!(s("9").as_deref(), Some("KILL"));
+        assert_eq!(s("15").as_deref(), Some("TERM"));
+        assert_eq!(s("kill").as_deref(), Some("9"));
+        assert_eq!(s("SIGkill").as_deref(), Some("9"));
+        assert_eq!(s("POLL").as_deref(), Some("29"));
+        assert_eq!(
+            s("4294967305").as_deref(),
+            Some("KILL"),
+            "an int, as C cuts it"
+        );
+        for unknown in [
+            "0", "32", "SIG9", "IO", "CLD", "RTMIN", "9x", " 9", "", "SIG",
+        ] {
+            assert_eq!(s(unknown), None, "{unknown:?}");
         }
-    }
-
-    #[test]
-    fn dash_l_keeps_its_operands() {
-        // The old code took `-l` as the whole command and threw away the rest,
-        // so `kill -l 9` printed all twelve names instead of `KILL`.
-        match parse_args(&s(&["-l", "9", "TERM"])).unwrap() {
-            KillAction::List { operands, .. } => assert_eq!(operands, s(&["9", "TERM"])),
-            other @ KillAction::Send { .. } => panic!("expected a List, got {other:?}"),
-        }
-    }
-
-    /// One operand, as the operating system would hand it over.
-    fn one(arg: &str) -> &OsStr {
-        OsStr::new(arg)
-    }
-
-    #[test]
-    fn translate_number_to_name_and_back() {
-        assert_eq!(translate_operand(one("9")).unwrap(), "KILL");
-        assert_eq!(translate_operand(one("KILL")).unwrap(), "9");
-        assert_eq!(translate_operand(one("sigterm")).unwrap(), "15");
-    }
-
-    #[test]
-    fn translate_subtracts_128_from_a_wait_status() {
-        // `kill -l $?` after a process died of SIGKILL: `$?` is 137.
-        assert_eq!(translate_operand(one("137")).unwrap(), "KILL");
-        assert_eq!(translate_operand(one("143")).unwrap(), "TERM");
-    }
-
-    #[test]
-    fn translate_rejects_what_it_cannot_name() {
-        assert!(translate_operand(one("200")).is_err());
-        assert!(translate_operand(one("NOPE")).is_err());
-    }
-
-    #[test]
-    fn signal_list_is_one_space_separated_line() {
-        let listing = format_signal_list();
-        assert_eq!(listing.lines().count(), 1);
-        let words: Vec<&str> = listing.trim_end().split(' ').collect();
-        assert_eq!(words.len(), SIGNALS.len());
-        assert_eq!(words.first(), Some(&"HUP"));
-        assert_eq!(words.last(), Some(&"SYS"));
-    }
-
-    #[test]
-    fn signal_table_names_every_signal_with_its_number() {
-        let table = format_signal_table();
-        for &(num, name) in SIGNALS {
-            assert!(table.contains(&format!("SIG{name}")), "missing SIG{name}");
-            assert!(
-                table.contains(&format!("{num:>2}) SIG{name}")),
-                "missing {num}) SIG{name}"
-            );
-        }
-        assert!(table.ends_with('\n'));
-        assert!(!table.contains(" \n"), "trailing blanks before a newline");
-    }
-
-    // ---------------- diagnostics ----------------
-
-    #[test]
-    fn each_errno_gets_its_own_sentence() {
-        // One fixed string for all three was the old behaviour, and it made a
-        // dead PID indistinguishable from one we lacked authority over.
-        let any = io::Error::from(ErrorKind::Other);
-        assert_eq!(errno_text(Some(1), &any), "Operation not permitted");
-        assert_eq!(errno_text(Some(3), &any), "No such process");
-        assert_eq!(errno_text(Some(22), &any), "Invalid argument");
-    }
-
-    #[test]
-    fn an_unexpected_errno_falls_back_to_strerror() {
-        let e = io::Error::from(ErrorKind::PermissionDenied);
-        assert_eq!(errno_text(None, &e), "Permission denied");
     }
 }

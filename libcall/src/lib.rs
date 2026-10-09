@@ -676,6 +676,36 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), i32> {
     kill_one(pid, sig)
 }
 
+/// [`kill`] with `pid` as `kill(2)` takes it, the broadcast forms included:
+/// 0 is the caller's process group, -1 every process the caller may signal,
+/// below -1 the group `-pid`.
+///
+/// For the `kill` command, whose operands *are* those -- `kill -TERM -- -1234`
+/// stops a job -- and which a person types knowing what they ask. This is
+/// the "differently-named function" [`kill`]'s documentation keeps the
+/// broadcast forms behind: a process list acting on one selected row must not
+/// reach here.
+///
+/// # Errors
+///
+/// The `errno` set by `kill(2)`: [`EINVAL`] for a number that is no signal,
+/// [`ESRCH`] for no such process or group, [`EPERM`]; [`ENOSYS`] off Unix.
+pub fn kill_any(pid: i32, sig: i32) -> Result<(), i32> {
+    kill_one(pid, sig)
+}
+
+/// [`sigqueue`] with `pid` as the C library takes it: any value at all,
+/// which the kernel answers -- on Linux `ESRCH` for a `pid` below 1, there
+/// being no queued signal for a group. For the `kill` command, as
+/// [`kill_any`] is.
+///
+/// # Errors
+///
+/// The `errno` set by `sigqueue`, as for [`sigqueue`]; [`ENOSYS`] off Unix.
+pub fn sigqueue_any(pid: i32, sig: i32, value: i32) -> Result<(), i32> {
+    sigqueue_one(pid, sig, value)
+}
+
 #[cfg(unix)]
 fn kill_one(pid: i32, sig: i32) -> Result<(), i32> {
     // SAFETY: `kill` reads no user memory -- both arguments are scalars --

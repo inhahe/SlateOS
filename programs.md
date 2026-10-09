@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**501 programs; 342 on the image, 6 carried inside the kernel.**
+**500 programs; 341 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 316
+## Userland utilities and services (`userspace/`, lane B) -- 315
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -135,8 +135,7 @@ two disagree.
 | `join` | Pair up the lines of two sorted files that share a field. | yes | `coreutils` |  |
 | `journalctl` | Journal Log Viewer (`journalctl`) | yes |  |  |
 | `jq` | Slate OS JSON processor | yes |  |  |
-| `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
-| `kill` | Process Termination Utility | yes |  | `killall` |
+| `kill` | Send a signal to a process: procps-ng 4.0.4's `kill.c`, ported, as Ubuntu ships it at `/usr/bin/kill`. | yes | `coreutils` | `killall` |
 | `killall5` | Send a signal to every process but those of its own session: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
 | `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |

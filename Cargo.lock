@@ -1968,16 +1968,6 @@ name = "keylayout"
 version = "0.1.0"
 
 [[package]]
-name = "kill"
-version = "0.1.0"
-dependencies = [
- "killconv",
- "procinfo",
- "quoting",
- "sysroot-dep",
-]
-
-[[package]]
 name = "killconv"
 version = "0.1.0"
 

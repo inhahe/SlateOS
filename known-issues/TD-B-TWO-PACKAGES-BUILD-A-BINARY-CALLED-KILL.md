@@ -1,8 +1,21 @@
-## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL (lane B, 2026-09-16) — **open**
+## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL (lane B, 2026-09-16) — FIXED on lane-b, pending a boot test on main
 
-**Status: OPEN**, found 2026-09-16, same cause as
+**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
+then it moves to `known-issues-resolved/`. The operator answered B-Q22
+(design-decisions §1072): one `kill`, and SlateOS's message route and the
+Linux signal route both inside it, chosen per program. The one `kill` is now
+procps-ng 4.0.4's, ported into coreutils and held to Ubuntu's by
+`scripts/kill-diff.sh`; `userspace/kill` is deleted, and with it the forced
+end a plain `kill PID` became whenever the build linked it last. The
+message route -- *close* and *terminate* to a program that answers them --
+joins that program when the lifecycle protocol exists (§1072's work, on
+lane B's roadmap), which is the merge this entry asked for. `killall`
+leaves the image until psmisc's is ported
+(`requests/b-d-killall-is-not-kill-under-another-name-any-more.md`); the
+baseline line in `scripts/check-bin-collisions.py` is gone.
+
+Found 2026-09-16, same cause as
 TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER and found by the same sweep.
-Baselined in `scripts/check-bin-collisions.py`.
 
 **In short:** as with `logger`, two packages build a binary called `kill` into
 the same directory, so `/bin/kill` is whichever linked last. Unlike `logger`,

@@ -1,72 +1,81 @@
 ### [A] On more than one CPU the application processors stop ticking, and no boot test runs more than one CPU -- 2026-10-08
 
-**Status:** OPEN
+**Status:** OPEN -- the scheduling causes fixed on lane-a-wip 2026-10-09,
+awaiting a boot on main; no boot test runs more than one CPU yet.
 
 **In short:** every boot test runs the kernel on a single CPU, so nothing has
-been checking that it works on more than one -- and on four it does not,
-quite. Booted under QEMU with four CPUs, the other three CPUs come up, then
-go silent: the watchdog reports them making no progress for tens of seconds
-at a time, and the boot crawls instead of finishing. A real PC has more than
-one core, so this is what the system would do on actual hardware.
+been checking that it works on more than one -- and on two or four it did
+not, quite. Booted under QEMU with several CPUs, the other CPUs came up and
+then mostly sat idle while work queued behind one busy CPU; a benchmark that
+takes 7 s on one CPU took four minutes on two and then gave up. A real PC
+has more than one core, so this is what the system would have done on actual
+hardware. Four causes were found and fixed (below). What remains is a boot
+test on more than one CPU, so that it stays fixed.
 
 **How it was found:** testing `kexec` (restarting without the firmware) on
 four CPUs, 2026-10-08, with the fast-boot helper given `-smp 4` and
-`selftest.skip=1 kexec.selftest=1`. The first such boot found a worse bug,
-fixed the same day: the system-call entry kept one per-CPU record for all
-CPUs and set up only the boot CPU's MSRs, so a thread that blocked in a
-system call and resumed on another CPU wrote its stack pointer to address 8
+`selftest.skip=1 kexec.selftest=1`. That boot first found a worse bug, fixed
+the same day: the system-call entry kept one per-CPU record for all CPUs and
+set up only the boot CPU's MSRs, so a thread that blocked in a system call
+and resumed on another CPU wrote its stack pointer to address 8
 (`syscall::entry`, `PER_CPU` is now one record per CPU, set up on each by
-`init_ap`; `smp::self_test` checks every online CPU). With that fixed the
-same boot no longer crashes, and shows this instead.
+`init_ap`; `smp::self_test` checks every online CPU).
 
-**What the log shows** (`/tmp`-style copy: the fast boot's
-`build/fast/serial.txt`, 4 vCPUs, QEMU TCG on Windows):
+**What the log showed:**
 
-- `[smp] SMP bootstrap complete: 4 CPU(s) online`, each AP's idle task
-  registered.
-- About two seconds later: `SOFT LOCKUP on CPU 2 (heartbeat stuck at 0)`,
-  `CPU 1 ... stuck at 2`, `CPU 3 ... stuck at 2` -- CPU 2 never took a single
-  heartbeat tick; 1 and 3 took two and stopped.
-- Lockup reports every five seconds for 45 s; then `CPU 1 recovered`. A
-  network self-test's 2.5 s wait took 34 s. The boot did not reach its end in
-  420 s, where one CPU takes about 60.
+- 4 vCPUs, single-threaded TCG: `SOFT LOCKUP on CPU 2 (heartbeat stuck at
+  0)`, `CPU 1 ... stuck at 2`, `CPU 3 ... stuck at 2` two seconds after the
+  APs came up, every five seconds for 45 s, then `CPU 1 recovered`.
+- 2 vCPUs, `-accel tcg,thread=multi` (one host thread per vCPU): no lockup
+  report, but the ring benchmark's `idle_beside_busy` load ended at its
+  deadline -- `"samples":2, "errors":14, "window_ms":234524,
+  "timed_out":true` -- where one CPU takes about 7 s. The QEMU monitor
+  (`info registers -a`) showed CPU 0 in `hlt` the whole time and CPU 1
+  running the load's busy sender.
 
-**The lockups were the emulator; a hang is not.** The same boot under
-`-accel tcg,thread=multi` (one host thread per vCPU) has no soft lockup at
-all, and the network test's 2.5 s wait takes 2.5 s again: single-threaded
-TCG, round-robin across four vCPUs, was starving them. But that boot hangs
-too, later: in the ring benchmark's `idle_beside_busy` load
-(`net::ring_bench`), the prober task finishes (`Task 20 exiting`) and the
-boot thread never prints the load's report line -- after which it would
-stop the busy sender, wait at most `LOAD_DEADLINE_MS` for it, close the
-sockets and go on. So the boot thread is stuck in `wait_for`'s
-`sleep_ms(5)` (a timer wakeup lost across CPUs) or in `socket::close`
-behind the busy sender running on another CPU (a lock or a wakeup lost the
-same way). One CPU never shows it.
+**The four causes, and what was done** (lane-a-wip, 2026-10-09):
 
-**It is starvation, not a deadlock** (2 vCPUs under MTTCG, the QEMU
-monitor's `info registers -a` and stack words, symbolized; 2026-10-08):
+1. **A task switched in at an interrupt's exit ran with no tick.** An AP's
+   idle loop stops its LAPIC timer before `hlt` and restarts it on its own
+   way out. A switch made from an interrupt that arrived during that `hlt` (a
+   deferred preemption, `sched::do_deferred_preempt`) never went back
+   through the loop, so the task it switched to -- and everything that CPU
+   ran until it next idled -- ran with no timer: never time-sliced, never
+   balanced. That is the busy sender owning CPU 1 for minutes. **Fix:**
+   `apic::TIMER_STOPPED` records which CPUs stopped their timer, and every
+   switch to a task other than the CPU's idle task restarts it
+   (`sched::leave_idle_for`).
+2. **The same switch left the CPU marked idle for RCU.** The idle loops mark
+   the CPU idle (quiescent) for RCU before `hlt`; a task switched in from
+   the interrupt ran with the mark still set, so `rcu::synchronize` -- and
+   `membarrier`'s global barrier, built on it -- passed that CPU over even
+   inside a read-side critical section. On the BSP this was the common case:
+   its timer tick preempts the idle loop's `hlt` on every wake. **Fix:** the
+   same switch clears the mark (`rcu::leave_idle`, a sequentially consistent
+   store).
+3. **Both soft-lockup watchdogs reported idle APs as locked up.** An idle AP
+   takes no timer ticks by design, so its heartbeat stops; `watchdog::check`
+   exempted only `sched::cpu_is_idle`, which is the scheduler's idle
+   *fallback*, not where an AP idles, and `sched::watchdog_check` exempted
+   nothing. Hence "stuck at 0" for an AP that went idle at once, and
+   "recovered" when it next ran a task. **Fix:** both exempt
+   `apic::timer_stopped_on(cpu)`.
+4. **A woken task went back to its busy CPU while another idled.** `wake`
+   queued a task on its last CPU however busy that was, and an idle AP, its
+   tick stopped, never ran the balancer that might have taken it. **Fix:**
+   `sched::select_wake_cpu` keeps the last CPU only if it is idle, and
+   otherwise picks an idle CPU the task may run on (design-decisions 1558).
 
-- The load does end -- at its deadline: `idle_beside_busy` reports
-  `"samples":2, "errors":14, "busy_bytes":10228736, "window_ms":234524,
-  "timed_out":true`, and the boot goes on. On one CPU it takes about 7 s and
-  fails nothing.
-- Throughout, **CPU 0 is idle in `hlt`** (interrupts on), and **CPU 1 runs the
-  busy sender** -- caught inside `KernelHeap::dealloc` / `check_redzone`,
-  re-reading its APIC ID (`current_cpu_index`) on the heap's hot path: busy,
-  not stuck. So the prober, the boot thread and the netstack daemon are
-  runnable (or soon woken) on CPU 1's queue while CPU 0 has nothing: no idle
-  CPU takes work from a busy one, and CPU 1 barely time-slices the busy
-  sender against them (two probes in four minutes).
-
-**What to look at:** where a woken task is queued (`sched::wake` and
-`try_wake` -- the waker's CPU, the task's last one, or an idle one), whether
-an idle CPU ever pulls from a loaded one (`sched_migrate`, the idle loop),
-and why round-robin at priority 16 on CPU 1 does not give the prober its
-turns -- the anti-starvation booster is per-CPU, and a task queued behind a
-CPU-bound one should still get a slice each tick.
+Found on the way, and fixed with them: the voluntary context-switch path
+(`yield_now`, `block_current`) ran with interrupts on between naming the
+incoming task current and switching to its stack, though `switch_context`
+asks for them off. An interrupt there whose exit found a preemption pending
+would run a second `schedule_inner` as the wrong task and save the outgoing
+task's stack as the incoming one's context. `sched::SwitchIrqs` now clears
+the flag for the switch and gives each task back the one it entered with;
+`sched::self_test_switch_interrupt_flag` checks both states.
 
 **What would make it stay fixed:** a boot test on more than one CPU. Today
-`scripts/boot-test.sh` starts QEMU without `-smp`, so a multi-CPU regression
-is invisible to every gate. Once an SMP boot is clean, it should run at least
-in the release boot.
+`scripts/boot-test.sh` starts QEMU without `-smp`, so a multi-CPU
+regression is invisible to every gate. Once a full-self-test boot on two
+CPUs is clean, it should run at least in the release boot.

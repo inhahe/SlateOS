@@ -815,6 +815,34 @@ pub unsafe fn stop_timer() {
             LVT_MASKED | TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR),
         );
     }
+    if let Some(flag) = TIMER_STOPPED.get(crate::smp::current_cpu_index()) {
+        flag.store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Per CPU: its LAPIC timer is masked ([`stop_timer`]) -- an application
+/// processor in tickless idle -- and not yet restarted ([`restart_timer`]).
+///
+/// Read by the scheduler, which restarts the timer before it runs anything
+/// but the idle task on such a CPU (`sched::schedule_inner`): a task must
+/// never run without the tick that time-slices it. Until 2026-10-09 only the
+/// AP idle loop restarted it, after its `hlt`, so a switch made any other way
+/// -- from an interrupt's exit, past the idle loop -- left the task running
+/// with no tick: never preempted, and starving every task queued behind it
+/// on that CPU (a two-CPU boot's ring benchmark took its whole four-minute
+/// deadline for two probes). Read too by the soft-lockup watchdogs, for which
+/// a CPU with its timer stopped in idle is quiet, not locked up.
+static TIMER_STOPPED: [core::sync::atomic::AtomicBool; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::smp::MAX_CPUS];
+
+/// Whether CPU `cpu`'s LAPIC timer is stopped ([`stop_timer`]) and not yet
+/// restarted ([`restart_timer`]): tickless idle. `false` for an index past
+/// the table.
+#[must_use]
+pub fn timer_stopped_on(cpu: usize) -> bool {
+    TIMER_STOPPED
+        .get(cpu)
+        .is_some_and(|f| f.load(core::sync::atomic::Ordering::Acquire))
 }
 
 /// Restart the APIC timer on the current CPU (leaving tickless idle).
@@ -842,6 +870,9 @@ pub unsafe fn restart_timer() {
         // Restart the countdown from the calibrated 10 ms value.
         // Writing initial_count restarts the counter from this value.
         apic_write(APIC_TIMER_INITIAL, count);
+    }
+    if let Some(flag) = TIMER_STOPPED.get(crate::smp::current_cpu_index()) {
+        flag.store(false, core::sync::atomic::Ordering::Release);
     }
 }
 

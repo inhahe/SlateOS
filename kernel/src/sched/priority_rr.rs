@@ -1237,9 +1237,18 @@ impl PerCpuScheduler {
     /// rather than [`queue_length`](Self::queue_length).
     #[must_use]
     pub fn real_queue_length(&self, cpu: usize) -> usize {
-        self.queues.get(cpu).map_or(0, |m| {
-            Self::try_locked_irqs_off(m, |backend| backend.real_tasks()).unwrap_or(0)
-        })
+        self.try_real_queue_length(cpu).unwrap_or(0)
+    }
+
+    /// [`real_queue_length`](Self::real_queue_length), but `None` -- rather
+    /// than 0 -- when the CPU index is out of range or the queue's lock is
+    /// held: for a caller to whom "nothing queued" is a promise, not an
+    /// estimate (`sched::cpu_idle_for_wake`). `try_lock`, so ISR-safe.
+    #[must_use]
+    pub fn try_real_queue_length(&self, cpu: usize) -> Option<usize> {
+        self.queues
+            .get(cpu)
+            .and_then(|m| Self::try_locked_irqs_off(m, |backend| backend.real_tasks()))
     }
 
     /// Check if any *other* CPU has real work that could be stolen.

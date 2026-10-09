@@ -1758,6 +1758,41 @@ fn set_current_task(cpu: usize, id: TaskId) {
     CURRENT_TASK_IDS[cpu].store(id, Ordering::Release);
 }
 
+/// Before this CPU, `cpu`, switches to task `next`: when `next` is not its
+/// idle task, undo what the idle loop did on its way into `hlt` -- RCU's idle
+/// mark ([`crate::rcu::leave_idle`]) and, on an AP, the stopped LAPIC timer
+/// ([`crate::apic::timer_stopped_on`]).
+///
+/// The idle loops undo both themselves after their `hlt`, but only on their
+/// own path. A switch made at an interrupt's exit while the idle task sat in
+/// `hlt` -- a deferred preemption ([`do_deferred_preempt`]) -- skipped them,
+/// and until the task it switched to blocked, that CPU ran with no tick and
+/// marked idle: nothing it ran was time-sliced or balanced, starving the
+/// tasks queued behind it (on two CPUs, the ring benchmark's prober got two
+/// probes in four minutes behind its busy sender), and RCU's grace periods,
+/// and `membarrier`'s global barrier with them, passed it over as quiescent
+/// while it ran. Here every switch is covered.
+///
+/// Called with interrupts off, between [`set_current_task`] and
+/// `switch_context`, on `cpu` itself, so the LAPIC write is this CPU's own.
+#[inline]
+fn leave_idle_for(cpu: usize, next: TaskId) {
+    let idle = IDLE_TASK_IDS
+        .get(cpu)
+        .map(|slot| slot.load(Ordering::Acquire));
+    if idle == Some(next) {
+        return;
+    }
+    crate::rcu::leave_idle(cpu);
+    if crate::apic::timer_stopped_on(cpu) {
+        // SAFETY: only a CPU whose APIC is initialized stops its timer, and
+        // the write is to this CPU's own LAPIC with interrupts off.
+        unsafe {
+            crate::apic::restart_timer();
+        }
+    }
+}
+
 /// Read the current-task ID for the calling CPU.
 #[inline]
 fn load_current_task() -> TaskId {
@@ -2030,6 +2065,65 @@ fn choose_cpu_for_task(task: &Task) -> usize {
     } else {
         task.last_cpu
     }
+}
+
+/// Whether `cpu` is idle, as placing a woken task asks: running its own idle
+/// task with no other task queued. The BSP's idle task, task 0, is the boot
+/// until the boot is done ([`BOOT_TASK_WORKING`]), and a CPU that has not
+/// registered an idle task is not up; neither is idle. A queue whose lock is
+/// held counts as busy.
+///
+/// Lock-free but for a `try_lock` of `cpu`'s queue, and so a moment stale
+/// either way -- which costs at most a placement that was not the best, never
+/// correctness: a task queued on any CPU runs there or is balanced away.
+fn cpu_idle_for_wake(cpu: usize) -> bool {
+    let Some(idle) = IDLE_TASK_IDS
+        .get(cpu)
+        .map(|slot| slot.load(Ordering::Acquire))
+    else {
+        return false;
+    };
+    if idle == u64::MAX || (cpu == 0 && BOOT_TASK_WORKING.load(Ordering::Acquire)) {
+        return false;
+    }
+    let running = CURRENT_TASK_IDS
+        .get(cpu)
+        .map(|slot| slot.load(Ordering::Acquire));
+    running == Some(idle) && PER_CPU_SCHED.try_real_queue_length(cpu) == Some(0)
+}
+
+/// The CPU a task that has just become runnable -- woken, or resumed from a
+/// stop -- is queued on.
+///
+/// [`choose_cpu_for_task`]'s answer, its last CPU, whose cache it is warm in,
+/// when that CPU is idle or no other CPU the task may run on is; otherwise
+/// the first idle CPU after it that the task may run on, which runs it at once
+/// rather than after whatever holds its last one. Linux's
+/// `select_idle_sibling`, without its search by cache domain: the machines
+/// this kernel runs on share their last-level cache across cores.
+///
+/// Before this, a task went back to its last CPU however busy: on two CPUs
+/// the ring benchmark's prober queued behind its CPU-bound busy sender while
+/// the other CPU sat in `hlt`, with its tick stopped, balancing nothing
+/// (known-issues `A-SMP-APS-STOP-TICKING-AND-NO-BOOT-TEST-RUNS-MORE-THAN-ONE-CPU`).
+/// On one CPU this is `choose_cpu_for_task`.
+fn select_wake_cpu(task: &Task) -> usize {
+    let preferred = choose_cpu_for_task(task);
+    let n = PER_CPU_SCHED.num_cpus();
+    if n <= 1 || cpu_idle_for_wake(preferred) {
+        return preferred;
+    }
+    let online = crate::cpu_hotplug::online_mask();
+    (1..n)
+        .filter_map(|step| preferred.wrapping_add(step).checked_rem(n))
+        .find(|&cpu| {
+            let up = u32::try_from(cpu)
+                .ok()
+                .and_then(|bit| online.checked_shr(bit))
+                .is_some_and(|m| m & 1 != 0);
+            up && task.can_run_on(cpu) && cpu_idle_for_wake(cpu)
+        })
+        .unwrap_or(preferred)
 }
 
 /// Signal a CPU that new work has been enqueued on its run queue.
@@ -3010,7 +3104,7 @@ pub fn wake(task_id: TaskId) -> bool {
                 task.burst_ticks = 0;
                 let prio = task.effective_priority();
                 // Respect CPU affinity when choosing the target CPU.
-                target_cpu = choose_cpu_for_task(task);
+                target_cpu = select_wake_cpu(task);
                 task.last_cpu = target_cpu;
                 PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
                 preempt_target = wake_preempts(target_cpu, prio);
@@ -3101,7 +3195,7 @@ pub fn try_wake(task_id: TaskId) -> bool {
     task.mark_ready(crate::apic::tick_count());
     task.burst_ticks = 0;
     let prio = task.effective_priority();
-    let target_cpu = choose_cpu_for_task(task);
+    let target_cpu = select_wake_cpu(task);
     task.last_cpu = target_cpu;
     PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
     drop(state);
@@ -3274,7 +3368,12 @@ fn watchdog_check() {
         let current = heartbeat.load(Ordering::Relaxed);
         let previous = last_seen.load(Ordering::Relaxed);
 
-        if current == previous && previous > 0 {
+        // An AP in tickless idle has stopped its timer and so takes no
+        // heartbeat ticks: silence there is the idle loop working, not a
+        // lockup. Its stall count starts again from here.
+        if crate::apic::timer_stopped_on(cpu) {
+            stall_count.store(0, Ordering::Relaxed);
+        } else if current == previous && previous > 0 {
             // CPU hasn't ticked since last check.
             let count = stall_count
                 .fetch_add(1, Ordering::Relaxed)
@@ -5469,8 +5568,10 @@ pub fn do_deferred_preempt() {
         //     interrupts immediately, and the enclosing IRQ stub's `iretq`
         //     restores IF=1 from the saved frame regardless.
         //   * Voluntary yields (`yield_now`, channel/futex blocking) do NOT go
-        //     through this path; they run, and are saved, with IF=1 — so the
-        //     per-task RFLAGS-preservation invariant is untouched for them.
+        //     through this path. They run with IF=1 up to the switch itself,
+        //     which clears it and puts it back for them when they resume
+        //     (`SwitchIrqs`) -- so each task still comes back with the
+        //     interrupt state it entered the switch with.
         //   * `preempt()` calls `schedule_inner(true, ..)` (requeue=true), so
         //     the current task is always re-enqueued and a runnable task is
         //     always picked — the HLT-based idle fallback (which needs IF=1) is
@@ -6368,7 +6469,7 @@ pub fn resume(task_id: TaskId) -> bool {
 
         task.mark_ready(crate::apic::tick_count());
         let prio = task.effective_priority();
-        target_cpu = choose_cpu_for_task(task);
+        target_cpu = select_wake_cpu(task);
         task.last_cpu = target_cpu;
         PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
     }
@@ -8242,7 +8343,7 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) -> u64 {
                 task.mark_ready(crate::apic::tick_count());
                 task.burst_ticks = 0;
                 let prio = task.effective_priority();
-                let target_cpu = choose_cpu_for_task(task);
+                let target_cpu = select_wake_cpu(task);
                 task.last_cpu = target_cpu;
                 PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
                 // Owe `target_cpu` a reschedule signal, to be sent once the
@@ -8593,7 +8694,7 @@ fn wake_expired_sleeper(task_id: TaskId) -> SleeperWake {
             task.mark_ready(crate::apic::tick_count());
             task.burst_ticks = 0;
             let prio = task.effective_priority();
-            let target_cpu = choose_cpu_for_task(task);
+            let target_cpu = select_wake_cpu(task);
             task.last_cpu = target_cpu;
             PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
             drop(state);
@@ -9437,7 +9538,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             flag.store(false, Ordering::Release);
                         }
 
+                        // Interrupts off from here into `switch_context`
+                        // (`SwitchIrqs`): this fallback idles with them on.
+                        let irqs = SwitchIrqs::disable();
+
                         set_current_task(cpu, ready_id);
+                        leave_idle_for(cpu, ready_id);
 
                         // Pin the outgoing task until it is off its own stack
                         // — same reason as the main `schedule_inner` switch
@@ -9527,6 +9633,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         // shortest correct span rather than the shortest
                         // convenient one.
                         finish_task_switch();
+                        irqs.restore();
 
                         // NOTE: After switch_context returns, we're now
                         // running as the OLD task (resumed later).  The
@@ -9722,7 +9829,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
     // --- Context switch (outside the lock) ---
 
+    // Interrupts off from here into `switch_context`: a voluntary switch
+    // (`yield_now`, `block_current`) arrives with them on. See `SwitchIrqs`.
+    let irqs = SwitchIrqs::disable();
+
     set_current_task(cpu, next_id);
+    leave_idle_for(cpu, next_id);
 
     // Pin the outgoing task until it is off its own stack.  `set_current_task`
     // above has just retired `current_id` from the reaper's exclusion set, but
@@ -9812,6 +9924,61 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     // why `finish_task_switch` re-reads the CPU index and clears the slot
     // rather than taking an id.  See `PREV_TASK_IDS`.
     finish_task_switch();
+    irqs.restore();
+}
+
+/// The interrupt flag across a context switch: cleared from just before
+/// [`set_current_task`] until the incoming task is on its own stack, and
+/// restored for the outgoing task when it is resumed.
+///
+/// `switch_context` asks for interrupts off around it, and the involuntary
+/// path ([`do_deferred_preempt`]) has always had them off; the voluntary one
+/// (`yield_now`, `block_current`) did not, because `SCHED` is a plain spin
+/// lock that leaves them alone. An interrupt landing in that window --
+/// `CURRENT_TASK_IDS` already naming the incoming task, the CPU still on the
+/// outgoing one's stack -- whose exit found a preemption pending (one deferred
+/// while `SCHED` was held is re-armed, not dropped) would run a second
+/// `schedule_inner` as the wrong task: saving the outgoing task's stack as the
+/// incoming one's context, so that the incoming task, when next picked,
+/// resumed on a stack not its own. The window is a microsecond or so, which
+/// is why it went unseen on one CPU; with every AP ticking it is not one to
+/// leave open.
+///
+/// `switch_context` saves RFLAGS per task, so the outgoing task is saved with
+/// interrupts off and resumed, by a later switch, with them off: `restore`,
+/// on the line after `switch_context` returns, puts back what this task had
+/// on the way in. A task running for the first time starts from its initial
+/// RFLAGS, interrupts on (`Task::new_kernel`).
+#[must_use = "restore the interrupt flag once the switch has returned"]
+struct SwitchIrqs {
+    /// Whether interrupts were on when the switch began.
+    were_on: bool,
+}
+
+impl SwitchIrqs {
+    /// Record the interrupt flag and clear it.
+    #[inline]
+    fn disable() -> Self {
+        let were_on = crate::cpu::interrupts_enabled();
+        // SAFETY: clearing IF has no memory effects; `restore` sets it again
+        // on the same task once it has been switched back to.
+        unsafe {
+            crate::cpu::cli();
+        }
+        Self { were_on }
+    }
+
+    /// Put the interrupt flag back as `disable` found it.
+    #[inline]
+    fn restore(self) {
+        if self.were_on {
+            // SAFETY: interrupts were on when this task entered the switch;
+            // the IDT is loaded on every CPU that schedules.
+            unsafe {
+                crate::cpu::sti();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -10154,6 +10321,79 @@ pub fn self_test() -> KernelResult<()> {
     test_load_address_space_uses_live_cr3()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// How many times [`irqflag_partner`] has run.
+static IRQFLAG_PARTNER_RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// [`self_test_switch_interrupt_flag`]'s partner: counts itself and exits,
+/// giving the test's yields a task to switch to and back from.
+extern "C" fn irqflag_partner(_arg: u64) {
+    IRQFLAG_PARTNER_RUNS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// A switch gives a task back the interrupt flag it went in with, on and
+/// off, though the switch itself runs with interrupts off ([`SwitchIrqs`]):
+/// the outgoing task is saved with them off, and puts them back on resuming
+/// only if they were on. A `restore` that forgot would leave a CPU's
+/// interrupts off for good after its first yield; one that set them
+/// regardless would turn them on inside a caller's `without_interrupts`.
+///
+/// Its own boot step, after preemptive scheduling starts: [`self_test`] runs
+/// before interrupts are first enabled, when there is no "on" to keep.
+///
+/// # Errors
+///
+/// `InternalError` when a flag comes back changed, when the partner never
+/// runs, or when interrupts are off as it starts.
+pub fn self_test_switch_interrupt_flag() -> KernelResult<()> {
+    if !crate::cpu::interrupts_enabled() {
+        serial_println!(
+            "[sched]   FAIL: switch interrupt flag: interrupts were off as the test began; it runs once preemptive scheduling has started"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Pinned here, and above the boot's level, so that a yield of this task
+    // switches to the partner and the partner's exit switches back.
+    let here = u32::try_from(current_cpu_id())
+        .ok()
+        .and_then(|c| 1u64.checked_shl(c))
+        .unwrap_or(1);
+    // One yield-until-the-partner-has-run; the interrupt flag it came back
+    // with.
+    let round = |label: &str| -> KernelResult<bool> {
+        IRQFLAG_PARTNER_RUNS.store(0, Ordering::Release);
+        let id = spawn_with_affinity(b"irqflag-partner", 16, irqflag_partner, 0, 0, here)?;
+        for _ in 0..1000 {
+            yield_now();
+            if IRQFLAG_PARTNER_RUNS.load(Ordering::Acquire) > 0 {
+                return Ok(crate::cpu::interrupts_enabled());
+            }
+        }
+        // Never run: give it no chance to run later, into another test.
+        let killed = kill_task(id);
+        serial_println!(
+            "[sched]   FAIL: switch interrupt flag ({}): the partner never ran (killed: {})",
+            label,
+            killed
+        );
+        Err(KernelError::InternalError)
+    };
+
+    let on_after = round("interrupts on")?;
+    let off_after = crate::cpu::without_interrupts(|| round("interrupts off"))?;
+    if !on_after {
+        serial_println!("[sched]   FAIL: a yield made with interrupts on came back with them off");
+        return Err(KernelError::InternalError);
+    }
+    if off_after {
+        serial_println!("[sched]   FAIL: a yield made with interrupts off came back with them on");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[sched]   A switch returns the interrupt flag it was entered with (on, off): OK"
+    );
     Ok(())
 }
 

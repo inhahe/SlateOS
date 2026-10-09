@@ -1,6 +1,6 @@
 ### A-CONTAINER-TAR-HAS-NO-FIFO-ENTRY -- 2026-10-08 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264)
 (named pipes themselves are not on main yet either).
 
 **In short:** `container export` (Docker's `export`) writes a container's

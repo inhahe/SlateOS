@@ -1,6 +1,6 @@
 ### [A] `sync` and `fsync` never flush a disk's own write cache -- 2026-10-09
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-09, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-09, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 
 **In short:** when a program saves a file and calls `fsync` (or the system
 runs `sync` before switching off), the kernel writes the data out to the

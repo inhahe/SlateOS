@@ -1,6 +1,6 @@
-### A-CONTAINER-INIT-RAN-BEFORE-IT-WAS-IN-ITS-CONTAINER -- 2026-10-09 -- OPEN (lane A)
+### A-CONTAINER-INIT-RAN-BEFORE-IT-WAS-IN-ITS-CONTAINER -- 2026-10-09 -- FIXED 2026-10-09 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-09, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-09, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 
 **In short:** starting a container (`container run`, and `container exec`
 for a second program) created the program and made it runnable first, and

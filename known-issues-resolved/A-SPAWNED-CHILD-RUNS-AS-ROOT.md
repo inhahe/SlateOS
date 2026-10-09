@@ -1,6 +1,6 @@
-### A-SPAWNED-CHILD-RUNS-AS-ROOT -- 2026-10-08 -- OPEN (lane A)
+### A-SPAWNED-CHILD-RUNS-AS-ROOT -- 2026-10-08 -- FIXED 2026-10-09 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264)
 (design-decisions 1552, section 3).
 
 **In short:** a program started with spawn ran as root (user id 0), whoever

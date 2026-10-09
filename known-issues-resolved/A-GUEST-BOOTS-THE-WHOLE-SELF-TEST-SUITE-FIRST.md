@@ -1,6 +1,6 @@
 ### [A] The guest channel boots the whole self-test suite before its agent answers -- 2026-10-03
 
-**Status:** OPEN -- fixed on lane-a-wip (8c0e4a1e9), awaiting a boot on main
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip (8c0e4a1e9), on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264)
 and a measured start time (see "Fixed" below).
 
 **In short:** `python scripts/guest.py start` is meant to give a running

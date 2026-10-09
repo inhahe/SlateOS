@@ -1,7 +1,10 @@
 ### [A] On more than one CPU the application processors stop ticking, and no boot test runs more than one CPU -- 2026-10-08
 
-**Status:** OPEN -- the scheduling causes fixed on lane-a-wip 2026-10-09,
-awaiting a boot on main; no boot test runs more than one CPU yet.
+**Status:** OPEN -- for its second half only. The scheduling causes, and the
+rest the two-CPU boots found, are fixed and on main since b083cfeca (lane
+A's publish of 2026-10-09, boot-tested green at 3d83e0264); a two-CPU boot
+with every self-test on is clean. No boot test runs more than one CPU by
+default yet: `boot-test.sh --smp=N` exists and nothing passes it.
 
 **In short:** every boot test runs the kernel on a single CPU, so nothing has
 been checking that it works on more than one -- and on two or four it did

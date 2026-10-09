@@ -1,7 +1,7 @@
-## TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP (lane A, 2026-10-02) — OPEN
+## TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP (lane A, 2026-10-02) — FIXED 2026-10-09
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-03 (the commit that adds
-`mm::frame::RemoteCopyWindow`), awaiting a boot on main. What it leaves is
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-03 (the commit that adds
+`mm::frame::RemoteCopyWindow`), on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264). What it leaves is
 in "Not covered" below, with its own entry.
 
 **In short:** `process_vm_readv`/`writev` copy memory in or out of another

@@ -1,6 +1,6 @@
-## TD-A-ZOMBIE-KEEPS-ITS-MEMORY-UNTIL-REAPED (lane A, 2026-10-02) — OPEN
+## TD-A-ZOMBIE-KEEPS-ITS-MEMORY-UNTIL-REAPED (lane A, 2026-10-02) — FIXED 2026-10-09
 
-**Status:** OPEN -- fixed on `lane-a-wip`, awaiting a boot on main:
+**Status:** FIXED 2026-10-09 -- fixed on `lane-a-wip`, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264):
 `pcb::release_address_space` frees a zombie's memory at its exit, behind
 `pcb::AsPin`, the pin a cross-process reader holds so that the free waits for
 it. The procfs memory files read empty for a zombie. Tested by pcb's

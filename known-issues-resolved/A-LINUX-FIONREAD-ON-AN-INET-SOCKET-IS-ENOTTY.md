@@ -1,6 +1,6 @@
 ### [A] `ioctl(FIONREAD)` on an `AF_INET` socket answers `ENOTTY` -- 2026-10-09
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-09, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-09, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 
 **In short:** a Linux program can ask any descriptor how many bytes are
 waiting to be read (`ioctl(fd, FIONREAD, &n)`). Since 2026-10-09 the kernel

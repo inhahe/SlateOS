@@ -1,6 +1,6 @@
-### A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS -- 2026-10-07 -- OPEN until its fix (lane-a-wip, 2026-10-08) has a boot on main (lane A)
+### A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS -- 2026-10-07 -- FIXED 2026-10-09 until its fix (lane-a-wip, 2026-10-08) has a boot on main (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 Found while writing POSIX timers (§1540).
 
 **In short:** a timer can be told to send any signal, `SIGCONT` and `SIGKILL`

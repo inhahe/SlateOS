@@ -41,6 +41,8 @@ pub const SIGQUIT: i32 = 3;
 pub const SIGALRM: i32 = 14;
 /// A child process has finished or stopped.
 pub const SIGCHLD: i32 = 17;
+/// Stop from the keyboard: Ctrl-Z.
+pub const SIGTSTP: i32 = 20;
 /// A background process read from its terminal.
 pub const SIGTTIN: i32 = 21;
 /// A background process wrote to its terminal, where that is not allowed.
@@ -307,6 +309,161 @@ fn is_ignored_one(sig: i32) -> Result<bool, i32> {
 
 #[cfg(not(unix))]
 fn is_ignored_one(_sig: i32) -> Result<bool, i32> {
+    Err(ENOSYS)
+}
+
+/// What a signal does now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    /// `SIG_DFL`.
+    Default,
+    /// `SIG_IGN`.
+    Ignore,
+    /// A handler, by its address -- comparable with `handler as usize`.
+    Handler(usize),
+}
+
+/// What `sig` does now -- `sigaction (sig, NULL, &old)` and a look at
+/// `old.sa_handler` -- as a library asks before installing a handler only
+/// where the program left the default (curses' `CatchIfDefault`).
+///
+/// # Errors
+///
+/// `EINVAL` for a number that is no signal; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn disposition(sig: i32) -> Result<Disposition, i32> {
+    let saved = save_action(sig)?;
+    Ok(match saved.handler {
+        0 => Disposition::Default,
+        1 => Disposition::Ignore,
+        h => Disposition::Handler(h),
+    })
+}
+
+/// A signal's whole action -- handler, mask and flags -- saved to be put
+/// back with [`restore_action`].
+#[derive(Clone, Copy)]
+pub struct SavedAction {
+    handler: usize,
+    mask: SigSet,
+    flags: i32,
+}
+
+/// `sigaction (sig, NULL, &old)`: `sig`'s action as it stands.
+///
+/// # Errors
+///
+/// `EINVAL` for a number that is no signal; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn save_action(sig: i32) -> Result<SavedAction, i32> {
+    save_action_one(sig)
+}
+
+#[cfg(unix)]
+fn save_action_one(sig: i32) -> Result<SavedAction, i32> {
+    let mut old = SigAction {
+        handler: 0,
+        mask: SigSet { bits: [0; 16] },
+        flags: 0,
+        restorer: 0,
+    };
+    // SAFETY: a null `act` changes nothing; `old` is a complete, writable
+    // `struct sigaction`, which is all the call writes.
+    let rc = unsafe { sys::sigaction(sig, core::ptr::null(), &raw mut old) };
+    if rc == 0 {
+        Ok(SavedAction {
+            handler: old.handler,
+            mask: old.mask,
+            flags: old.flags,
+        })
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn save_action_one(_sig: i32) -> Result<SavedAction, i32> {
+    Err(ENOSYS)
+}
+
+/// `sigaction (sig, &saved, NULL)`: an action [`save_action`] saved, put
+/// back.
+///
+/// # Errors
+///
+/// `EINVAL` for a number that is no signal, or one that cannot be caught;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn restore_action(sig: i32, saved: &SavedAction) -> Result<(), i32> {
+    restore_action_one(sig, saved)
+}
+
+#[cfg(unix)]
+fn restore_action_one(sig: i32, saved: &SavedAction) -> Result<(), i32> {
+    let action = SigAction {
+        handler: saved.handler,
+        mask: saved.mask,
+        flags: saved.flags,
+        restorer: 0,
+    };
+    // SAFETY: a complete `struct sigaction` that lives for the call, which
+    // copies it. Its handler is what `sigaction` itself reported: `SIG_DFL`,
+    // `SIG_IGN`, or a handler the program installed, which is still there.
+    let rc = unsafe { sys::sigaction(sig, &raw const action, core::ptr::null_mut()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn restore_action_one(_sig: i32, saved: &SavedAction) -> Result<(), i32> {
+    // Nothing to restore through: the action is only read, to be honest
+    // about what it holds.
+    let _ = (saved.handler, saved.mask, saved.flags);
+    Err(ENOSYS)
+}
+
+/// Ignore `sig` -- `sigaction` with `SIG_IGN`, an empty mask and no flags
+/// -- and return the action it replaced, for [`restore_action`]. What a
+/// library does to hold a signal off for a while: curses ignores `SIGTSTP`
+/// while it updates the screen, and a signal it is cleaning up after.
+///
+/// # Errors
+///
+/// `EINVAL` for a number that is no signal, and for `SIGKILL` and `SIGSTOP`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn ignore(sig: i32) -> Result<SavedAction, i32> {
+    ignore_one(sig)
+}
+
+#[cfg(unix)]
+fn ignore_one(sig: i32) -> Result<SavedAction, i32> {
+    /// `SIG_IGN`.
+    const SIG_IGN: usize = 1;
+    let action = SigAction {
+        handler: SIG_IGN,
+        mask: SigSet::empty(),
+        flags: 0,
+        restorer: 0,
+    };
+    let mut old = SigAction {
+        handler: 0,
+        mask: SigSet { bits: [0; 16] },
+        flags: 0,
+        restorer: 0,
+    };
+    // SAFETY: `action` is a complete `struct sigaction` that lives for the
+    // call, which copies it, and installs no code of ours; `old` is a
+    // complete, writable one, which is all the call writes.
+    let rc = unsafe { sys::sigaction(sig, &raw const action, &raw mut old) };
+    if rc == 0 {
+        Ok(SavedAction {
+            handler: old.handler,
+            mask: old.mask,
+            flags: old.flags,
+        })
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn ignore_one(_sig: i32) -> Result<SavedAction, i32> {
     Err(ENOSYS)
 }
 
@@ -592,6 +749,7 @@ mod tests {
         assert_eq!(SIGQUIT, posix::signal::SIGQUIT);
         assert_eq!(SIGALRM, posix::signal::SIGALRM);
         assert_eq!(SIGCHLD, posix::signal::SIGCHLD);
+        assert_eq!(SIGTSTP, posix::signal::SIGTSTP);
         assert_eq!(SIGTTIN, posix::signal::SIGTTIN);
         assert_eq!(SIGTTOU, posix::signal::SIGTTOU);
         assert_eq!(SIGWINCH, posix::signal::SIGWINCH);

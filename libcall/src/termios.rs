@@ -61,6 +61,8 @@ mod sys {
         // both our library and glibc.
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn ttyname_r(fd: i32, buf: *mut u8, buflen: usize) -> i32;
+        pub fn tcgetpgrp(fd: i32) -> i32;
+        pub fn tcflush(fd: i32, queue_selector: i32) -> i32;
     }
 
     /// `fcntl`: read the file status flags.
@@ -119,6 +121,59 @@ pub fn set_attr(fd: i32, when: i32, t: &Termios) -> Result<(), i32> {
     #[cfg(not(unix))]
     {
         let _ = (fd, when, t);
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `tcgetpgrp(fd)`: the foreground process group of the terminal on `fd` --
+/// what a job-control-aware program compares with its own group to learn
+/// whether it is in the foreground.
+///
+/// # Errors
+///
+/// `EBADF`, or `ENOTTY` when `fd` is not this process's controlling
+/// terminal; [`ENOSYS`](crate::ENOSYS) on a host with no C library of ours.
+pub fn foreground_group(fd: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `tcgetpgrp` takes a number and touches no memory of ours.
+        let pgrp = unsafe { sys::tcgetpgrp(fd) };
+        if pgrp >= 0 {
+            Ok(pgrp)
+        } else {
+            Err(crate::last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `tcflush`'s selector for "the input received and not yet read".
+const TCIFLUSH: i32 = 0;
+
+/// `tcflush(fd, TCIFLUSH)`: throw away what has been typed at the terminal on
+/// `fd` and not yet read.
+///
+/// # Errors
+///
+/// `EBADF`, `ENOTTY`; [`ENOSYS`](crate::ENOSYS) on a host with no C library
+/// of ours.
+pub fn flush_input(fd: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `tcflush` takes two numbers and touches no memory of ours.
+        if unsafe { sys::tcflush(fd, TCIFLUSH) } == 0 {
+            Ok(())
+        } else {
+            Err(crate::last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, TCIFLUSH);
         Err(crate::ENOSYS)
     }
 }

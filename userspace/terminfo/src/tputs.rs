@@ -118,6 +118,14 @@ pub fn putp_to(string: &[u8], padding: &Padding, out: &mut dyn Outc) {
     tputs_screen(string, 1, padding, out, false);
 }
 
+/// `NCURSES_SP_NAME (tputs)` on a curses screen of the caller's: `delays`
+/// is whether a delay that is not mandatory applies -- the screen's
+/// `always_delay || normal_delay`, which only it can work out (`userspace/
+/// curses`'s `Term::tputs_always`).
+pub fn tputs_with(string: &[u8], affcnt: i32, padding: &Padding, out: &mut dyn Outc, delays: bool) {
+    tputs_screen(string, affcnt, padding, out, delays);
+}
+
 /// `NCURSES_SP_NAME (tputs)`: `normal_delay` is whether a delay that is not
 /// mandatory applies -- with a screen and no terminal of its own, always;
 /// with no screen, never.

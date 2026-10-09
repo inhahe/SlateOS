@@ -80,7 +80,7 @@ pub enum Kind {
 
 pub use sgr0::trim_sgr0;
 pub use tparm::{Analysis, Arg, NUM_PARM, Tparm, analyze};
-pub use tputs::{Outc, Padding, baudrate, putp_to, tputs, tputs_affcnt, tputs_to};
+pub use tputs::{Outc, Padding, baudrate, putp_to, tputs, tputs_affcnt, tputs_to, tputs_with};
 
 /// `TGETENT_YES`: the terminal was found.
 pub const TGETENT_YES: i32 = 1;

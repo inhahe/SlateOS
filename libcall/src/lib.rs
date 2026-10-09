@@ -70,6 +70,7 @@ pub mod epoll;
 pub mod fd;
 pub mod glob;
 pub mod inotify;
+pub mod locale;
 pub mod lock;
 pub mod netdb;
 pub mod power;

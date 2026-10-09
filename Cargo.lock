@@ -840,6 +840,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "curses"
+version = "0.1.0"
+dependencies = [
+ "cstrtol",
+ "libcall",
+ "terminfo",
+]
+
+[[package]]
 name = "datetimesettings"
 version = "0.1.0"
 dependencies = [

@@ -161,6 +161,16 @@ impl Entry {
         }
     }
 
+    /// Set the string at `index`, `None` cancelling it -- as a curses
+    /// screen takes away what it must not use: `ht` and `cbt` on a terminal
+    /// that expands tabs itself, and the attribute and line-drawing strings
+    /// of one whose attributes take up a cell (`xmc`).
+    pub fn set_string(&mut self, index: usize, value: Option<Vec<u8>>) {
+        if let Some(s) = self.strings.get_mut(index) {
+            *s = value;
+        }
+    }
+
     /// `_nc_tinfo_cmdch`'s rewrite: every `proto` byte of every string,
     /// standard and extended, made `cc`.
     pub(crate) fn replace_in_strings(&mut self, proto: u8, cc: u8) {

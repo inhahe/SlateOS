@@ -170,6 +170,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/create-ext4-rootfs.sh` | Build a real ext4 root-filesystem image for the SlateOS Linux-ABI layer. |
 | `scripts/csplit-diff.sh` | Differential test: our csplit against GNU csplit. |
 | `scripts/ctest-fixtures.py` | Build the 70 ring-3 fixture ELFs on demand, and verify what the image ships. |
+| `scripts/curses-diff.sh` | Differential test: the curses crate against Ubuntu's libncursesw 6.4. |
+| `scripts/curses-ptyrun.py` | Run a program on a pseudo-terminal of its own, for curses-diff.sh. |
 | `scripts/cut-diff.sh` | Differential test: our cut against GNU cut. |
 | `scripts/date-diff.sh` | Differential test: our `date` against GNU date. |
 | `scripts/dd-diff.sh` | Differential test: our dd against GNU dd. |
@@ -575,4 +577,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_565 scripts._
+_567 scripts._

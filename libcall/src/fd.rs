@@ -56,7 +56,37 @@ mod sys {
         pub fn close(fd: i32) -> i32;
         pub fn isatty(fd: i32) -> i32;
         pub fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+        // `void *`, as the C library and Rust's runtime declare it.
+        pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
     }
+}
+
+/// Write `buf` to `fd` once: `write`. How many bytes went, which may be
+/// fewer than `buf` holds.
+///
+/// For a caller that must write without the standard library's stream --
+/// a curses screen, whose output has to be the bytes it means and nothing
+/// else, at the moment it flushes them.
+///
+/// # Errors
+///
+/// What `write` reports: `EINTR`, `EAGAIN`, `EBADF`, `EPIPE`, `EIO` and the
+/// rest; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn write(fd: i32, buf: &[u8]) -> Result<usize, i32> {
+    write_one(fd, buf)
+}
+
+#[cfg(unix)]
+fn write_one(fd: i32, buf: &[u8]) -> Result<usize, i32> {
+    // SAFETY: `buf` is readable for its whole length, which is what the
+    // call is told.
+    let n = unsafe { sys::write(fd, buf.as_ptr().cast(), buf.len()) };
+    usize::try_from(n).map_err(|_| last_errno())
+}
+
+#[cfg(not(unix))]
+fn write_one(_fd: i32, _buf: &[u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
 }
 
 /// Make descriptor `new` refer to what `old` refers to, closing whatever

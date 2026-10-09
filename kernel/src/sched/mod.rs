@@ -2094,6 +2094,7 @@ pub fn init() {
     }
 
     state.initialized = true;
+    drop(state);
     serial_println!(
         "[sched] Scheduler initialized ({}, {} levels, {} CPU{})",
         backend::backend_name(backend::active_backend()),
@@ -2101,6 +2102,28 @@ pub fn init() {
         num_cpus,
         if num_cpus > 1 { "s" } else { "" }
     );
+
+    // CPU 0's idle context for while task 0 is the boot (`BOOT_IDLE_ID`).
+    // Unqueued and unadmitted: only the idle fallback switches to it.
+    match spawn_inner(
+        b"idle0-boot",
+        task::IDLE_PRIORITY,
+        boot_idle_entry,
+        0,
+        0,
+        cpu_bit(0),
+        false,
+        None,
+    ) {
+        Ok(id) => BOOT_IDLE_ID.store(id, Ordering::Release),
+        // Not fatal: the fallback idles on the stopped task's stack, as it
+        // did before there was one -- every self-test that moves a task off
+        // CPU 0 while the boot sleeps will say so.
+        Err(e) => serial_println!(
+            "[sched] WARNING: CPU 0's boot-time idle context could not be made: {:?}",
+            e
+        ),
+    }
 }
 
 /// Register an idle task for an Application Processor.
@@ -2201,8 +2224,9 @@ fn choose_cpu_for_task(task: &Task) -> usize {
 
 /// Whether `cpu` is idle, as placing a woken task asks: running its own idle
 /// task with no other task queued. The BSP's idle task, task 0, is the boot
-/// until the boot is done ([`BOOT_TASK_WORKING`]), and a CPU that has not
-/// registered an idle task is not up; neither is idle. A queue whose lock is
+/// until the boot is done ([`BOOT_TASK_WORKING`]) -- CPU 0 idles in its
+/// boot-time idle context ([`BOOT_IDLE_ID`]) then -- and a CPU that has not
+/// registered an idle task is not up, and not idle. A queue whose lock is
 /// held counts as busy.
 ///
 /// Lock-free but for a `try_lock` of `cpu`'s queue, and so a moment stale
@@ -2215,9 +2239,14 @@ fn cpu_idle_for_wake(cpu: usize) -> bool {
     else {
         return false;
     };
-    if idle == u64::MAX || (cpu == 0 && BOOT_TASK_WORKING.load(Ordering::Acquire)) {
+    if idle == u64::MAX {
         return false;
     }
+    let idle = if cpu == 0 && BOOT_TASK_WORKING.load(Ordering::Acquire) {
+        BOOT_IDLE_ID.load(Ordering::Acquire)
+    } else {
+        idle
+    };
     let running = CURRENT_TASK_IDS
         .get(cpu)
         .map(|slot| slot.load(Ordering::Acquire));
@@ -5958,6 +5987,70 @@ pub fn boot_work_done() {
     BOOT_TASK_WORKING.store(false, Ordering::Release);
 }
 
+/// CPU 0's idle context of its own: the task the idle fallback hands CPU 0
+/// to when nothing may run there, so that the fallback idles on this task's
+/// stack and never on another's. `u64::MAX` until [`init`] has made it.
+///
+/// Every AP has an idle task, always queued, so its scheduler never runs out
+/// of something to run. CPU 0's is task 0, which is the boot until the boot
+/// is done, and the boot blocks -- in every self-test that sleeps or waits.
+/// With nothing else runnable then, the fallback in [`schedule_inner`] used
+/// to idle on the stack of whichever task had just stopped, and that task's
+/// context stayed live on CPU 0 until something else came along to run: a
+/// task that had pinned itself to CPU 1 could not leave, CPU 1 handing it
+/// back as still running here ([`classify_pick`]), and it carried on on CPU 0
+/// -- the first two-CPU boot to run the affinity self-test, 2026-10-09. A
+/// task woken while CPU 0 idled on its stack was tied to CPU 0 the same way.
+///
+/// Created awaiting admission and never admitted (`Task::awaiting_admission`),
+/// so no wake or resume can queue it: the fallback, which switches to it
+/// directly, is the one thing that runs it. Pinned to CPU 0.
+static BOOT_IDLE_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// [`BOOT_IDLE_ID`]'s body. It runs only when the idle fallback hands CPU 0
+/// to it, and parks again at once -- in the fallback, which then idles on
+/// this, its own stack, until there is something to run.
+extern "C" fn boot_idle_entry(_arg: u64) {
+    loop {
+        block_current();
+    }
+}
+
+/// Ready CPU 0's idle context `idle` ([`BOOT_IDLE_ID`]) to be switched to by
+/// the idle fallback, under `SCHED`: whether it can be. It is parked
+/// (`Blocked`) whenever it is not running, and is never queued -- nothing
+/// admits it -- but an entry for it is removed all the same, so that the
+/// switch leaves none behind.
+fn take_fallback_idle(state: &mut SchedState, idle: TaskId) -> bool {
+    let Some(task) = state.tasks.get(&idle) else {
+        return false;
+    };
+    match task.state {
+        TaskState::Blocked => true,
+        TaskState::Ready => {
+            PER_CPU_SCHED.dequeue(idle, task.effective_priority(), task.last_cpu);
+            true
+        }
+        // Running is impossible -- it is pinned to CPU 0, which is running
+        // another task -- and Dead or Suspended leaves the fallback where it
+        // is.
+        TaskState::Running | TaskState::Suspended | TaskState::Dead => false,
+    }
+}
+
+/// The task the idle fallback on `cpu` should leave the stack of `current`
+/// for: CPU 0's own idle context ([`BOOT_IDLE_ID`]), unless `current` is it
+/// or it does not exist yet -- before [`init`] has made it, or on an AP,
+/// whose idle task is always queued and so never leaves the fallback with
+/// another task's stack to idle on.
+fn fallback_idle_for(cpu: usize, current: TaskId) -> Option<TaskId> {
+    if cpu != 0 {
+        return None;
+    }
+    let id = BOOT_IDLE_ID.load(Ordering::Acquire);
+    (id != u64::MAX && id != current).then_some(id)
+}
+
 /// Whether the booster passes task `id` over: an idle-level task -- task 0
 /// excepted while it is still the boot ([`BOOT_TASK_WORKING`]) -- a
 /// throttled one, which waits by design, and a real-time one, whose waiting
@@ -9583,8 +9676,24 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 // runnable, so a lost wakeup (task parked forever) is dumped
                 // once instead of hanging silently — see dump_idle_fallback_wedge.
                 let mut idle_spins: u64 = 0;
+                // Where this stack is not the CPU's own idle context, leave it
+                // for that context, which idles in its place: the current task
+                // may be wanted elsewhere -- re-homed by its affinity, or woken
+                // onto another CPU -- and no CPU can run it while this one
+                // stands on its stack (`BOOT_IDLE_ID`).
+                let mut handoff = fallback_idle_for(cpu, current_id);
+                // The task a wedge report is about: the current one, or --
+                // idling in CPU 0's boot-time idle context, which is parked by
+                // design -- the boot, whose wake is the one that matters.
+                let wedge_subject = if BOOT_IDLE_ID.load(Ordering::Acquire) == current_id {
+                    0
+                } else {
+                    current_id
+                };
                 loop {
-                    cpu::hlt();
+                    if handoff.is_none() {
+                        cpu::hlt();
+                    }
 
                     let Some(mut s) = SCHED.try_lock() else {
                         continue;
@@ -9606,17 +9715,29 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // for a dead or parked task is dropped here too, rather
                     // than switched to.
                     let mut pick_signals = 0u64;
-                    // The current task's context stays live on this CPU
-                    // here, so it is not moved (`classify_pick`).
-                    let picked =
-                        pick_runnable_locked(&mut s, cpu, current_id, &mut pick_signals, false);
+                    // The current task's context stays live on this CPU while
+                    // the fallback idles on its stack, so then it is not moved
+                    // (`classify_pick`). About to leave the stack, it may be:
+                    // the switch saves it.
+                    let picked = pick_runnable_locked(
+                        &mut s,
+                        cpu,
+                        current_id,
+                        &mut pick_signals,
+                        handoff.is_some(),
+                    );
                     wake_signals.add(pick_signals);
+                    let picked = picked.or_else(|| {
+                        handoff
+                            .take()
+                            .filter(|&idle| take_fallback_idle(&mut s, idle))
+                    });
                     let Some(ready_id) = picked else {
                         idle_spins = idle_spins.saturating_add(1);
                         if idle_spins == IDLE_FALLBACK_WEDGE_TICKS
                             && !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed)
                         {
-                            dump_idle_fallback_wedge(&s, cpu, current_id);
+                            dump_idle_fallback_wedge(&s, cpu, wedge_subject);
                         }
                         drop(s);
                         wake_signals.flush();

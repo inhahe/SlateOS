@@ -20,8 +20,9 @@ one. This is what Linux does (`select_idle_sibling`).
   the task's affinity allows.
 - `cpu_idle_for_wake(cpu)`: running its own idle task with nothing else
   queued. The BSP's idle task is the boot itself until the boot is done
-  (`BOOT_TASK_WORKING`), so the BSP never counts as idle during the boot. A
-  queue whose lock is held counts as busy.
+  (`BOOT_TASK_WORKING`); during the boot the BSP counts as idle when it runs
+  its boot-time idle context instead (design-decisions 1559). A queue whose
+  lock is held counts as busy.
 - Used where a task becomes runnable: `wake`, `try_wake`, the deferred-wake
   drain, a timed sleeper's expiry, and `resume` from a stop. Not by `spawn`,
   which still places a new task on its creator's CPU.

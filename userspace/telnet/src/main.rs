@@ -45,6 +45,7 @@
 // DoS risk; buffer indices come from the kernel read() return value.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use libcall::termios::RawInput;
 use quoting::quoteaf_os;
 use std::env;
 use std::process;
@@ -59,13 +60,9 @@ use std::time::{Duration, Instant};
 // Syscall numbers (from kernel/src/syscall/net syscall table)
 // ============================================================================
 
-// Slate OS native console syscalls (kernel syscall/number.rs).  There is no
-// Linux-style fd read/write or ioctl: 0 and 1 are SYS_YIELD/SYS_EXIT here, so
-// the previous SYS_READ=0/SYS_WRITE=1 actually yielded and *terminated* the
-// process.  Terminal I/O goes through the bootstrap console syscalls instead.
-const SYS_CONSOLE_WRITE: u64 = 100;
-const SYS_CONSOLE_READ_CHAR: u64 = 101;
-const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
+// Terminal I/O goes through the C library (`libcall`): standard input read
+// raw, standard output and error written. The network is the native TCP and
+// DNS syscalls below.
 const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
 const SYS_TCP_RECV: u64 = 802;
@@ -265,101 +262,81 @@ fn dns_resolve(hostname: &str) -> Result<u32, i64> {
 // Terminal window size
 // ============================================================================
 
-/// Rows of the `Slate OS` bootstrap framebuffer console.
+/// Rows of the `Slate OS` bootstrap framebuffer console: the size NAWS
+/// reports when the terminal cannot be asked.
 const CONSOLE_ROWS: u16 = 25;
 /// Columns of the `Slate OS` bootstrap framebuffer console.
 const CONSOLE_COLS: u16 = 80;
 
-/// Return the terminal dimensions as (rows, cols).
+/// Return the terminal dimensions as (rows, cols), for NAWS.
 ///
-/// `Slate OS` has no `ioctl`/`TIOCGWINSZ` syscall (and no resizable terminal yet):
-/// the bootstrap console is a fixed-size framebuffer grid.  Report its actual
-/// dimensions so NAWS negotiation advertises a sensible size.
+/// The terminal on standard input, asked with `TIOCGWINSZ` -- the console's
+/// grid, or the window of a terminal emulator on a pty. A standard input
+/// that is no terminal, or one that does not know its size, is reported as
+/// the bootstrap console's 25 by 80, which is what this always answered
+/// before the terminal could be asked.
 fn get_terminal_size() -> (u16, u16) {
-    (CONSOLE_ROWS, CONSOLE_COLS)
+    match libcall::pty::window_size(0) {
+        Ok(w) if w.rows > 0 && w.cols > 0 => (w.rows, w.cols),
+        _ => (CONSOLE_ROWS, CONSOLE_COLS),
+    }
 }
 
 // ============================================================================
 // Low-level I/O: raw stdin read / stdout write
 // ============================================================================
 
-/// Read available keyboard bytes into `buf`.
+/// Read what has been typed into `buf`: standard input, which on a terminal
+/// [`run_session`] makes raw with `VMIN` 1 and `VTIME` 0, so a read waits
+/// for one byte and returns every byte that has come by then. With `ISIG`
+/// off, `^C` is the byte 0x03, sent on for the remote host to interrupt with
+/// rather than raising `SIGINT` here.
 ///
-/// Blocks until at least one byte is available (matching a typical blocking
-/// stdin read), then drains any further immediately-available bytes without
-/// blocking.  Returns the number of bytes read.
+/// Through the terminal's line discipline, as every program reads it. (Until
+/// 2026-10-09 this read the keyboard's raw ring with `SYS_CONSOLE_READ_CHAR`,
+/// past the terminal, which kept the console from delivering `^C` to a
+/// program that was not reading: lane A's `requests/a-bd-read-the-console-
+/// through-the-terminal-so-ctrl-c-can-stop-a-program-that-is-not-reading.md`.)
 ///
-/// The `Slate OS` bootstrap console keyboard never reports EOF, so for a non-empty
-/// `buf` this only returns 0 on a syscall error.  Because the first read
-/// blocks, a thread parked here cannot observe a shutdown flag until the next
-/// keypress — a known limitation of the fixed bootstrap console.
+/// Returns 0 at the end of the input and at a failed read; a read a signal
+/// interrupted is made again. A thread parked here sees a shutdown flag only
+/// once the read returns.
 fn stdin_read(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
     }
-    let mut ch: u8 = 0;
-    // Block for the first byte.
-    // SAFETY: SYS_CONSOLE_READ_CHAR writes one byte to the provided pointer.
-    let ret = unsafe { syscall1(SYS_CONSOLE_READ_CHAR, &raw mut ch as u64) };
-    if ret < 0 {
-        return 0;
-    }
-    let mut n = 0usize;
-    if let Some(slot) = buf.get_mut(n) {
-        *slot = ch;
-        n = n.saturating_add(1);
-    }
-    // Drain any further buffered bytes without blocking.
-    while n < buf.len() {
-        // SAFETY: SYS_CONSOLE_TRY_READ_CHAR writes one byte or returns WouldBlock.
-        let r = unsafe { syscall1(SYS_CONSOLE_TRY_READ_CHAR, &raw mut ch as u64) };
-        if r < 0 {
-            break; // WouldBlock: no more buffered input.
+    loop {
+        match libcall::fd::read(0, buf) {
+            Ok(n) => return n,
+            Err(libcall::EINTR) => {}
+            Err(_) => return 0,
         }
-        if let Some(slot) = buf.get_mut(n) {
-            *slot = ch;
-            n = n.saturating_add(1);
-        } else {
-            break;
-        }
-    }
-    n
-}
-
-/// Write all bytes of `data` to the console.
-fn console_write_all(data: &[u8]) {
-    let mut offset = 0usize;
-    while offset < data.len() {
-        let Some(chunk) = data.get(offset..) else {
-            break;
-        };
-        // SAFETY: SYS_CONSOLE_WRITE takes (ptr, len) and writes to the console.
-        let ret = unsafe {
-            syscall3(
-                SYS_CONSOLE_WRITE,
-                chunk.as_ptr() as u64,
-                chunk.len() as u64,
-                0,
-            )
-        };
-        if ret <= 0 {
-            break;
-        }
-        offset = offset.saturating_add(ret as usize);
     }
 }
 
-/// Write all bytes of `data` to the console (stdout).
+/// Write all of `data` to the descriptor `fd`: a write a signal interrupted
+/// is retried, and the rest dropped at any other failure, there being no
+/// other place to report it.
+fn write_all(fd: i32, data: &[u8]) {
+    let mut rest = data;
+    while !rest.is_empty() {
+        match libcall::fd::write(fd, rest) {
+            Ok(0) => break,
+            Ok(n) => rest = rest.get(n..).unwrap_or_default(),
+            Err(libcall::EINTR) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+/// Write all bytes of `data` to standard output.
 fn stdout_write(data: &[u8]) {
-    console_write_all(data);
+    write_all(1, data);
 }
 
-/// Write all bytes of `data` to the console (stderr).
-///
-/// `Slate OS`'s bootstrap console has no separate stderr stream, so this writes to
-/// the same console as `stdout_write`.
+/// Write all bytes of `data` to standard error.
 fn stderr_write(data: &[u8]) {
-    console_write_all(data);
+    write_all(2, data);
 }
 
 // ============================================================================
@@ -1052,6 +1029,12 @@ fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), Str
         login_bytes.push(b'\n');
         let _ = tcp_send_all(handle, &login_bytes);
     }
+
+    // Raw input from here to the end of the session, and the terminal's own
+    // settings back however it ends. A standard input that is no terminal --
+    // a script piped in -- has nothing to make raw and is read as it comes,
+    // as BSD telnet reads it; so the refusal is not an error.
+    let _raw = RawInput::enter(0, 1, 0).ok();
 
     // Shared flag used by the stdin thread to signal the main loop.
     let done = Arc::new(AtomicBool::new(false));

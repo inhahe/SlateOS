@@ -29,6 +29,7 @@
 //! Ctrl+A ?     Show help
 //! ```
 
+use libcall::termios::RawInput;
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
@@ -38,13 +39,6 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-// Native Slate OS console syscalls (kernel syscall/number.rs).  These were
-// previously 0/1, which are SYS_YIELD and SYS_EXIT — so a "read char" call
-// actually terminated the process.  The render loop polls for input (it must
-// keep refreshing the status bar while idle), so it uses the *non-blocking*
-// try-read variant (103); the blocking variant (101) would freeze the loop.
-const SYS_CONSOLE_WRITE: u64 = 100;
-const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 // Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
@@ -84,20 +78,39 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }
 
+/// `s`, written to the terminal on standard output: every byte, a write a
+/// signal interrupted retried, and the rest dropped at any other failure --
+/// there is nowhere else to say that the terminal has gone.
 fn console_write(s: &str) {
-    unsafe {
-        syscall3(SYS_CONSOLE_WRITE, s.as_ptr() as u64, s.len() as u64, 0);
+    let mut rest = s.as_bytes();
+    while !rest.is_empty() {
+        match libcall::fd::write(1, rest) {
+            Ok(0) => break,
+            Ok(n) => rest = rest.get(n..).unwrap_or_default(),
+            Err(libcall::EINTR) => {}
+            Err(_) => break,
+        }
     }
 }
 
+/// The next byte typed, or `None` when none is waiting.
+///
+/// A read of the terminal on standard input, through its line discipline as
+/// every program's is, which [`run_session`] puts in raw mode with `VMIN`
+/// and `VTIME` both 0: a read then returns at once, a byte or nothing, so the
+/// render loop keeps the status bar moving between keys. With `ISIG` off,
+/// `^C` is the byte 0x03 -- the session's "clear the input" key -- and
+/// `^A`, the command key, is 0x01. (This read the keyboard's raw ring with
+/// `SYS_CONSOLE_TRY_READ_CHAR` until 2026-10-09, past the terminal, which
+/// kept the console from delivering `^C` to a program that was not reading:
+/// lane A's `requests/a-bd-read-the-console-through-the-terminal-so-ctrl-c-
+/// can-stop-a-program-that-is-not-reading.md`.)
 fn console_read_char() -> Option<u8> {
-    // SYS_CONSOLE_TRY_READ_CHAR requires a non-null, writable 1-byte buffer:
-    // it writes the key there and returns 1, or returns WouldBlock (negative)
-    // when no key is buffered.  (Passing a null pointer returns InvalidArgument,
-    // which is why the previous null-arg form never read any input.)
-    let mut ch: u8 = 0;
-    let ret = unsafe { syscall3(SYS_CONSOLE_TRY_READ_CHAR, &raw mut ch as u64, 0, 0) };
-    if ret < 0 { None } else { Some(ch) }
+    let mut ch = [0u8; 1];
+    match libcall::fd::read(0, &mut ch) {
+        Ok(1) => ch.first().copied(),
+        _ => None,
+    }
 }
 
 fn clock_ns() -> u64 {
@@ -754,6 +767,13 @@ fn process_command(session: &mut Session, input: &str) {
 // ============================================================================
 
 fn run_session(session: &mut Session) {
+    // Raw input for as long as the session holds the terminal, and the
+    // terminal's own settings back however the session ends. Without a
+    // terminal there are no keys to read, as GNU screen says.
+    let Ok(_raw) = RawInput::enter(0, 0, 0) else {
+        eprintln!("Must be connected to a terminal.");
+        process::exit(1);
+    };
     term_alt_screen_on();
     term_clear();
     term_set_scroll_region(2, TERM_ROWS - 2);

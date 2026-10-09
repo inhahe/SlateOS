@@ -10,3 +10,6 @@ authlib = { path = "../authlib" }
 # value is a path from the command line, and a path may hold any byte but
 # `/` and NUL -- a newline included.
 quoting = { path = "../quoting" }
+# The terminal through the C library: keys read raw on standard input
+# (tcgetattr, tcsetattr, read), what it draws written to standard output.
+libcall = { path = "../../libcall" }

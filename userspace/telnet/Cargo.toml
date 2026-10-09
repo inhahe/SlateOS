@@ -7,6 +7,9 @@ description = "SlateOS telnet client"
 # Host names come from argv and option and banner text comes off the
 # connection.
 quoting = { path = "../quoting" }
+# The terminal through the C library: keys read raw on standard input
+# (tcgetattr, tcsetattr, read), what it draws written to standard output.
+libcall = { path = "../../libcall" }
 
 [lints]
 workspace = true

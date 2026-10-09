@@ -3527,6 +3527,7 @@ name = "screen"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "libcall",
  "quoting",
  "userdb",
 ]
@@ -4254,6 +4255,7 @@ version = "0.1.0"
 name = "telnet"
 version = "0.1.0"
 dependencies = [
+ "libcall",
  "quoting",
 ]
 

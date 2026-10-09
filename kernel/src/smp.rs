@@ -153,6 +153,12 @@ static MULTI_CPU_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// BSP's sequential CPU index (always 0).
 const BSP_CPU_INDEX: usize = 0;
 
+/// Per CPU index: whether that application processor found itself set up
+/// for SYSCALL once `ap_entry` had done it (`syscall::entry::this_cpu_is_set_up`)
+/// -- its own `KERNEL_GS_BASE` record, `LSTAR`, `EFER.SCE`. Read by
+/// [`self_test`]; the AP's own MSRs are readable only on the AP.
+static AP_SYSCALL_READY: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -913,6 +919,21 @@ extern "C" fn ap_entry() -> ! {
         crate::gdt::init_for_ap(cpu_index);
     }
 
+    // SYSCALL on this CPU: EFER.SCE, LSTAR, FMASK, and KERNEL_GS_BASE
+    // pointing at this CPU's own per-CPU record -- before any task runs here,
+    // since a thread blocked in a system call on another CPU may resume on
+    // this one and leave the kernel through its SWAPGS (`syscall::entry`).
+    // SAFETY: on this CPU, once, interrupts disabled, `cpu_index` its index.
+    unsafe {
+        crate::syscall::entry::init_ap(cpu_index);
+    }
+    if let Some(ready) = AP_SYSCALL_READY.get(cpu_index) {
+        ready.store(
+            crate::syscall::entry::this_cpu_is_set_up(cpu_index),
+            Ordering::Release,
+        );
+    }
+
     // Load the kernel's IDT.
     // All CPUs share the same IDT — interrupt handlers are the same.
     // SAFETY: IDT was set up by BSP.
@@ -1362,6 +1383,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let bsp_apic = crate::apic::bsp_id();
     let mapped_idx = APIC_TO_CPU[bsp_apic as usize].load(Ordering::Relaxed);
     assert!(mapped_idx == 0, "BSP APIC ID should map to CPU 0");
+
+    // Every CPU takes a system call into a per-CPU record of its own: the BSP
+    // checked here, each AP as it came up (`ap_entry`). A thread may leave a
+    // system call on another CPU than it entered on, through that CPU's
+    // SWAPGS, so one CPU without its own record breaks every CPU's threads.
+    if !crate::syscall::entry::this_cpu_is_set_up(BSP_CPU_INDEX) {
+        serial_println!("[smp]   FAIL: the BSP is not set up for SYSCALL with its own record");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    let mut ready = 1usize;
+    for cpu in 1..MAX_CPUS {
+        if crate::cpu_hotplug::is_online(cpu) {
+            if !AP_SYSCALL_READY
+                .get(cpu)
+                .is_some_and(|r| r.load(Ordering::Acquire))
+            {
+                serial_println!(
+                    "[smp]   FAIL: AP {} is online but not set up for SYSCALL with its own record",
+                    cpu
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+            ready = ready.saturating_add(1);
+        }
+    }
+    serial_println!(
+        "[smp]   SYSCALL: {} CPU(s), each with its own KERNEL_GS_BASE record, LSTAR and EFER.SCE: OK",
+        ready
+    );
 
     serial_println!("[smp] Self-test PASSED");
     Ok(())

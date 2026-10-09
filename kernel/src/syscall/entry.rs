@@ -60,13 +60,14 @@ const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 // Per-CPU kernel data
 // ---------------------------------------------------------------------------
 
-/// Storage for kernel/user RSP during SWAPGS-based stack switching.
+/// Storage for kernel/user RSP during SWAPGS-based stack switching: one per
+/// CPU, each CPU's `IA32_KERNEL_GS_BASE` pointing at its own ([`PER_CPU`]).
 ///
 /// On SYSCALL entry, `swapgs` makes this accessible via the GS segment.
 /// `[gs:0]` = kernel RSP, `[gs:8]` = scratch for saving user RSP.
 ///
-/// For SMP, this would be one instance per CPU.  For now, single CPU.
-#[repr(C, align(16))]
+/// A cache line each, so two CPUs' records never share one.
+#[repr(C, align(64))]
 pub struct PerCpuData {
     /// Kernel stack pointer (set by scheduler on context switch).
     pub kernel_rsp: u64,
@@ -74,11 +75,24 @@ pub struct PerCpuData {
     pub user_rsp: u64,
 }
 
-/// Single-CPU per-CPU data.
-static mut PER_CPU: PerCpuData = PerCpuData {
-    kernel_rsp: 0,
-    user_rsp: 0,
-};
+/// Every CPU's [`PerCpuData`], by CPU index (`smp::current_cpu_index`).
+///
+/// Until 2026-10-08 there was one record for every CPU, and only the boot
+/// CPU's MSRs were set up ([`init`]): an application processor had no
+/// `IA32_KERNEL_GS_BASE`, `LSTAR`, `FMASK` or `EFER.SCE` of its own. A thread
+/// that entered a system call on the boot CPU, blocked, and was resumed on
+/// another ran the exit path's `swapgs` against a zero GS base and wrote the
+/// user RSP to address 8 -- the first self-reload tried on four CPUs died so
+/// in its first kernel -- and a first system call on such a CPU would have been
+/// `#UD`. With every CPU's MSRs set ([`init_ap`]) one shared record would still
+/// be wrong: two CPUs in system calls at once would each overwrite the other's
+/// kernel and user stack pointers.
+static mut PER_CPU: [PerCpuData; crate::smp::MAX_CPUS] = [const {
+    PerCpuData {
+        kernel_rsp: 0,
+        user_rsp: 0,
+    }
+}; crate::smp::MAX_CPUS];
 
 // ---------------------------------------------------------------------------
 // SYSCALL entry assembly
@@ -531,20 +545,56 @@ fn handle_syscall(f: &mut SyscallFrame) -> i64 {
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Set up the SYSCALL/SYSRET MSRs.
+/// Set up the SYSCALL/SYSRET MSRs on the boot CPU, CPU index 0 -- the index
+/// `smp` gives it.
 ///
 /// Configures:
 /// - `IA32_LSTAR` — syscall entry point
 /// - `IA32_FMASK` — RFLAGS mask (clears IF, DF, TF, AC, NT, IOPL, RF, ID and
 ///   the arithmetic flags on entry)
-/// - `IA32_KERNEL_GS_BASE` — per-CPU data for SWAPGS
+/// - `IA32_KERNEL_GS_BASE` — this CPU's [`PerCpuData`], for SWAPGS
 ///
-/// `IA32_STAR` (segment selectors) is configured in `gdt::init()`.
+/// `IA32_STAR` (segment selectors) is configured in `gdt::init()`. Each
+/// application processor does the same for itself with [`init_ap`].
 ///
 /// # Safety
 ///
 /// Must be called during boot after GDT is loaded.
 pub unsafe fn init() {
+    // SAFETY: the caller's contract; the boot CPU is index 0.
+    let (entry_addr, fmask, per_cpu_addr) = unsafe { init_this_cpu(0) };
+    serial_println!(
+        "[syscall] LSTAR={:#x}, FMASK={:#x}, KERNEL_GS_BASE={:#x}, EFER.SCE=1",
+        entry_addr,
+        fmask,
+        per_cpu_addr
+    );
+}
+
+/// Set up the SYSCALL/SYSRET MSRs on application processor `cpu`: as [`init`]
+/// does on the boot CPU, its `IA32_KERNEL_GS_BASE` pointing at its own
+/// [`PerCpuData`]. Called from `smp::ap_entry` once its GDT (and so `STAR`)
+/// is loaded, before it runs any task.
+///
+/// # Safety
+///
+/// Only on CPU `cpu` itself, once, with interrupts disabled; `cpu` must be
+/// its CPU index, below `smp::MAX_CPUS`.
+pub unsafe fn init_ap(cpu: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        init_this_cpu(cpu);
+    }
+}
+
+/// The MSR writes [`init`] and [`init_ap`] share, for CPU `cpu_index` -- the
+/// CPU running this. Returns the entry point, the RFLAGS mask and the address of
+/// `cpu`'s [`PerCpuData`], for the boot CPU's log line.
+///
+/// # Safety
+///
+/// As [`init_ap`].
+unsafe fn init_this_cpu(cpu_index: usize) -> (u64, u64, u64) {
     // Enable SYSCALL/SYSRET by setting IA32_EFER.SCE (bit 0).
     //
     // The bootloader sets LME (bit 8) and LMA (bit 10) for long mode,
@@ -612,33 +662,69 @@ pub unsafe fn init() {
         cpu::wrmsr(IA32_FMASK, fmask);
     }
 
-    // Set up per-CPU data for SWAPGS.
-    let per_cpu_addr = core::ptr::addr_of!(PER_CPU) as u64;
-    // SAFETY: IA32_KERNEL_GS_BASE sets the base for SWAPGS; per_cpu_addr is a valid static.
+    // This CPU's per-CPU data, for SWAPGS. An index past the table falls
+    // back to the last record rather than off its end; `smp` never hands out
+    // one (`MAX_CPUS` bounds its indices).
+    let index = cpu_index.min(crate::smp::MAX_CPUS.saturating_sub(1));
+    let per_cpu_addr = per_cpu_data_addr(index).unwrap_or(0);
+    // SAFETY: IA32_KERNEL_GS_BASE sets the base for SWAPGS; per_cpu_addr is a
+    // valid static record this CPU alone uses.
     unsafe {
         cpu::wrmsr(IA32_KERNEL_GS_BASE, per_cpu_addr);
     }
-
-    serial_println!(
-        "[syscall] LSTAR={:#x}, FMASK={:#x}, KERNEL_GS_BASE={:#x}, EFER.SCE=1",
-        entry_addr,
-        fmask,
-        per_cpu_addr
-    );
+    (entry_addr, fmask, per_cpu_addr)
 }
 
-/// Update the kernel stack pointer in the per-CPU data.
+/// The address of CPU `cpu`'s [`PerCpuData`]. `None` past the table.
+#[must_use]
+pub fn per_cpu_data_addr(cpu: usize) -> Option<u64> {
+    // Pointer arithmetic, not indexing: only the address is wanted, and
+    // `cpu` is checked against the table's length first.
+    (cpu < crate::smp::MAX_CPUS).then(|| {
+        core::ptr::addr_of!(PER_CPU)
+            .cast::<PerCpuData>()
+            .wrapping_add(cpu) as u64
+    })
+}
+
+/// Whether the running CPU, CPU `cpu`, is set up for SYSCALL: `EFER.SCE`
+/// on, `LSTAR` at the entry stub, and `IA32_KERNEL_GS_BASE` naming its own
+/// [`PerCpuData`] -- what [`init`] and [`init_ap`] write. For the self-test
+/// (`smp::self_test`) that no CPU can take a system call into another's
+/// record, or into none. Read from kernel code, where the per-CPU pointer
+/// rests in `KERNEL_GS_BASE` (the entry stub swaps it out and back).
+#[must_use]
+pub fn this_cpu_is_set_up(cpu: usize) -> bool {
+    // SAFETY: reading these MSRs has no side effect; all exist on x86-64.
+    let (efer, lstar, gs) = unsafe {
+        (
+            cpu::rdmsr(IA32_EFER),
+            cpu::rdmsr(IA32_LSTAR),
+            cpu::rdmsr(IA32_KERNEL_GS_BASE),
+        )
+    };
+    efer & 1 != 0
+        && lstar == syscall_entry as *const () as u64
+        && per_cpu_data_addr(cpu) == Some(gs)
+}
+
+/// Update the kernel stack pointer in the running CPU's per-CPU data.
 ///
 /// Called by the scheduler on context switch so that SYSCALL entry
 /// uses the correct kernel stack for the new task.
 ///
 /// # Safety
 ///
-/// Must be called with interrupts disabled (during context switch).
+/// Must be called with interrupts disabled (during context switch), so the
+/// running CPU cannot change under it.
 pub unsafe fn set_kernel_stack(stack_top: u64) {
-    // SAFETY: Single-CPU, called during context switch with interrupts
-    // disabled.  No concurrent access.
+    let cpu = crate::smp::current_cpu_index();
+    // SAFETY: interrupts are off, so no other code runs on this CPU, and no
+    // other CPU touches this CPU's record (each CPU writes only its own).
+    // `get_mut` refuses an index past the table rather than writing off it.
     unsafe {
-        (*core::ptr::addr_of_mut!(PER_CPU)).kernel_rsp = stack_top;
+        if let Some(record) = (*core::ptr::addr_of_mut!(PER_CPU)).get_mut(cpu) {
+            record.kernel_rsp = stack_top;
+        }
     }
 }

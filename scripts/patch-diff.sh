@@ -41,10 +41,13 @@
 #
 # GNU patch is its own project, so `DIFF_GNU_SOURCE` -- which fetches coreutils
 # -- cannot supply it. The reference is `/usr/bin/patch`, GNU patch 2.7.6,
-# Ubuntu `2.7.6-7build3`. That `build3` suffix is a plain rebuild with no Debian
-# source patches, which makes this the least-diverged reference of any harness
-# here; §726's caveat about Ubuntu's heavily patched coreutils does not bite the
-# same way. Recorded rather than assumed.
+# Ubuntu `2.7.6-7build3`: Debian's 2.7.6-7, rebuilt. That is NOT upstream's
+# 2.7.6 -- an earlier version of this paragraph said it was, and was wrong.
+# Debian carries fifteen patches on it (`-m` for `--merge`, the ed script run
+# from a temporary file for CVE-2018-1000156, no symlinks followed for
+# CVE-2019-13636, a `cleanup` that runs once, and five crash fixes), and ours
+# is a port of upstream WITH them, so that this binary is the reference it
+# should agree with byte for byte.
 #
 # ## The exit status
 #
@@ -58,9 +61,18 @@ DIFF_PROG='patch'
 # Every invocation below is bounded, both sides. `patch` searching for a hunk
 # with fuzz is a scan over the file for each offset, and a malformed patch is
 # exactly the input that makes an implementation loop rather than refuse.
-DIFF_NEED=timeout
+# `ed` for the ed-script cases, which `patch` hands to it; `git` to write the
+# git-style diffs, as GNU diff writes the others; `python3` for the random
+# merges.
+DIFF_NEED='timeout ed git python3'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
+
+# `patch` runs `ed` by name, from PATH -- and each side's PATH holds nothing
+# but that side's `patch`. The same `ed` goes beside both.
+for side in ours gnu; do
+  ln -sf "$(command -v ed)" "$bindir/$side/ed"
+done
 
 # Variables `patch` runs with, on both sides, and nothing else does:
 # `POSIXLY_CORRECT` changes where option parsing stops, and exported it would
@@ -139,6 +151,26 @@ printf 'untouched\n'                                    > "$proto/a/keep.txt"
 # unpatchable. See known-issues.md ->
 # B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8.
 printf 'alpha\ncaf\351 comment\ncharlie\ndelta\n'        > "$proto/a/latin1.txt"
+
+# --- (2026-10-09) the rest of upstream ------------------------------------------
+# Fixtures for the parts of GNU patch a from-scratch `patch` never had, which
+# the port (TD-B-THE-PATCH-PAIR-IS-NOT-DECIDED-BY-ITS-HARNESS) brought in.
+#
+# `Prereq: 1.2` asks that the file contain the word `1.2`.
+printf 'release 1.2 of this\n'                          > "$proto/a/ver.txt"
+# Numbered backups already there: the next is `.~10~`, a digit longer, which
+# is the case `check_extension` exists for.
+printf 'num\n'                                          > "$proto/a/num.txt"
+printf 'old1\n'                                         > "$proto/a/num.txt.~1~"
+printf 'old9\n'                                         > "$proto/a/num.txt.~9~"
+# Read-only, for `--read-only`. (This user is not root, so it really is.)
+printf 'locked\n'                                       > "$proto/a/ro.txt"
+chmod 444 "$proto/a/ro.txt"
+# Names git writes C-quoted: a double quote, and bytes above 0177.
+printf 'quoted\n'                                       > "$proto/a/q\"uote.txt"
+printf 'accented\n'                                     > "$proto/a/caf$(printf '\303\251').txt"
+# Long enough that one hunk outgrows the hunk arrays' first 125 lines.
+{ for i in $(seq 1 300); do printf 'big %03d\n' "$i"; done; } > "$proto/a/big.txt"
 
 # --- the patches, produced by GNU diff ----------------------------------------
 mk=$work/mk
@@ -238,6 +270,118 @@ printf ''                                               > "$patches/empty.patch"
 printf -- '--- x/a/base.txt\n+++ y/a/base.txt\n@@ -1,4 +1,4 @@\n alpha\n-bravo\n' \
                                                         > "$patches/truncated.patch"
 
+# --- (2026-10-09) patches for the rest of upstream -------------------------------
+# An ed script, as `diff -e` writes one; GNU patch hands it to `ed`.
+( cd "$mk" && /usr/bin/diff -e base.txt base.new ) > "$patches/e.patch" || true
+# Every ed command patch knows besides `c`: an append, a delete, and the
+# `s/.//` that turns a `..` back into a lone `.`.
+printf 'alpha\nbravo\ncharlie\ndelta\n'                 > "$mk/ed.old"
+printf 'alpha\n.\ncharlie\nadded\n'                     > "$mk/ed.new"
+( cd "$mk" && /usr/bin/diff -e ed.old ed.new ) > "$patches/e2.patch" || true
+# The same change as a normal diff, with `a`, `c` and `d` hunks.
+( cd "$mk" && /usr/bin/diff ed.old ed.new ) > "$patches/n2.patch" || true
+# Context diffs that leave one side out: a pure insertion omits the old lines
+# (`ptrn_missing`), a pure deletion the new ones (`repl_missing`).
+( cd "$mk" && /usr/bin/diff -c --label x/a/base.txt --label y/a/base.txt \
+    base.txt base.append ) > "$patches/cadd.patch" || true
+( cd "$mk" && /usr/bin/diff -c --label x/a/base.txt --label y/a/base.txt \
+    base.append base.txt ) > "$patches/cdel.patch" || true
+# A context diff whose hunk fails, for the reject formats.
+( cd "$mk" && /usr/bin/diff -c --label x/a/base.txt --label y/a/base.txt \
+    drift.txt base.new ) > "$patches/cdrift.patch" || true
+# Timestamps in the headers, for -Z and -T: the old one is not the file's, so
+# only -f sets the time.
+tab=$(printf '\t')
+( cd "$mk" && /usr/bin/diff -u \
+    --label "x/a/base.txt${tab}1999-12-31 00:00:00.000000000 +0000" \
+    --label "y/a/base.txt${tab}2000-01-01 00:00:00.000000000 +0000" \
+    base.txt base.new ) > "$patches/ts.patch" || true
+# RFC 934 encapsulation: every line that begins with `-` gets `- ` in front.
+# It is recognised from a `- --- ` header WITH a timestamp, which ts.patch has.
+sed 's/^-/- -/' "$patches/ts.patch" > "$patches/rfc934.patch"
+# Carriage returns, which patch strips unless --binary; and an indented patch.
+sed 's/$/\r/' "$patches/u.patch" > "$patches/crlf.patch"
+sed 's/^/   /' "$patches/u.patch" > "$patches/indent.patch"
+# `Prereq:` found, missing, and of more than one word.
+printf 'release 1.2 of that\n'                          > "$mk/ver.new"
+printf 'release 1.2 of this\n'                          > "$mk/ver.txt"
+( cd "$mk" && /usr/bin/diff -u --label x/a/ver.txt --label y/a/ver.txt \
+    ver.txt ver.new ) > "$mk/ver.patch" || true
+{ printf 'Prereq: 1.2\n'; cat "$mk/ver.patch"; }         > "$patches/prereq.patch"
+{ printf 'Prereq: 9.9\n'; cat "$patches/u.patch"; }      > "$patches/prereq-miss.patch"
+{ printf 'Prereq: 1.2 and more\n'; cat "$mk/ver.patch"; } > "$patches/prereq-words.patch"
+# Numbered backups, and a read-only target.
+printf 'num\n' > "$mk/num.txt"; printf 'NUM\n' > "$mk/num.new"
+( cd "$mk" && /usr/bin/diff -u --label x/a/num.txt --label y/a/num.txt \
+    num.txt num.new ) > "$patches/num.patch" || true
+printf 'locked\n' > "$mk/ro.txt"; printf 'unlocked\n' > "$mk/ro.new"
+( cd "$mk" && /usr/bin/diff -u --label x/a/ro.txt --label y/a/ro.txt \
+    ro.txt ro.new ) > "$patches/ro.patch" || true
+# Every other line of 300 changed: one hunk of 450 lines, in all three formats.
+cp "$proto/a/big.txt" "$mk/big.txt"
+{ for i in $(seq 1 300); do
+    if [ $((i % 2)) = 0 ]; then printf 'BIG %03d\n' "$i"; else printf 'big %03d\n' "$i"; fi
+  done; }                                               > "$mk/big.new"
+( cd "$mk" && /usr/bin/diff -u --label x/a/big.txt --label y/a/big.txt \
+    big.txt big.new ) > "$patches/big.patch" || true
+( cd "$mk" && /usr/bin/diff -c --label x/a/big.txt --label y/a/big.txt \
+    big.txt big.new ) > "$patches/bigc.patch" || true
+( cd "$mk" && /usr/bin/diff big.txt big.new ) > "$patches/bign.patch" || true
+# A context hunk with no `---`: it runs into the end of the hunk arrays.
+{ printf '*** x/a/base.txt\n--- y/a/base.txt\n***************\n*** 1,2 ****\n'
+  for i in $(seq 1 200); do printf '  alpha\n'; done; } > "$patches/unterminated.patch"
+# Hunks out of order: the second is earlier in the file than the first.
+printf -- '--- x/a/long.txt\n+++ y/a/long.txt\n@@ -30,3 +30,3 @@\n line 30\n-line 31\n+LINE 31\n line 32\n@@ -2,3 +2,3 @@\n line 02\n-line 03\n+LINE 03\n line 04\n' \
+                                                        > "$patches/misordered.patch"
+# An added line that is empty AND has no newline: a line of no bytes, which
+# upstream's fwrite reports as a write error.
+printf -- '--- x/a/base.txt\n+++ y/a/base.txt\n@@ -4 +4,2 @@\n delta\n+\n\\ No newline at end of file\n' \
+                                                        > "$patches/emptynonl.patch"
+# Names that climb out of the tree, or start at its root.
+printf -- '--- ../evil.txt\n+++ ../evil.txt\n@@ -1 +1 @@\n-a\n+b\n'   > "$patches/dotdot.patch"
+printf -- '--- /tmp/evil.txt\n+++ /tmp/evil.txt\n@@ -1 +1 @@\n-a\n+b\n' > "$patches/abs.patch"
+# Two patches in one file, with garbage before, between and after.
+{ printf 'leading garbage\n'; cat "$patches/u.patch"; printf 'between\n'
+  cat "$patches/latin1.patch"; printf 'trailing\n'; }   > "$patches/multi.patch"
+
+# Git-style diffs, written by git from a repository holding the starting tree
+# and then changed: a rename with an edit, a copy, a mode change, new files
+# (one in directories that do not exist yet), a deletion, a symlink, a binary
+# file, and names git has to quote.
+gr=$work/gitrepo
+mkdir -p "$gr"
+cp -a "$proto/a" "$gr/a"
+acc="a/caf$(printf '\303\251').txt"
+( cd "$gr" || exit 1
+  git init -q .
+  git add -A
+  git -c user.name=t -c user.email=t@t commit -qm init
+  git mv a/long.txt a/longer.txt
+  sed -i 's/^line 20$/LINE 20/' a/longer.txt
+  cp a/base.txt a/basecopy.txt
+  printf 'extra\n' >> a/basecopy.txt
+  chmod 755 a/keep.txt
+  printf 'fresh\n' > a/fresh.txt
+  mkdir -p a/new/dir
+  printf 'deep fresh\n' > a/new/dir/f.txt
+  git rm -q a/sub/deep.txt
+  ln -s base.txt a/link
+  printf '\000\001\002' > a/bin.dat
+  printf 'requoted\n' > 'a/q"uote.txt'
+  printf 'accented now\n' > "$acc"
+  git add -A
+  git diff --cached -M -- a/long.txt a/longer.txt         > "$patches/git-rename.patch"
+  git diff --cached -C -C -- a/base.txt a/basecopy.txt    > "$patches/git-copy.patch"
+  git diff --cached -- a/keep.txt                         > "$patches/git-mode.patch"
+  git diff --cached -- a/fresh.txt a/new                  > "$patches/git-new.patch"
+  git diff --cached -- a/sub/deep.txt                     > "$patches/git-delete.patch"
+  git diff --cached -- a/link                             > "$patches/git-symlink.patch"
+  git diff --cached --binary -- a/bin.dat                 > "$patches/git-binary.patch"
+  git diff --cached -- a/bin.dat                          > "$patches/git-binary-nodata.patch"
+  git diff --cached -- 'a/q"uote.txt' "$acc"              > "$patches/git-quoted.patch"
+  git diff --cached -M -C -C                              > "$patches/git-all.patch"
+) || exit 1
+
 # --- comparing a whole tree ---------------------------------------------------
 # Sorted, one line per entry, with type, mode and a content hash. `cksum` rather
 # than the bytes so a long file does not drown the report, and the mode because
@@ -251,9 +395,23 @@ snap() {
           elif [ -L "$e" ]; then
             printf 'l %s -> %s\n' "$e" "$(readlink "$e")"
           else
-            printf 'f %s %s %s\n' "$e" "$(stat -c '%a' "$e")" "$(cksum < "$e")"
+            # A modification time is shown only when it is one `-Z` or `-T`
+            # set from a patch header -- the fixtures' headers say 2000 --
+            # since every other file's is the moment its case ran.
+            m=$(stat -c '%Y' "$e")
+            if [ "$m" -lt 1000000000 ]; then m=" mtime=$m"; else m=; fi
+            printf 'f %s %s %s%s\n' "$e" "$(stat -c '%a' "$e")" "$(cksum < "$e")" "$m"
           fi
         done )
+}
+
+# The temporary files `patch` makes are named `NAME.<letter>XXXXXX` beside
+# their target, or `$TMPDIR/p<letter>XXXXXX`, six random characters each run.
+# Only the debug output names them; a case that prints one sets NORM.
+norm_temp() {
+  if [ -n "${NORM:-}" ]; then
+    sed -E 's/(\.[oirpe]|\/p[oirpe])[A-Za-z0-9]{6}/\1XXXXXX/g' "$1" > "$1.n" && mv "$1.n" "$1"
+  fi
 }
 
 run_side() {
@@ -275,10 +433,17 @@ compare() {
   if [ "$use_stdin" = yes ]; then
     run_side "$o_dir" ours "$@" <"$pfile" >"$o_bin" 2>"$o_err"; o_rc=$?
     run_side "$g_dir" gnu  "$@" <"$pfile" >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "$use_stdin" = pipe ]; then
+    # Not a regular file, so `patch` copies it to a temporary file first.
+    # shellcheck disable=SC2002
+    cat "$pfile" | run_side "$o_dir" ours "$@" >"$o_bin" 2>"$o_err"; o_rc=${PIPESTATUS[1]}
+    # shellcheck disable=SC2002
+    cat "$pfile" | run_side "$g_dir" gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=${PIPESTATUS[1]}
   else
     run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
     run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
+  norm_temp "$o_bin"; norm_temp "$g_bin"; norm_temp "$o_err"; norm_temp "$g_err"
 
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   local o_msg g_msg o_tree g_tree
@@ -557,8 +722,10 @@ run_case nosuch.patch -p1
 run_case u.patch -p1 --nosuchoption
 run_case u.patch -p1 -Q
 
-# --- the two whose text is ours ------------------------------------------------------
-xfail_case "our help text, not the GNU project's" empty.patch --help
+# --- the one whose text is ours ------------------------------------------------------
+# `--help` is upstream's own text since the port (2026-10-09); `--version` names
+# this build.
+run_case empty.patch --help
 xfail_case "our version string, not the GNU project's" empty.patch --version
 
 # --- the command line, on the shared parser ---------------------------------------
@@ -589,6 +756,200 @@ ENVV=(POSIXLY_CORRECT=1)
 argv_case a/base.txt "$patches/u.patch" --dry-run
 argv_case --dry-run a/base.txt "$patches/u.patch"
 ENVV=()
+
+# --- (2026-10-09) the rest of upstream --------------------------------------------
+# Everything below arrived with the port. Before it, ours had no ed scripts,
+# no git diffs, no --merge, no -D, no backup styles but one, no reject formats
+# and no debugging; each block is one of those, measured.
+
+# Ed scripts, run by `ed` on a copy of the file. A missing file is allowed
+# (Debian's patch), and `-o` gets the result copied to it.
+run_case e.patch a/base.txt
+run_case e.patch -e a/base.txt
+run_case e2.patch a/base.txt
+run_case e2.patch --dry-run a/base.txt
+run_case e.patch -o out.txt a/base.txt
+run_case e.patch a/nosuch.txt
+run_case e.patch -b a/base.txt
+run_stdin e.patch a/base.txt
+run_case n2.patch a/base.txt
+run_case n2.patch -n a/base.txt
+
+# Git-style diffs: each kind alone, then all of them in one patch -- which
+# is where the queued outputs of a git diff matter, since a later patch may
+# read a file an earlier one renamed.
+for gp in git-rename git-copy git-mode git-new git-delete git-symlink \
+          git-binary git-binary-nodata git-quoted git-all; do
+  run_case "$gp.patch" -p1
+done
+run_case git-all.patch -p1 --dry-run
+run_case git-all.patch -p1 --verbose
+run_case git-all.patch -p1 -b
+run_case git-rename.patch -p1 -R
+run_case git-quoted.patch -p1 --quoting-style=c
+run_case git-quoted.patch -p1 --quoting-style=escape
+run_case git-quoted.patch -p1 --quoting-style=literal
+run_case git-quoted.patch -p1 --quoting-style=shell-always
+
+# --merge, in both styles and by its Debian short option; and -D.
+run_case drift.patch -p1 --merge
+run_case drift.patch -p1 --merge=diff3
+run_case drift.patch -p1 -m
+run_case drift.patch -p1 --merge=bogus
+run_case off1.patch -p1 --merge
+run_case fz2.patch -p1 --merge
+run_case u.patch -p1 --merge
+run_case u.patch -p1 --merge --verbose
+run_case applied.patch -p1 --merge
+run_case u.patch -p1 -D FOO
+run_case u.patch -p1 --ifdef=FOO
+run_case c.patch -p1 -D BAR
+run_case append.patch -p1 -D FOO
+run_case nonl.patch -p1 -D FOO
+run_case long.patch -p1 -D FOO
+run_case drift.patch -p1 -D FOO
+
+# Backup names: numbered, existing, simple, by option and by environment,
+# with prefixes and suffixes; and CVS 1.9's `-b SUFFIX ORIGFILE PATCHFILE`.
+run_case num.patch -p1 -b -V numbered
+run_case num.patch -p1 -b -V existing
+run_case num.patch -p1 -b -V simple
+run_case u.patch -p1 -b -V numbered
+run_case u.patch -p1 -b -V existing
+run_case u.patch -p1 -b -V never
+run_case u.patch -p1 -b -V t
+run_case u.patch -p1 -b -V bogus
+run_case u.patch -p1 -b -V n
+run_case u.patch -p1 -b --version-control=nil
+run_case u.patch -p1 -b -z .bak
+run_case u.patch -p1 -b --suffix=.bak
+run_case u.patch -p1 -b -B pre/
+run_case u.patch -p1 -b -Y bak.
+run_case u.patch -p1 -b -B ''
+run_case u.patch -p1 -z ''
+run_case create.patch -p1 -b
+run_case delete.patch -p1 -b
+run_case drift.patch -p1 --backup-if-mismatch
+ENVV=(SIMPLE_BACKUP_SUFFIX=.sav)
+run_case u.patch -p1 -b
+ENVV=(VERSION_CONTROL=numbered)
+run_case num.patch -p1 -b
+ENVV=(PATCH_VERSION_CONTROL=simple VERSION_CONTROL=numbered)
+run_case num.patch -p1 -b
+ENVV=(VERSION_CONTROL=bogus)
+run_case u.patch -p1 -b
+ENVV=()
+argv_case -b .bak a/base.txt "$patches/u.patch"
+argv_case -s -b .bak a/base.txt "$patches/u.patch"
+
+# Rejects in the other format, and thrown away.
+run_case drift.patch -p1 --reject-format=context
+run_case drift.patch -p1 --reject-format=unified
+run_case cdrift.patch -p1
+run_case cdrift.patch -p1 --reject-format=unified
+run_case drift.patch -p1 -r -
+run_case drift.patch -p1 --reject-format=bogus
+
+# Debugging output, flag by flag. -x 16 is plan B: the file kept in a
+# temporary file of fixed-size records instead of memory.
+run_case u.patch -p1 -x 1
+run_case off1.patch -p1 -x 1
+run_case u.patch -p1 -x 2
+run_case c.patch -p1 -x 2
+run_case cadd.patch -p1 -x 2
+run_case drift.patch -p1 -x 2 --merge
+NORM=1 run_case u.patch -p1 -x 4
+NORM=1 run_case u.patch -p1 -b -x 4
+NORM=1 run_case git-all.patch -p1 -x 4
+run_case u.patch -p1 -x 16
+run_case u.patch -p1 -x 16 --verbose
+run_case c.patch -p1 -x 16
+run_case nonl.patch -p1 -x 16
+run_case long.patch -p1 -x 16
+run_case big.patch -p1 -x 16
+run_case drift.patch -p1 -x 16
+run_case u.patch -p1 -x 32
+run_case git-all.patch -p1 -x 32
+run_case cadd.patch -p1 -x 64
+run_case u.patch -p1 -x 128
+run_case u.patch -p1 -x 256
+NORM=1 run_case u.patch -p1 -x -1
+
+# The patch file itself: line endings, indentation, encapsulation, several
+# patches in one, a pipe, timestamps, and hunks that are big, unterminated,
+# out of order, or short of a byte.
+run_case crlf.patch -p1
+run_case crlf.patch -p1 --binary
+run_case indent.patch -p1
+run_case rfc934.patch -p1
+run_case ts.patch -p1 -Z
+run_case ts.patch -p1 -Z -f
+run_case ts.patch -p1 -T -f
+run_case ts.patch -p1 --set-utc --force
+run_case multi.patch -p1
+run_case multi.patch -p1 --verbose
+compare "$patches/u.patch" pipe -p1
+report "cat u.patch | patch -p1"
+compare "$patches/multi.patch" pipe -p1
+report "cat multi.patch | patch -p1"
+run_case big.patch -p1
+run_case bigc.patch -p1
+run_case bign.patch a/big.txt
+run_case big.patch -p1 -R
+run_case unterminated.patch -p1
+run_case misordered.patch -p1
+run_case emptynonl.patch -p1
+run_case cadd.patch -p1
+run_case cdel.patch -p1
+run_case cadd.patch -p1 --verbose
+
+# Prereq.
+run_case prereq.patch -p1
+run_case prereq.patch -p1 --verbose
+run_case prereq.patch -p1 -x 16 --verbose
+run_case prereq-miss.patch -p1
+run_case prereq-miss.patch -p1 -f
+run_case prereq-miss.patch -p1 -t
+run_case prereq-miss.patch -p1 -x 16 -f
+run_case prereq-words.patch -p1
+
+# Names that climb out of the tree; quoting styles.
+run_case dotdot.patch
+run_case abs.patch
+run_case dotdot.patch -f
+run_case u.patch -p1 --quoting-style=c
+run_case u.patch -p1 --quoting-style=bogus
+run_case u.patch -p1 --quoting-style=s
+ENVV=(QUOTING_STYLE=c)
+run_case dotdot.patch
+ENVV=()
+
+# Read-only targets.
+run_case ro.patch -p1
+run_case ro.patch -p1 --read-only=fail
+run_case ro.patch -p1 --read-only=ignore
+run_case ro.patch -p1 --read-only=bogus
+
+# Batch mode, and --posix where it asks nothing.
+run_case applied.patch -p1 -t
+run_case applied.patch -p1 --batch
+run_case u.patch -p1 -R -t
+run_case u.patch -p1 --posix
+run_case drift.patch -p1 --posix
+
+# The merge search, sampled widely: 300 seeded random merges, ours against
+# GNU, each side dumping the search's result (`-x 2`) -- one case here, since
+# a fixed handful cannot walk enough of `compareseq`'s diagonals to show a
+# slip in one. See scripts/patch-merge-fuzz.py.
+if python3 "$root/scripts/patch-merge-fuzz.py" "$bindir/ours/patch" "$bindir/gnu/patch" 300 1 \
+     > "$work/mergefuzz.txt" 2>&1; then
+  pass=$((pass+1))
+  [ -n "${VERBOSE:-}" ] && printf 'OK   random merges: %s\n' "$(tail -n 1 "$work/mergefuzz.txt")"
+else
+  fail=$((fail+1))
+  printf 'DIFF random merges\n'
+  cat "$work/mergefuzz.txt"
+fi
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

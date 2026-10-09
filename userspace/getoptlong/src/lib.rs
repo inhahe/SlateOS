@@ -925,6 +925,22 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Take the next word of argv as a value the *program* decided an
+    /// option has: glibc's `optarg = argv[optind++]`, done by hand.
+    ///
+    /// Only `patch` needs it, for the hack upstream keeps for CVS 1.9: when
+    /// the last four words are `-b SUFFIX ORIGFILE PATCHFILE`, the `-b` --
+    /// which takes no value -- takes `SUFFIX` as `-z`'s, and the walk goes
+    /// on after it. `None` while a bundle like `-ab` is half-read, since its
+    /// next letter, not the next word, is what comes next; and `None` at the
+    /// end of argv.
+    pub fn take_word(&mut self) -> Option<OsString> {
+        if !self.cluster.is_empty() {
+            return None;
+        }
+        self.next_word()
+    }
+
     /// Whether glibc's `getopt_long` would have **stopped** by now: every word
     /// from here on is an operand however it looks — after a `--`, or from the
     /// first operand on in a `+` table, or in a table with no prefix while
@@ -2270,6 +2286,26 @@ mod tests {
         assert_eq!(p.optind(), 1, "and now the word is spent");
         assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[1]));
         assert_eq!(p.optind(), 2);
+    }
+
+    #[test]
+    fn a_word_taken_by_hand_is_not_seen_again() {
+        // patch's `-b SUFFIX ORIGFILE PATCHFILE`: the program takes `SUFFIX`
+        // itself, and the walk resumes after it.
+        let args = argv(&["-c", "suf", "f"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.take_word(), Some(OsString::from("suf")));
+        assert_eq!(p.optind(), 2);
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[2]));
+        assert_eq!(p.take_word(), None, "nothing left");
+
+        // Mid-bundle there is no next word to give: `-f` is still owed.
+        let args = argv(&["-cf", "x"]);
+        let mut p = TOUCH.parse(&args, TOUCH_SHORTS, TOUCH_LONGS);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'c'));
+        assert_eq!(p.take_word(), None);
+        assert_eq!(p.next().unwrap().unwrap(), short(b'f'));
     }
 
     #[test]

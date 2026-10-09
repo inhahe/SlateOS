@@ -202,7 +202,7 @@ two disagree.
 | `osh` | The Oils shell command-line entry point. | yes | `oils` |  |
 | `passwd` | Password Management Utility | yes |  |  |
 | `paste` | Write corresponding lines of several files side by side. | yes | `coreutils` |  |
-| `patch` | Apply a diff file to originals. | yes | `coreutils` |  |
+| `patch` | Apply a diff to the files it names: GNU patch 2.7.6 as Ubuntu ships it, ported. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. | yes | `coreutils` |  |
 | `pgrep` | Look up processes by name and other attributes. | yes | `coreutils` |  |
 | `ping` | ICMP Ping Utility | yes |  |  |

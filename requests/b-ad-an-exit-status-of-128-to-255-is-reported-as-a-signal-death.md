@@ -1,7 +1,7 @@
 # B → A, D: an exit status of 128 to 255 is reported to the parent as a signal death
 
-**Status:** OPEN -- lane A's half done on `lane-a-wip` 2026-10-03, awaiting a
-boot on main (reply below); lane D's half is
+**Status:** OPEN -- lane A's half done 2026-10-03, on main and boot-tested
+(reply below); lane D's half is
 `requests/a-d-end-a-default-action-death-with-sys-signal-exit-self.md`.
 
 **From:** lane B. **Date:** 2026-10-02. Found while porting GNU `timeout`,

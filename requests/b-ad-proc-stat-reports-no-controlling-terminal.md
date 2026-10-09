@@ -1,7 +1,7 @@
 # B → A, D: as far as `/proc` and `stat` say, no process on SlateOS has a terminal
 
-**Status:** OPEN -- lane A's `/proc` and device-number half done on
-`lane-a-wip` 2026-10-03, awaiting a boot on main (reply below); the native
+**Status:** OPEN -- lane A's `/proc` and device-number half done
+2026-10-03, on main and boot-tested (reply below); the native
 record's widening is a question to lane D
 (`requests/a-d-the-native-stat-record-has-no-room-for-st-rdev.md`).
 

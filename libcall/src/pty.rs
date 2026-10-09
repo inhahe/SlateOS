@@ -372,8 +372,10 @@ mod sys {
         ) -> i32;
         pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
         pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
-        pub fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-        pub fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        // `void *`, as the C library and Rust's own runtime declare them: a
+        // test build links the runtime, which checks that these agree.
+        pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
+        pub fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
         pub fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         pub fn waitid(idtype: i32, id: i32, infop: *mut core::ffi::c_void, options: i32) -> i32;
@@ -494,7 +496,7 @@ fn spawn_one(path: &CStr, argv: &[&CStr], envp: &[&CStr], size: WinSize) -> Resu
             // seeing an exit status of 127, which is wrong but not dangerous;
             // there is nothing more a child in this state can do.
             let bytes = crate::last_errno().to_ne_bytes();
-            sys::write(report_wr, bytes.as_ptr(), bytes.len());
+            sys::write(report_wr, bytes.as_ptr().cast(), bytes.len());
             sys::_exit(127);
         }
     }
@@ -561,7 +563,7 @@ fn read_all_retrying(fd: i32, buf: &mut [u8]) -> usize {
         }
         // SAFETY: `rest` is a live, writable slice and the length handed over
         // is its own.
-        let n = unsafe { sys::read(fd, rest.as_mut_ptr(), rest.len()) };
+        let n = unsafe { sys::read(fd, rest.as_mut_ptr().cast(), rest.len()) };
         match usize::try_from(n) {
             Ok(0) => break,
             Ok(n) => got = got.saturating_add(n),
@@ -963,7 +965,7 @@ mod tests {
             let mut buf = [0u8; 512];
             loop {
                 // SAFETY: `buf` is writable for its whole length.
-                let n = unsafe { sys::read(master, buf.as_mut_ptr(), buf.len()) };
+                let n = unsafe { sys::read(master, buf.as_mut_ptr().cast(), buf.len()) };
                 if n > 0 {
                     out.extend_from_slice(&buf[..usize::try_from(n).unwrap()]);
                     continue;
@@ -1042,7 +1044,7 @@ mod tests {
                 spawn(SH, &[c"sh", c"-c", c"read x; stty size"], &[], size(24, 80)).expect("spawn");
             set_window_size(s.master, size(40, 132)).expect("resize");
             // SAFETY: a one-byte write from a live buffer to our own master.
-            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr(), 1) };
+            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr().cast(), 1) };
             assert_eq!(wrote, 1);
             let out = read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);
@@ -1061,7 +1063,7 @@ mod tests {
             assert_eq!(window_size(s.master), Ok(size(40, 132)));
             // SAFETY: a one-byte write from a live buffer to our own master,
             // which lets the child's `read` finish.
-            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr(), 1) };
+            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr().cast(), 1) };
             assert_eq!(wrote, 1);
             read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);
@@ -1227,7 +1229,7 @@ mod tests {
             // Wait for the child to be running `sleep` before interrupting it.
             std::thread::sleep(Duration::from_millis(300));
             // SAFETY: a one-byte write from a live buffer to our own master.
-            let wrote = unsafe { sys::write(s.master, [0x03u8].as_ptr(), 1) };
+            let wrote = unsafe { sys::write(s.master, [0x03u8].as_ptr().cast(), 1) };
             assert_eq!(wrote, 1);
             read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);

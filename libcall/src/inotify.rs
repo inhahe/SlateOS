@@ -173,7 +173,9 @@ mod sys {
         pub fn inotify_init1(flags: i32) -> i32;
         pub fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> i32;
         pub fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-        pub fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        // `void *`, as the C library and Rust's own runtime declare it: a test
+        // build links the runtime, which checks that the two agree.
+        pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
     }
 
@@ -291,7 +293,7 @@ impl Inotify {
     pub fn read<'b>(&self, buf: &'b mut [u8]) -> Result<Events<'b>, i32> {
         // SAFETY: `buf` is a live, writable slice and the count is its
         // length, so the library writes only within it.
-        let n = unsafe { sys::read(self.fd, buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe { sys::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n < 0 {
             let errno = crate::last_errno();
             return if errno == sys::EAGAIN || errno == sys::EINTR {

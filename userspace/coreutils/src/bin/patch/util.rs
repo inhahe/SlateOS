@@ -574,8 +574,7 @@ impl Ctx {
             let mut m = self.program_name.clone();
             m.extend_from_slice(b": write error: ");
             m.extend_from_slice(
-                coreutils::errmsg::strerror(&std::io::Error::from_raw_os_error(failure))
-                    .as_bytes(),
+                coreutils::errmsg::strerror(&std::io::Error::from_raw_os_error(failure)).as_bytes(),
             );
             m.push(b'\n');
             print_stderr(&m);

@@ -10,13 +10,31 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
-## In chat to lane A, 2026-10-09 (afternoon)
+## open-questions/claude-answers.txt
 
-- **Written:** 2026-10-09, in lane A's session, after lane A answered the
-  questions the operator had asked back in `open-questions/answers.txt`.
-- **Processed:** 2026-10-09 by lane A, the same hour.
-- **Copy:** `operator-answers/2026-10-09-chat-to-lane-a.txt`
-- **Content:** sha256 `c609490015f138335c79e73d207a204fedf9cb994fabd7d0514ff28ee4936b3d`
+- **Written:** 2026-10-09 16:16, in the integration tree's `open-questions/`:
+  not the operator's answers but lane A's chat reply to the questions asked
+  back in `open-questions/answers.txt`, which the operator kept there.
+- **Processed:** 2026-10-09 by lane A. Nothing in it is a decision; what the
+  operator decided after reading it is the next file,
+  `open-questions/answers.2.txt` (section below).
+- **Copy:** `operator-answers/2026-10-09-claude-answers.txt`
+- **Content:** sha256 `317a8dc611c4aa5d9d3d358e4d87d1b8cfc4c37e0f9827987aee0164d937d1c1`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| Lane A's answers on D-Q3, D-Q8, C-Q29, C-Q33, C-Q34, E-Q4, F-Q3, F-Q5, F-Q6, F-Q7, F-Q8, F-Q9, F-Q10, B-Q22 | A | relayed to lanes B-F by notice, 2026-10-09 19:40Z | recorded -- a reply, nothing to decide |
+
+## open-questions/answers.2.txt
+
+- **Written:** 2026-10-09 16:15, in the integration tree's `open-questions/`,
+  and given in chat to lane A minutes later, word for word, after lane A
+  answered the questions the operator had asked back in
+  `open-questions/answers.txt`.
+- **Processed:** 2026-10-09 by lane A, the same hour (from the chat; the file
+  was found and its copy made byte-exact at the next sync).
+- **Copy:** `operator-answers/2026-10-09-open-questions-answers.2.txt`
+- **Content:** sha256 `5e94dc49f15ffd10ca0eaa0053a1cd35cf84524c809fbeeee00853e2d252ad6a`
 
 | Answer | Lane | Recorded in | State |
 |---|---|---|---|

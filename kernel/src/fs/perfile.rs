@@ -3,8 +3,9 @@
 //!
 //! Kernel tables hold state about files in memory rather than in the
 //! filesystem that holds the files: ACLs ([`super::acl`]), seals
-//! ([`super::sealing`]), the indexed attributes of [`super::queryable`], and
-//! which socket a Unix-domain socket's node leads to. The `chattr` flags were
+//! ([`super::sealing`]), and which socket a Unix-domain socket's node leads
+//! to. Queryable attributes were a table here too until 2026-10-09; they are
+//! the file's own `user.slate.*` attributes now (design-decisions §1561). The `chattr` flags were
 //! a table here too until 2026-10-02 (`fs::immutable`, which nothing
 //! consulted); they are the inode's now (`vfs::FileAttr`), as Linux keeps
 //! them, and end with it. Since 2026-09-21 each table keys its entries
@@ -56,8 +57,8 @@
 //!   file lives on under another, the report names the old one until the file
 //!   goes: nothing maps an identity back to its surviving names.
 //! - A rename rewrites names by scanning each table: nothing when the tables
-//!   are empty, which is almost always, and a few milliseconds at the 65,536
-//!   entries `queryable` allows.
+//!   are empty, which is almost always, and a few milliseconds at tens of
+//!   thousands of entries.
 //!
 //! ## Lock order
 //!
@@ -118,7 +119,6 @@ pub(crate) const TABLES: &[Table] = &[
     // would hand a stranger's files an ACL nobody set on them.
     super::acl::DEFAULT_PER_FILE_STATE,
     super::sealing::PER_FILE_STATE,
-    super::queryable::PER_FILE_STATE,
     // Which socket a Unix-domain socket's node leads to: an entry outliving
     // its node would lead the next client to whatever file reuses the inode.
     crate::ipc::unix_socket::PER_FILE_STATE,

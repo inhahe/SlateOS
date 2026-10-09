@@ -35,10 +35,17 @@ DIFF_NEED='timeout python3'
 
 pass=0; fail=0; broken=0; xfail=0
 
-# $1 = side (ours|gnu), rest = argv; stdin is the caller's.
+# $1 = side (ours|gnu), rest = argv; stdin is the caller's. With UTSNAME set,
+# the run is in a UTS namespace of its own (`unshare -Uru`) named that.
 run_side() {
   local side=$1; shift
-  diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 logger "$@"
+  if [ -n "${UTSNAME:-}" ]; then
+    # shellcheck disable=SC2016  # $1 and $@ are the inner shell's
+    diff_run unshare -Uru sh -c 'hostname "$1" && shift && exec "$@"' sh "$UTSNAME" \
+      env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 logger "$@"
+  else
+    diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 logger "$@"
+  fi
 }
 
 # Each frame with its clock taken out.
@@ -167,6 +174,20 @@ case_ '' --no-act -s -t t 'x
 case_ '' --no-act -s --id=4294967295 -t t x
 case_ '' --no-act -s -i -t t x --id=77
 case_ '' --no-act -s -t "$(printf 'x%.0s' {1..200})" --rfc3164 x
+# The host name in the header: `xgethostname` reads it into
+# `sysconf (_SC_HOST_NAME_MAX) + 1` bytes, so 64 -- Linux's longest -- fits
+# with its NUL. (The port passed 64 for 65 bytes until 2026-10-09, and lost a
+# 64-byte name to ENAMETOOLONG.) A dot ends it in an RFC 3164 header.
+if unshare -Uru sh -c 'hostname x' 2>/dev/null; then
+  for name in "$(printf '%63s' '' | tr ' ' h)" "$(printf '%64s' '' | tr ' ' h)" \
+              "$(printf '%60s' '' | tr ' ' h).dom"; do
+    for hdr in --rfc3164 --rfc5424; do
+      UTSNAME=$name case_ '' "${NA[@]}" "$hdr" hello
+    done
+  done
+else
+  echo "logger-diff: no UTS namespace (unshare -Uru); the host name cases are skipped" >&2
+fi
 
 # --- priorities ------------------------------------------------------------------
 for p in user.notice notice LOCAL3.ERR 8.5 5 none 16 kernel.err critical 4294967304.5 0.3 mark.info 192.1 security.err .info user. user.info.x 96.1 8 12x; do

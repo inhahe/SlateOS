@@ -52,3 +52,7 @@ journalrec = { path = "../journalrec" }
 # Appended under the journal's lock (design-decisions §1037), so a vacuum or
 # rotation at that moment does not lose the record.
 journalio = { path = "../journalio" }
+
+# `gethostname` into the buffer util-linux sizes from
+# `sysconf (_SC_HOST_NAME_MAX)`: 65 bytes on Linux, 256 on SlateOS.
+libcall = { path = "../../libcall" }

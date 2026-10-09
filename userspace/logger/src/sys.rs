@@ -1,8 +1,9 @@
 //! The libc calls util-linux's `logger` makes that std does not wrap, reached
 //! through the C ABI as the one-libc rule requires (design-decisions §768):
-//! `getpwuid`, `getuid`/`geteuid`, `gethostname`, `ntp_gettime`
-//! (as `adjtimex`), name resolution for `-n`, and the `sendmsg` that attaches
-//! a claimed PID to a local message (`SCM_CREDENTIALS`).
+//! `getpwuid`, `getuid`/`geteuid`, `ntp_gettime` (as `adjtimex`), name
+//! resolution for `-n`, and the `sendmsg` that attaches a claimed PID to a
+//! local message (`SCM_CREDENTIALS`) -- and `gethostname`, through `libcall`,
+//! which also knows how long a host name may be.
 //!
 //! Each has a host fallback for the Windows build the unit tests run on, where
 //! none of these exist; the fallbacks answer "unknown", which the callers
@@ -23,10 +24,23 @@ pub fn xgetlogin() -> Option<Vec<u8>> {
     imp::getpwuid_name(imp::getuid()?)
 }
 
-/// `xgethostname()`: the host's name, or `None` if it cannot be read.
+/// `xgethostname()` (util-linux 2.39.3's `include/xalloc.h`): `gethostname`
+/// into `get_hostname_max () + 1` bytes -- 65 on Linux, 256 on SlateOS --
+/// the last made 0; `None` if it cannot be read.
+///
+/// Until 2026-10-09 this passed 64 for a 65-byte buffer, so a host name of
+/// exactly 64 bytes -- Linux's longest -- did not fit with its NUL, glibc
+/// refused it with `ENAMETOOLONG`, and the header went without the name that
+/// util-linux's carries; and on SlateOS, whose names run to 255 bytes, every
+/// name past 63 was refused that way.
 #[must_use]
 pub fn hostname() -> Option<Vec<u8>> {
-    imp::gethostname()
+    let sz = libcall::conf::hostname_max().saturating_add(1);
+    let mut buf = vec![0u8; sz];
+    let n = libcall::hostname_into(&mut buf).ok()?;
+    // `name[sz - 1] = '\0'`: a library that cuts the name short without
+    // saying so still gives a terminated one.
+    Some(buf.get(..n.min(sz.saturating_sub(1)))?.to_vec())
 }
 
 /// `ntp_gettime`'s verdict on the clock: `Some(maxerror)` in microseconds
@@ -194,7 +208,6 @@ mod imp {
             pub fn geteuid() -> u32;
             pub fn kill(pid: i32, sig: i32) -> i32;
             pub fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize;
-            pub fn gethostname(name: *mut c_char, len: usize) -> i32;
             pub fn adjtimex(buf: *mut Timex) -> i32;
             pub fn getaddrinfo(
                 node: *const c_char,
@@ -279,22 +292,6 @@ mod imp {
             // Upstream: `pw && pw->pw_name && *pw->pw_name`.
             (!name.is_empty()).then(|| name.to_vec())
         }
-    }
-
-    pub fn gethostname() -> Option<Vec<u8>> {
-        // HOST_NAME_MAX is 64 on Linux; util-linux sizes its buffer from
-        // sysconf(_SC_HOST_NAME_MAX), which answers the same. The last byte
-        // stays 0, so a truncated name is still terminated.
-        let mut buf = [0u8; 65];
-        let len = buf.len().saturating_sub(1);
-        // SAFETY: the buffer is valid for `len` bytes, and `gethostname`
-        // writes at most that many.
-        let rc = unsafe { ffi::gethostname(buf.as_mut_ptr().cast(), len) };
-        if rc != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(len);
-        Some(buf.get(..end)?.to_vec())
     }
 
     pub fn adjtimex_maxerror() -> Option<i64> {
@@ -413,9 +410,6 @@ mod imp {
     }
     pub fn process_exists(_pid: i32) -> bool {
         false
-    }
-    pub fn gethostname() -> Option<Vec<u8>> {
-        None
     }
     pub fn adjtimex_maxerror() -> Option<i64> {
         None

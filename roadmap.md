@@ -1426,6 +1426,41 @@ list moved to lane D on 2026-09-22):
     `D:/visual studio projects/backup` in a supported language, or that
     program run on Mono once Mono runs (E).
 
+- **The operator's answers of 2026-10-09 (B-Q22, B-Q24, B-Q25), as work.**
+  B-Q23 had no answer; lane A has asked the operator.
+  - `[x]` `[B]` **New passwords are yescrypt** (§1070, B-Q24). Done 2026-10-09:
+    `userdb::PASSWORD_METHOD`, a setting from `crypt_gensalt` through
+    `libcall::crypt`, `authlib`'s burn to match.
+  - `[x]` `[B]` **Lost output is reported** (§1071, B-Q25) in `which` (already),
+    `ed`, `hostname` and `patch`, each with full-disk and closed-output cases
+    in its harness as differences on purpose. Done 2026-10-09.
+  - **One `kill`, three requests** (§1072, B-Q22: close, terminate, force,
+    sent as SlateOS's message to a program that answers it and as a Linux
+    signal to one that does not):
+    - `[ ]` `[B]` procps-ng 4.0.4's `kill`, ported, replacing coreutils'
+      `kill.rs` and deleting `userspace/kill` -- `kill PID` is `SIGTERM`
+      everywhere from then on, never the forced end it was whenever the build
+      linked `userspace/kill` last; a `kill-diff.sh` harness. `killall` leaves
+      the image with it (lane D's manifest line) until the next item.
+    - `[ ]` `[B]` psmisc's `killall`, ported (`pstree` is already psmisc's).
+    - `[ ]` `[A]` The kernel half: a lifecycle endpoint each process registers
+      at start, found by PID under a signal's permission rule -- offered by
+      lane A 2026-10-09 and accepted; its request carries the interface.
+    - `[ ]` `[B]` The userspace half: a library a program answers *close* (may
+      decline) and *terminate* (may not) with; `kill`, `pkill` and `killall`
+      sending them -- `--close`, `--via=message|signal`, `--force`,
+      `--timeout MS REQUEST` -- and falling back to the signal for a program
+      that does not answer.
+    - `[ ]` `[B]` Services stopped with *terminate*, then *force* after their
+      stop timeout (`init`, the service manager).
+    - `[ ]` `[C]` The GUI toolkit answers *close* as a window's close button
+      does and *terminate* as session end does, for every program built on it
+      (requested).
+    - `[ ]` `[E]` The task manager (`apps/sysmonitor`) offers close, "end
+      without asking" and force, where it sends `SIGKILL` today (requested).
+    - `[ ]` `[F]` *close* for a Linux program's windows, as the compositor's
+      close request -- asked when the toolkit half exists.
+
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**
   An operator decision of 2026-08-21 that had no roadmap entry and was found

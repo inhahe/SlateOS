@@ -1135,7 +1135,7 @@ _Note the boundary: this covers programs that **crash**. A program that **hangs*
 - [x] Hardware exceptions → language-level exceptions (SEH-style) _(exception.rs: ExceptionCode enum, ExceptionContext struct, per-process handler registry; idt.rs: dispatch to userspace handler via modified IRETQ frame, context pushed on user stack, SysV ABI, SYS_EXCEPTION_RETURN to resume)_
   - [x] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
   - [x] Normal page faults handled by kernel, NOT exposed to application
-- [ ] Structured shutdown via IPC message (not Unix signals)
+- [-] Structured shutdown via IPC message (not Unix signals) _(in progress: design-decisions §1072, the operator's answer to B-Q22 -- three requests, close / terminate / force, sent as the message to a program that answers it and as a Linux signal to one that does not; the kernel half lane A's, the library, `kill` and services lane B's, the toolkit lane C's, the task manager lane E's; items under roadmap.md's lane B backlog)_
 - [ ] Process credential / capability management
 - [ ] Unwind info in release builds for backtraces (< 2% perf impact)
 - [ ] Separate debug symbol files loaded on demand for symbolization

@@ -5,7 +5,7 @@
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 
 use crate::backupfile::BackupType;
 use crate::sys::{self, Stat, Timespec, errno, oflag};
@@ -24,10 +24,41 @@ pub const FA_XATTRS: u32 = 8;
 /// `PATH_MAX`.
 const PATH_MAX: usize = 4096;
 
-/// Write all of `bytes` to descriptor `fd`. A failure is not reported:
-/// upstream checks neither `printf` nor `fprintf (stderr, ...)`.
+/// The first write to standard output that failed, as its `errno`; 0 while
+/// none has. [`Ctx::exit`] reports it.
+///
+/// Upstream checks no write to standard output -- `say` is `printf` and
+/// `fflush`, unchecked -- and registers no `close_stdout`, so `patch < d >
+/// /dev/full` exits 0 having said nothing anywhere. Here the failure is kept,
+/// as stdio keeps a stream's error flag, and the run ends reporting it
+/// (design-decisions §1071, the operator's answer to B-Q25).
+static STDOUT_FAILURE: AtomicI32 = AtomicI32::new(0);
+
+/// Whether descriptor 1 is standard error now. `-o -` points it there, so
+/// that the patched file can go down the original standard output and the
+/// messages do not mix with it; from then on a message that fails has failed
+/// on standard error, which is unchecked, as upstream's is.
+static STDOUT_IS_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// Say that descriptor 1 is standard error from now on (`-o -`).
+pub fn stdout_is_stderr_now() {
+    STDOUT_IS_STDERR.store(true, Ordering::Relaxed);
+}
+
+/// Write all of `bytes` to descriptor `fd`. A failure is not reported here:
+/// upstream checks neither `printf` nor `fprintf (stderr, ...)`. One to
+/// standard output is kept for [`Ctx::exit`] to report.
 fn write_fd(fd: i32, bytes: &[u8]) {
-    let _ = coreutils::stdfd::write_all(fd, bytes);
+    let written = coreutils::stdfd::write_all(fd, bytes);
+    if fd == 1
+        && !STDOUT_IS_STDERR.load(Ordering::Relaxed)
+        && let Err(e) = written
+    {
+        let failure = e.raw_os_error().unwrap_or(errno::EIO);
+        // `Err` is an earlier failure already kept, and the first one is the
+        // one reported, as a stream's error flag keeps the first.
+        let _ = STDOUT_FAILURE.compare_exchange(0, failure, Ordering::Relaxed, Ordering::Relaxed);
+    }
 }
 
 /// To standard output, at once: upstream's `printf` followed by `fflush`.
@@ -524,6 +555,33 @@ impl Ctx {
     pub fn write_fatal(&mut self) -> ! {
         let e = sys::last_errno();
         self.pfatal(b"write error", e);
+    }
+
+    /// `exit (status)` -- with gnulib's `close_stdout` in front of it, which
+    /// upstream does not register: a write to standard output that failed is
+    /// reported, `patch: write error: No space left on device`, and the run
+    /// ends in trouble, status 2, whatever it had earned. Upstream ends
+    /// silently, with the status it had (design-decisions §1071).
+    ///
+    /// 2 because it is `patch`'s status for trouble -- `write_fatal`'s, for an
+    /// output file it could not write -- where 1 would say only that some
+    /// hunks failed; diffutils, whose programs do register `close_stdout`,
+    /// sets `exit_failure` to the same. Every exit but a signal's comes
+    /// through here, as every one upstream reaches `exit` and its handlers.
+    pub fn exit(&mut self, status: i32) -> ! {
+        let failure = STDOUT_FAILURE.load(Ordering::Relaxed);
+        if failure != 0 {
+            let mut m = self.program_name.clone();
+            m.extend_from_slice(b": write error: ");
+            m.extend_from_slice(
+                coreutils::errmsg::strerror(&std::io::Error::from_raw_os_error(failure))
+                    .as_bytes(),
+            );
+            m.push(b'\n');
+            print_stderr(&m);
+            std::process::exit(2);
+        }
+        std::process::exit(status)
     }
 
     // ------------------------------------------------------- talking ----
@@ -1728,7 +1786,7 @@ impl Ctx {
                 // (exit_failure)` -- no "Try --help".
                 let name = self.program_name.clone();
                 crate::backupfile::complain(&name, context, version.unwrap_or_default(), ambiguous);
-                std::process::exit(2);
+                self.exit(2);
             }
         }
     }
@@ -1740,7 +1798,7 @@ impl Ctx {
         m.extend_from_slice(&self.program_name);
         m.extend_from_slice(b" --help' for more information.\n");
         print_stderr(&m);
-        std::process::exit(2);
+        self.exit(2);
     }
 
     /// Written to the output: `fwrite`, failure fatal.

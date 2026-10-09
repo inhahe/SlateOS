@@ -45,6 +45,12 @@
 //!   write error, as upstream's `fwrite` of nothing makes it, reported with
 //!   `errno` 0 (`Success`). That is what Ubuntu's binary prints in every case
 //!   measured; upstream prints whatever an earlier call left in `errno`.
+//! - **What cannot be written to standard output is reported.** Upstream
+//!   checks no write there and has no `close_stdout`, so `patch < d >
+//!   /dev/full` exits 0 having said nothing anywhere. Here the run ends as a
+//!   GNU program that registers `close_stdout` ends: `patch: write error: No
+//!   space left on device`, status 2, `patch`'s trouble ([`Ctx::exit`];
+//!   design-decisions §1071, the operator's answer to B-Q25).
 
 mod backupfile;
 mod diffseq;
@@ -528,7 +534,7 @@ impl Ctx {
                 util::print_stderr(&m);
             }
         }
-        std::process::exit(status);
+        self.exit(status);
     }
 
     /// `numeric_string`.
@@ -689,7 +695,7 @@ impl Ctx {
                 Opt::Short(b'u', _) | Opt::Long("unified", _) => self.diff_type = Diff::Uni,
                 Opt::Short(b'v', _) | Opt::Long("version", _) => {
                     util::print_stdout(b"patch (SlateOS coreutils) 0.1.0\n");
-                    std::process::exit(0);
+                    self.exit(0);
                 }
                 Opt::Short(b'V', v) | Opt::Long("version-control", v) => {
                     self.version_control = Some(arg(&v));
@@ -1288,6 +1294,7 @@ impl Ctx {
         if let Err(e) = libcall::fd::dup2(2, 1) {
             self.pfatal(b"Failed to redirect messages to standard error", e);
         }
+        util::stdout_is_stderr_now();
         Output {
             w: std::io::BufWriter::new(util::file_from_fd(dup)),
             fd: dup,
@@ -1602,7 +1609,7 @@ impl Ctx {
     /// `fatal_exit (0)`.
     pub fn fatal_exit(&mut self) -> ! {
         self.cleanup();
-        std::process::exit(2);
+        self.exit(2);
     }
 }
 
@@ -2385,7 +2392,7 @@ fn main() {
     cx.safe.debug = cx.debug;
 
     let status = run(&mut cx);
-    std::process::exit(status);
+    cx.exit(status);
 }
 
 #[cfg(test)]

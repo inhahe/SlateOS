@@ -49,10 +49,20 @@
 //! a newline or `#`, through upstream's `fgets` loop, and with `-b` a missing
 //! or empty file sets the current name, or `localhost`; a failure to set
 //! other than "not permitted" and "too long" is not reported, as upstream
-//! tests for those two only; `-I` and `-A` print each address followed by a
-//! space, then a newline; and a write that fails is not reported, as
-//! upstream's `printf`s are unchecked. `scripts/hostname-diff.sh` holds all of
-//! it to Ubuntu's `hostname`, under each of its five names.
+//! tests for those two only; and `-I` and `-A` print each address followed by
+//! a space, then a newline. `scripts/hostname-diff.sh` holds all of it to
+//! Ubuntu's `hostname`, under each of its five names.
+//!
+//! One difference, on purpose: **output that cannot be written is reported.**
+//! Upstream's `printf`s are unchecked and it has no `close_stdout`, so
+//! `hostname > /dev/full` and `hostname >&-` exit 0 having printed nowhere,
+//! and a script that saves the name to a file on a full disk carries on with
+//! an empty file. Here the run ends as every GNU coreutils program's does --
+//! `hostname: write error: No space left on device`, status 1 -- as `which`
+//! and `ed` already did (design-decisions §1071, the operator's answer to
+//! B-Q25). The standard descriptors are the ones the program was given
+//! (`guard_std_fds!`), so a closed output is a write error too, rather than
+//! the runtime's `/dev/null` swallowing the name.
 //!
 //! Upstream's notice is the `Debian hostname` entry of
 //! `userspace/coreutils/licenses/notices.yaml`.
@@ -65,6 +75,7 @@ use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{Opt, Program, Takes};
+use coreutils::stdfd;
 use libcall::netdb::{
     AF_INET, AF_INET6, AI_CANONNAME, EAI_NONAME, IFF_LOOPBACK, IFF_UP, INET6_ADDRSTRLEN,
     NI_NAMEREQD, NI_NUMERICHOST, SOCK_DGRAM,
@@ -72,6 +83,8 @@ use libcall::netdb::{
 
 #[cfg(test)]
 mod tests;
+
+coreutils::guard_std_fds!();
 
 /// The parser's name for this program. Its referral is never printed --
 /// upstream answers a bad option with the usage itself -- and its status is
@@ -353,8 +366,11 @@ impl Io<'_> {
 
     /// Standard output, unchecked as upstream's `printf`s are.
     fn put(&mut self, bytes: &[u8]) {
-        // Ignored: upstream never looks at what `printf` returns, so a failed
-        // write does not change what it exits with, and neither does ours.
+        // Not checked here, as upstream never looks at what `printf` returns:
+        // standard output is a `stdfd::Stream`, which keeps a failure as
+        // stdio's `ferror` does, and `main` reports it when it closes the
+        // stream (the module's one difference on purpose). A test's buffer
+        // does not fail.
         let _ = self.out.write_all(bytes);
     }
 
@@ -819,13 +835,16 @@ pub(crate) fn run(args: &[OsString], sys: &dyn System, io: &mut Io<'_>) -> Exit 
 }
 
 fn main() -> ExitCode {
+    // The descriptors the program was given, before anything touches them.
+    stdfd::restore();
     // argv[0] as given, and the arguments after it.
     let invocation = std::env::args_os()
         .next()
         .map_or_else(|| b"hostname".to_vec(), |a| bytes(&a));
     let rest: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+    // Buffered as stdio buffers it: by line to a terminal, by block to
+    // anything else.
+    let mut out = stdfd::Stream::stdout();
     let stderr = io::stderr();
     let mut err = stderr.lock();
     let mut io = Io {
@@ -834,7 +853,9 @@ fn main() -> ExitCode {
         invocation,
     };
     let Exit(status) = run(&rest, &Libc, &mut io);
-    // `exit`'s flush of standard output, whose failure upstream never sees.
-    let _ = io.out.flush();
-    ExitCode::from(status)
+    let name = io.short_name().to_vec();
+    // `exit`'s flush of standard output, whose failure upstream never sees,
+    // reported here as gnulib's `close_stdout` reports it -- under the name
+    // the program was run by, as its other complaints are.
+    stdfd::close_stdout_bytes(&name, out, ExitCode::from(status), 1)
 }

@@ -420,6 +420,24 @@ run_side() {
       env ${ENVV[@]+"${ENVV[@]}"} LC_ALL=C.UTF-8 PATH="$bindir/$side" patch "$@" )
 }
 
+# Where the next case's standard output and error go: '' for the files the
+# comparison reads, or one of '>/dev/full', '>&-' and '2>/dev/full'. Whatever
+# is redirected away is compared as empty on both sides. Reset after every
+# case; the patch-on-a-pipe form takes none.
+REDIR=''
+
+# `side_io DIR SIDE IN OUT ERR ARGS...`: one side, its standard input from IN,
+# its output and error connected as `REDIR` says.
+side_io() {
+  local dir=$1 side=$2 in=$3 out=$4 err=$5; shift 5
+  case $REDIR in
+    '>/dev/full')  run_side "$dir" "$side" "$@" <"$in" >/dev/full 2>"$err" ;;
+    '>&-')         run_side "$dir" "$side" "$@" <"$in" >&- 2>"$err" ;;
+    '2>/dev/full') run_side "$dir" "$side" "$@" <"$in" >"$out" 2>/dev/full ;;
+    *)             run_side "$dir" "$side" "$@" <"$in" >"$out" 2>"$err" ;;
+  esac
+}
+
 # `$1` is the patch file (absolute), the rest are `patch`'s arguments. stdin is
 # the patch when no `-i` is given, which is how `patch` is normally driven.
 compare() {
@@ -431,8 +449,8 @@ compare() {
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
 
   if [ "$use_stdin" = yes ]; then
-    run_side "$o_dir" ours "$@" <"$pfile" >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_side "$g_dir" gnu  "$@" <"$pfile" >"$g_bin" 2>"$g_err"; g_rc=$?
+    side_io "$o_dir" ours "$pfile" "$o_bin" "$o_err" "$@"; o_rc=$?
+    side_io "$g_dir" gnu  "$pfile" "$g_bin" "$g_err" "$@"; g_rc=$?
   elif [ "$use_stdin" = pipe ]; then
     # Not a regular file, so `patch` copies it to a temporary file first.
     # shellcheck disable=SC2002
@@ -440,9 +458,10 @@ compare() {
     # shellcheck disable=SC2002
     cat "$pfile" | run_side "$g_dir" gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=${PIPESTATUS[1]}
   else
-    run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    side_io "$o_dir" ours /dev/null "$o_bin" "$o_err" "$@"; o_rc=$?
+    side_io "$g_dir" gnu  /dev/null "$g_bin" "$g_err" "$@"; g_rc=$?
   fi
+  REDIR=''
   norm_temp "$o_bin"; norm_temp "$g_bin"; norm_temp "$o_err"; norm_temp "$g_err"
 
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
@@ -501,19 +520,19 @@ argv_case() {
 # The other way in: the patch on stdin. Reserved for cases that apply cleanly,
 # since those are the ones that cannot reach the prompt.
 run_stdin() {
-  local p=$1; shift
+  local p=$1 redir=$REDIR; shift
   compare "$patches/$p" yes "$@"
-  report "patch $* < $p"
+  report "patch $* < $p $redir"
 }
 xfail_case() {
-  local why=$1 p=$2; shift 2
+  local why=$1 p=$2 redir=$REDIR; shift 2
   compare "$patches/$p" yes "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1))
-    printf 'XPASS patch %s < %s -- expected to differ (%s) and did not\n' "$*" "$p" "$why"
+    printf 'XPASS patch %s < %s %s -- expected to differ (%s) and did not\n' "$*" "$p" "$redir" "$why"
   else
     xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'xfail patch %s < %s (%s)\n' "$*" "$p" "$why"
+    [ -n "${VERBOSE:-}" ] && printf 'xfail patch %s < %s %s (%s)\n%s\n' "$*" "$p" "$redir" "$why" "$REPORT"
   fi
   return 0
 }
@@ -554,6 +573,27 @@ run_case append.patch -p1
 run_case long.patch -p1
 run_stdin u.patch -p1
 run_stdin c.patch -p1
+
+# --- output that cannot be written ---------------------------------------------
+# Upstream checks no write to standard output -- `say` is printf and fflush --
+# and has no close_stdout, so with its output on a full disk it patches, says
+# nothing anywhere and exits 0. Ours reports the lost `patching file` line and
+# exits 2, patch's trouble: design-decisions 1071, the operator's answer to
+# B-Q25. With the output closed upstream does worse: the file it opens to patch
+# takes descriptor 1, and the line is written into it (measured) -- ours opens
+# its files off the standard descriptors and reports the write instead. `-s`
+# writes nothing there, so it has nothing to report. `-o -` sends the patched
+# file down standard output and the messages to standard error, and a failure
+# of that output is upstream's own `write error`, on both sides.
+why_write='a failed write to standard output is reported (design-decisions 1071)'
+REDIR='>/dev/full'; xfail_case "$why_write" u.patch -p1
+REDIR='>&-'; xfail_case "$why_write; upstream writes its message into the file it patches" u.patch -p1
+REDIR='>/dev/full'; xfail_case "$why_write" u.patch -p1 --verbose
+REDIR='>/dev/full'; xfail_case "$why_write" u.patch -p1 -v
+REDIR='>/dev/full'; run_stdin u.patch -p1 -s
+REDIR='>/dev/full'; run_stdin u.patch -p1 -o -
+REDIR='2>/dev/full'; run_stdin u.patch -p1
+REDIR='2>/dev/full'; run_stdin u.patch -p1 -o -
 
 # --- strip levels -------------------------------------------------------------
 run_case deep.patch -p0

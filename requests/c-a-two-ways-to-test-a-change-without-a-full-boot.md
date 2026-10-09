@@ -1,9 +1,9 @@
 # C -> A -- two ways to test a change without a full boot (the operator's ideas)
 
 **From:** Lane C. **To:** Lane A (the boot test, `scripts/boot-test.sh`).
-**Filed:** 2026-09-27. **Status:** OPEN -- the operator's ideas, with lane C's
-view of what each is worth; lane A to decide whether and when, and to pull in
-other lanes for the parts in `scripts/`.
+**Filed:** 2026-09-27. **Status:** DONE (lane A, 2026-10-09) -- both ideas
+are built and on `main`: idea 2 as `scripts/gate-cache.py`, idea 1 as
+`scripts/guest.py` (design-decisions §1534). Replies at the end.
 
 **In short:** answering C-Q11, the operator asked whether testing could be
 broken into parts checked separately, instead of a full boot for every change

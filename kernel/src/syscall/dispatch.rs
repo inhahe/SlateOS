@@ -121,6 +121,7 @@ use super::number::{
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
     SYS_FS_ADD_SEALS, SYS_FS_DEFER, SYS_FS_DEFER_CANCEL, SYS_FS_DEFER_LIST, SYS_FS_GET_SEALS,
+    SYS_RESTART_SYSCALL,
 };
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
@@ -455,6 +456,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CLOCK_SETTIME as usize] = Some(handlers::sys_clock_settime);
     handlers[SYS_CLOCK_ADJTIME as usize] = Some(handlers::sys_clock_adjtime);
     handlers[SYS_SLEEP as usize] = Some(handlers::sys_sleep);
+    handlers[SYS_RESTART_SYSCALL as usize] = Some(handlers::sys_restart_syscall);
     handlers[SYS_TIMER_CREATE as usize] = Some(handlers::sys_timer_create);
     handlers[SYS_TIMER_CANCEL as usize] = Some(handlers::sys_timer_cancel);
 

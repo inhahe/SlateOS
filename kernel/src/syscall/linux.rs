@@ -1475,7 +1475,8 @@ pub mod restart_block {
 ///   * `ERESTART_RESTARTBLOCK` → restart via the `restart_syscall(2)`
 ///     trampoline: same RIP rewind, but RAX is set to `nr::RESTART_SYSCALL` so
 ///     the resumed call consults the saved `restart_block` (e.g. `nanosleep`
-///     resuming with the remaining time).
+///     resuming with the remaining time) -- for a native process, to the
+///     native `SYS_RESTART_SYSCALL`, which resumes a frozen `SYS_SLEEP`.
 ///
 /// A non-sentinel value is returned unchanged.  A sentinel is **never**
 /// returned to userspace.
@@ -1494,9 +1495,20 @@ pub fn resolve_syscall_restart(frame: &mut crate::syscall::entry::SyscallFrame, 
         }
         restart::RestartAction::RestartBlock => {
             frame.user_rip = frame.user_rip.wrapping_sub(restart::SYSCALL_INSN_LEN);
+            // Each ABI resumes through its own number: Linux's
+            // `restart_syscall` (219), or the native `SYS_RESTART_SYSCALL`
+            // (1171) -- 219 means something else in the native table.
+            let native = crate::proc::thread::owner_process(crate::sched::current_task_id())
+                .and_then(crate::proc::pcb::get_abi_mode)
+                .is_none_or(|m| m == crate::proc::pcb::AbiMode::Native);
+            let restart_nr = if native {
+                crate::syscall::number::SYS_RESTART_SYSCALL
+            } else {
+                nr::RESTART_SYSCALL
+            };
             #[allow(clippy::cast_possible_wrap)]
             {
-                nr::RESTART_SYSCALL as i64
+                restart_nr as i64
             }
         }
         // restart_action never yields Eintr when has_handler == false, but stay
@@ -5245,7 +5257,8 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // checkpoint, which a parked read never reaches.
         let deliverable = !crate::proc::signal::blocked(caller);
         let interrupt_mask = deliverable & !mask;
-        if crate::proc::signal::has_pending_in_mask(caller, interrupt_mask) {
+        // A freeze breaks the wait as such a signal does (`proc::freezer`).
+        if crate::proc::signal::wait_ends(caller, interrupt_mask) {
             return restart::restart_result(restart::ERESTARTSYS);
         }
 
@@ -5257,9 +5270,9 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         let task = crate::sched::current_task_id();
         let wait_mask = mask | deliverable;
         crate::proc::signal::register_signalfd_waiter(caller, task, wait_mask);
-        if crate::proc::signal::has_pending_in_mask(caller, wait_mask) {
-            // Raced with an arriving signal — re-evaluate (drain or interrupt)
-            // on the next iteration.
+        if crate::proc::signal::wait_ends(caller, wait_mask) {
+            // Raced with an arriving signal (or a freeze) — re-evaluate (drain
+            // or interrupt) on the next iteration.
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -9483,7 +9496,9 @@ fn interruptible_sleep_until(
             return true; // slept to completion
         }
         let deliverable = !crate::proc::signal::blocked(pid);
-        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A freeze interrupts the sleep as a signal does; the restart block
+        // keeps its deadline, so the thawed sleep ends when it would have.
+        if crate::proc::signal::wait_ends(pid, deliverable) {
             return false; // interrupted before parking
         }
         let remaining = deadline_ns - now;
@@ -9491,7 +9506,7 @@ fn interruptible_sleep_until(
         // Register-then-recheck: a signal posted between the check above and
         // the park must not be lost (set_pending wakes signal-waiters).
         crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        if crate::proc::signal::wait_ends(pid, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(pid, task);
             let _ = crate::hrtimer::cancel(handle); // discard: nothing to wake
             return false;
@@ -21202,20 +21217,20 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
     loop {
         // Deliverable = pending and not blocked.
         let deliverable = !crate::proc::signal::blocked(caller);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             // Linux returns -ERESTARTNOHAND from pause() (arch-generic
             // sys_pause -> -ERESTARTNOHAND).  The signal-delivery checkpoint
             // resolves it: a handler that runs collapses it to -EINTR
             // (ERESTARTNOHAND never honours SA_RESTART when a handler ran),
             // while a default/no-handler disposition restarts pause() — which
-            // is exactly the re-park we want.
+            // is exactly the re-park we want, and what a freeze gets.
             return restart::restart_result(restart::ERESTARTNOHAND);
         }
         // Register-then-recheck so a signal posted in the gap before we
         // park is not lost (set_pending wakes registered waiters whose
         // mask covers the signal's bit).
         crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -25370,7 +25385,7 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 // wrap, so there is no -512/CrossDevice collision.)
                 let deliverable = caller.map_or(0, |p| !crate::proc::signal::blocked(p));
                 if let Some(p) = caller
-                    && crate::proc::signal::has_pending_in_mask(p, deliverable)
+                    && crate::proc::signal::wait_ends(p, deliverable)
                 {
                     return restart::restart_result(restart::ERESTARTSYS);
                 }
@@ -25386,8 +25401,8 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 if let Some(p) = caller {
                     crate::proc::signal::register_signalfd_waiter(p, task, deliverable);
                 }
-                let racey_signal = caller
-                    .is_some_and(|p| crate::proc::signal::has_pending_in_mask(p, deliverable));
+                let racey_signal =
+                    caller.is_some_and(|p| crate::proc::signal::wait_ends(p, deliverable));
                 if crate::ipc::inotify::is_readable(handle) || racey_signal {
                     crate::fs::notify::deregister_notify_waiter(token, task);
                     if let Some(p) = caller {
@@ -32969,7 +32984,10 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
 /// reports an ignored signal.)
 fn caller_has_deliverable_signal(pid: Option<u64>) -> bool {
     match pid {
-        Some(p) => crate::proc::signal::has_pending_in_mask(p, !crate::proc::signal::blocked(p)),
+        // A freeze ends the wait too (`proc::freezer`); the call then
+        // returns `-EINTR` as for a signal -- what Linux's `epoll_wait` does
+        // under its freezer, though its `poll` and `select` restart.
+        Some(p) => crate::proc::signal::wait_ends(p, !crate::proc::signal::blocked(p)),
         None => false,
     }
 }
@@ -33002,7 +33020,7 @@ fn interruptible_wait_slice(pid: Option<u64>, slice_ms: u64) -> bool {
     // Recheck after registering: a signal posted in the gap before the park
     // already woke (a now-removed) waiter, so observe it here instead of
     // sleeping through it.
-    if crate::proc::signal::has_pending_in_mask(p, deliverable) {
+    if crate::proc::signal::wait_ends(p, deliverable) {
         crate::proc::signal::deregister_signalfd_waiter(p, task);
         return true;
     }
@@ -33011,7 +33029,7 @@ fn interruptible_wait_slice(pid: Option<u64>, slice_ms: u64) -> bool {
     // deferring signal delivery to the end of the slice.
     crate::sched::sleep_ms_interruptible(slice_ms);
     crate::proc::signal::deregister_signalfd_waiter(p, task);
-    crate::proc::signal::has_pending_in_mask(p, deliverable)
+    crate::proc::signal::wait_ends(p, deliverable)
 }
 
 /// Sleep up to `total_ms` in ≤10 ms slices, returning `true` if a deliverable
@@ -37673,11 +37691,13 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
     // restart when nothing ran one (the saved mask put back first).
     loop {
         let deliverable = !crate::proc::signal::blocked(caller);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        // A freeze ends the wait as a signal with no handler would: the call
+        // is restarted after the thaw (`proc::freezer`).
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             return restart::restart_result(restart::ERESTARTNOHAND);
         }
         crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+        if crate::proc::signal::wait_ends(caller, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -37901,14 +37921,16 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
         // Recomputed every pass: a handler installed by another thread counts
         // from the next wake.
         let interrupters = sigtimedwait_interrupters(caller, mask);
-        if crate::proc::signal::has_pending_in_mask(caller, interrupters) {
+        // A freeze ends the wait the same way, as Linux's freezer ends it
+        // with -EINTR (`proc::freezer`).
+        if crate::proc::signal::wait_ends(caller, interrupters) {
             return linux_err(errno::EINTR);
         }
         // Register-then-recheck so a signal raised in the gap before we
         // park is not missed (`set_pending` wakes registered waiters).
         let wake_on = mask | interrupters;
         crate::proc::signal::register_signalfd_waiter(caller, task, wake_on);
-        if crate::proc::signal::has_pending_in_mask(caller, wake_on) {
+        if crate::proc::signal::wait_ends(caller, wake_on) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }

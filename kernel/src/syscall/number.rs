@@ -7191,6 +7191,17 @@ pub const UNIX_RECVMSG_LEN: usize = 7 * 8;
 /// for them, or no native type (Linux's `MSG_CTRUNC`).
 pub const UNIX_MSG_CTRUNC: u64 = 1 << 0;
 
+/// `SYS_RESTART_SYSCALL()` -- resume a call the kernel interrupted with a
+/// deadline to keep, as Linux's `restart_syscall(2)` resumes one. Programs
+/// do not call it: when a sleep ([`SYS_SLEEP`]) is interrupted with no signal
+/// handler to run -- a freeze (`crate::proc::freezer`) -- the kernel saves
+/// the sleep's deadline and returns to the program with this number in RAX
+/// and its instruction pointer back on the `syscall` instruction, so the
+/// program's next instruction issues it, and the sleep ends when it would
+/// have. With nothing saved for the thread (a call nobody interrupted) it
+/// returns `Interrupted`, as Linux's answers `EINTR`.
+pub const SYS_RESTART_SYSCALL: u64 = 1171;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

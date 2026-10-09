@@ -1725,6 +1725,9 @@ pub fn create(name: &str, parent: ProcessId) -> ProcessId {
     let mut table = PROCESS_TABLE.lock();
     table.insert(pid, proc);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
+    drop(table);
+    // A child of a paused container's process is paused with it.
+    crate::proc::freezer::on_new_process(parent, pid);
 
     pid
 }
@@ -2196,6 +2199,9 @@ pub fn fork_create(
     // `utsns` never takes: the order is one way only.
     crate::utsns::retain(uts_ns);
     drop(table);
+    // A child of a paused container's process is paused with it: it parks
+    // before its first instruction (`crate::proc::freezer`).
+    crate::proc::freezer::on_new_process(parent_pid, pid);
     // Its parent's mount namespace (`crate::fs::mntns`, leaf locks only).
     // The child has no thread yet, so nothing resolves a path for it before
     // this. `clone(CLONE_NEWNS)` moves it to a copy afterwards.
@@ -5608,6 +5614,8 @@ fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
     // And on its mount namespace (`crate::fs::mntns`), whose table goes with
     // the last: no process-table lock is held here.
     crate::fs::mntns::process_gone(pid);
+    // A paused container's process that ends is no longer paused.
+    crate::proc::freezer::on_process_exit(pid);
     // The rest of the record holds nothing that needs a lock to release.
     drop(proc);
     destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);

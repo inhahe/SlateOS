@@ -3,8 +3,11 @@
 **Status:** OPEN -- for its second half only. The scheduling causes, and the
 rest the two-CPU boots found, are fixed and on main since b083cfeca (lane
 A's publish of 2026-10-09, boot-tested green at 3d83e0264); a two-CPU boot
-with every self-test on is clean. No boot test runs more than one CPU by
-default yet: `boot-test.sh --smp=N` exists and nothing passes it.
+with every self-test on is clean. The intermittent two-CPU hang at the
+device-door test is a heap-lock deadlock, fixed on lane-a-wip 2026-10-09
+(design-decisions §1563; below), awaiting boots. No boot test runs more than
+one CPU by default yet: `boot-test.sh --smp=N` exists and nothing passes it --
+the default can change once the two-CPU boots run clean with the fix.
 
 **In short:** every boot test runs the kernel on a single CPU, so nothing has
 been checking that it works on more than one -- and on two or four it did
@@ -215,13 +218,21 @@ stack" shape `A-SCHEDULE-INNER-RESUMED-ONTO-A-FRAME-HOLDING-MINUS-1001` reads
 its one crash as; none of these is shown to be that crash's source (its value,
 -1001, matches none of them), but they were real hazards of exactly that kind.
 
-**Still open: a hang at the native device-door test, seen once.** One two-CPU
-debug fast boot of lane-a-wip (6c458082b) stopped mid-spawn of
-`spawn-test-device-door` -- after "Stored 1 argv", before the scheduler's
-"Spawned task" -- and printed nothing for minutes; the QEMU had no monitor, so
-where each CPU was is unknown (serial log:
-`os-lane-a-batch/build/fast-wave2-hang-serial.txt`). The same test is where
-the -1001 crash happened, on one CPU, after the same audio tests. A repro boot
-with a monitor attached passed it. The next two-CPU boots run with the monitor
-and `hangcap.py` armed (stall 100 s: registers, frame-pointer chains and stacks
-of every CPU).
+**The hang at the native device-door test: found and fixed on lane-a-wip
+2026-10-09, awaiting boots.** One two-CPU debug fast boot of lane-a-wip
+(6c458082b) stopped mid-spawn of `spawn-test-device-door` -- after "Stored 1
+argv", before the scheduler's "Spawned task" -- and printed nothing for
+minutes (serial log: `os-lane-a-batch/build/fast-wave2-hang-serial.txt`). On
+2026-10-09 the fourth two-CPU boot run with the monitor and `hangcap.py`
+armed hung at the same line, and the capture named it: CPU 0 spinning, with
+interrupts off, on the heap lock inside a timer interrupt -- the timer's wake
+(`try_wake` -> `PerCpuScheduler::enqueue`) grew the idle second CPU's run
+queue, which allocated -- while the code it had interrupted, the device-door
+spawn's `Box::default` in `start_job_and_signals`, held that lock; CPU 1
+halted, idle. The heap lock now turns interrupts off while held, and refills
+outside the lock (design-decisions §1563;
+`heap::self_test_lock_irqs`, proven to fail without the fix). Two-CPU boots
+because only there was the wake's queue one that had never held a task.
+Whether the earlier -1001 crash at the same test is related is not shown: a
+deadlock does not write -1001 into a frame
+(`A-SCHEDULE-INNER-RESUMED-ONTO-A-FRAME-HOLDING-MINUS-1001`).

@@ -579,7 +579,7 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     // recheck closes that race).
     let deliverable = !crate::proc::signal::blocked(pid);
     crate::proc::signal::register_signalfd_waiter(pid, current_task, deliverable);
-    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+    if crate::proc::signal::wait_ends(pid, deliverable) {
         crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
         // A signal is already pending: unwind our queue entry and report the
         // interruption (unless a racing futex_wake already dequeued us).
@@ -717,7 +717,7 @@ pub fn futex_wait_bitset_timeout(
     if pid != 0 {
         let deliverable = !crate::proc::signal::blocked(pid);
         crate::proc::signal::register_signalfd_waiter(pid, current_task, deliverable);
-        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        if crate::proc::signal::wait_ends(pid, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
             crate::hrtimer::cancel(timer_handle);
             if remove_self_waiter(key, current_task) {
@@ -900,7 +900,7 @@ pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvO
         if pid != 0 {
             let deliverable = !crate::proc::signal::blocked(pid);
             crate::proc::signal::register_signalfd_waiter(pid, current_task, deliverable);
-            if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+            if crate::proc::signal::wait_ends(pid, deliverable) {
                 crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
                 if let Some(h) = timer_handle {
                     crate::hrtimer::cancel(h);

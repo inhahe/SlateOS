@@ -4924,6 +4924,36 @@ pub fn wait_of(tid: TaskId) -> Option<crate::wchan::Wait> {
     Some(current_wait(state.tasks.get(&tid)?))
 }
 
+/// What the freezer needs to know of a task, in one look under the `SCHED`
+/// lock ([`crate::proc::freezer`]): its state, what it waits on (as
+/// [`wait_of`] says), whether it is created and not yet admitted
+/// (`Task::awaiting_admission`), and the CPU it last ran on. `None` if there
+/// is no such task.
+#[must_use]
+pub fn rest_view(tid: TaskId) -> Option<RestView> {
+    let state = SCHED.lock();
+    let task = state.tasks.get(&tid)?;
+    Some(RestView {
+        state: task.state,
+        wait: current_wait(task),
+        awaiting_admission: task.awaiting_admission,
+        last_cpu: task.last_cpu,
+    })
+}
+
+/// [`rest_view`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestView {
+    /// The task's state.
+    pub state: TaskState,
+    /// What it waits on, as [`wait_of`] reports it.
+    pub wait: crate::wchan::Wait,
+    /// Created suspended and not yet admitted: it has run nothing.
+    pub awaiting_admission: bool,
+    /// The CPU it last ran on (the one it runs on, while `Running`).
+    pub last_cpu: usize,
+}
+
 /// [`wait_of`] for a task already in hand, under the `SCHED` lock.
 fn current_wait(task: &Task) -> crate::wchan::Wait {
     use crate::wchan::Wait;

@@ -1,4 +1,4 @@
-## A-THE-WRITEBACK-SOFTIRQ-RE-ENTERS-THE-BLOCK-REGISTRY-LOCK-AND-SELF-DEADLOCKS (lane A, 2026-09-15) — **Status: FIXED**, pending a boot
+## A-THE-WRITEBACK-SOFTIRQ-RE-ENTERS-THE-BLOCK-REGISTRY-LOCK-AND-SELF-DEADLOCKS (lane A, 2026-09-15) — **Status: FIXED**, confirmed by boot on main: on `main` since lane A's publishes of mid-September 2026 and through every lane A boot test of `main` since, most recently b083cfeca (2026-10-09). Stamped 2026-10-09.
 
 **Observed, not theorised.** A FAT/virtio boot panicked:
 

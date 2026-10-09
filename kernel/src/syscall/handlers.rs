@@ -11261,6 +11261,11 @@ pub(crate) fn regs_into_syscall_frame(
 /// it will be retried on the next return to userspace. This avoids
 /// corrupting memory.
 pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: &mut i64) -> bool {
+    // A thread to be frozen parks here, before any signal is looked for -- as
+    // Linux's `get_signal` tries to freeze first -- with the call's result
+    // still unresolved: a restart sentinel is decided after the thaw, against
+    // the signals there are then (`crate::proc::freezer`).
+    crate::proc::freezer::park_if_frozen();
     // Fast path: nothing pending anywhere.
     if !crate::proc::signal::any_pending() {
         return false;
@@ -11319,6 +11324,24 @@ pub fn deliver_pending_signal_on_interrupt_exit(
         Some(pid) if pid != 0 => pid,
         _ => return,
     };
+    // A thread to be frozen parks here, before any signal is looked for, as
+    // at a system call's exit (`deliver_pending_signal`). Parking blocks, so
+    // with interrupts on -- safe for the reasons given below for delivery.
+    if crate::proc::freezer::any() {
+        crate::cpu::irqoff_tracker::record_enable();
+        // SAFETY: as for the `sti` below: the interrupt has been handled, this
+        // is the outermost one, on the interrupted thread's kernel stack, and
+        // the interrupted code was in ring 3, holding no kernel lock.
+        unsafe {
+            crate::cpu::sti();
+        }
+        crate::proc::freezer::park_if_frozen();
+        // SAFETY: disabling interrupts is always sound.
+        unsafe {
+            crate::cpu::cli();
+        }
+        crate::cpu::irqoff_tracker::record_disable();
+    }
     // Cheap enough to ask before enabling interrupts: anything this thread
     // could take now?
     if !signal::has_pending_in_mask(pid, !signal::blocked(pid)) {
@@ -11635,6 +11658,10 @@ fn deliver_native_signal(
     // any other, whatever its value.
     let rax = match exit {
         Some(e) if crate::syscall::linux::restart::is_sentinel(e.ret) => {
+            // Not restarted, so whatever a frozen sleep saved to resume with
+            // is dropped, as Linux drops its restart block when a handler
+            // runs: a later `SYS_RESTART_SYSCALL` must find nothing.
+            crate::syscall::linux::restart_block::clear(task_id);
             #[allow(clippy::cast_sign_loss)]
             let code = i64::from(KernelError::Interrupted.code()) as u64;
             code
@@ -12313,12 +12340,75 @@ pub fn sys_sleep(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
 
-    // Delegate to sleep_ns which automatically selects the best path:
-    // - hrtimer for ≤ 100ms (nanosecond-precision wake via HPET)
-    // - tick-based for > 100ms (efficient, avoids hrtimer slot pressure)
-    sched::sleep_ns(duration_ns);
+    sleep_until_native(crate::hrtimer::now_ns().saturating_add(duration_ns))
+}
 
-    SyscallResult::ok(0)
+/// `SYS_RESTART_SYSCALL` (1171) -- resume the sleep a freeze interrupted, to
+/// the deadline it had ([`sleep_until_native`] saved it). The kernel puts the
+/// number in RAX when it rewinds the interrupted call; programs do not call
+/// it. With nothing saved for the thread, `Interrupted`, as Linux's
+/// `restart_syscall` answers `EINTR` with nothing to restart. See
+/// [`SYS_RESTART_SYSCALL`](super::number::SYS_RESTART_SYSCALL).
+pub fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
+    let task = sched::current_task_id();
+    match super::linux::restart_block::take(task) {
+        // A CPU-clock sleep is the Linux ABI's alone; a native thread never
+        // saves one.
+        Some(block) if block.clock.is_none() => sleep_until_native(block.deadline_ns),
+        _ => SyscallResult::err(KernelError::Interrupted),
+    }
+}
+
+/// Sleep the calling thread until `deadline_ns` on the `hrtimer` clock: all
+/// of it, whatever wakes it before -- a signal does not end a native sleep --
+/// except a freeze (`crate::proc::freezer`). A freeze saves the deadline and
+/// returns the restart sentinel, so the thread parks at its checkpoint and,
+/// once thawed, issues [`SYS_RESTART_SYSCALL`](super::number::SYS_RESTART_SYSCALL),
+/// which sleeps on to the same deadline: the program's `sleep` ends when it
+/// would have, and never sees the freeze.
+///
+/// The thread waits registered as a signal waiter with an empty mask, so that
+/// no signal wakes it but the freezer's wake of every waiter does.
+fn sleep_until_native(deadline_ns: u64) -> SyscallResult {
+    let pid = caller_pid().unwrap_or(0);
+    if pid == 0 {
+        // A kernel caller: nothing freezes it.
+        let now = crate::hrtimer::now_ns();
+        if deadline_ns > now {
+            sched::sleep_ns(deadline_ns.saturating_sub(now));
+        }
+        return SyscallResult::ok(0);
+    }
+    let task = sched::current_task_id();
+    loop {
+        let now = crate::hrtimer::now_ns();
+        if now >= deadline_ns {
+            return SyscallResult::ok(0);
+        }
+        if crate::proc::freezer::interrupt_pending(pid) {
+            super::linux::restart_block::save_nanosleep(
+                task,
+                super::linux::restart_block::NanosleepBlock {
+                    deadline_ns,
+                    rem_ptr: 0,
+                    clock: None,
+                },
+            );
+            return super::linux::restart::restart_result(
+                super::linux::restart::ERESTART_RESTARTBLOCK,
+            );
+        }
+        // Register, then look again: a freeze that began in between has
+        // already woken the waiters it found, and this thread was not yet
+        // among them.
+        crate::proc::signal::register_signalfd_waiter(pid, task, 0);
+        if crate::proc::freezer::interrupt_pending(pid) {
+            crate::proc::signal::deregister_signalfd_waiter(pid, task);
+            continue;
+        }
+        sched::sleep_ns_interruptible(deadline_ns.saturating_sub(now));
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+    }
 }
 
 // ---------------------------------------------------------------------------

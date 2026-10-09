@@ -1,6 +1,31 @@
-## TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER (lane B, 2026-10-09) — OPEN
+## TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER (lane B, 2026-10-09) — FIXED on lane-b, pending a boot test on main
 
-**Status:** OPEN
+**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
+then it moves to `known-issues-resolved/`. Once a screen has been drawn, the work
+a handler does -- `endwin`, and the repaint after a suspension -- allocates
+and frees nothing, which
+`screen::tests::the_work_a_signal_handler_does_allocates_nothing` measures
+with a counting allocator in the C and UTF-8 locales (it counted 234, 4318
+and 234 calls before; 0, 0 and 0 after). What it took, against the plan
+below:
+
+- `terminfo::Tparm` keeps upstream's `out_buff` and `fmt_buff` and a fixed
+  twenty-slot stack, a string parameter on it held as its index rather than a
+  copy, and `printf` writes digits from a stack array: `Tparm::expand` and
+  `nc_expand` answer a slice of the kept buffer (the `Vec` forms copy it, for
+  `tput`, `tic` and the rest). `tputs`' padding comes from a fixed run.
+- `curses::term::Output` holds the sink and buffer, so that `putp_cap`,
+  `tputs_cap` and `put_tiparm` write a capability straight from the entry and
+  an expansion straight from `tparm` -- `Term::s`, the copier, is gone.
+- `mvcur` appends expansions straight into its fixed move buffers;
+  `_address_cursor` is an index (upstream points at the terminal's string
+  too).
+- The update borrows the lines it compares, and `Ctype::wcrtomb` writes into
+  the caller's `MB_LEN_MAX` bytes; `_nc_screen_resume` restores colours by
+  index.
+
+What is left is `exit`'s, after the screen is put back: `atexit` handlers and
+the standard streams' flush, as in upstream's handler.
 
 **What.** `userspace/curses` does what ncurses' signal handlers do --
 `endwin` on `SIGINT`/`SIGTERM`, the suspend-and-repaint on `SIGTSTP`, and

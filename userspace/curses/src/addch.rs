@@ -21,6 +21,8 @@
 //! is not refused; it writes past the line, which C leaves undefined. Here
 //! such a write is dropped.
 
+pub use libcall::locale::MB_LEN_MAX;
+
 use crate::cell::{A_ALTCHARSET, A_COLOR, A_NORMAL, Attr, BLANK_TEXT, CCHARW_MAX, Cell, WChar};
 use crate::window::{WRAPPED, Window, short};
 
@@ -43,9 +45,11 @@ pub trait Ctype {
     fn wctob(&self, wc: WChar) -> i32;
     /// `btowc`.
     fn btowc(&self, c: i32) -> u32;
-    /// `wcrtomb` from the initial state: the character's bytes, or `None`
-    /// when the locale cannot write it.
-    fn wcrtomb(&self, wc: WChar) -> Option<Vec<u8>>;
+    /// `wcrtomb` from the initial state into `buf`: how many bytes the
+    /// character took, or `None` when the locale cannot write it. A buffer
+    /// of the caller's rather than a `Vec`, because the update writes every
+    /// wide character through it, a repaint from a signal handler among them.
+    fn wcrtomb(&self, wc: WChar, buf: &mut [u8; MB_LEN_MAX]) -> Option<usize>;
     /// `_nc_unicode_locale ()`: the locale's codeset is `UTF-8`.
     fn unicode_locale(&self) -> bool;
     /// Whether the locale is `C` or `POSIX`, or has no name at all -- what

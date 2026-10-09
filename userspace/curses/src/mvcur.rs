@@ -224,6 +224,19 @@ impl Term {
             .unwrap_or(cost)
     }
 
+    /// `_nc_safe_strcat (target, TIPARM_n (cap, …))` of the string
+    /// capability at `index`: the expansion appended straight from the
+    /// buffer `tparm` keeps, so that a move costs no allocation -- `false`,
+    /// as upstream's for a null string, when the terminal has no such
+    /// capability or it cannot be expanded.
+    fn strcat_tiparm(&mut self, target: &mut Desc, buf: &mut Buf, index: usize, n: i32) -> bool {
+        let expansion = match self.entry.string(index) {
+            Some(cap) => self.tparm.expand(&self.entry, cap, &[i64::from(n)]),
+            None => None,
+        };
+        safe_strcat(target, buf, expansion)
+    }
+
     /// The cost of a parameterised capability given these parameters.
     fn param_cost(&mut self, index: usize, params: &[i64], normalized: bool) -> i32 {
         let s = self.tiparm(index, params);
@@ -265,12 +278,12 @@ impl Term {
         if self.has(string::INSERT_PADDING) {
             self.costs.ip_cost = cost(self, string::INSERT_PADDING);
         }
-        self.address_cursor = self
-            .s(string::CURSOR_ADDRESS)
-            .or_else(|| self.s(string::CURSOR_MEM_ADDRESS));
+        self.address_cursor = [string::CURSOR_ADDRESS, string::CURSOR_MEM_ADDRESS]
+            .into_iter()
+            .find(|&i| self.has(i));
 
-        let cup = self.address_cursor.clone();
-        let cup_str = cup.as_ref().and_then(|c| self.tiparm_str(c, &[23, 23]));
+        let cup = self.address_cursor;
+        let cup_str = cup.and_then(|i| self.tiparm(i, &[23, 23]));
         self.costs.cup_cost = self.msec_cost(cup_str.as_deref(), 1);
         self.costs.cub_cost = self.param_cost(string::PARM_LEFT_CURSOR, &[23], false);
         self.costs.cuf_cost = self.param_cost(string::PARM_RIGHT_CURSOR, &[23], false);
@@ -294,7 +307,7 @@ impl Term {
         self.costs.ich_cost = self.param_cost(string::PARM_ICH, &[23], true);
         self.costs.ech_cost = self.param_cost(string::ERASE_CHARS, &[23], true);
         self.costs.rep_cost = self.param_cost(string::REPEAT_CHAR, &[i64::from(b' '), 23], true);
-        let cup_str = cup.as_ref().and_then(|c| self.tiparm_str(c, &[23, 23]));
+        let cup_str = cup.and_then(|i| self.tiparm(i, &[23, 23]));
         self.costs.cup_ch_cost = self.normalized_cost(cup_str.as_deref(), 1);
         self.costs.hpa_ch_cost = self.param_cost(string::COLUMN_ADDRESS, &[23], true);
         self.costs.cuf_ch_cost = self.param_cost(string::PARM_RIGHT_CURSOR, &[23], true);
@@ -307,16 +320,21 @@ impl Term {
         // for scrolling optimization, since the corresponding restore_cursor
         // is not nested on the various terminals (vt100, xterm, etc.) which
         // use this feature."
-        if let (Some(sc), Some(smcup)) =
-            (self.s(string::SAVE_CURSOR), self.s(string::ENTER_CA_MODE))
-        {
-            let sc = sc.get(..c_len(&sc)).unwrap_or_default().to_vec();
-            if !sc.is_empty() && smcup.windows(sc.len()).any(|w| w == sc.as_slice())
-                || sc.is_empty()
-            {
-                self.entry.set_string(string::SAVE_CURSOR, None);
-                self.entry.set_string(string::RESTORE_CURSOR, None);
+        let nested = match (
+            self.entry.string(string::SAVE_CURSOR),
+            self.entry.string(string::ENTER_CA_MODE),
+        ) {
+            (Some(sc), Some(smcup)) => {
+                // `strstr (enter_ca_mode, save_cursor)`, which an empty
+                // `sc` is found in at once.
+                let sc = sc.get(..c_len(sc)).unwrap_or_default();
+                sc.is_empty() || smcup.windows(sc.len()).any(|w| w == sc)
             }
+            _ => false,
+        };
+        if nested {
+            self.entry.set_string(string::SAVE_CURSOR, None);
+            self.entry.set_string(string::RESTORE_CURSOR, None);
         }
         self.mvcur_resume();
     }
@@ -328,11 +346,8 @@ impl Term {
         self.putp_cap(string::ENTER_CA_MODE);
         // `reset_scroll_region ()`.
         if self.has(string::CHANGE_SCROLL_REGION) {
-            let s = self.tiparm(
-                string::CHANGE_SCROLL_REGION,
-                &[0, i64::from(self.lines.wrapping_sub(1))],
-            );
-            self.putp(s.as_deref());
+            let last = i64::from(self.lines.wrapping_sub(1));
+            self.put_tiparm(string::CHANGE_SCROLL_REGION, &[0, last], 1);
         }
         self.cursrow = -1;
         self.curscol = -1;
@@ -361,13 +376,11 @@ impl Term {
             _ => string::CURSOR_INVISIBLE,
         };
         // `NCURSES_PUTP2_FLUSH`: `OK` where the terminal has the string.
-        let code = match self.s(cap) {
-            Some(s) => {
-                self.tputs(&s, 1);
-                self.flush();
-                if cursor == -1 { 1 } else { cursor }
-            }
-            None => -1,
+        let code = if self.putp_cap(cap) {
+            self.flush();
+            if cursor == -1 { 1 } else { cursor }
+        } else {
+            -1
         };
         self.cursor = vis;
         code
@@ -409,40 +422,37 @@ impl Term {
 
         if to_y != from_y {
             vcost = INFINITY;
-            let s = self.tiparm(string::ROW_ADDRESS, &[i64::from(to_y)]);
-            if self.has(string::ROW_ADDRESS) && safe_strcat(target, buf, s.as_deref()) {
+            if self.strcat_tiparm(target, buf, string::ROW_ADDRESS, to_y) {
                 vcost = self.costs.vpa_cost;
             }
             if to_y > from_y {
                 let n = to_y.wrapping_sub(from_y);
                 if self.has(string::PARM_DOWN_CURSOR) && self.costs.cud_cost < vcost {
                     *target = save;
-                    let s = self.tiparm(string::PARM_DOWN_CURSOR, &[i64::from(n)]);
-                    if safe_strcat(target, buf, s.as_deref()) {
+                    if self.strcat_tiparm(target, buf, string::PARM_DOWN_CURSOR, n) {
                         vcost = self.costs.cud_cost;
                     }
                 }
-                if let Some(cud1) = self.s(string::CURSOR_DOWN) {
-                    if cud1.first() != Some(&b'\n') && n.wrapping_mul(self.costs.cud1_cost) < vcost
-                    {
-                        *target = save;
-                        vcost = repeated_append(target, buf, 0, self.costs.cud1_cost, n, &cud1);
-                    }
+                if let Some(cud1) = self.entry.string(string::CURSOR_DOWN)
+                    && cud1.first() != Some(&b'\n')
+                    && n.wrapping_mul(self.costs.cud1_cost) < vcost
+                {
+                    *target = save;
+                    vcost = repeated_append(target, buf, 0, self.costs.cud1_cost, n, cud1);
                 }
             } else {
                 let n = from_y.wrapping_sub(to_y);
                 if self.has(string::PARM_UP_CURSOR) && self.costs.cuu_cost < vcost {
                     *target = save;
-                    let s = self.tiparm(string::PARM_UP_CURSOR, &[i64::from(n)]);
-                    if safe_strcat(target, buf, s.as_deref()) {
+                    if self.strcat_tiparm(target, buf, string::PARM_UP_CURSOR, n) {
                         vcost = self.costs.cuu_cost;
                     }
                 }
-                if let Some(cuu1) = self.s(string::CURSOR_UP) {
-                    if n.wrapping_mul(self.costs.cuu1_cost) < vcost {
-                        *target = save;
-                        vcost = repeated_append(target, buf, 0, self.costs.cuu1_cost, n, &cuu1);
-                    }
+                if let Some(cuu1) = self.entry.string(string::CURSOR_UP)
+                    && n.wrapping_mul(self.costs.cuu1_cost) < vcost
+                {
+                    *target = save;
+                    vcost = repeated_append(target, buf, 0, self.costs.cuu1_cost, n, cuu1);
                 }
             }
             if vcost == INFINITY {
@@ -456,8 +466,7 @@ impl Term {
             hcost = INFINITY;
             if self.has(string::COLUMN_ADDRESS) {
                 *target = save;
-                let s = self.tiparm(string::COLUMN_ADDRESS, &[i64::from(to_x)]);
-                if safe_strcat(target, buf, s.as_deref()) {
+                if self.strcat_tiparm(target, buf, string::COLUMN_ADDRESS, to_x) {
                     hcost = self.costs.hpa_cost;
                 }
             }
@@ -465,12 +474,11 @@ impl Term {
                 let n = to_x.wrapping_sub(from_x);
                 if self.has(string::PARM_RIGHT_CURSOR) && self.costs.cuf_cost < hcost {
                     *target = save;
-                    let s = self.tiparm(string::PARM_RIGHT_CURSOR, &[i64::from(n)]);
-                    if safe_strcat(target, buf, s.as_deref()) {
+                    if self.strcat_tiparm(target, buf, string::PARM_RIGHT_CURSOR, n) {
                         hcost = self.costs.cuf_cost;
                     }
                 }
-                if let Some(cuf1) = self.s(string::CURSOR_RIGHT) {
+                if let Some(cuf1) = self.entry.string(string::CURSOR_RIGHT) {
                     let mut lhcost: i32 = 0;
                     let mut str_buf: Buf = [0; OPT_SIZE];
                     let mut check = str_init(&mut str_buf, OPT_SIZE, true);
@@ -507,7 +515,7 @@ impl Term {
                             lhcost,
                             self.costs.cuf1_cost,
                             n,
-                            &cuf1,
+                            cuf1,
                         );
                     }
                     if lhcost < hcost {
@@ -521,22 +529,15 @@ impl Term {
                 let n = from_x.wrapping_sub(to_x);
                 if self.has(string::PARM_LEFT_CURSOR) && self.costs.cub_cost < hcost {
                     *target = save;
-                    let s = self.tiparm(string::PARM_LEFT_CURSOR, &[i64::from(n)]);
-                    if safe_strcat(target, buf, s.as_deref()) {
+                    if self.strcat_tiparm(target, buf, string::PARM_LEFT_CURSOR, n) {
                         hcost = self.costs.cub_cost;
                     }
                 }
-                if let Some(cub1) = self.s(string::CURSOR_LEFT) {
+                if let Some(cub1) = self.entry.string(string::CURSOR_LEFT) {
                     let mut str_buf: Buf = [0; OPT_SIZE];
                     let mut check = str_init(&mut str_buf, OPT_SIZE, true);
-                    let lhcost = repeated_append(
-                        &mut check,
-                        &mut str_buf,
-                        0,
-                        self.costs.cub1_cost,
-                        n,
-                        &cub1,
-                    );
+                    let lhcost =
+                        repeated_append(&mut check, &mut str_buf, 0, self.costs.cub1_cost, n, cub1);
                     if lhcost < hcost {
                         *target = save;
                         if safe_strcat(target, buf, Some(c_string(&str_buf))) {
@@ -590,12 +591,14 @@ impl Term {
         let mut usecost = INFINITY;
 
         // "tactic #0: use direct cursor addressing"
-        let cup = self.address_cursor.clone();
-        let cup_str = cup
-            .as_ref()
-            .and_then(|c| self.tiparm_str(c, &[i64::from(ynew), i64::from(xnew)]));
+        let cup_str = match self.address_cursor.and_then(|i| self.entry.string(i)) {
+            Some(cup) => self
+                .tparm
+                .expand(&self.entry, cup, &[i64::from(ynew), i64::from(xnew)]),
+            None => None,
+        };
         let mut nonlocal = false;
-        if safe_strcpy(&mut result, &mut buffer, cup_str.as_deref()) {
+        if safe_strcpy(&mut result, &mut buffer, cup_str) {
             tactic = 0;
             usecost = self.costs.cup_cost;
             if yold == -1 || xold == -1 || self.not_local(yold, xold, ynew, xnew) {
@@ -677,8 +680,8 @@ impl Term {
                     );
                 }
                 2 => {
-                    let cr = self.s(string::CARRIAGE_RETURN);
-                    safe_strcpy(&mut result, &mut buffer, cr.as_deref());
+                    let cr = self.entry.string(string::CARRIAGE_RETURN);
+                    safe_strcpy(&mut result, &mut buffer, cr);
                     self.relative_move(
                         newscr,
                         ctype,
@@ -690,23 +693,23 @@ impl Term {
                     );
                 }
                 3 => {
-                    let home = self.s(string::CURSOR_HOME);
-                    safe_strcpy(&mut result, &mut buffer, home.as_deref());
+                    let home = self.entry.string(string::CURSOR_HOME);
+                    safe_strcpy(&mut result, &mut buffer, home);
                     self.relative_move(newscr, ctype, &mut result, &mut buffer, (0, 0), new, ovw);
                 }
                 4 => {
-                    let ll = self.s(string::CURSOR_TO_LL);
-                    safe_strcpy(&mut result, &mut buffer, ll.as_deref());
+                    let ll = self.entry.string(string::CURSOR_TO_LL);
+                    safe_strcpy(&mut result, &mut buffer, ll);
                     let from = (self.lines.wrapping_sub(1), 0);
                     self.relative_move(newscr, ctype, &mut result, &mut buffer, from, new, ovw);
                 }
                 5 => {
                     if xold > 0 {
-                        let cr = self.s(string::CARRIAGE_RETURN);
-                        safe_strcat(&mut result, &mut buffer, cr.as_deref());
+                        let cr = self.entry.string(string::CARRIAGE_RETURN);
+                        safe_strcat(&mut result, &mut buffer, cr);
                     }
-                    let cub1 = self.s(string::CURSOR_LEFT);
-                    safe_strcat(&mut result, &mut buffer, cub1.as_deref());
+                    let cub1 = self.entry.string(string::CURSOR_LEFT);
+                    safe_strcat(&mut result, &mut buffer, cub1);
                     let from = (yold.wrapping_sub(1), self.columns.wrapping_sub(1));
                     self.relative_move(newscr, ctype, &mut result, &mut buffer, from, new, ovw);
                 }
@@ -714,8 +717,7 @@ impl Term {
             }
         }
         if usecost != INFINITY {
-            let s = c_string(&buffer).to_vec();
-            self.tputs(&s, 1);
+            self.tputs(c_string(&buffer), 1);
             self.cursrow = ynew;
             self.curscol = xnew;
             true

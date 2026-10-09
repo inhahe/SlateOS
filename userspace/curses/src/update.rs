@@ -12,7 +12,7 @@
 //! reads `newscr` (the cursor optimiser looks at the characters it might
 //! write over), writes `curscr`, and writes the terminal, all at once.
 
-use crate::addch::Ctype;
+use crate::addch::{Ctype, MB_LEN_MAX};
 use crate::caps::{boolean, string};
 use crate::cell::{
     A_ALTCHARSET, A_COLOR, A_NORMAL, Attr, BLANK_TEXT, CCHARW_MAX, Cell, NONBLANK_ATTR,
@@ -115,13 +115,14 @@ fn putc(t: &mut Term, ctype: &dyn Ctype, ch: &Cell) {
         t.outch(ch.ch().to_le_bytes()[0]);
         return;
     }
+    let mut bytes = [0u8; MB_LEN_MAX];
     for (i, &wc) in ch.chars.iter().enumerate().take(CCHARW_MAX) {
         if wc == 0 {
             break;
         }
-        match ctype.wcrtomb(wc) {
-            Some(bytes) if !bytes.is_empty() => {
-                for b in bytes {
+        match ctype.wcrtomb(wc, &mut bytes) {
+            Some(n) if n > 0 => {
+                for &b in bytes.get(..n).unwrap_or_default() {
                     t.outch(b);
                 }
             }
@@ -209,9 +210,7 @@ fn put_attr_char(t: &mut Term, ctype: &dyn Ctype, ch: &Cell) {
     t.update_attrs(&attr);
     putc(t, ctype, &ch);
     t.curscol = t.curscol.wrapping_add(chlen);
-    if let Some(cp) = t.s(string::CHAR_PADDING) {
-        t.putp(Some(&cp));
-    }
+    t.putp_cap(string::CHAR_PADDING);
 }
 
 /// Whether the terminal's `acsc` maps `c`: `_acs_map[c] != 0`.
@@ -256,11 +255,11 @@ fn put_char_lr(t: &mut Term, newscr: &Window, ctype: &dyn Ctype, ch: &Cell) {
             cols.wrapping_sub(2),
         );
         let start = usize::try_from(cols.wrapping_sub(2)).unwrap_or(0);
-        let tail: Vec<Cell> = newscr
+        let tail: &[Cell] = newscr
             .line(lines.wrapping_sub(1))
-            .map(|l| l.text.get(start..).unwrap_or_default().to_vec())
+            .and_then(|l| l.text.get(start..))
             .unwrap_or_default();
-        ins_str(t, ctype, &tail, 1);
+        ins_str(t, ctype, tail, 1);
     }
 }
 
@@ -351,8 +350,7 @@ fn emit_range(t: &mut Term, newscr: &Window, ctype: &dyn Ctype, ntext: &[Cell]) 
                 && can_clear_with(t, &ntext0)
             {
                 t.update_attrs(&ntext0);
-                let s = t.tiparm(string::ERASE_CHARS, &[i64::from(run)]);
-                t.putp(s.as_deref());
+                t.put_tiparm(string::ERASE_CHARS, &[i64::from(run)], 1);
                 // "If this is the last part of the given interval, don't
                 // bother moving cursor, since it can be the last update on
                 // the line."
@@ -391,13 +389,11 @@ fn emit_range(t: &mut Term, newscr: &Window, ctype: &dyn Ctype, ntext: &[Cell]) 
                         temp.set_char(mapped.cast_signed(), ntext0.attr | A_ALTCHARSET);
                     }
                 }
-                let s = t.tiparm(
+                t.put_tiparm(
                     string::REPEAT_CHAR,
                     &[i64::from(temp.ch()), i64::from(rep_count)],
+                    1,
                 );
-                if let Some(s) = s {
-                    t.tputs(&s, 1);
-                }
                 t.curscol = t.curscol.wrapping_add(rep_count);
                 if wrap_possible {
                     put_char(t, newscr, ctype, &ntext0);
@@ -439,11 +435,15 @@ fn put_range(
             .copied()
             .unwrap_or_default()
     };
-    let slice = |from: i32, count: i32| -> Vec<Cell> {
-        let from = usize::try_from(from).unwrap_or(0);
+    // `count` cells from `from`, as far as the line goes: borrowed, so that
+    // writing a range allocates nothing.
+    fn sub(cells: &[Cell], from: i32, count: i32) -> &[Cell] {
+        let from = usize::try_from(from).unwrap_or(0).min(cells.len());
         let count = usize::try_from(count).unwrap_or(0);
-        ntext.iter().skip(from).take(count).copied().collect()
-    };
+        let end = from.saturating_add(count).min(cells.len());
+        cells.get(from..end).unwrap_or_default()
+    }
+    let slice = |from: i32, count: i32| sub(ntext, from, count);
     if let Some(otext) = otext
         && last.wrapping_sub(first).wrapping_add(1) > t.costs.inline_cost
     {
@@ -460,7 +460,7 @@ fn put_range(
             } else {
                 if same > t.costs.inline_cost {
                     let run = slice(first, j.wrapping_sub(same).wrapping_sub(first));
-                    emit_range(t, newscr, ctype, &run);
+                    emit_range(t, newscr, ctype, run);
                     first = j;
                     go_to(t, newscr, ctype, row, first);
                 }
@@ -469,13 +469,13 @@ fn put_range(
             j = j.wrapping_add(1);
         }
         let run = slice(first, j.wrapping_sub(same).wrapping_sub(first));
-        let i = emit_range(t, newscr, ctype, &run);
+        let i = emit_range(t, newscr, ctype, run);
         // "Always return 1 for the next GoTo() after a PutRange() if we
         // found identical characters at end of interval"
         if same == 0 { i } else { true }
     } else {
         let run = slice(first, last.wrapping_sub(first).wrapping_add(1));
-        emit_range(t, newscr, ctype, &run)
+        emit_range(t, newscr, ctype, run)
     }
 }
 
@@ -523,9 +523,8 @@ fn clr_to_eos(t: &mut Term, curscr: &mut Window, blank: Cell) {
     let mut row = t.cursrow.max(0);
     let mut col = t.curscol.max(0);
     t.update_attrs(&blank);
-    if let Some(ed) = t.s(string::CLR_EOS) {
-        t.tputs(&ed, t.lines.wrapping_sub(row));
-    }
+    let affected = t.lines.wrapping_sub(row);
+    t.tputs_cap(string::CLR_EOS, affected);
     while col < t.columns {
         if let Some(c) = curscr.line_mut(row).and_then(|l| l.at_mut(col)) {
             *c = blank;
@@ -606,9 +605,8 @@ fn clear_screen(
             t.curscol = -1;
             go_to(t, newscr, ctype, 0, 0);
             t.update_attrs(&blank);
-            if let Some(ed) = t.s(string::CLR_EOS) {
-                t.tputs(&ed, t.lines);
-            }
+            let lines = t.lines;
+            t.tputs_cap(string::CLR_EOS, lines);
         } else {
             t.cursrow = -1;
             t.curscol = -1;
@@ -640,9 +638,7 @@ fn ins_str(t: &mut Term, ctype: &dyn Ctype, line: &[Cell], count: i32) {
     // "Prefer parm_ich as it has the smallest cost - no need to shift the
     // whole line on each character."
     if t.has(string::PARM_ICH) {
-        if let Some(s) = t.tiparm(string::PARM_ICH, &[i64::from(count)]) {
-            t.tputs(&s, 1);
-        }
+        t.put_tiparm(string::PARM_ICH, &[i64::from(count)], 1);
         for c in cells {
             put_attr_char(t, ctype, c);
         }
@@ -665,9 +661,7 @@ fn ins_str(t: &mut Term, ctype: &dyn Ctype, line: &[Cell], count: i32) {
 /// `DelChar (count)`: `count` characters deleted at the cursor.
 fn del_char(t: &mut Term, count: i32) {
     if t.has(string::PARM_DCH) {
-        if let Some(s) = t.tiparm(string::PARM_DCH, &[i64::from(count)]) {
-            t.tputs(&s, 1);
-        }
+        t.put_tiparm(string::PARM_DCH, &[i64::from(count)], 1);
     } else {
         for _ in 0..count.max(0) {
             t.putp_cap(string::DELETE_CHARACTER);
@@ -689,9 +683,13 @@ pub fn transform_line(
     let cols = t.columns;
     // "copy new hash value to old one"
     hash.copy_one(lineno);
-    let new_line: Vec<Cell> = newscr
+    // Borrowed from `newscr`, which the update only reads; and below, each
+    // `old` from `curscr` for just the `put_range` that reads it -- copies
+    // here were a line's allocation, and a repaint from a signal handler
+    // must make none.
+    let new_line: &[Cell] = newscr
         .line(lineno)
-        .map(|l| l.text.clone())
+        .map(|l| l.text.as_slice())
         .unwrap_or_default();
     let nl = |n: i32| {
         usize::try_from(n)
@@ -744,16 +742,16 @@ pub fn transform_line(
         go_to(t, newscr, ctype, lineno, first_char);
         let b = clr_blank(t, stdscr_bkgd);
         clr_to_eol(t, newscr, curscr, ctype, b, false);
-        let old: Vec<Cell> = curscr
+        let old: &[Cell] = curscr
             .line(lineno)
-            .map(|l| l.text.clone())
+            .map(|l| l.text.as_slice())
             .unwrap_or_default();
         put_range(
             t,
             newscr,
             ctype,
-            Some(&old),
-            &new_line,
+            Some(old),
+            new_line,
             lineno,
             0,
             cols.wrapping_sub(1),
@@ -822,27 +820,21 @@ pub fn transform_line(
             }
             if n_last >= first_char {
                 go_to(t, newscr, ctype, lineno, first_char);
-                let old: Vec<Cell> = curscr
+                let old: &[Cell] = curscr
                     .line(lineno)
-                    .map(|l| l.text.clone())
+                    .map(|l| l.text.as_slice())
                     .unwrap_or_default();
                 put_range(
                     t,
                     newscr,
                     ctype,
-                    Some(&old),
-                    &new_line,
+                    Some(old),
+                    new_line,
                     lineno,
                     first_char,
                     n_last,
                 );
-                copy_cells(
-                    curscr,
-                    lineno,
-                    &new_line,
-                    first_char,
-                    n_last.wrapping_add(1),
-                );
+                copy_cells(curscr, lineno, new_line, first_char, n_last.wrapping_add(1));
             }
             return;
         }
@@ -867,17 +859,17 @@ pub fn transform_line(
         } else if n_last != o_last && (nl(n_last) != ol(curscr, o_last) || !(t.idcok && has_ic(t)))
         {
             go_to(t, newscr, ctype, lineno, first_char);
-            let old: Vec<Cell> = curscr
+            let old: &[Cell] = curscr
                 .line(lineno)
-                .map(|l| l.text.clone())
+                .map(|l| l.text.as_slice())
                 .unwrap_or_default();
             if o_last.wrapping_sub(n_last) > t.costs.el_cost {
                 if put_range(
                     t,
                     newscr,
                     ctype,
-                    Some(&old),
-                    &new_line,
+                    Some(old),
+                    new_line,
                     lineno,
                     first_char,
                     n_last,
@@ -887,16 +879,7 @@ pub fn transform_line(
                 clr_to_eol(t, newscr, curscr, ctype, blank, false);
             } else {
                 let n = n_last.max(o_last);
-                put_range(
-                    t,
-                    newscr,
-                    ctype,
-                    Some(&old),
-                    &new_line,
-                    lineno,
-                    first_char,
-                    n,
-                );
+                put_range(t, newscr, ctype, Some(old), new_line, lineno, first_char, n);
             }
         } else {
             let n_last_nonblank = n_last;
@@ -919,20 +902,11 @@ pub fn transform_line(
             let mut n = o_last.min(n_last);
             if n >= first_char {
                 go_to(t, newscr, ctype, lineno, first_char);
-                let old: Vec<Cell> = curscr
+                let old: &[Cell] = curscr
                     .line(lineno)
-                    .map(|l| l.text.clone())
+                    .map(|l| l.text.as_slice())
                     .unwrap_or_default();
-                put_range(
-                    t,
-                    newscr,
-                    ctype,
-                    Some(&old),
-                    &new_line,
-                    lineno,
-                    first_char,
-                    n,
-                );
+                put_range(t, newscr, ctype, Some(old), new_line, lineno, first_char, n);
             }
             if o_last < n_last {
                 let m = n_last_nonblank.max(o_last_nonblank);
@@ -951,24 +925,24 @@ pub fn transform_line(
                 if n_last < n_last_nonblank
                     || ins_char_cost(t, n_last.wrapping_sub(o_last)) > m.wrapping_sub(n)
                 {
-                    let old: Vec<Cell> = curscr
+                    let old: &[Cell] = curscr
                         .line(lineno)
-                        .map(|l| l.text.clone())
+                        .map(|l| l.text.as_slice())
                         .unwrap_or_default();
                     put_range(
                         t,
                         newscr,
                         ctype,
-                        Some(&old),
-                        &new_line,
+                        Some(old),
+                        new_line,
                         lineno,
                         n.wrapping_add(1),
                         m,
                     );
                 } else {
                     let from = usize::try_from(n.wrapping_add(1)).unwrap_or(0);
-                    let tail = new_line.get(from..).unwrap_or_default().to_vec();
-                    ins_str(t, ctype, &tail, n_last.wrapping_sub(o_last));
+                    let tail = new_line.get(from..).unwrap_or_default();
+                    ins_str(t, ctype, tail, n_last.wrapping_sub(o_last));
                 }
             } else if o_last > n_last {
                 go_to(t, newscr, ctype, lineno, n.wrapping_add(1));
@@ -978,16 +952,16 @@ pub fn transform_line(
                         .wrapping_add(n_last_nonblank)
                         .wrapping_sub(n.wrapping_add(1))
                 {
-                    let old: Vec<Cell> = curscr
+                    let old: &[Cell] = curscr
                         .line(lineno)
-                        .map(|l| l.text.clone())
+                        .map(|l| l.text.as_slice())
                         .unwrap_or_default();
                     if put_range(
                         t,
                         newscr,
                         ctype,
-                        Some(&old),
-                        &new_line,
+                        Some(old),
+                        new_line,
                         lineno,
                         n.wrapping_add(1),
                         n_last_nonblank,
@@ -1008,7 +982,7 @@ pub fn transform_line(
     }
     // "update the code's internal representation"
     if cols > first_char {
-        copy_cells(curscr, lineno, &new_line, first_char, cols);
+        copy_cells(curscr, lineno, new_line, first_char, cols);
     }
 }
 
@@ -1079,15 +1053,11 @@ fn scroll_csr_forward(
     } else if t.has(string::PARM_INDEX) && top == miny && bot == maxy {
         go_to(t, newscr, ctype, bot, 0);
         t.update_attrs(&blank);
-        if let Some(s) = t.tiparm(string::PARM_INDEX, &[i64::from(n)]) {
-            t.tputs(&s, n);
-        }
+        t.put_tiparm(string::PARM_INDEX, &[i64::from(n)], n);
     } else if t.has(string::PARM_DELETE_LINE) && bot == maxy {
         go_to(t, newscr, ctype, top, 0);
         t.update_attrs(&blank);
-        if let Some(s) = t.tiparm(string::PARM_DELETE_LINE, &[i64::from(n)]) {
-            t.tputs(&s, n);
-        }
+        t.put_tiparm(string::PARM_DELETE_LINE, &[i64::from(n)], n);
     } else if t.has(string::SCROLL_FORWARD) && top == miny && bot == maxy {
         go_to(t, newscr, ctype, bot, 0);
         t.update_attrs(&blank);
@@ -1138,15 +1108,11 @@ fn scroll_csr_backward(
     } else if t.has(string::PARM_RINDEX) && top == miny && bot == maxy {
         go_to(t, newscr, ctype, top, 0);
         t.update_attrs(&blank);
-        if let Some(s) = t.tiparm(string::PARM_RINDEX, &[i64::from(n)]) {
-            t.tputs(&s, n);
-        }
+        t.put_tiparm(string::PARM_RINDEX, &[i64::from(n)], n);
     } else if t.has(string::PARM_INSERT_LINE) && bot == maxy {
         go_to(t, newscr, ctype, top, 0);
         t.update_attrs(&blank);
-        if let Some(s) = t.tiparm(string::PARM_INSERT_LINE, &[i64::from(n)]) {
-            t.tputs(&s, n);
-        }
+        t.put_tiparm(string::PARM_INSERT_LINE, &[i64::from(n)], n);
     } else if t.has(string::SCROLL_REVERSE) && top == miny && bot == maxy {
         go_to(t, newscr, ctype, top, 0);
         t.update_attrs(&blank);
@@ -1194,9 +1160,7 @@ fn scroll_idl(
     if n == 1 && t.has(string::DELETE_LINE) {
         t.putp_cap(string::DELETE_LINE);
     } else if t.has(string::PARM_DELETE_LINE) {
-        if let Some(s) = t.tiparm(string::PARM_DELETE_LINE, &[i64::from(n)]) {
-            t.tputs(&s, n);
-        }
+        t.put_tiparm(string::PARM_DELETE_LINE, &[i64::from(n)], n);
     } else {
         for _ in 0..n {
             t.putp_cap(string::DELETE_LINE);
@@ -1207,9 +1171,7 @@ fn scroll_idl(
     if n == 1 && t.has(string::INSERT_LINE) {
         t.putp_cap(string::INSERT_LINE);
     } else if t.has(string::PARM_INSERT_LINE) {
-        if let Some(s) = t.tiparm(string::PARM_INSERT_LINE, &[i64::from(n)]) {
-            t.tputs(&s, n);
-        }
+        t.put_tiparm(string::PARM_INSERT_LINE, &[i64::from(n)], n);
     } else {
         for _ in 0..n {
             t.putp_cap(string::INSERT_LINE);
@@ -1249,11 +1211,11 @@ pub fn scrolln(
                 cursor_saved = true;
                 t.putp_cap(string::SAVE_CURSOR);
             }
-            let s = t.tiparm(
+            t.put_tiparm(
                 string::CHANGE_SCROLL_REGION,
                 &[i64::from(top), i64::from(bot)],
+                1,
             );
-            t.putp(s.as_deref());
             if cursor_saved {
                 t.putp_cap(string::RESTORE_CURSOR);
             } else {
@@ -1261,8 +1223,7 @@ pub fn scrolln(
                 t.curscol = -1;
             }
             r = scroll_csr_forward(t, newscr, ctype, n, top, bot, top, bot, blank);
-            let s = t.tiparm(string::CHANGE_SCROLL_REGION, &[0, i64::from(maxy)]);
-            t.putp(s.as_deref());
+            t.put_tiparm(string::CHANGE_SCROLL_REGION, &[0, i64::from(maxy)], 1);
             t.cursrow = -1;
             t.curscol = -1;
         }
@@ -1305,11 +1266,11 @@ pub fn scrolln(
                 cursor_saved = true;
                 t.putp_cap(string::SAVE_CURSOR);
             }
-            let s = t.tiparm(
+            t.put_tiparm(
                 string::CHANGE_SCROLL_REGION,
                 &[i64::from(top), i64::from(bot)],
+                1,
             );
-            t.putp(s.as_deref());
             if cursor_saved {
                 t.putp_cap(string::RESTORE_CURSOR);
             } else {
@@ -1327,8 +1288,7 @@ pub fn scrolln(
                 bot,
                 blank,
             );
-            let s = t.tiparm(string::CHANGE_SCROLL_REGION, &[0, i64::from(maxy)]);
-            t.putp(s.as_deref());
+            t.put_tiparm(string::CHANGE_SCROLL_REGION, &[0, i64::from(maxy)], 1);
             t.cursrow = -1;
             t.curscol = -1;
         }
@@ -1376,16 +1336,15 @@ pub fn screen_resume(t: &mut Term, newscr: &mut Window) {
     if t.color_defs < 0 && t.direct_color == (0, 0, 0) {
         t.color_defs = t.color_defs.wrapping_neg();
         let defs = usize::try_from(t.color_defs).unwrap_or(0);
-        let inits: Vec<(i32, i32, i32, i32)> = t
-            .color_table
-            .iter()
-            .take(defs)
-            .enumerate()
-            .filter(|(_, c)| c.init)
-            .map(|(n, c)| (i32::try_from(n).unwrap_or(0), c.r, c.g, c.b))
-            .collect();
-        for (n, r, g, b) in inits {
-            t.init_color(n, r, g, b);
+        // By index, each colour copied out before `init_color` changes the
+        // table: a list of them would be an allocation in a repaint.
+        for n in 0..defs {
+            let Some(c) = t.color_table.get(n).copied() else {
+                break;
+            };
+            if c.init {
+                t.init_color(i32::try_from(n).unwrap_or(0), c.r, c.g, c.b);
+            }
         }
     }
     if t.has(string::EXIT_ATTRIBUTE_MODE) {

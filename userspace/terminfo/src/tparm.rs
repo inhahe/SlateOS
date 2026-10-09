@@ -14,6 +14,18 @@
 //! [`Tparm::nc_tiparm`] is `_nc_tiparm`, the entry point the library itself
 //! uses, with its checks of the parameter count; [`analyze`] is
 //! `_nc_tparm_analyze`.
+//!
+//! # No allocation once warm
+//!
+//! [`Tparm::expand`] and [`Tparm::nc_expand`] answer with a slice of a
+//! buffer the `Tparm` keeps -- upstream's `out_buff` -- and the format of a
+//! `%d` is built in another it keeps, `fmt_buff`; both grow only when an
+//! expansion needs more than any before it, and the stack is twenty slots
+//! of fixed size. So once a terminal's capabilities have each been expanded,
+//! expanding them again allocates nothing: what lets curses repaint from a
+//! signal handler without reaching for the allocator, which the program it
+//! interrupted may be holding. The forms that return a `Vec` copy that slice
+//! for callers to keep.
 
 use crate::Entry;
 use crate::string as cap;
@@ -25,11 +37,13 @@ pub const NUM_PARM: usize = 9;
 /// `NUM_VARS`.
 const NUM_VARS: usize = 26;
 
-/// One slot of the stack.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One slot of the stack: a number, or a string parameter -- which is the
+/// only string a capability can push, so it is kept as the parameter's
+/// index, as upstream keeps a pointer to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
     Num(i32),
-    Str(Vec<u8>),
+    Str(usize),
 }
 
 /// What `_nc_tparm_analyze` finds in a capability.
@@ -65,10 +79,17 @@ fn at(s: &[u8], i: usize) -> u8 {
 }
 
 /// `parse_format`: the printf format a `%` introduces -- its flags, width
-/// and precision as written, and the conversion -- and where the
-/// conversion (or whatever stopped the scan) is.
-fn parse_format(s: &[u8], mut i: usize) -> (Vec<u8>, usize) {
-    let mut format = vec![b'%'];
+/// and precision as written, and the conversion -- written into `format`
+/// when there is one to write it into (upstream's `fmt_buff`, which the
+/// analysis passes as null); and where the conversion (or whatever stopped
+/// the scan) is.
+fn parse_format(s: &[u8], mut i: usize, mut format: Option<&mut Vec<u8>>) -> usize {
+    let mut put = |c: u8| {
+        if let Some(f) = format.as_deref_mut() {
+            f.push(c);
+        }
+    };
+    put(b'%');
     let mut done = false;
     let mut allowminus = false;
     let mut dot = false;
@@ -78,11 +99,11 @@ fn parse_format(s: &[u8], mut i: usize) -> (Vec<u8>, usize) {
         let c = at(s, i);
         match c {
             b'c' | b'd' | b'o' | b'x' | b'X' | b's' => {
-                format.push(c);
+                put(c);
                 done = true;
             }
             b'.' => {
-                format.push(c);
+                put(c);
                 i = i.saturating_add(1);
                 if dot {
                     err = true;
@@ -92,7 +113,7 @@ fn parse_format(s: &[u8], mut i: usize) -> (Vec<u8>, usize) {
                 value = 0;
             }
             b'#' | b' ' => {
-                format.push(c);
+                put(c);
                 i = i.saturating_add(1);
             }
             b':' => {
@@ -101,7 +122,7 @@ fn parse_format(s: &[u8], mut i: usize) -> (Vec<u8>, usize) {
             }
             b'-' => {
                 if allowminus {
-                    format.push(c);
+                    put(c);
                     i = i.saturating_add(1);
                 } else {
                     done = true;
@@ -114,20 +135,20 @@ fn parse_format(s: &[u8], mut i: usize) -> (Vec<u8>, usize) {
                 if value > 10000 {
                     err = true;
                 }
-                format.push(c);
+                put(c);
                 i = i.saturating_add(1);
             }
             _ => done = true,
         }
     }
-    if err {
+    if err && let Some(f) = format {
         // "If we found an error, ignore (and remove) the flags."
-        format.truncate(1);
+        f.truncate(1);
         if at(s, i) != 0 {
-            format.push(at(s, i));
+            f.push(at(s, i));
         }
     }
-    (format, i)
+    i
 }
 
 /// `_nc_tparm_analyze`.
@@ -148,7 +169,7 @@ pub fn analyze(string: &[u8]) -> Analysis {
     while cp < len {
         if at(string, cp) == b'%' {
             cp = cp.saturating_add(1);
-            cp = parse_format(string, cp).1;
+            cp = parse_format(string, cp, None);
             match at(string, cp) {
                 b'd' | b'o' | b'x' | b'X' | b'c' => {
                     if lastpop <= 0 {
@@ -217,13 +238,38 @@ pub fn analyze(string: &[u8]) -> Analysis {
     a
 }
 
+/// The digits of `v` in `base` -- 8, 10 or 16, the letters capitals when
+/// `upper` -- written to the end of `buf`, which holds the most there can be
+/// (eleven, in octal): the slice they fill.
+fn digits(v: u32, base: u32, upper: bool, buf: &mut [u8; 11]) -> &[u8] {
+    let set: &[u8; 16] = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let mut v = v;
+    let mut at = buf.len();
+    loop {
+        at = at.saturating_sub(1);
+        let d = usize::try_from(v.checked_rem(base).unwrap_or(0)).unwrap_or(0);
+        if let (Some(slot), Some(&c)) = (buf.get_mut(at), set.get(d)) {
+            *slot = c;
+        }
+        v = v.checked_div(base).unwrap_or(0);
+        if v == 0 || at == 0 {
+            break;
+        }
+    }
+    buf.get(at..).unwrap_or_default()
+}
+
 /// The `printf` of one `%d`, `%o`, `%x` or `%X` -- or of `%s` -- with the
-/// flags, width and precision `parse_format` copied, as glibc prints them.
-/// A format glibc would not take as a conversion is printed as it is, as
-/// glibc prints one it does not know.
-fn printf(format: &[u8], num: i32, text: &[u8]) -> Vec<u8> {
+/// flags, width and precision `parse_format` copied, as glibc prints them,
+/// added to `out`. A format glibc would not take as a conversion is printed
+/// as it is, as glibc prints one it does not know.
+fn printf(out: &mut Vec<u8>, format: &[u8], num: i32, text: &[u8]) {
     let Some((&conv, spec)) = format.split_last() else {
-        return Vec::new();
+        return;
     };
     let spec = spec.get(1..).unwrap_or_default();
     let (mut left, mut zero, mut space, mut alt) = (false, false, false, false);
@@ -258,63 +304,68 @@ fn printf(format: &[u8], num: i32, text: &[u8]) -> Vec<u8> {
         precision = Some(p);
     }
     if i != spec.len() {
-        return format.to_vec();
+        out.extend_from_slice(format);
+        return;
     }
 
-    let (prefix, body): (Vec<u8>, Vec<u8>) = if conv == b's' {
+    // What is printed, in three parts: the sign or `0x`, the zeros a
+    // precision or `%#o` asks for, and the digits -- or for `%s`, the text.
+    let mut scratch = [0u8; 11];
+    let (prefix, zeros, body): (&[u8], usize, &[u8]) = if conv == b's' {
         let n = precision.map_or(text.len(), |p| p.min(text.len()));
-        (Vec::new(), text.get(..n).unwrap_or_default().to_vec())
+        (b"", 0, text.get(..n).unwrap_or_default())
     } else {
         let unsigned = u32::from_ne_bytes(num.to_ne_bytes());
-        let mut digits = match conv {
-            b'd' => num.unsigned_abs().to_string().into_bytes(),
-            b'o' => format!("{unsigned:o}").into_bytes(),
-            b'x' => format!("{unsigned:x}").into_bytes(),
-            _ => format!("{unsigned:X}").into_bytes(),
+        let mut body = match conv {
+            b'd' => digits(num.unsigned_abs(), 10, false, &mut scratch),
+            b'o' => digits(unsigned, 8, false, &mut scratch),
+            b'x' => digits(unsigned, 16, false, &mut scratch),
+            _ => digits(unsigned, 16, true, &mut scratch),
         };
         if precision == Some(0) && num == 0 {
-            digits.clear();
+            body = b"";
         }
-        if let Some(p) = precision
-            && digits.len() < p
-        {
-            let mut padded = vec![b'0'; p.saturating_sub(digits.len())];
-            padded.extend_from_slice(&digits);
-            digits = padded;
+        let mut zeros = precision.map_or(0, |p| p.saturating_sub(body.len()));
+        // `%#o` makes the first digit a 0 when no other zero already does.
+        if conv == b'o' && alt && zeros == 0 && body.first() != Some(&b'0') {
+            zeros = 1;
         }
-        let mut prefix = Vec::new();
-        match conv {
-            b'd' if num < 0 => prefix.push(b'-'),
-            b'd' if space => prefix.push(b' '),
-            b'o' if alt && digits.first() != Some(&b'0') => digits.insert(0, b'0'),
-            b'x' if alt && num != 0 => prefix.extend_from_slice(b"0x"),
-            b'X' if alt && num != 0 => prefix.extend_from_slice(b"0X"),
-            _ => {}
-        }
-        (prefix, digits)
+        let prefix: &[u8] = match conv {
+            b'd' if num < 0 => b"-",
+            b'd' if space => b" ",
+            b'x' if alt && num != 0 => b"0x",
+            b'X' if alt && num != 0 => b"0X",
+            _ => b"",
+        };
+        (prefix, zeros, body)
     };
 
-    let len = prefix.len().saturating_add(body.len());
+    let len = prefix
+        .len()
+        .saturating_add(zeros)
+        .saturating_add(body.len());
     let pad = width.saturating_sub(len);
-    let mut out = Vec::with_capacity(len.saturating_add(pad));
+    let put = |out: &mut Vec<u8>, c: u8, n: usize| out.resize(out.len().saturating_add(n), c);
     if left {
-        out.extend_from_slice(&prefix);
-        out.extend_from_slice(&body);
-        out.resize(out.len().saturating_add(pad), b' ');
+        out.extend_from_slice(prefix);
+        put(out, b'0', zeros);
+        out.extend_from_slice(body);
+        put(out, b' ', pad);
     } else if zero && precision.is_none() && conv != b's' {
-        out.extend_from_slice(&prefix);
-        out.resize(out.len().saturating_add(pad), b'0');
-        out.extend_from_slice(&body);
+        out.extend_from_slice(prefix);
+        put(out, b'0', pad.saturating_add(zeros));
+        out.extend_from_slice(body);
     } else {
-        out.resize(pad, b' ');
-        out.extend_from_slice(&prefix);
-        out.extend_from_slice(&body);
+        put(out, b' ', pad);
+        out.extend_from_slice(prefix);
+        put(out, b'0', zeros);
+        out.extend_from_slice(body);
     }
-    out
 }
 
 /// The state `tparm` keeps for a terminal from one call to the next: the
-/// static variables `A` to `Z`, zero when the terminal was set up.
+/// static variables `A` to `Z`, zero when the terminal was set up -- and the
+/// room its expansions are made in.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tparm {
     static_vars: [i32; NUM_VARS],
@@ -322,14 +373,64 @@ pub struct Tparm {
     /// stack, a push onto a full one, or (when there was no other) items
     /// left on the stack at the end. Cleared as each expansion starts.
     pub err: u32,
+    scratch: Scratch,
 }
 
-/// The parameters of one call.
-struct Data {
+/// `out_buff` and `fmt_buff`: the result of the last expansion, and the
+/// format of the conversion it was printing. Kept from call to call so that
+/// they are allocated once and only grown; not state, so two `Tparm`s that
+/// differ only here are equal.
+#[derive(Clone, Debug, Default)]
+struct Scratch {
+    out: Vec<u8>,
+    fmt: Vec<u8>,
+}
+
+impl PartialEq for Scratch {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Scratch {}
+
+/// The parameters of one call: numbers, and strings borrowed from the
+/// caller, as upstream keeps pointers to them.
+struct Data<'a> {
     analysis: Analysis,
     /// `param`: `TPARM_ARG`, a `long`.
     param: [i64; NUM_PARM],
-    strings: [Option<Vec<u8>>; NUM_PARM],
+    strings: [Option<&'a [u8]>; NUM_PARM],
+}
+
+impl<'a> Data<'a> {
+    fn new(analysis: Analysis) -> Self {
+        Self {
+            analysis,
+            param: [0; NUM_PARM],
+            strings: [None; NUM_PARM],
+        }
+    }
+
+    /// The `i`th parameter as `%p` pushes it: the string, where the
+    /// analysis reads it as one and it was given; the number cut to an
+    /// `int` otherwise.
+    fn item(&self, i: usize) -> Item {
+        let is_string = self.analysis.is_string.get(i).copied().unwrap_or(false);
+        match self.strings.get(i).copied().flatten() {
+            Some(_) if is_string => Item::Str(i),
+            _ => Item::Num(as_int(self.param.get(i).copied().unwrap_or(0))),
+        }
+    }
+
+    /// The string an item stands for: a string parameter's text, or the
+    /// empty string upstream's `spop` gives for a number.
+    fn text(&self, item: Option<Item>) -> &'a [u8] {
+        match item {
+            Some(Item::Str(i)) => self.strings.get(i).copied().flatten().unwrap_or_default(),
+            Some(Item::Num(_)) | None => b"",
+        }
+    }
 }
 
 /// One of `tparm`'s variable arguments: a `long`, or a string pointer
@@ -384,11 +485,38 @@ impl Tparm {
     }
 
     /// `tiparm (string, ...)` -- numbers only, as `TIPARM_9` passes them:
-    /// as [`Tparm::tparm`], every parameter a number.
+    /// [`Tparm::expand`], copied for the caller to keep.
     #[must_use]
     pub fn tiparm(&mut self, entry: &Entry, string: &[u8], params: &[i64]) -> Option<Vec<u8>> {
-        let args: Vec<Arg<'_>> = params.iter().map(|&p| Arg::Num(p)).collect();
-        self.tparm(entry, string, &args)
+        self.expand(entry, string, params).map(<[u8]>::to_vec)
+    }
+
+    /// `tiparm (string, ...)` -- numbers only, as `TIPARM_9` passes them --
+    /// answered in the buffer this keeps, until the next expansion: as
+    /// [`Tparm::tparm`] with every argument a number, and allocating nothing
+    /// once the buffers have grown to the expansion (module docs).
+    pub fn expand(&mut self, entry: &Entry, string: &[u8], params: &[i64]) -> Option<&[u8]> {
+        self.err = 0;
+        let analysis = analyze(string);
+        let tparm_type = analysis.tparm_type();
+        // `ValidCap (TRUE)`.
+        if tparm_type != 0 && !check_string_caps(entry, string, tparm_type) {
+            return None;
+        }
+        let mut data = Data::new(analysis);
+        for k in 0..analysis.actual().min(NUM_PARM) {
+            if analysis.is_string.get(k).copied().unwrap_or(false) {
+                // A number where a string is read: upstream reads the one as
+                // the other, which is undefined; here the string is empty.
+                if let Some(slot) = data.strings.get_mut(k) {
+                    *slot = Some(b"");
+                }
+            } else if let Some(slot) = data.param.get_mut(k) {
+                *slot = params.get(k).copied().unwrap_or(0);
+            }
+        }
+        self.tparam_internal(string, &mut data);
+        Some(&self.scratch.out)
     }
 
     /// `tparm (string, ...)` -- the variable-argument form -- for the
@@ -405,18 +533,14 @@ impl Tparm {
         if tparm_type != 0 && !check_string_caps(entry, string, tparm_type) {
             return None;
         }
-        let mut data = Data {
-            analysis,
-            param: [0; NUM_PARM],
-            strings: Default::default(),
-        };
+        let mut data = Data::new(analysis);
         // `tparm_copy_valist (&myData, TRUE, ap)`.
         for k in 0..analysis.actual().min(NUM_PARM) {
             let wants_string = analysis.is_string.get(k).copied().unwrap_or(false);
             match (wants_string, args.get(k)) {
                 (true, Some(Arg::Str(s))) => {
                     if let Some(slot) = data.strings.get_mut(k) {
-                        *slot = Some(s.unwrap_or_default().to_vec());
+                        *slot = Some(s.unwrap_or_default());
                     }
                 }
                 (false, Some(Arg::Num(n))) => {
@@ -430,20 +554,19 @@ impl Tparm {
                 // the same.
                 (true, _) => {
                     if let Some(slot) = data.strings.get_mut(k) {
-                        *slot = Some(Vec::new());
+                        *slot = Some(b"");
                     }
                 }
                 (false, _) => {}
             }
         }
-        Some(self.tparam_internal(string, &mut data))
+        self.tparam_internal(string, &mut data);
+        Some(self.scratch.out.clone())
     }
 
     /// `_nc_tiparm (expected, string, ...)` for the terminal `entry`, with
-    /// numeric parameters: `None` where upstream returns a null pointer --
-    /// a capability with string parameters, or one that takes no
-    /// parameters, or more than `expected`, or (unless `expected` is 9, for
-    /// `sgr`) a different number.
+    /// numeric parameters: [`Tparm::nc_expand`], copied for the caller to
+    /// keep.
     #[must_use]
     pub fn nc_tiparm(
         &mut self,
@@ -452,6 +575,23 @@ impl Tparm {
         string: &[u8],
         params: &[i32],
     ) -> Option<Vec<u8>> {
+        self.nc_expand(entry, expected, string, params)
+            .map(<[u8]>::to_vec)
+    }
+
+    /// `_nc_tiparm (expected, string, ...)` for the terminal `entry`, with
+    /// numeric parameters, answered in the buffer this keeps until the next
+    /// expansion: `None` where upstream returns a null pointer -- a
+    /// capability with string parameters, or one that takes no parameters,
+    /// or more than `expected`, or (unless `expected` is 9, for `sgr`) a
+    /// different number.
+    pub fn nc_expand(
+        &mut self,
+        entry: &Entry,
+        expected: usize,
+        string: &[u8],
+        params: &[i32],
+    ) -> Option<&[u8]> {
         self.err = 0;
         let analysis = analyze(string);
         // `ValidCap (FALSE)`: numbers only.
@@ -488,28 +628,27 @@ impl Tparm {
         {
             return None;
         }
-        let mut data = Data {
-            analysis,
-            param: [0; NUM_PARM],
-            strings: Default::default(),
-        };
+        let mut data = Data::new(analysis);
         for (k, slot) in data.param.iter_mut().enumerate().take(actual) {
             *slot = i64::from(params.get(k).copied().unwrap_or(0));
         }
-        Some(self.tparam_internal(string, &mut data))
+        self.tparam_internal(string, &mut data);
+        Some(&self.scratch.out)
     }
 
-    /// `tparam_internal`: the expansion.
+    /// `tparam_internal`: the expansion, into the output buffer.
     #[allow(
         clippy::too_many_lines,
         reason = "upstream's tparam_internal, in one piece so it reads against it"
     )]
-    fn tparam_internal(&mut self, string: &[u8], data: &mut Data) -> Vec<u8> {
-        let mut out: Vec<u8> = Vec::new();
+    fn tparam_internal(&mut self, string: &[u8], data: &mut Data<'_>) {
+        let Self {
+            static_vars,
+            err,
+            scratch: Scratch { out, fmt },
+        } = self;
+        out.clear();
         let mut stack = Stack::default();
-        let push = |stack: &mut Stack, item: Item| stack.push(item);
-        let npop = |stack: &mut Stack| stack.npop();
-        let spop = |stack: &mut Stack| stack.spop();
         // `(char) ((c == 0) ? 0200 : c)`.
         let save_char = |out: &mut Vec<u8>, c: i32| {
             out.push(if c == 0 {
@@ -518,20 +657,13 @@ impl Tparm {
                 c.to_le_bytes().first().copied().unwrap_or(0)
             });
         };
-        let param_item = |data: &Data, i: usize| -> Item {
-            match data.strings.get(i).cloned().flatten() {
-                Some(s) if data.analysis.is_string.get(i).copied().unwrap_or(false) => Item::Str(s),
-                _ => Item::Num(as_int(data.param.get(i).copied().unwrap_or(0))),
-            }
-        };
 
         // `tparm_tc_compat`: with no `%p` at all, the parameters go on the
         // stack so that successive pops take them in order.
         let termcap_hack = data.analysis.popped == 0;
         if termcap_hack {
             for i in (0..data.analysis.parsed).rev() {
-                let item = param_item(data, i);
-                push(&mut stack, item);
+                stack.push(data.item(i));
             }
         }
         let mut dynamic: Option<[i32; NUM_VARS]> = None;
@@ -542,28 +674,25 @@ impl Tparm {
         while cp < len {
             if at(string, cp) == b'%' {
                 cp = cp.saturating_add(1);
-                let (format, next) = parse_format(string, cp);
-                cp = next;
+                fmt.clear();
+                cp = parse_format(string, cp, Some(&mut *fmt));
                 match at(string, cp) {
-                    b'%' => save_char(&mut out, i32::from(b'%')),
+                    b'%' => save_char(out, i32::from(b'%')),
                     b'd' | b'o' | b'x' | b'X' => {
-                        let x = npop(&mut stack);
-                        out.extend_from_slice(&printf(&format, x, b""));
+                        let x = stack.npop();
+                        printf(out, fmt, x, b"");
                     }
                     b'c' => {
-                        let x = npop(&mut stack);
-                        save_char(&mut out, x);
+                        let x = stack.npop();
+                        save_char(out, x);
                     }
                     b'l' => {
-                        let s = spop(&mut stack);
-                        push(
-                            &mut stack,
-                            Item::Num(i32::try_from(s.len()).unwrap_or(i32::MAX)),
-                        );
+                        let s = data.text(stack.spop());
+                        stack.push(Item::Num(i32::try_from(s.len()).unwrap_or(i32::MAX)));
                     }
                     b's' => {
-                        let s = spop(&mut stack);
-                        out.extend_from_slice(&printf(&format, 0, &s));
+                        let s = data.text(stack.spop());
+                        printf(out, fmt, 0, s);
                     }
                     b'p' => {
                         cp = cp.saturating_add(1);
@@ -571,22 +700,20 @@ impl Tparm {
                         if let Ok(i) = usize::try_from(i)
                             && i < NUM_PARM
                         {
-                            let item = param_item(data, i);
-                            push(&mut stack, item);
+                            stack.push(data.item(i));
                         }
                     }
                     b'P' => {
                         cp = cp.saturating_add(1);
                         let c = at(string, cp);
                         if c.is_ascii_uppercase() {
-                            let x = npop(&mut stack);
-                            if let Some(v) =
-                                self.static_vars.get_mut(usize::from(c.wrapping_sub(b'A')))
+                            let x = stack.npop();
+                            if let Some(v) = static_vars.get_mut(usize::from(c.wrapping_sub(b'A')))
                             {
                                 *v = x;
                             }
                         } else if c.is_ascii_lowercase() {
-                            let x = npop(&mut stack);
+                            let x = stack.npop();
                             let vars = dynamic.get_or_insert([0; NUM_VARS]);
                             if let Some(v) = vars.get_mut(usize::from(c.wrapping_sub(b'a'))) {
                                 *v = x;
@@ -597,24 +724,23 @@ impl Tparm {
                         cp = cp.saturating_add(1);
                         let c = at(string, cp);
                         if c.is_ascii_uppercase() {
-                            let v = self
-                                .static_vars
+                            let v = static_vars
                                 .get(usize::from(c.wrapping_sub(b'A')))
                                 .copied()
                                 .unwrap_or(0);
-                            push(&mut stack, Item::Num(v));
+                            stack.push(Item::Num(v));
                         } else if c.is_ascii_lowercase() {
                             let vars = dynamic.get_or_insert([0; NUM_VARS]);
                             let v = vars
                                 .get(usize::from(c.wrapping_sub(b'a')))
                                 .copied()
                                 .unwrap_or(0);
-                            push(&mut stack, Item::Num(v));
+                            stack.push(Item::Num(v));
                         }
                     }
                     b'\'' => {
                         cp = cp.saturating_add(1);
-                        push(&mut stack, Item::Num(i32::from(at(string, cp))));
+                        stack.push(Item::Num(i32::from(at(string, cp))));
                         cp = cp.saturating_add(1);
                     }
                     b'{' => {
@@ -626,12 +752,12 @@ impl Tparm {
                                 .wrapping_add(i32::from(at(string, cp).wrapping_sub(b'0')));
                             cp = cp.saturating_add(1);
                         }
-                        push(&mut stack, Item::Num(number));
+                        stack.push(Item::Num(number));
                     }
                     op @ (b'+' | b'-' | b'*' | b'/' | b'm' | b'A' | b'O' | b'&' | b'|' | b'^'
                     | b'=' | b'<' | b'>') => {
-                        let y = npop(&mut stack);
-                        let x = npop(&mut stack);
+                        let y = stack.npop();
+                        let x = stack.npop();
                         let r = match op {
                             b'+' => x.wrapping_add(y),
                             b'-' => x.wrapping_sub(y),
@@ -653,15 +779,15 @@ impl Tparm {
                             b'<' => i32::from(x < y),
                             _ => i32::from(x > y),
                         };
-                        push(&mut stack, Item::Num(r));
+                        stack.push(Item::Num(r));
                     }
                     b'!' => {
-                        let x = npop(&mut stack);
-                        push(&mut stack, Item::Num(i32::from(x == 0)));
+                        let x = stack.npop();
+                        stack.push(Item::Num(i32::from(x == 0)));
                     }
                     b'~' => {
-                        let x = npop(&mut stack);
-                        push(&mut stack, Item::Num(!x));
+                        let x = stack.npop();
+                        stack.push(Item::Num(!x));
                     }
                     b'i' => {
                         // The first two parameters, if numbers, once; with
@@ -675,17 +801,15 @@ impl Tparm {
                                 {
                                     *p = p.wrapping_add(1);
                                     let v = as_int(*p);
-                                    if termcap_hack
-                                        && let Some(Item::Num(slot)) = stack.items.get_mut(k)
-                                    {
-                                        *slot = v;
+                                    if termcap_hack {
+                                        stack.rewrite(k, v);
                                     }
                                 }
                             }
                         }
                     }
                     b't' => {
-                        let x = npop(&mut stack);
+                        let x = stack.npop();
                         if x == 0 {
                             // Forward to the `%e` or `%;` at this level.
                             cp = cp.saturating_add(1);
@@ -737,7 +861,7 @@ impl Tparm {
                     _ => {}
                 }
             } else {
-                save_char(&mut out, i32::from(at(string, cp)));
+                save_char(out, i32::from(at(string, cp)));
             }
             if at(string, cp) == 0 {
                 break;
@@ -745,58 +869,79 @@ impl Tparm {
             cp = cp.saturating_add(1);
         }
         // "tparm: stack has items on return" counts when nothing else did.
-        if !stack.items.is_empty() && stack.err == 0 {
+        if stack.len != 0 && stack.err == 0 {
             stack.err = 1;
         }
-        self.err = self.err.saturating_add(stack.err);
+        *err = err.saturating_add(stack.err);
         // The result is a C string.
         if let Some(nul) = out.iter().position(|&b| b == 0) {
             out.truncate(nul);
         }
-        out
     }
 }
 
-/// `TPS (stack)`: the stack, and the errors `npush`, `npop` and the
-/// others count into `_nc_tparm_err`.
-#[derive(Default)]
+/// `TPS (stack)`: the stack -- twenty slots, as upstream's -- and the
+/// errors `npush`, `npop` and the others count into `_nc_tparm_err`.
 struct Stack {
-    items: Vec<Item>,
+    items: [Item; STACKSIZE],
+    len: usize,
     err: u32,
+}
+
+impl Default for Stack {
+    fn default() -> Self {
+        Self {
+            items: [Item::Num(0); STACKSIZE],
+            len: 0,
+            err: 0,
+        }
+    }
 }
 
 impl Stack {
     /// `npush`, `spush`: onto the stack, or an error when it is full.
     fn push(&mut self, item: Item) {
-        if self.items.len() < STACKSIZE {
-            self.items.push(item);
-        } else {
+        match self.items.get_mut(self.len) {
+            Some(slot) => {
+                *slot = item;
+                self.len = self.len.saturating_add(1);
+            }
+            None => self.err = self.err.saturating_add(1),
+        }
+    }
+
+    /// The top item, taken; an error and nothing when the stack is empty.
+    fn pop(&mut self) -> Option<Item> {
+        if self.len == 0 {
             self.err = self.err.saturating_add(1);
+            return None;
         }
+        self.len = self.len.saturating_sub(1);
+        self.items.get(self.len).copied()
     }
 
-    /// `npop`: a number -- 0 for a string -- or an error and 0 when empty.
+    /// `npop`: a number -- 0 for a string, and for an empty stack, which
+    /// is also an error.
     fn npop(&mut self) -> i32 {
-        match self.items.pop() {
+        match self.pop() {
             Some(Item::Num(n)) => n,
-            Some(Item::Str(_)) => 0,
-            None => {
-                self.err = self.err.saturating_add(1);
-                0
-            }
+            Some(Item::Str(_)) | None => 0,
         }
     }
 
-    /// `spop`: a string -- empty for a number -- or an error and an empty
-    /// one when the stack is.
-    fn spop(&mut self) -> Vec<u8> {
-        match self.items.pop() {
-            Some(Item::Str(s)) => s,
-            Some(Item::Num(_)) => Vec::new(),
-            None => {
-                self.err = self.err.saturating_add(1);
-                Vec::new()
-            }
+    /// `spop`: the item a string is read from -- see [`Data::text`] -- and
+    /// an error when the stack is empty.
+    fn spop(&mut self) -> Option<Item> {
+        self.pop()
+    }
+
+    /// The `k`th item from the bottom, made the number `v` if it is one:
+    /// `%i` on the parameters the termcap hack pushed.
+    fn rewrite(&mut self, k: usize, v: i32) {
+        if k < self.len
+            && let Some(Item::Num(slot)) = self.items.get_mut(k)
+        {
+            *slot = v;
         }
     }
 }
@@ -854,20 +999,26 @@ mod tests {
         assert_eq!((a.popped, a.parsed), (0, 2));
     }
 
+    /// The expansion of `s` with numbers `p`, by a `Tparm` of its own.
+    fn run(tp: &mut Tparm, s: &[u8], p: &[i32]) -> Vec<u8> {
+        let mut data = Data::new(analyze(s));
+        for (k, v) in p.iter().enumerate() {
+            data.param[k] = i64::from(*v);
+        }
+        tp.tparam_internal(s, &mut data);
+        tp.scratch.out.clone()
+    }
+
+    /// `printf`'s answer, alone.
+    fn print(format: &[u8], num: i32, text: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        printf(&mut out, format, num, text);
+        out
+    }
+
     #[test]
     fn arithmetic_variables_and_conditions() {
-        let t = |s: &[u8], p: &[i32]| -> Vec<u8> {
-            let mut tp = Tparm::new();
-            let mut data = Data {
-                analysis: analyze(s),
-                param: [0; NUM_PARM],
-                strings: Default::default(),
-            };
-            for (k, v) in p.iter().enumerate() {
-                data.param[k] = i64::from(*v);
-            }
-            tp.tparam_internal(s, &mut data)
-        };
+        let t = |s: &[u8], p: &[i32]| -> Vec<u8> { run(&mut Tparm::new(), s, p) };
         assert_eq!(t(b"%p1%p2%+%d", &[3, 4]), b"7");
         assert_eq!(t(b"%p1%{10}%/%d", &[42]), b"4");
         assert_eq!(t(b"%p1%{0}%/%d", &[42]), b"0");
@@ -889,36 +1040,78 @@ mod tests {
         assert_eq!(t(b"\x1b[%i%d;%dH", &[4, 9]), b"\x1b[10;5H");
         // Static variables outlive the call; dynamic ones do not.
         let mut tp = Tparm::new();
-        let s = b"%{7}%PA";
-        let mut d = Data {
-            analysis: analyze(s),
-            param: [0; NUM_PARM],
-            strings: Default::default(),
-        };
-        tp.tparam_internal(s, &mut d);
-        let s = b"%gA%d";
-        let mut d = Data {
-            analysis: analyze(s),
-            param: [0; NUM_PARM],
-            strings: Default::default(),
-        };
-        assert_eq!(tp.tparam_internal(s, &mut d), b"7");
+        run(&mut tp, b"%{7}%PA", &[]);
+        assert_eq!(run(&mut tp, b"%gA%d", &[]), b"7");
     }
 
     #[test]
     fn printf_follows_glibc() {
-        assert_eq!(printf(b"%d", -42, b""), b"-42");
-        assert_eq!(printf(b"% d", 42, b""), b" 42");
-        assert_eq!(printf(b"%.0d", 0, b""), b"");
-        assert_eq!(printf(b"%.3d", -7, b""), b"-007");
-        assert_eq!(printf(b"%05d", -7, b""), b"-0007");
-        assert_eq!(printf(b"%x", -1, b""), b"ffffffff");
-        assert_eq!(printf(b"%#X", 255, b""), b"0XFF");
-        assert_eq!(printf(b"%#x", 0, b""), b"0");
-        assert_eq!(printf(b"%#.0o", 0, b""), b"0");
-        assert_eq!(printf(b"%-4s", 0, b"ab"), b"ab  ");
-        assert_eq!(printf(b"%.1s", 0, b"ab"), b"a");
-        assert_eq!(printf(b"%5#x", 1, b""), b"%5#x");
+        assert_eq!(print(b"%d", -42, b""), b"-42");
+        assert_eq!(print(b"% d", 42, b""), b" 42");
+        assert_eq!(print(b"%.0d", 0, b""), b"");
+        assert_eq!(print(b"%.3d", -7, b""), b"-007");
+        assert_eq!(print(b"%05d", -7, b""), b"-0007");
+        assert_eq!(print(b"%x", -1, b""), b"ffffffff");
+        assert_eq!(print(b"%#X", 255, b""), b"0XFF");
+        assert_eq!(print(b"%#x", 0, b""), b"0");
+        assert_eq!(print(b"%#.0o", 0, b""), b"0");
+        assert_eq!(print(b"%-4s", 0, b"ab"), b"ab  ");
+        assert_eq!(print(b"%.1s", 0, b"ab"), b"a");
+        assert_eq!(print(b"%5#x", 1, b""), b"%5#x");
+        // The extremes of each base, and the flags against each other.
+        assert_eq!(print(b"%o", -1, b""), b"37777777777");
+        assert_eq!(print(b"%d", i32::MIN, b""), b"-2147483648");
+        assert_eq!(print(b"%#o", 8, b""), b"010");
+        assert_eq!(print(b"%#05o", 8, b""), b"00010");
+        assert_eq!(print(b"%#.4o", 8, b""), b"0010");
+        assert_eq!(print(b"%-6.3d", -5, b""), b"-005  ");
+        assert_eq!(print(b"%06.3d", 5, b""), b"   005");
+        assert_eq!(print(b"%#8X", 0xbeef, b""), b"  0XBEEF");
+        assert_eq!(print(b"%-#8x", 0xbeef, b""), b"0xbeef  ");
+    }
+
+    /// Strings pushed by `%p` are the caller's, read by `%s` and measured by
+    /// `%l`; a number popped as a string is empty.
+    #[test]
+    fn string_parameters_are_read_where_they_lie() {
+        let e = Entry::default();
+        let mut tp = Tparm::new();
+        assert_eq!(
+            tp.tparm(&e, b"%p1%s=%p1%l%d", &[Arg::Str(Some(b"abc"))]),
+            None,
+            "a capability with string parameters must be one that may"
+        );
+        let mut data = Data::new(analyze(b"[%p1%s|%p1%l%d|%p2%s]"));
+        data.strings[0] = Some(b"abc");
+        data.param[1] = 7;
+        tp.tparam_internal(b"[%p1%s|%p1%l%d|%p2%s]", &mut data);
+        assert_eq!(tp.scratch.out, b"[abc|3|]");
+    }
+
+    /// Once its buffers have grown, an expansion reuses them: the second
+    /// run of a capability asks the allocator for nothing.
+    #[test]
+    fn a_warm_expansion_reuses_its_buffers() {
+        let e = Entry::default();
+        let mut tp = Tparm::new();
+        let first = tp
+            .expand(&e, XTERM_SGR, &[1, 1, 0, 0, 0, 1, 0, 0, 0])
+            .map(<[u8]>::as_ptr);
+        let again = tp
+            .expand(&e, XTERM_SGR, &[0, 0, 1, 0, 0, 0, 0, 0, 1])
+            .map(<[u8]>::as_ptr);
+        assert_eq!(first, again, "the same buffer, not a new one");
+        assert_eq!(
+            tp.expand(&e, XTERM_SGR, &[1, 1, 0, 0, 0, 1, 0, 0, 0]),
+            Some(&b"\x1b(B\x1b[0;1;4;7m"[..])
+        );
+        // The stack is fixed: twenty-one pushes overflow it, as upstream's.
+        let full = [b"%{1}".as_slice(); 21].concat();
+        assert_eq!(tp.expand(&e, &full, &[]), Some(&b""[..]));
+        assert_eq!(
+            tp.err, 1,
+            "one push too many; the items left count only when nothing else did"
+        );
     }
 
     #[test]

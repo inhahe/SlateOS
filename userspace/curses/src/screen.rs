@@ -479,7 +479,7 @@ fn init_acs(t: &mut Term) {
             }
         }
     }
-    if let Some(acsc) = t.s(string::ACS_CHARS) {
+    if let Some(acsc) = t.entry.string(string::ACS_CHARS) {
         // `strlen (acs_chars)`.
         let length = acsc.iter().position(|&b| b == 0).unwrap_or(acsc.len());
         let mut i = 0usize;
@@ -883,8 +883,7 @@ impl Screen {
         } else {
             string::KEYPAD_LOCAL
         };
-        if let Some(s) = self.t.s(cap) {
-            self.t.tputs(&s, 1);
+        if self.t.putp_cap(cap) {
             self.t.flush();
         }
         self.keypad_on = flag;
@@ -1229,12 +1228,10 @@ impl Screen {
 
     /// `beep ()`: `bel`, else `flash`, sent and flushed.
     pub fn beep(&mut self) -> bool {
-        if let Some(bel) = self.t.s(string::BELL) {
-            self.t.tputs_always(&bel, 1, true);
+        if self.t.tputs_cap_always(string::BELL, 1, true) {
             self.t.flush();
             true
-        } else if let Some(flash) = self.t.s(string::FLASH_SCREEN) {
-            self.t.tputs_always(&flash, 1, true);
+        } else if self.t.tputs_cap_always(string::FLASH_SCREEN, 1, true) {
             self.t.flush();
             self.t.flush();
             true
@@ -1374,6 +1371,7 @@ fn adjust_window(
 mod tests {
     use super::*;
     use crate::addch;
+    use crate::cell::{A_NORMAL, A_REVERSE, A_UNDERLINE};
     use crate::testing::{CLocale, Utf8};
 
     /// A screen on xterm-256color -- from the database, or from the entry
@@ -1390,6 +1388,85 @@ mod tests {
 
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// What a signal handler does to a screen the program has drawn --
+    /// `endwin` for `SIGINT`, `SIGTERM` and a program's own handler, and for
+    /// `SIGTSTP` that, then the modes kept and the screen repainted on the
+    /// way back -- allocates and frees nothing: a handler that interrupted
+    /// the program inside the allocator would wait on its lock for good
+    /// (TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER). Written to a
+    /// closed descriptor, so the bytes go nowhere and only the library's own
+    /// work is counted; what it writes is the business of the other tests
+    /// and of `scripts/curses-diff.sh`.
+    #[test]
+    fn the_work_a_signal_handler_does_allocates_nothing() {
+        use crate::testing::allocations_in;
+        let locales: [(&str, Box<dyn Ctype + Send>); 2] =
+            [("C", Box::new(CLocale)), ("UTF-8", Box::new(Utf8))];
+        for (name, ctype) in locales {
+            let opts = Options {
+                output: Sink::Fd(-1),
+                input: -1,
+                use_env: false,
+            };
+            let mut sp = Screen::newterm(b"xterm-256color", &opts, ctype).unwrap();
+            assert!(sp.t.start_color());
+            assert!(sp.init_pair(1, 1, 4));
+            // A colour of the program's own, which the repaint restores
+            // (`_nc_screen_resume`), as `watch` defines eight.
+            assert!(sp.t.init_color(9, 1000, 333, 333));
+            let text: &[u8] = if name == "C" {
+                b"plain text"
+            } else {
+                "wide \u{65e5}\u{672c} text".as_bytes()
+            };
+            {
+                let (w, ctx) = sp.stdscr_ctx();
+                for y in 0..20 {
+                    assert!(w.wmove(y, y));
+                    assert!(addch::waddnstr(w, &ctx, text, -1));
+                }
+                w.wattrset(A_BOLD | A_REVERSE);
+                assert!(w.wmove(21, 0));
+                assert!(addch::waddnstr(w, &ctx, b"bold and reversed", -1));
+                w.wattr_set(A_UNDERLINE, 1);
+                assert!(addch::waddnstr(w, &ctx, b" in colour", -1));
+                w.wattrset(A_NORMAL);
+                assert!(w.wmove(22, 0));
+                for _ in 0..30 {
+                    assert!(addch::waddch(w, &ctx, Attr::from(b'q') | A_ALTCHARSET));
+                }
+            }
+            sp.refresh();
+            // A second frame, so the update has something to compare and
+            // every table its size.
+            {
+                let (w, ctx) = sp.stdscr_ctx();
+                assert!(w.wmove(5, 0));
+                assert!(addch::waddnstr(w, &ctx, b"changed", -1));
+            }
+            sp.refresh();
+
+            let ending = allocations_in(|| {
+                sp.endwin();
+            });
+            let repainting = allocations_in(|| {
+                sp.def_prog_mode();
+                sp.flushinp();
+                sp.def_shell_mode();
+                sp.doupdate();
+            });
+            let ending_again = allocations_in(|| {
+                sp.endwin();
+            });
+            assert_eq!(
+                (ending, repainting, ending_again),
+                (0, 0, 0),
+                "allocator calls in endwin, the repaint after a suspension, and \
+                 endwin again, in the {name} locale"
+            );
+        }
     }
 
     #[test]

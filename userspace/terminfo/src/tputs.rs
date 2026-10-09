@@ -81,7 +81,15 @@ fn delay_output(out: &mut dyn Outc, ms: i32, padding: &Padding) {
             .wrapping_mul(padding.baud)
             .checked_div(BAUDBYTE * 1000)
             .unwrap_or(0);
-        out.put(&vec![padding.pad; usize::try_from(nullcount).unwrap_or(0)]);
+        // A chunk at a time from a fixed run, so that padding allocates
+        // nothing: curses pads from a signal handler too.
+        let run = [padding.pad; 64];
+        let mut left = usize::try_from(nullcount).unwrap_or(0);
+        while left > 0 {
+            let n = left.min(run.len());
+            out.put(run.get(..n).unwrap_or_default());
+            left = left.saturating_sub(n);
+        }
     }
 }
 

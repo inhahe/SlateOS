@@ -47,10 +47,8 @@ impl Ctype for Libc {
         locale::btowc(c)
     }
 
-    fn wcrtomb(&self, wc: WChar) -> Option<Vec<u8>> {
-        let mut buf = [0u8; locale::MB_LEN_MAX];
-        let n = locale::wcrtomb(wc, &mut MbState::new(), &mut buf)?;
-        buf.get(..n).map(<[u8]>::to_vec)
+    fn wcrtomb(&self, wc: WChar, buf: &mut [u8; locale::MB_LEN_MAX]) -> Option<usize> {
+        locale::wcrtomb(wc, &mut MbState::new(), buf)
     }
 
     /// `nl_langinfo (CODESET)` is `UTF-8`.

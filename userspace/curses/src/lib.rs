@@ -70,6 +70,12 @@ mod testing;
 pub mod update;
 pub mod window;
 
+/// The unit tests' allocator, which counts on request: what lets a test
+/// show that the work a signal handler does allocates nothing.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: testing::Counting = testing::Counting;
+
 pub use cell::{
     A_ALTCHARSET, A_ATTRIBUTES, A_BLINK, A_BOLD, A_CHARTEXT, A_COLOR, A_DIM, A_INVIS, A_ITALIC,
     A_NORMAL, A_PROTECT, A_REVERSE, A_STANDOUT, A_UNDERLINE, Attr, Cell, WChar, color_pair,

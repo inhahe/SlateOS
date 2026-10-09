@@ -57,15 +57,15 @@ pseudo-terminal and finds the same bytes.
 ### Against
 
 * **What upstream does still happens in one case:** a signal that arrives
-  while the program is outside curses runs `endwin` inside the handler, as
-  upstream's does, and `endwin` allocates (a few small vectors). If the
-  program was inside the memory allocator at that instant, the handler can
-  deadlock in it. Upstream accepts the same hazard in its own words ("Much
-  of this is unsafe from a signal handler. But we'll _try_ to clean up the
-  screen and terminal settings on the way out."). The output buffer is
-  reserved whole when the screen is made, so writing to the terminal is not
-  among the allocations. Tracked as
-  `known-issues.md` -> `TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER`.
+  while the program is outside curses runs `endwin` -- and for `SIGTSTP`
+  the repaint after -- inside the handler, as upstream's does. Upstream's
+  allocates there, and accepts the hazard in its own words ("Much of this is
+  unsafe from a signal handler. But we'll _try_ to clean up the screen and
+  terminal settings on the way out."): a handler that interrupted the
+  allocator can deadlock in it. This one did too until 2026-10-09; since
+  then, once the screen has been drawn, that work allocates and frees
+  nothing, which a test measures (`TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-
+  HANDLER`, now fixed). What `exit` does after it is the C library's.
 * A signal in the middle of a curses call takes effect a call later than
   upstream's -- after, say, an `addstr` finishes rather than half way
   through it. No harness or program has been found that can tell.

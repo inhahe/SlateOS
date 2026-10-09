@@ -163,6 +163,81 @@ pub enum Sink {
     Memory(Vec<u8>),
 }
 
+/// A screen's output: where it goes and the buffer it is collected in --
+/// `_ofd`, `out_buffer`, `out_inuse` and `out_limit`.
+///
+/// A struct of its own so that what is written to it can be borrowed from
+/// the rest of the [`Term`] -- a capability from the entry, an expansion
+/// from `tparm`'s buffer -- rather than copied out first: copies the
+/// borrow checker would otherwise force, and that a signal handler writing
+/// the screen cannot afford, the allocator being perhaps the very thing it
+/// interrupted (TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER).
+pub struct Output {
+    /// Where the bytes go: `_ofd`, or memory.
+    pub sink: Sink,
+    /// `out_buffer` (its length `out_inuse`), reserved at `out_limit` when
+    /// the screen is sized and never grown past it.
+    pub buf: Vec<u8>,
+    /// `out_limit`; 0 before the screen is sized, when every byte is
+    /// written as it comes.
+    pub limit: usize,
+}
+
+impl Output {
+    /// `_nc_outch (ch)`: one byte into the buffer, which is flushed first
+    /// when it is full.
+    pub fn outch(&mut self, b: u8) {
+        if self.limit == 0 {
+            self.write_out(&[b]);
+            return;
+        }
+        if self.buf.len().saturating_add(1) >= self.limit {
+            self.flush();
+        }
+        self.buf.push(b);
+    }
+
+    /// `_nc_flush ()`: the buffer written, every byte, retrying an
+    /// interrupted or would-block write; abandoned at any other error. The
+    /// buffer keeps its allocation.
+    pub fn flush(&mut self) {
+        match &mut self.sink {
+            Sink::Fd(fd) => write_all(*fd, &self.buf),
+            Sink::Memory(kept) => kept.extend_from_slice(&self.buf),
+        }
+        self.buf.clear();
+    }
+
+    /// `write (_ofd, …)` of bytes that bypass the buffer, until they are all
+    /// out or it fails.
+    fn write_out(&mut self, buf: &[u8]) {
+        match &mut self.sink {
+            Sink::Fd(fd) => write_all(*fd, buf),
+            Sink::Memory(kept) => kept.extend_from_slice(buf),
+        }
+    }
+
+    /// `tputs (string, affcnt, _nc_outch)` into this output, padded as
+    /// `padding` says; `delays` is whether a delay that is not mandatory
+    /// applies (the screen's to work out: [`Term::tputs_always`]).
+    pub fn tputs(&mut self, string: &[u8], affcnt: i32, padding: &Padding, delays: bool) {
+        terminfo::tputs_with(string, affcnt, padding, self, delays);
+    }
+}
+
+/// Bytes on their way to a screen's buffer, for `tputs`.
+impl Outc for Output {
+    fn put(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.outch(b);
+        }
+    }
+
+    fn flush(&mut self) {
+        Output::flush(self);
+    }
+}
+
 /// The terminal side of a screen.
 #[allow(
     clippy::struct_excessive_bools,
@@ -172,18 +247,14 @@ pub struct Term {
     /// The description, with the screen's size in `lines` and `cols`, and
     /// the capabilities the screen cancels cancelled.
     pub entry: Entry,
-    /// `tparm`'s static variables.
+    /// `tparm`'s static variables, and the buffer it expands into.
     pub tparm: Tparm,
     /// How delays are padded: speed, `PC`, `npc`.
     pub padding: Padding,
     /// `_no_padding`: `NCURSES_NO_PADDING` was set.
     pub no_padding: bool,
-    /// Where the output goes: `_ofd`, or memory.
-    pub sink: Sink,
-    /// `out_buffer`, `out_inuse`.
-    pub out: Vec<u8>,
-    /// `out_limit`.
-    pub out_limit: usize,
+    /// Where the output goes, and its buffer.
+    pub output: Output,
     /// `screen_lines`, `screen_columns`.
     pub lines: i32,
     pub columns: i32,
@@ -195,8 +266,9 @@ pub struct Term {
     /// `_cursor`: the cursor's visibility as `curs_set` set it, -1 unknown.
     pub cursor: i32,
     pub costs: Costs,
-    /// `_address_cursor`: `cup`, else `mrcup`.
-    pub address_cursor: Option<Vec<u8>>,
+    /// `_address_cursor`: `cup`, else `mrcup` -- the index of the one the
+    /// terminal has, as upstream points at the terminal's own string.
+    pub address_cursor: Option<usize>,
     /// `_scrolling`: the terminal can scroll a region at all.
     pub scrolling: bool,
     /// `_use_rmso`, `_use_rmul`, `_use_ritm`: those differ from `sgr0`.
@@ -246,23 +318,6 @@ pub struct Term {
     pub default_pairs: i32,
 }
 
-/// Bytes on their way to a screen's buffer, for `tputs`.
-struct ToScreen<'a> {
-    term: &'a mut Term,
-}
-
-impl Outc for ToScreen<'_> {
-    fn put(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.term.outch(b);
-        }
-    }
-
-    fn flush(&mut self) {
-        self.term.flush();
-    }
-}
-
 impl Term {
     /// The terminal `entry`, padded as `padding` says, written to `sink` --
     /// with everything else as a new `SCREEN` has it: the zeros
@@ -277,9 +332,11 @@ impl Term {
             tparm: Tparm::new(),
             padding,
             no_padding: false,
-            sink,
-            out: Vec::new(),
-            out_limit: 0,
+            output: Output {
+                sink,
+                buf: Vec::new(),
+                limit: 0,
+            },
             lines: 0,
             columns: 0,
             cursrow: -1,
@@ -326,14 +383,8 @@ impl Term {
     /// to it never allocates -- which keeps a signal handler that writes
     /// through it (`endwin` from `handle_SIGINT`) off the allocator.
     pub fn set_out_limit(&mut self, limit: usize) {
-        self.out_limit = limit;
-        self.out = Vec::with_capacity(limit);
-    }
-
-    /// A string capability, copied.
-    #[must_use]
-    pub fn s(&self, index: usize) -> Option<Vec<u8>> {
-        self.entry.string(index).map(<[u8]>::to_vec)
+        self.output.limit = limit;
+        self.output.buf = Vec::with_capacity(limit);
     }
 
     /// Whether the terminal has a string capability.
@@ -357,41 +408,19 @@ impl Term {
     /// `_nc_outch (ch)`: one byte into the buffer, which is flushed first
     /// when it is full.
     pub fn outch(&mut self, b: u8) {
-        if self.out_limit == 0 {
-            self.write_out(&[b]);
-            return;
-        }
-        if self.out.len().saturating_add(1) >= self.out_limit {
-            self.flush();
-        }
-        self.out.push(b);
+        self.output.outch(b);
     }
 
-    /// `_nc_flush ()`: the buffer written, every byte, retrying an
-    /// interrupted or would-block write; abandoned at any other error. The
-    /// buffer keeps its allocation.
+    /// `_nc_flush ()`: the buffer written; see [`Output::flush`].
     pub fn flush(&mut self) {
-        match &mut self.sink {
-            Sink::Fd(fd) => write_all(*fd, &self.out),
-            Sink::Memory(kept) => kept.extend_from_slice(&self.out),
-        }
-        self.out.clear();
-    }
-
-    /// `write (_ofd, …)` of bytes that bypass the buffer, until they are all
-    /// out or it fails.
-    fn write_out(&mut self, buf: &[u8]) {
-        match &mut self.sink {
-            Sink::Fd(fd) => write_all(*fd, buf),
-            Sink::Memory(kept) => kept.extend_from_slice(buf),
-        }
+        self.output.flush();
     }
 
     /// What a [`Sink::Memory`] screen has written so far, taken: the bytes a
     /// terminal would have been sent, flushed or not.
     pub fn take_written(&mut self) -> Vec<u8> {
         self.flush();
-        match &mut self.sink {
+        match &mut self.output.sink {
             Sink::Fd(_) => Vec::new(),
             Sink::Memory(kept) => std::mem::take(kept),
         }
@@ -412,13 +441,7 @@ impl Term {
     pub fn tputs_always(&mut self, string: &[u8], affcnt: i32, always: bool) {
         let apply = always || self.normal_delay();
         let padding = self.padding;
-        terminfo::tputs_with(
-            string,
-            affcnt,
-            &padding,
-            &mut ToScreen { term: self },
-            apply,
-        );
+        self.output.tputs(string, affcnt, &padding, apply);
     }
 
     /// `tputs (string, affcnt, _nc_outch)`.
@@ -426,30 +449,76 @@ impl Term {
         self.tputs_always(string, affcnt, false);
     }
 
-    /// `NCURSES_PUTP2 (name, value)`: a string capability sent, if it is
-    /// there.
+    /// `NCURSES_PUTP2 (name, value)`: a string sent, if there is one.
     pub fn putp(&mut self, value: Option<&[u8]>) {
         if let Some(v) = value {
             self.tputs(v, 1);
         }
     }
 
-    /// The string capability at `index`, sent if the terminal has it.
-    pub fn putp_cap(&mut self, index: usize) {
-        let v = self.s(index);
-        self.putp(v.as_deref());
+    /// `NCURSES_PUTP2` of the string capability at `index`: sent, straight
+    /// from the entry, if the terminal has it -- and whether it does.
+    pub fn putp_cap(&mut self, index: usize) -> bool {
+        self.tputs_cap(index, 1)
     }
 
-    /// `TIPARM_n (cap, …)` of the string capability at `index`: `None` when
-    /// the terminal does not have it or it cannot be expanded.
+    /// `tputs (cap, affcnt, _nc_outch)` of the string capability at
+    /// `index`, straight from the entry, if the terminal has it -- and
+    /// whether it does.
+    pub fn tputs_cap(&mut self, index: usize, affcnt: i32) -> bool {
+        self.tputs_cap_always(index, affcnt, false)
+    }
+
+    /// [`Term::tputs_cap`], with every delay padded when `always` -- for
+    /// `bel` and `flash`, as [`Term::tputs_always`].
+    pub fn tputs_cap_always(&mut self, index: usize, affcnt: i32, always: bool) -> bool {
+        let apply = always || self.normal_delay();
+        let padding = self.padding;
+        match self.entry.string(index) {
+            Some(v) => {
+                self.output.tputs(v, affcnt, &padding, apply);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `TPUTS (TIPARM_n (cap, …), affcnt)` of the string capability at
+    /// `index`, the expansion sent straight from the buffer `tparm` keeps:
+    /// whether there was one -- false when the terminal does not have the
+    /// capability, or it cannot be expanded.
+    pub fn put_tiparm(&mut self, index: usize, params: &[i64], affcnt: i32) -> bool {
+        let apply = self.normal_delay();
+        let padding = self.padding;
+        let Some(cap) = self.entry.string(index) else {
+            return false;
+        };
+        match self.tparm.expand(&self.entry, cap, params) {
+            Some(s) => {
+                self.output.tputs(s, affcnt, &padding, apply);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `TIPARM_n (cap, …)` of the string capability at `index`, copied:
+    /// `None` when the terminal does not have it or it cannot be expanded.
+    /// For setting up a screen, where a copy is kept; the writing paths use
+    /// [`Term::put_tiparm`] and [`Term::expand`], which copy nothing.
     pub fn tiparm(&mut self, index: usize, params: &[i64]) -> Option<Vec<u8>> {
-        let s = self.entry.string(index)?.to_vec();
-        self.tparm.tiparm(&self.entry, &s, params)
+        let s = self.entry.string(index)?;
+        self.tparm
+            .expand(&self.entry, s, params)
+            .map(<[u8]>::to_vec)
     }
 
-    /// `TIPARM_n` of a string that is no capability of the entry's.
-    pub fn tiparm_str(&mut self, s: &[u8], params: &[i64]) -> Option<Vec<u8>> {
-        self.tparm.tiparm(&self.entry, s, params)
+    /// `TIPARM_n (cap, …)` of the string capability at `index`, in the
+    /// buffer `tparm` keeps until the next expansion: `None` when the
+    /// terminal does not have it or it cannot be expanded.
+    pub fn expand(&mut self, index: usize, params: &[i64]) -> Option<&[u8]> {
+        let s = self.entry.string(index)?;
+        self.tparm.expand(&self.entry, s, params)
     }
 
     /// `_nc_baudrate (ospeed)` of the screen's terminal.
@@ -563,12 +632,7 @@ impl Term {
 
     /// `reset_color_pair ()`: `op`, if the terminal has it.
     fn reset_color_pair(&mut self) -> bool {
-        if let Some(op) = self.s(string::ORIG_PAIR) {
-            self.tputs(&op, 1);
-            true
-        } else {
-            false
-        }
+        self.putp_cap(string::ORIG_PAIR)
     }
 
     /// `_nc_reset_colors ()`.
@@ -576,12 +640,9 @@ impl Term {
         if self.color_defs > 0 {
             self.color_defs = self.color_defs.wrapping_neg();
         }
-        let mut result = self.reset_color_pair();
-        if let Some(oc) = self.s(string::ORIG_COLORS) {
-            self.tputs(&oc, 1);
-            result = true;
-        }
-        result
+        let pair = self.reset_color_pair();
+        let colors = self.putp_cap(string::ORIG_COLORS);
+        pair || colors
     }
 
     /// `toggled_colors (c)`: SVr4's order of `setf`'s colours.
@@ -597,31 +658,27 @@ impl Term {
 
     /// `set_background_color (bg)`.
     fn set_background_color(&mut self, bg: i32) {
-        let s = if self.has(string::SET_A_BACKGROUND) {
-            self.tiparm(string::SET_A_BACKGROUND, &[i64::from(bg)])
+        if self.has(string::SET_A_BACKGROUND) {
+            self.put_tiparm(string::SET_A_BACKGROUND, &[i64::from(bg)], 1);
         } else {
-            self.tiparm(
+            self.put_tiparm(
                 string::SET_BACKGROUND,
                 &[i64::from(Self::toggled_colors(bg))],
-            )
-        };
-        if let Some(s) = s {
-            self.tputs(&s, 1);
+                1,
+            );
         }
     }
 
     /// `set_foreground_color (fg)`.
     fn set_foreground_color(&mut self, fg: i32) {
-        let s = if self.has(string::SET_A_FOREGROUND) {
-            self.tiparm(string::SET_A_FOREGROUND, &[i64::from(fg)])
+        if self.has(string::SET_A_FOREGROUND) {
+            self.put_tiparm(string::SET_A_FOREGROUND, &[i64::from(fg)], 1);
         } else {
-            self.tiparm(
+            self.put_tiparm(
                 string::SET_FOREGROUND,
                 &[i64::from(Self::toggled_colors(fg))],
-            )
-        };
-        if let Some(s) = s {
-            self.tputs(&s, 1);
+                1,
+            );
         }
     }
 
@@ -643,9 +700,7 @@ impl Term {
             return;
         } else if pair != 0 {
             if self.has(string::SET_COLOR_PAIR) {
-                if let Some(s) = self.tiparm(string::SET_COLOR_PAIR, &[i64::from(pair)]) {
-                    self.tputs(&s, 1);
-                }
+                self.put_tiparm(string::SET_COLOR_PAIR, &[i64::from(pair)], 1);
                 return;
             }
             match self.pair_content(pair) {
@@ -799,9 +854,7 @@ impl Term {
                     flag(A_PROTECT),
                     flag(A_ALTCHARSET),
                 ];
-                if let Some(s) = self.tiparm(string::SET_ATTRIBUTES, &params) {
-                    self.tputs(&s, 1);
-                }
+                self.put_tiparm(string::SET_ATTRIBUTES, &params, 1);
                 previous_attr &= ALL_BUT_COLOR;
                 previous_pair = 0;
             }
@@ -1025,9 +1078,7 @@ impl Term {
             }
         }
         let params = [i64::from(color), i64::from(r), i64::from(g), i64::from(b)];
-        if let Some(s) = self.tiparm(string::INITIALIZE_COLOR, &params) {
-            self.tputs(&s, 1);
-        }
+        self.put_tiparm(string::INITIALIZE_COLOR, &params, 1);
         self.color_defs = self.color_defs.max(color.saturating_add(1));
         true
     }
@@ -1122,9 +1173,7 @@ impl Term {
             );
             let params =
                 [pair, fc.red, fc.green, fc.blue, bc.red, bc.green, bc.blue].map(i64::from);
-            if let Some(s) = self.tiparm(string::INITIALIZE_PAIR, &params) {
-                self.tputs(&s, 1);
-            }
+            self.put_tiparm(string::INITIALIZE_PAIR, &params, 1);
         }
         Some(repaint)
     }

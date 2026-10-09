@@ -17,13 +17,25 @@
 //! ends. A handler that finds it free does its work at once, as upstream's
 //! does.
 //!
-//! What is still upstream's to the letter is the rest of that: a handler that
-//! runs while the program is outside curses runs `endwin`, and allocates
-//! doing it. If the program was itself inside the allocator then, that is
-//! the hazard upstream accepts in so many words ("Much of this is unsafe
-//! from a signal handler. But we'll _try_ to clean up the screen and
-//! terminal settings on the way out."); the output buffer is reserved whole
-//! when the screen is made so that writing into it does not add to it.
+//! What is still upstream's is the rest of that: a handler that runs while
+//! the program is outside curses does its work at once -- `endwin`, and on
+//! the way back from a suspension the repaint.
+//!
+//! # And allocates nothing
+//!
+//! Upstream accepts the hazard of that work in so many words ("Much of this
+//! is unsafe from a signal handler. But we'll _try_ to clean up the screen
+//! and terminal settings on the way out."): it allocates, and a handler that
+//! interrupted the program inside the allocator would wait on its lock for
+//! good. Here, once the screen has been drawn, it allocates and frees
+//! nothing: the output buffer is reserved whole when the screen is made,
+//! capabilities are written straight from the terminal's description,
+//! `tparm` expands into a buffer it keeps, the cursor optimiser builds its
+//! moves in fixed buffers, the update borrows the lines it compares, and
+//! `wcrtomb` writes into the caller's bytes. A test counts the allocator's
+//! calls through all of it. What `exit` then does -- `atexit` handlers, the
+//! standard streams flushed -- is the C library's and Rust's, as upstream's
+//! is the C library's.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};

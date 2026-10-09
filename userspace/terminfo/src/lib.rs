@@ -16,6 +16,13 @@
 //! - **What does `tputs` write?** [`tputs`] -- and [`Termcap::tputs`],
 //!   which pads as upstream pads on the terminal `setupterm` found: at its
 //!   output speed, with its pad character.
+//! - **What is in a compiled entry, exactly?** [`termtype::TermType`]: every
+//!   value raw, an absent capability and a cancelled one told apart, as
+//!   `tic`, `infocmp` and `toe` need it ([`read_file_entry`],
+//!   [`read_entry_file`]).
+//! - **How is a source compiled?** [`compile`]: `tic`'s library, the
+//!   scanner and parser through `use=` resolution to the compiled file, and
+//!   back out to source.
 //!
 //! Ported from Ubuntu 24.04's ncurses 6.4+20240113, built as Debian builds
 //! it: no termcap fallback, no hashed database, the compiled-in search list
@@ -46,10 +53,13 @@
 
 use std::path::PathBuf;
 
+pub mod captab;
+pub mod compile;
 mod entry;
 mod fallback_data;
 pub mod names;
 mod sgr0;
+pub mod termtype;
 mod tparm;
 mod tputs;
 
@@ -283,7 +293,14 @@ fn identity(path: &std::path::Path, _meta: &std::fs::Metadata) -> Vec<u8> {
 /// for in, in order.
 #[must_use]
 pub fn search_list(env: &Env) -> Vec<Vec<u8>> {
+    search_list_tic(env, None)
+}
+
+/// `_nc_first_db` once `_nc_tic_dir` has named a directory: that one first.
+#[must_use]
+pub fn search_list_tic(env: &Env, tic_dir: Option<&[u8]>) -> Vec<Vec<u8>> {
     let mut values: Vec<Vec<u8>> = Vec::new();
+    values.push(tic_dir.map(<[u8]>::to_vec).unwrap_or_default());
     if env.trusted {
         values.push(env.terminfo.clone().unwrap_or_default());
         // `PRIVATE_INFO`, "%s/.terminfo": an empty HOME is `/.terminfo`.
@@ -343,8 +360,10 @@ pub fn search_list(env: &Env) -> Vec<Vec<u8>> {
     kept.into_iter().map(|(e, _)| e).collect()
 }
 
-/// `_nc_read_file_entry`: the entry in the file `path`, or `None`.
-fn read_file_entry(path: &[u8]) -> Option<Entry> {
+/// `_nc_read_file_entry`: the entry in the file `path`, its values raw,
+/// or `None`.
+#[must_use]
+pub fn read_file_entry(path: &[u8], user_definable: bool) -> Option<termtype::TermType> {
     use std::io::Read;
     let file = std::fs::File::open(path_of(path)).ok()?;
     let mut buffer = Vec::new();
@@ -353,16 +372,25 @@ fn read_file_entry(path: &[u8]) -> Option<Entry> {
     if buffer.is_empty() {
         return None;
     }
-    entry::read_termtype(&buffer)
+    termtype::read_termtype(&buffer, user_definable)
 }
 
-/// `_nc_read_tic_entry`: `name` in one element of the search list.
-fn read_tic_entry(element: &[u8], name: &[u8]) -> Option<Entry> {
+/// `_nc_read_tic_entry`: `name` in one element of the search list --
+/// `filename` set, as upstream sets it, to what was read: `$TERMINFO` for an
+/// entry spelled out in the list, else the file tried.
+fn read_tic_entry(
+    filename: &mut Vec<u8>,
+    element: &[u8],
+    name: &[u8],
+    user_definable: bool,
+) -> Option<termtype::TermType> {
     let dump = entry::decode_quickdump(element);
     if !dump.is_empty()
-        && let Some(e) = entry::read_termtype(&dump)
-        && entry::name_match(e.names(), name)
+        && let Some(e) = termtype::read_termtype(&dump, user_definable)
+        && entry::name_match(&e.term_names, name)
     {
+        // "shorten name shown by infocmp"
+        *filename = b"$TERMINFO".to_vec();
         return Some(e);
     }
     // `make_dir_filename`: DIR/<first byte>/NAME, if it fits.
@@ -379,28 +407,58 @@ fn read_tic_entry(element: &[u8], name: &[u8]) -> Option<Entry> {
     path.push(first);
     path.push(b'/');
     path.extend_from_slice(name);
-    read_file_entry(&path)
+    *filename = path;
+    read_file_entry(filename, user_definable)
 }
 
 /// `_nc_read_entry2`: the entry for `name`, or [`TGETENT_NO`] (an
 /// impossible name, or none found) or [`TGETENT_ERR`] (nowhere to look).
 pub fn read_entry(name: &[u8], env: &Env) -> Result<Entry, i32> {
+    read_termtype_entry(name, env, None, true).map(Entry::from_termtype)
+}
+
+/// `_nc_read_entry2` as the compiler calls it: the description raw -- an
+/// absent and a cancelled capability told apart -- looked for first in
+/// `tic_dir` (`_nc_tic_dir`) if there is one, its extended capabilities
+/// read only when `user_definable`.
+pub fn read_termtype_entry(
+    name: &[u8],
+    env: &Env,
+    tic_dir: Option<&[u8]>,
+    user_definable: bool,
+) -> Result<termtype::TermType, i32> {
+    read_entry_file(name, env, tic_dir, user_definable).0
+}
+
+/// `_nc_read_entry2 (name, filename, tp)`: as [`read_termtype_entry`], and
+/// the `filename` upstream leaves -- the file the entry came from, or the
+/// last one tried, or the name itself when none was. `infocmp` prints it.
+pub fn read_entry_file(
+    name: &[u8],
+    env: &Env,
+    tic_dir: Option<&[u8]>,
+    user_definable: bool,
+) -> (Result<termtype::TermType, i32>, Vec<u8>) {
+    let mut filename = name
+        .get(..name.len().min(PATH_MAX - 1))
+        .unwrap_or(name)
+        .to_vec();
     if name.is_empty()
         || name == b"."
         || name == b".."
         || name.contains(&b'/')
         || name.contains(&b':')
     {
-        return Err(TGETENT_NO);
+        return (Err(TGETENT_NO), filename);
     }
     let mut code = TGETENT_ERR;
-    for element in search_list(env) {
-        match read_tic_entry(&element, name) {
-            Some(e) => return Ok(e),
+    for element in search_list_tic(env, tic_dir) {
+        match read_tic_entry(&mut filename, &element, name, user_definable) {
+            Some(e) => return (Ok(e), filename),
             None => code = TGETENT_NO,
         }
     }
-    Err(code)
+    (Err(code), filename)
 }
 
 /// `_nc_fallback2`: the entry built in under `name`, for a name the database

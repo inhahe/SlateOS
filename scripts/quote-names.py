@@ -212,6 +212,12 @@ IGNORE = {
     # one echo of raw input, upstream's `TZ="..." in date string`, is
     # double-quoted bytes and was never this pattern's to find.
     "userspace/coreutils/src/parse_datetime/mod.rs": "gnulib's --debug text; the quotes wrap formatted dates",
+    # ncurses' `comp_scan.c` texts, byte for byte, which `tic-diff.sh`
+    # compares against the reference `tic`'s: "Illegal character - '%s'" and
+    # its three siblings. What each quotes is ONE BYTE of the source as
+    # `unctrl` shows it -- `^J`, `~X`, or the byte itself where printable --
+    # so it can hold no newline, and no name reaches any of the four.
+    "userspace/terminfo/src/compile/scan.rs": "comp_scan.c's text; the quotes wrap unctrl() of one byte",
 }
 
 # The macros that build a message somebody will read.

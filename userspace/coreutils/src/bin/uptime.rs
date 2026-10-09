@@ -349,7 +349,7 @@ fn run_main() -> ExitCode {
         }
         Ok(request) => show(&request, &mut out),
     };
-    stdfd::close_stdout("uptime", out, ExitCode::from(status))
+    stdfd::close_stdout_procps(b"uptime", out, ExitCode::from(status))
 }
 
 /// The three readings, `-p` and `-s` and the default, in upstream's order of

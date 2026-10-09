@@ -6036,7 +6036,12 @@ _Port ext4 first. Don't write a custom filesystem._
   procps' own `close_stdout` closes it, silent for a reader that has gone
   (`stdfd::close_stdout_procps`); `scripts/pwdx-diff.sh`: 111 cases agree and
   9 differ on purpose, over sleepers in awkward directories, a deleted one and
-  a zombie);
+  a zombie. `free`, `uptime`, `vmstat`, `w`, `sysctl`, `pgrep` and `pkill`
+  close through `close_stdout_procps` too since the same day -- under
+  `trap '' PIPE` they had said `write error: Broken pipe` and exited 1 where
+  procps says nothing -- and `free` keeps `/proc/meminfo` open as the library
+  does, which decides what `free >&-` says; `scripts/procps-close-diff.sh`
+  holds the whole family to procps' close: 44 cases agree);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).

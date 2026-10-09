@@ -5518,6 +5518,18 @@ _Port ext4 first. Don't write a custom filesystem._
   `libcall::socket` and `libcall::fd`; `scripts/systemd-cat-diff.sh`: 100
   cases agree and 1 differs on purpose, ours in namespaces of its own with a
   private `/var/log`, the reference's records read back from WSL's journald);
+  `patch` (2026-10-09, GNU patch 2.7.6 with Debian's fifteen patches, as
+  Ubuntu ships it -- until then written from scratch and grown one measured
+  option at a time: `patch.c`, `pch.c`, `inp.c`, `util.c`, `safe.c` and
+  `merge.c`, with gnulib's `diffseq.h` and `backupfile.c`, each under its
+  upstream's names -- ed scripts handed to `ed`, git-style diffs with renames,
+  copies, modes, symlinks and quoted names, `--merge` and `-m`, `-D`, every
+  backup style, both reject formats, plan B and every `-x` flag, upstream's
+  slips kept wherever what a user sees depends on them, names quoted as the C
+  locale quotes them (a new `quoting::Charset`); `scripts/patch-diff.sh`:
+  260 cases agree and 3 differ on purpose, comparing the whole tree each
+  side leaves, its last case 300 random merges by
+  `scripts/patch-merge-fuzz.py`; design-decisions §1068);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5634,7 +5646,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] look: sorted file prefix search (binary search, -d alphanumeric, -f case-insensitive, -t termination)
   - [x] objdump/nm/size: ELF analysis tools (disassembly, headers, symbols, relocations, Berkeley/SysV size formats)
   - [x] cpio: archive utility (newc SVR4 format, copy-out/in/pass-through, files/dirs/symlinks, glob extraction, block counting)
-  - [x] patch: diff applier (unified/context/normal formats, fuzz matching, strip, reverse, backup, dry-run, whitespace ignore)
+  - [x] patch: GNU patch 2.7.6 with Debian's fifteen patches, ported whole on 2026-10-09 (see the coreutils item; design-decisions §1068) -- until then a diff applier written from scratch
   - [x] mktemp/id/groups/whoami: temp files and user identity (secure temp creation, UID/GID display, group membership)
   - [x] ipcalc: IP subnet calculator (IPv4/IPv6, CIDR, netmask, network/broadcast/hosts, class detect, private ranges, split)
   - [x] seq/yes/expr: number sequences, repeated output, expression evaluator (arithmetic, comparison, regex, substr, index)

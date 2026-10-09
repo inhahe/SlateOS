@@ -727,6 +727,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "paste-diff.sh",
         "paste-probe.py",
         "patch-diff.sh",
+        "patch-merge-fuzz.py",
         "pathchk-diff.sh",
         "pgrep-diff.sh",
         "pinky-diff.sh",

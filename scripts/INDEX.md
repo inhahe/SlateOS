@@ -334,6 +334,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/paste-diff.sh` | Differential test: our paste against GNU paste. |
 | `scripts/paste-probe.py` | Ad-hoc measurement of GNU `paste`. Not part of the build; kept only so the |
 | `scripts/patch-diff.sh` | Differential test: our `patch` against GNU patch. |
+| `scripts/patch-merge-fuzz.py` | Random `patch --merge` cases: ours against GNU patch, case by case. |
 | `scripts/pathchk-diff.sh` | pathchk-diff.sh — compare our `pathchk` against GNU's, inside WSL. |
 | `scripts/pgrep-diff.sh` | Differential test: our `pgrep`, `pkill` and `pidwait` against procps-ng |
 | `scripts/pinky-diff.sh` | pinky-diff.sh — compare our `pinky` against GNU coreutils 9.4's, inside WSL. |
@@ -563,4 +564,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_553 scripts._
+_554 scripts._

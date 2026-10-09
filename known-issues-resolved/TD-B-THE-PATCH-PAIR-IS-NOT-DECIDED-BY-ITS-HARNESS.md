@@ -1,4 +1,21 @@
-## TD-B-THE-PATCH-PAIR-IS-NOT-DECIDED-BY-ITS-HARNESS (lane B, 2026-09-11)
+## TD-B-THE-PATCH-PAIR-IS-NOT-DECIDED-BY-ITS-HARNESS (lane B, 2026-09-11) — RESOLVED
+
+**Status:** RESOLVED 2026-10-09
+
+**Decided, and then made moot.** The standalone `userspace/patch` was retired
+on 2026-09-12, which settled the pair in coreutils' favour. On 2026-10-09 the
+coreutils half stopped being a reimplementation: it is now GNU patch 2.7.6 as
+Ubuntu ships it, ported whole (design-decisions §1068). `patch-diff.sh` holds it
+to that binary across ed scripts, git diffs, merges, every backup style and
+every debugging flag, comparing output and the tree left behind, and it agrees
+on every case but `--version`.
+
+**A correction to the table below.** Its "a plain rebuild with no Debian source
+patches" was wrong. Ubuntu's `2.7.6-7build3` is Debian's `2.7.6-7`, rebuilt, and
+Debian carries fifteen patches on 2.7.6. Two of them fix security holes
+(CVE-2018-1000156, CVE-2019-13636), one enables `-m`, and five fix crashes. The
+port carries all fifteen, because that binary is what the harness measures
+against. The entry is otherwise kept as written.
 
 `scripts/patch-diff.sh` was written to settle the second of the two pairs where
 `coreutils` is the thinner half. **It did not settle it**, and that is recorded

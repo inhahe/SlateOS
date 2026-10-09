@@ -168,3 +168,18 @@ by NMI, restarted by the new kernel).
 `-smp N` under multi-threaded TCG, recorded as a boot of the tree with its
 own `cpus` population, not as an experiment. Nothing runs it by default
 yet; once two-CPU boots are clean it should be the release boot's shape.
+
+**The first full two-CPU release boot test (2026-10-09, `main` at b083cfeca,
+`--smp=2 --profile=release`) panicked** at 180 s, in a sixth self-test that
+held only on one CPU: `sched::barrier`'s, which yielded ten times for its
+helper task and then asserted the helper had passed the barrier, while the
+helper -- released, on the other CPU -- was still on its way out
+(`barrier.rs:251`, "Task 896 exiting" interleaved with the panic). The
+release build is faster than the debug one that passed this test on two
+CPUs, which is all that changed. Fixed on lane-a-wip the same day: the test
+waits by the clock (`selftest::wait_until`), checks that exactly one of the
+two arrivals is the leader, and returns its failures instead of asserting
+them, so a failed check no longer stops the boot. The barrier itself was
+read for the same race and holds: a round's non-leaders stay blocked until
+its generation advances, so none can start the next round early. Serial
+log: `os-lane-a/build/serial-failures/20261009T143451Z-b083cfeca-rc1.txt`.

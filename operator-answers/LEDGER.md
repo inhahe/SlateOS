@@ -10,6 +10,56 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## open-questions/answers.2.txt
+
+- **Written:** 2026-10-09 16:15, as `open-questions/answers.2.txt` in the
+  integration tree: the operator's reply to lane A's report (`claude-answers.txt`,
+  the next section), and five questions of the operator's own -- the same five
+  are in the operator's `todo2.txt`.
+- **Processed:** 2026-10-09 by lane B: copied; every lane with answers in it
+  sent a notice; the operator's five questions answered in the rows below.
+- **Copy:** `operator-answers/2026-10-09-open-questions-answers.2.txt`
+- **Content:** sha256 `5e94dc49f15ffd10ca0eaa0053a1cd35cf84524c809fbeeee00853e2d252ad6a`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| C-Q34 | C | -- | relayed 2026-10-09 (A) |
+| C-Q29 | C | -- | relayed 2026-10-09 (A) |
+| F-Q7 | F | -- | relayed 2026-10-09 (A) |
+| F-Q8 | F | -- | relayed 2026-10-09 (B) |
+| F-Q9 | F | -- | relayed 2026-10-09 (B) |
+| F-Q10 | F | -- | relayed 2026-10-09 (A) |
+| F-Q6 | F | -- | relayed 2026-10-09 (a note to make: turning on remote desktop also sets up whatever is still missing of a dynamic-DNS name and a Let's Encrypt certificate) |
+| "Yes, commit the MIT license." | A | -- | relayed 2026-10-09 (lane A asked; the untracked `LICENSE` is at the integration tree's root) |
+| "...reform some files ... has that been done?" | A | §1530 | **Answered here.** Mostly yes, on 2026-10-02 (§1530, lane A's five steps, which you approved): known issues, design decisions and the question queue are one file per entry; closed issues and finished roadmap blocks live apart from open ones (`known-issues-resolved/`, `roadmap-done.md`); and `scripts/docsearch.py` searches all of them through a database (SQLite), by words and by meaning. Not done: `todo.txt`, still one file of 59,315 lines, and `roadmap.md`, still 6,523 lines of open items. `todo2.txt` is your own file, which no session edits. The documents' tooling is lane A's (§973): relayed 2026-10-09 for `todo.txt` |
+| "...configuration abilities like those in Process Lasso...?" | B | `open-questions/B-Q26.md` | **Answered, with one question back to you: B-Q26.** Most of it is planned: a priority remembered for each program (your proposal of 2026-09-26); processor time, memory and disk speed kept back for the desktop, so a runaway program cannot make it sluggish (what Process Lasso's ProBalance is for, done ahead of time instead of after); workload profiles; disk priorities; per-program limits. Not planned: remembering which processors a program may use, a cap on one program's processor use, and switching profile while a program runs -- B-Q26 asks whether to add them |
+| "...hotkeys ... pgup, pgdn, home, end, ctrl+home, ctrl+end" | C | §1416; `roadmap.md`, the `[C]` item "Page Up, Page Down, Home, End, Ctrl+Home and Ctrl+End wherever ..." | **Answered here: yes, it was recorded** -- in lane C's decision on the shortcuts that are on by default (§1416: "the operator's addition, later the same day"), and as a roadmap item. Relayed 2026-10-09 |
+| "...flipping the .net userspace default?", and the GPU order | A, C | §934 | **Answered here.** It is not .NET: `net.userspace` is the switch that chooses which of the system's two network stacks runs -- the one inside the kernel, or the one that runs as an ordinary program, as the design asks. "Flipping" it makes the ordinary program the default. You set the order on 2026-09-12, answering A-Q9 (§934): first fix the program's one known problem (a server answering its clients one at a time), then flip, then delete the kernel's stack. Your `todo2.txt` marks the reply to lane C, with the GPU ordering, as lane A's: relayed 2026-10-09 to both |
+
+## open-questions/claude-answers.txt
+
+- **Written:** 2026-10-09 16:16, as `open-questions/claude-answers.txt` in the
+  integration tree. These are not the operator's answers: it is lane A's report
+  to the operator -- what was recorded from `answers.txt`, and lane A's account
+  of the questions the operator had asked back -- saved beside the questions.
+  The checker reads its `B-Q22:`, `F-Q5:` and `F-Q3:` lines as answers. The
+  operator's reply to it is `answers.2.txt` (above).
+- **Processed:** 2026-10-09 by lane B: copied; each lane it speaks to sent a
+  notice.
+- **Copy:** `operator-answers/2026-10-09-open-questions-claude-answers.txt`
+- **Content:** sha256 `317a8dc611c4aa5d9d3d358e4d87d1b8cfc4c37e0f9827987aee0164d937d1c1`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| B-Q22 | B | §1072 | recorded: lane A's reading of your answer -- close, terminate, force -- is the one §1072 records; its offer of the kernel half is accepted (lane A told 2026-10-09) |
+| B-Q23 | B | -- | **still not answered**: neither file answers it, and `open-questions/B-Q23.md` waits. If the first "B-Q24" line of `answers.txt` ("Claude's recommendation") was meant for it, the recommendation there is E, with B as what "desktop" means -- say so and it is recorded |
+| F-Q5 | F | -- | relayed 2026-10-09 (lane A's note: the run-time processor check disappears once the whole system is built for x86-64-v3) |
+| F-Q3 | F | -- | relayed 2026-10-09 (lane A's note: keep the three choices in A-Q26's stored permissions, not a second store) |
+| C-Q33 | C | -- | relayed 2026-10-09 (lane A: by your rule it is C; lane C records C unless you say otherwise) |
+| D-Q3, D-Q8 | D | -- | relayed 2026-10-09 (lane A's account: for D-Q3 a fourth option, offered to you through lane D; for D-Q8, a swap-file bug lane A logged and is fixing) |
+| E-Q4 | E | -- | relayed 2026-10-09 (lane A: yes, the per-drive age, size and count policy is in `roadmap-detailed.md`) |
+| C-Q34, C-Q29, F-Q6 ... F-Q10 | C, F | -- | lane A's analysis for you; your answers to it are in `answers.2.txt` (above) |
+
 ## open-questions/answers.txt
 
 - **Written:** 2026-10-09, as `open-questions/answers.txt` in the integration

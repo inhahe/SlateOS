@@ -377,8 +377,13 @@ pub fn wall_utmp(text: &[u8], path: &str) -> i32 {
             Some(code) => neg(code),
         };
     }
-    // A file that is there but cannot be read gives `getutxent` nothing.
-    let data = std::fs::read(path).unwrap_or_default();
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        // A file that is there but cannot be read: `setutxent` fails without
+        // saying so and `getutxent` then returns nothing, so no terminal is
+        // written to and `wall` succeeds.
+        Err(_) => return 0,
+    };
     let mut r = 0;
     for rec in utmpfile::parse(&data) {
         if rec.record_type != utmpfile::USER_PROCESS || rec.user.is_empty() {

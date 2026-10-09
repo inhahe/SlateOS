@@ -1,4 +1,4 @@
-## A-FWUPDATE-INVENTED-THREE-FIRMWARE-DEVICES-AND-REPORTED-FLASHES-THAT-NEVER-HAPPENED (lane A, 2026-09-15) — **Status: FIXED**, pending a boot
+## A-FWUPDATE-INVENTED-THREE-FIRMWARE-DEVICES-AND-REPORTED-FLASHES-THAT-NEVER-HAPPENED (lane A, 2026-09-15) — **Status: FIXED**, confirmed by boot on main: on `main` since lane A's publishes of mid-September 2026 and through every lane A boot test of `main` since, most recently b083cfeca (2026-10-09). Stamped 2026-10-09.
 
 **What it was, in two halves.** The second is the serious one.
 

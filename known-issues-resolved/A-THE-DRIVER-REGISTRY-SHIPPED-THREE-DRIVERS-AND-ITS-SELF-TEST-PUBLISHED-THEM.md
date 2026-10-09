@@ -1,4 +1,4 @@
-## A-THE-DRIVER-REGISTRY-SHIPPED-THREE-DRIVERS-AND-ITS-SELF-TEST-PUBLISHED-THEM (lane A, 2026-09-15) — **Status: FIXED**, pending a boot
+## A-THE-DRIVER-REGISTRY-SHIPPED-THREE-DRIVERS-AND-ITS-SELF-TEST-PUBLISHED-THEM (lane A, 2026-09-15) — **Status: FIXED**, confirmed by boot on main: on `main` since lane A's publishes of mid-September 2026 and through every lane A boot test of `main` since, most recently b083cfeca (2026-10-09). Stamped 2026-10-09.
 
 **What it was.** `kernel/src/fs/driverupdate.rs::init_defaults()` seeded three `InstalledDriver` entries and `procfs::gen_driverupdate` published the count at `/proc/driverupdate` as `driver_count`. Nothing had installed anything.
 

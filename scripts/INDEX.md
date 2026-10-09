@@ -366,6 +366,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/pstree-diff.sh` | Differential test: our `pstree` against psmisc 23.7's. |
 | `scripts/ptx-diff.sh` | ptx-diff.sh — compare our `ptx` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pwd-diff.sh` | pwd-diff.sh — run our `pwd` and GNU coreutils' `pwd` side by side and report |
+| `scripts/pwdx-diff.sh` | pwdx-diff.sh -- run our `pwdx` and procps-ng's side by side and report every |
 | `scripts/q45_apply.py` | Q45: give every `RenderCommand::Text` construction an explicit `overflow`. |
 | `scripts/q45_survey.py` | Survey every `RenderCommand::Text {` site before Q45 edits a single one. |
 | `scripts/qemu-probe.py` | Ask a throwaway QEMU a question, and always get the process back. |
@@ -552,4 +553,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_542 scripts._
+_543 scripts._

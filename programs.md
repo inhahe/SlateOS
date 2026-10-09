@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**493 programs; 334 on the image, 6 carried inside the kernel.**
+**494 programs; 335 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 308
+## Userland utilities and services (`userspace/`, lane B) -- 309
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -220,6 +220,7 @@ two disagree.
 | `ptx` | Produce a permuted index of file contents. | yes | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). | yes |  |  |
 | `pwd` | Print the full filename of the current working directory. | yes | `coreutils` |  |
+| `pwdx` | Print the working directory of each process named: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |
 | `readelf` | ELF Binary Inspector | yes |  |  |
 | `readlink` | Print a symbolic link's target, or a file name's canonical form. | yes | `coreutils` |  |
 | `realpath` | Print the resolved absolute file name. | yes | `coreutils` |  |

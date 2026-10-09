@@ -6027,6 +6027,16 @@ _Port ext4 first. Don't write a custom filesystem._
   260 cases agree and 3 differ on purpose, comparing the whole tree each
   side leaves, its last case 300 random merges by
   `scripts/patch-merge-fuzz.py`; design-decisions §1068);
+  `pwdx` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: a
+  process number read as `strtol` reads it, so ` 12` and `+12` pass and then
+  name no process; a bad one ends the run after delivering what came before
+  it, as `error()` does, while a process it cannot read is reported *ahead*
+  of the answers still buffered, as the bare `fprintf (stderr)` upstream uses
+  is (the new `stdfd::diag_bytes_ahead_of_stdout`); standard output closed as
+  procps' own `close_stdout` closes it, silent for a reader that has gone
+  (`stdfd::close_stdout_procps`); `scripts/pwdx-diff.sh`: 111 cases agree and
+  9 differ on purpose, over sleepers in awkward directories, a deleted one and
+  a zombie);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6054,6 +6064,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fw: firewall rule management (allow/deny by port/IP, policy, logging, persistence, JSON output)
   - [x] diskutil: disk management (list/info/format/verify/repair/TRIM, benchmark, S.M.A.R.T., partitions)
   - [x] ps: procps-ng 4.0.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/ps-diff.sh`, 590 cases)
+  - [x] pwdx: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pwdx-diff.sh`, 120 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)

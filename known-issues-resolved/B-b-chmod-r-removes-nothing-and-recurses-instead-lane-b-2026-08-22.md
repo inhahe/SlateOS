@@ -1,4 +1,11 @@
-## B-`chmod -r` REMOVES NOTHING AND RECURSES INSTEAD (lane B, 2026-08-22) — FIXED 2026-08-22 (steps 1-2); 3-4 open
+## B-`chmod -r` REMOVES NOTHING AND RECURSES INSTEAD (lane B, 2026-08-22) — FIXED 2026-08-22 (steps 1-2); 3-4 FIXED by 2026-10-07
+
+**Status:** FIXED -- all four steps. Steps 3 and 4 were closed by the time
+`d8ce4310b` (2026-10-07) gave `chmod` its harness: `-v`, `-c`, `-f`/`--silent`
+and `--reference` are the shipped `chmod`'s, and `scripts/chmod-diff.sh`
+compares it with GNU 9.4 on a real tree under five umasks -- 154 cases agree,
+2 differ on purpose (help and version text). On `main`, boot-tested with
+`0c2886e3c`; moved to `known-issues-resolved/`.
 
 > **Fixed the same day, in the copy that ships.** `-r` is now a mode, `-R` and
 > `--recursive` are the flag, `--` ends options, and an unknown dash-argument is

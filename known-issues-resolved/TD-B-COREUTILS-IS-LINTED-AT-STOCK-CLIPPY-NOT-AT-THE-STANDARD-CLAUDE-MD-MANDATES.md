@@ -1,7 +1,7 @@
 ## TD-B-COREUTILS-IS-LINTED-AT-STOCK-CLIPPY-NOT-AT-THE-STANDARD-CLAUDE-MD-MANDATES (lane B, 2026-09-04)
 
-**Status:** FIXED 2026-10-07 (lane B), pending a boot test on `main` before
-the move to `known-issues-resolved/`. Both crates inherit `[workspace.lints]`
+**Status:** FIXED 2026-10-07 (lane B); on `main` and boot-tested there with
+`0c2886e3c` (2026-10-09), so moved to `known-issues-resolved/`. Both crates inherit `[workspace.lints]`
 now: `coreutils` since `ee3db643f` (2026-09-15, "subject the 83 commands to
 the defensive lints"), which left this entry open for its other half, and
 `userspace/shell` since 2026-10-07 -- a 180-line toolchain smoke test, whose

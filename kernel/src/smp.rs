@@ -181,7 +181,8 @@ pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
 
 /// Get the current CPU's sequential index.
 ///
-/// Returns 0 (BSP) if SMP has not been initialized.
+/// Before any AP has started, 0 (the BSP); from then on, each CPU's own
+/// index -- an AP's from its first instruction in the kernel ([`ap_entry`]).
 ///
 /// # Performance
 ///
@@ -197,18 +198,22 @@ pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
 /// every timer tick took an uncached APIC MMIO round-trip in ISR context.
 /// Delegating removes both gaps permanently.
 ///
-/// The only thing this function adds over [`fast_cpu_index`] is the
-/// `SMP_INITIALIZED` gate, which covers the window before the BSP has
-/// registered itself in `APIC_TO_CPU`.
+/// It used to add one thing: an `SMP_INITIALIZED` gate answering 0 until the
+/// BSP had finished starting every AP, meant for the window before the BSP
+/// registers itself in `APIC_TO_CPU`. That window is [`fast_cpu_index`]'s
+/// tier 0 already -- the BSP registers itself before the first AP starts --
+/// and the gate's answer was wrong for every AP that ran meanwhile: an AP
+/// starting up, told it was CPU 0, raised CPU 0's preempt count taking a lock
+/// and lowered its own releasing it once the gate had opened, leaving CPU 0's
+/// count at 1 for the rest of the boot (the first two-CPU boot with the
+/// self-tests on, 2026-10-09: every voluntary switch on CPU 0 reported as made
+/// under a lock nobody held). Now it is [`fast_cpu_index`] itself.
 ///
 /// This function is lock-free and safe to call from ISR context
 /// (timer interrupt, IPI handlers, etc.).
 #[must_use]
 #[inline]
 pub fn current_cpu_index() -> usize {
-    if !SMP_INITIALIZED.load(Ordering::Acquire) {
-        return BSP_CPU_INDEX;
-    }
     fast_cpu_index()
 }
 
@@ -892,6 +897,18 @@ extern "C" fn ap_entry() -> ! {
         core::ptr::read_volatile(addr) as usize
     };
 
+    // Before anything that asks which CPU this is -- the first lock taken,
+    // the first allocation, the first print: IA32_TSC_AUX, which the RDPID
+    // and rdtscp tiers of `fast_cpu_index` read, is 0 after INIT, which
+    // would name this CPU as the BSP. (The APIC tier's mapping the BSP
+    // published before starting this CPU.)
+    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) || RDPID_AVAILABLE.load(Ordering::Relaxed) {
+        // SAFETY: IA32_TSC_AUX exists when rdtscp or RDPID is supported.
+        unsafe {
+            crate::cpu::wrmsr(IA32_TSC_AUX, cpu_index as u64);
+        }
+    }
+
     serial_println!("[smp] AP {} entered kernel (64-bit mode)", cpu_index);
 
     // Enable FPU/SSE on this AP.
@@ -953,14 +970,6 @@ extern "C" fn ap_entry() -> ! {
     #[allow(clippy::cast_possible_truncation)]
     APIC_TO_CPU[apic_id as usize].store(cpu_index as u8, Ordering::Relaxed);
     CPU_TO_APIC[cpu_index].store(apic_id, Ordering::Relaxed);
-
-    // Write CPU index to IA32_TSC_AUX for fast rdtscp-based lookup.
-    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
-        // SAFETY: IA32_TSC_AUX exists when rdtscp is supported.
-        unsafe {
-            crate::cpu::wrmsr(IA32_TSC_AUX, cpu_index as u64);
-        }
-    }
 
     // Enable SMEP/UMIP on this AP (each CPU has its own CR4).
     // SMAP is intentionally not enabled until user access paths are instrumented.

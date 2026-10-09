@@ -129,6 +129,12 @@
 #                                       # An unrecognised value is an error, not
 #                                       # a fallback: a typo must not silently
 #                                       # measure the other profile.
+#   ./scripts/boot-test.sh --smp=N      # boot on N CPUs (1-16, default 1),
+#                                       # under multi-threaded TCG unless
+#                                       # QEMU_EXTRA names an accelerator. A
+#                                       # boot of the tree, not an experiment:
+#                                       # its row carries `cpus` and its own
+#                                       # wall-time population.
 #   ./scripts/boot-test.sh --bench      # wait for BENCH_OK and print benchmark
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
@@ -2035,6 +2041,9 @@ USB_IMAGE=0
 # See the --no-rootfs case in the arg parser.
 NO_ROOTFS=0
 
+# How many CPUs QEMU gives the guest. See the --smp case in the arg parser.
+SMP_CPUS=1
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -2117,6 +2126,27 @@ for arg in "$@"; do
         # exists to prevent, so record_boot_history() adds one -- the run is
         # excluded from the consecutive-clean streak in both directions.
         --no-rootfs) NO_ROOTFS=1 ;;
+        # --smp=N boots the kernel on N CPUs. Every boot before 2026-10-09 ran on
+        # one -- QEMU's default, since nothing here passed -smp -- so nothing
+        # checked that the kernel works on more, and on two it did not: the
+        # first two-CPU boots found application processors that stopped ticking,
+        # a container's first program running before it was in its container,
+        # and an AP that took CPU 0's identity while it started (known-issues
+        # A-SMP-APS-STOP-TICKING-AND-NO-BOOT-TEST-RUNS-MORE-THAN-ONE-CPU). Its
+        # own flag rather than QEMU_EXTRA="-smp 2", which marks the run an
+        # experiment: a boot on two CPUs is a boot of the tree, with its own
+        # population (boot-history.py's `cpus`). Capped at the kernel's MAX_CPUS.
+        --smp=*)
+            SMP_CPUS="${arg#*=}"
+            case "$SMP_CPUS" in
+                ''|*[!0-9]*) echo "ERROR: --smp takes a number of CPUs, got '$SMP_CPUS'" >&2
+                             exit 1 ;;
+            esac
+            if [ "$SMP_CPUS" -lt 1 ] || [ "$SMP_CPUS" -gt 16 ]; then
+                echo "ERROR: --smp must be 1 to 16 (the kernel's MAX_CPUS), got $SMP_CPUS" >&2
+                exit 1
+            fi
+            ;;
         # Anything else is refused, for --profile's reason: a flag this loop
         # does not know used to fall through the `case` and be dropped, so the
         # run went ahead in its default shape under a name that said otherwise.
@@ -3158,6 +3188,12 @@ print_bench_results() {
         bench_args+=(--experiment "$BENCH_EXPERIMENT")
     elif [ -n "${QEMU_EXTRA:-}" ]; then
         bench_args+=(--experiment "QEMU_EXTRA=$QEMU_EXTRA (non-default emulator flags)")
+    elif [ "$SMP_CPUS" -gt 1 ]; then
+        # Every benchmark baseline was measured on one CPU, and the history
+        # has no field to tell a two-CPU run's numbers from them. Recorded,
+        # never a baseline, until bench-history.py learns the CPU count as
+        # boot-history.py has.
+        bench_args+=(--experiment "--smp=$SMP_CPUS (benchmark baselines are one-CPU)")
     fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
@@ -3269,6 +3305,7 @@ record_boot_outcome() {
     # whatever HEAD happens to be now; see the BT_HEAD block near the top.
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
                 --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}"
+                --cpus "$SMP_CPUS"
                 --commit "${BT_HEAD:-unknown}" --branch "${BT_BRANCH:-unknown}")
     # Passed only when the file exists, so a --no-boot run (or one that died
     # before QEMU launched) hands the recorder nothing rather than a leftover
@@ -9096,6 +9133,17 @@ else
 fi
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 
+# The CPUs (--smp). More than one runs under multi-threaded TCG -- one host
+# thread per guest CPU, which is what lets two CPUs truly run at once and so
+# what finds the races -- unless QEMU_EXTRA names an accelerator of its own.
+SMP_ARGS=(-smp "$SMP_CPUS")
+if [ "$SMP_CPUS" -gt 1 ]; then
+    case " ${QEMU_EXTRA:-} " in
+        *" -accel "*) : ;;
+        *) SMP_ARGS+=(-accel "tcg,thread=multi") ;;
+    esac
+fi
+
 # Extra QEMU arguments, for diagnosing emulator-side effects without touching
 # the guest.  Word-split on purpose so a caller can pass several:
 #
@@ -9726,7 +9774,7 @@ fi
 
 # Step 4: Boot QEMU
 contention_notice "the moment before QEMU"
-echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
+echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU, cpus: $SMP_CPUS) ==="
 rm -f "$SERIAL_FILE"
 # Removed together with the serial log, and for the identical reason: both are
 # evidence about *this* boot, and a leftover from the previous one is worse
@@ -9904,6 +9952,7 @@ QEMU_START_EPOCH=$(date +%s)
     -no-reboot \
     -m 3072M \
     -cpu "$QEMU_CPU" \
+    "${SMP_ARGS[@]}" \
     "${QEMU_EXTRA_ARGS[@]}" \
     -machine q35 2> "$QEMU_STDERR" &
 QEMU_PID=$!

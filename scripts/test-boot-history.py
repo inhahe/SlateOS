@@ -809,6 +809,9 @@ class _Args:
     # rather than reporting anything about boot history.
     free_gb_min = None
     free_gb_phase = ""
+    # And again (2026-10-09): `build_record` reads `args.cpus`, argparse's
+    # default None. The note above is why it is here.
+    cpus = None
     # Empty, as argparse leaves them when boot-test.sh does not pass them, so
     # build_record() takes the git fallback -- which is the path these tests
     # were written against.
@@ -1395,6 +1398,34 @@ def test_population_is_the_triple_not_any_subset(bh):
                "debug" in bh.population_of(tcg_plain)
                and "none" in bh.population_of(tcg_plain)
                and "QEMU TCG" in bh.population_of(tcg_plain))
+
+
+def test_the_cpu_count_is_a_fourth_axis_named_only_when_not_one(bh):
+    """A two-CPU boot is its own population; the one-CPU labels do not move.
+
+    Rows before 2026-10-09 carry no `cpus` and were all one-CPU boots
+    (boot-test.sh passed no `-smp`), so they group with the one-CPU rows
+    written since -- except an experiment, whose QEMU_EXTRA could have named
+    any count, which cannot say.
+    """
+    def rec(**extra):
+        base = {"profile": "debug", "sanitizer": "none", "accel": "QEMU TCG"}
+        base.update(extra)
+        return base
+
+    one, two, old = rec(cpus=1), rec(cpus=2), rec()
+    check("one CPU, written since: the label it always had",
+          bh.population_of(one), "debug/none on QEMU TCG")
+    check("before the field: one CPU, the same population",
+          bh.population_of(old), bh.population_of(one))
+    check("two CPUs: its own population, and the label says so",
+          bh.population_of(two), "debug/none on QEMU TCG, 2 CPUs")
+    check("an experiment before the field cannot say",
+          bh.cpus_of(rec(experiment="QEMU_EXTRA=-smp 4")), None)
+    check("nor can a row whose recorder was not told",
+          bh.population_of(rec(cpus=None)),
+          "debug/none on QEMU TCG, unknown CPU count")
+    check("a boolean is not a count", bh.cpus_of(rec(cpus=True)), None)
 
 
 def test_a_release_boot_does_not_move_the_debug_median(bh):

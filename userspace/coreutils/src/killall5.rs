@@ -422,10 +422,9 @@ fn scan_procs(
             continue;
         };
         let mut at = 0usize;
-        let first = readarg(&cmdline, &mut at).unwrap_or_default();
-        if !first.is_empty() {
-            p.argv0 = Some(first);
-        }
+        // An empty first argument, and none at all, are alike upstream: the
+        // buffer it reads into holds an empty string either way.
+        p.argv0 = readarg(&cmdline, &mut at).filter(|a| !a.is_empty());
         let mut arg: Vec<u8> = Vec::new();
         while let Some(a) = readarg(&cmdline, &mut at) {
             arg = a;

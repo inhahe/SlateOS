@@ -23,9 +23,11 @@ def main(argv: list[str]) -> int:
         os.close(master)
         os.dup2(slave, 0)
         os.close(slave)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        os.dup2(os.open(out, flags, 0o644), 1)
-        os.dup2(os.open(err, flags, 0o644), 2)
+        # Binary, so the program's bytes land as it wrote them. The files
+        # opened here close before the exec; their copies on 1 and 2 stay.
+        with open(out, "wb") as o, open(err, "wb") as e:
+            os.dup2(o.fileno(), 1)
+            os.dup2(e.fileno(), 2)
         try:
             os.execvp(prog[0], prog)
         finally:

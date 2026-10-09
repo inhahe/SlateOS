@@ -31,9 +31,8 @@
     their WinDirStat fork, a debugger, a LithicBackup reimplementation) are now
     on the roadmap.
   - B-Q19 A standing rule for search-and-replace edits? -- (§1051) **yes, both
-    habits, in the `CLAUDE.md` of all three accounts** -- to be applied when
-    the operator confirms in lane B's own session, since the answer came by
-    relay.
+    habits, in the `CLAUDE.md` of all three accounts** -- applied 2026-10-09 by
+    lane A, at the operator's direction in lane A's session.
   - B-Q20 `shred --random-source` -- (§1052) the premise had gone: `shred` is now
     a port of GNU's with the option working; the one detail the operator
     proposed differently (restart a source file each pass) is kept as GNU's

@@ -830,6 +830,119 @@ pub fn build_memmap_response(
     Some(ptr)
 }
 
+/// A framebuffer as the handoff passes it on: the fields of Limine's
+/// `limine_framebuffer` at revision 0, which a restarted kernel reads as it
+/// read the bootloader's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramebufferDesc {
+    /// Its address in the direct map -- the same offset in both kernels.
+    pub address: u64,
+    /// Width in pixels.
+    pub width: u64,
+    /// Height in pixels.
+    pub height: u64,
+    /// Bytes from one row to the next.
+    pub pitch: u64,
+    /// Bits per pixel.
+    pub bpp: u16,
+    /// Limine's memory model (1: RGB).
+    pub memory_model: u8,
+    /// Red, green and blue: each mask's size then its shift.
+    pub masks: [u8; 6],
+}
+
+impl FramebufferDesc {
+    /// The descriptor of a framebuffer the bootloader gave this kernel.
+    #[must_use]
+    pub fn of(fb: &crate::limine::Framebuffer) -> Self {
+        Self {
+            address: fb.address as u64,
+            width: fb.width,
+            height: fb.height,
+            pitch: fb.pitch,
+            bpp: fb.bpp,
+            memory_model: fb.memory_model,
+            masks: [
+                fb.red_mask_size,
+                fb.red_mask_shift,
+                fb.green_mask_size,
+                fb.green_mask_shift,
+                fb.blue_mask_size,
+                fb.blue_mask_shift,
+            ],
+        }
+    }
+
+    /// The physical bytes it occupies: from its address less `hhdm`,
+    /// `pitch * height` of them. `None` if that does not compute.
+    fn phys_range(&self, hhdm: u64) -> Option<PhysRange> {
+        let start = self.address.checked_sub(hhdm)?;
+        let end = start.checked_add(self.pitch.checked_mul(self.height)?)?;
+        Some(PhysRange { start, end })
+    }
+}
+
+/// The framebuffers of `fbs` a restarted kernel can be given: those wholly
+/// inside one `FRAMEBUFFER` entry of `memory_map` -- the memory the handoff
+/// maps, write-combining, for them ([`framebuffer_ranges`]). A framebuffer the
+/// map does not describe would be handed over unmapped, and the new kernel's
+/// first pixel would fault with no handler to say so.
+#[must_use]
+pub fn passable_framebuffers(
+    fbs: &[FramebufferDesc],
+    memory_map: &[&MemmapEntry],
+    hhdm: u64,
+) -> alloc::vec::Vec<FramebufferDesc> {
+    let ranges = framebuffer_ranges(memory_map);
+    fbs.iter()
+        .filter(|fb| {
+            fb.phys_range(hhdm).is_some_and(|r| {
+                ranges
+                    .iter()
+                    .any(|m| m.start <= r.start && r.end <= m.end && r.start < r.end)
+            })
+        })
+        .copied()
+        .collect()
+}
+
+/// The size of Limine's `limine_framebuffer` at revision 0: through `edid`.
+const LIMINE_FRAMEBUFFER_SIZE: usize = 64;
+
+/// Build the framebuffer response for `fbs`: each descriptor in Limine's
+/// layout (`address`, `width`, `height`, `pitch`, `bpp`, `memory_model`, the
+/// six mask bytes, seven unused, then `edid_size` and `edid`, both zero: no
+/// EDID is passed on), an array of pointers to them, and the response
+/// (`revision` 0, the count, the array). Returns the response's HHDM pointer.
+pub fn build_framebuffer_response(
+    arena: &mut HandoffArena<'_>,
+    fbs: &[FramebufferDesc],
+) -> Option<u64> {
+    let mut ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(fbs.len());
+    for fb in fbs {
+        let (off, ptr) = arena.reserve(LIMINE_FRAMEBUFFER_SIZE, 8)?;
+        arena.put(off, &fb.address.to_le_bytes())?;
+        arena.put(off.checked_add(8)?, &fb.width.to_le_bytes())?;
+        arena.put(off.checked_add(16)?, &fb.height.to_le_bytes())?;
+        arena.put(off.checked_add(24)?, &fb.pitch.to_le_bytes())?;
+        arena.put(off.checked_add(32)?, &fb.bpp.to_le_bytes())?;
+        arena.put(off.checked_add(34)?, &[fb.memory_model])?;
+        arena.put(off.checked_add(35)?, &fb.masks)?;
+        ptrs.push(ptr);
+    }
+    let (array_off, array_ptr) = arena.reserve(ptrs.len().checked_mul(8)?, 8)?;
+    for (i, p) in ptrs.iter().enumerate() {
+        arena.put(array_off.checked_add(i.checked_mul(8)?)?, &p.to_le_bytes())?;
+    }
+    let (off, ptr) = arena.reserve(24, 8)?;
+    arena.put(
+        off.checked_add(8)?,
+        &u64::try_from(ptrs.len()).ok()?.to_le_bytes(),
+    )?;
+    arena.put(off.checked_add(16)?, &array_ptr.to_le_bytes())?;
+    Some(ptr)
+}
+
 /// Build the kernel-file response carrying the command line `cmdline`, and no
 /// file: the `LimineFile` (`crate::limine::LimineFile`) it points to has the
 /// line, NUL-terminated, an empty path, and a null address and zero size.
@@ -1102,21 +1215,36 @@ unsafe fn map_huge(
 /// to map APIC MMIO", "[ioapic] WARNING: MMIO map failed"), when the handoff
 /// mapped everything from 0 to the top of RAM.
 ///
-/// The framebuffer's entry is left out until the handoff answers the
-/// framebuffer request (known-issues `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`):
-/// Limine maps it write-combining, and nothing reads it without the response.
+/// The framebuffer's entries are the other part of Limine's direct map, mapped
+/// write-combining rather than write-back: [`framebuffer_ranges`].
 #[must_use]
 pub fn direct_map_ranges(memory_map: &[&MemmapEntry]) -> alloc::vec::Vec<PhysRange> {
+    ranges_of_types(
+        memory_map,
+        &[
+            memmap_type::USABLE,
+            memmap_type::BOOTLOADER_RECLAIMABLE,
+            memmap_type::EXECUTABLE_AND_MODULES,
+        ],
+    )
+}
+
+/// The physical ranges of `memory_map`'s `FRAMEBUFFER` entries, which the new
+/// kernel's direct map covers write-combining, as Limine maps them, so the
+/// framebuffers the handoff passes on ([`build_framebuffer_response`]) can be
+/// drawn on at the addresses they are given -- widened to whole 4 KiB pages,
+/// sorted, adjacent ones merged.
+#[must_use]
+pub fn framebuffer_ranges(memory_map: &[&MemmapEntry]) -> alloc::vec::Vec<PhysRange> {
+    ranges_of_types(memory_map, &[memmap_type::FRAMEBUFFER])
+}
+
+/// The entries of `memory_map` whose type is one of `types`, each widened to
+/// whole 4 KiB pages, sorted, overlapping or adjacent ones merged.
+fn ranges_of_types(memory_map: &[&MemmapEntry], types: &[u64]) -> alloc::vec::Vec<PhysRange> {
     let mut ranges: alloc::vec::Vec<PhysRange> = memory_map
         .iter()
-        .filter(|e| {
-            matches!(
-                e.type_,
-                memmap_type::USABLE
-                    | memmap_type::BOOTLOADER_RECLAIMABLE
-                    | memmap_type::EXECUTABLE_AND_MODULES
-            )
-        })
+        .filter(|e| types.contains(&e.type_))
         .filter_map(|e| {
             let start = align_down(e.base, SIZE_4K);
             let end = align_up(e.base.checked_add(e.length)?, SIZE_4K)?;
@@ -1134,9 +1262,11 @@ pub fn direct_map_ranges(memory_map: &[&MemmapEntry]) -> alloc::vec::Vec<PhysRan
     merged
 }
 
-/// Direct-map `range` at `hhdm`: 1 GiB pages (where the CPU has them) and
-/// 2 MiB pages over the aligned blocks it covers whole, 4 KiB pages at its
-/// edges -- so the map covers the range and nothing beside it.
+/// Direct-map `range` at `hhdm` with `flags`: 1 GiB pages (where the CPU has
+/// them) and 2 MiB pages over the aligned blocks it covers whole, 4 KiB pages
+/// at its edges -- so the map covers the range and nothing beside it.
+/// `PageFlags::WRITE_COMBINING` is the PWT bit, the same in a huge entry as in
+/// a 4 KiB one, so the memory type holds at every size.
 ///
 /// # Safety
 ///
@@ -1144,11 +1274,11 @@ pub fn direct_map_ranges(memory_map: &[&MemmapEntry]) -> alloc::vec::Vec<PhysRan
 unsafe fn map_direct(
     pml4: u64,
     range: PhysRange,
+    flags: PageFlags,
     one_gib: bool,
     hhdm: u64,
     frames: &mut TableFrames<'_>,
 ) -> KernelResult<()> {
-    let flags = PageFlags::PRESENT | PageFlags::WRITABLE;
     let mut p = range.start;
     while p < range.end {
         let virt = hhdm.checked_add(p).ok_or(KernelError::InvalidArgument)?;
@@ -1181,6 +1311,7 @@ fn try_build_tables(
     dest_base: u64,
     hhdm: u64,
     direct_map: &[PhysRange],
+    framebuffer_map: &[PhysRange],
 ) -> KernelResult<u64> {
     let pml4 = alloc_table(frames)?;
 
@@ -1188,10 +1319,18 @@ fn try_build_tables(
     // (`direct_map_ranges`), with the largest pages they allow, writable and
     // executable as Limine leaves them.
     let one_gib = crate::cpu::features().is_some_and(|f| f.page_1g);
+    let ram = PageFlags::PRESENT | PageFlags::WRITABLE;
     for &range in direct_map {
         // SAFETY: pml4 and its descendants are freshly allocated tables this
         // module owns, all reachable through `hhdm`; the ranges are disjoint.
-        unsafe { map_direct(pml4, range, one_gib, hhdm, frames)? };
+        unsafe { map_direct(pml4, range, ram, one_gib, hhdm, frames)? };
+    }
+    // The framebuffers, write-combining, as Limine maps them; never RAM, so
+    // disjoint from the ranges above.
+    let fb = ram | PageFlags::WRITE_COMBINING | PageFlags::NO_EXECUTE;
+    for &range in framebuffer_map {
+        // SAFETY: as above.
+        unsafe { map_direct(pml4, range, fb, one_gib, hhdm, frames)? };
     }
 
     // The new image: 4 KiB pages at its linked addresses, each segment with its
@@ -1231,9 +1370,10 @@ fn try_build_tables(
 ///
 /// `dest_base` is where the handoff places the image (physically contiguous),
 /// `hhdm` the direct-map offset to reproduce (the running kernel's own, so one
-/// trampoline address is valid in both tables), and `direct_map` the disjoint
-/// physical ranges to direct-map ([`direct_map_ranges`]). On failure every
-/// frame allocated so far is freed.
+/// trampoline address is valid in both tables), `direct_map` the disjoint
+/// physical ranges of RAM to direct-map ([`direct_map_ranges`]), and
+/// `framebuffer_map` those of the framebuffers ([`framebuffer_ranges`]),
+/// mapped write-combining. On failure every frame allocated so far is freed.
 ///
 /// # Errors
 ///
@@ -1244,6 +1384,7 @@ pub fn build_handoff_tables(
     dest_base: u64,
     hhdm: u64,
     direct_map: &[PhysRange],
+    framebuffer_map: &[PhysRange],
 ) -> KernelResult<HandoffTables> {
     let mut frames: alloc::vec::Vec<PhysFrame> = alloc::vec::Vec::new();
     let built = try_build_tables(
@@ -1255,6 +1396,7 @@ pub fn build_handoff_tables(
         dest_base,
         hhdm,
         direct_map,
+        framebuffer_map,
     );
     match built {
         Ok(pml4_phys) => Ok(HandoffTables { pml4_phys, frames }),
@@ -1707,26 +1849,40 @@ impl PreparedHandoff {
     }
 }
 
+/// What a restarted kernel is told about the machine and its start: the facts
+/// Limine's responses carry on a firmware boot, gathered by the caller of
+/// [`prepare_handoff`].
+#[derive(Clone, Copy)]
+pub struct HandoffFacts<'a> {
+    /// The firmware's memory map; the handoff hands on an adjusted copy.
+    pub memory_map: &'a [&'a MemmapEntry],
+    /// The direct-map offset -- the running kernel's own, kept.
+    pub hhdm: u64,
+    /// The RSDP's physical address, if the machine has ACPI.
+    pub rsdp_address: Option<u64>,
+    /// The command line, if one is passed on.
+    pub cmdline: Option<&'a [u8]>,
+    /// The framebuffers to pass on.
+    pub framebuffers: &'a [FramebufferDesc],
+}
+
 /// Build the Limine responses into the arena frame and return their pointers.
 ///
 /// The memory-map response carries the adjusted map: the destination as
 /// `EXECUTABLE_AND_MODULES`, and the page-table and arena frames as
 /// `BOOTLOADER_RECLAIMABLE` (the regions the new kernel keeps). A kernel-file
-/// response is built when there is a `cmdline` to pass on, carrying only it
-/// ([`build_kernel_file_response`]); the framebuffer response is not built (see
-/// [`prepare_handoff`]).
-#[allow(clippy::too_many_arguments)] // the response inputs, gathered once
+/// response is built when there is a command line to pass on, carrying only
+/// it ([`build_kernel_file_response`]), and a framebuffer response when there
+/// are framebuffers ([`build_framebuffer_response`]).
 fn build_all_responses(
     arena_phys: u64,
-    hhdm: u64,
+    facts: &HandoffFacts<'_>,
     dest_base: u64,
     parsed: &ParsedKernel,
-    memory_map: &[&MemmapEntry],
     tables: &HandoffTables,
     arena_all_frames: &[PhysFrame],
-    rsdp_address: Option<u64>,
-    cmdline: Option<&[u8]>,
 ) -> KernelResult<ResponseAddrs> {
+    let hhdm = facts.hhdm;
     let span = parsed.image_span().ok_or(KernelError::InvalidArgument)?;
     let dest_end = dest_base
         .checked_add(align_up(span, FRAME_U64).ok_or(KernelError::InvalidArgument)?)
@@ -1748,7 +1904,7 @@ fn build_all_responses(
     for f in arena_all_frames {
         overlays.push((frame_range(*f), memmap_type::BOOTLOADER_RECLAIMABLE));
     }
-    let adjusted = adjust_memory_map(memory_map, &overlays);
+    let adjusted = adjust_memory_map(facts.memory_map, &overlays);
 
     // The arena is the HHDM view of the arena frame.
     let arena_virt = arena_phys
@@ -1764,21 +1920,29 @@ fn build_all_responses(
     let mm_ptr = build_memmap_response(&mut arena, &adjusted).ok_or(KernelError::OutOfMemory)?;
     let ea_ptr = build_executable_address_response(&mut arena, dest_base, parsed.min_vaddr)
         .ok_or(KernelError::OutOfMemory)?;
-    let rsdp_ptr = match rsdp_address {
+    let rsdp_ptr = match facts.rsdp_address {
         Some(addr) => Some(build_rsdp_response(&mut arena, addr).ok_or(KernelError::OutOfMemory)?),
         None => None,
     };
-    let kernel_file_ptr = match cmdline {
+    let kernel_file_ptr = match facts.cmdline {
         Some(line) => {
             Some(build_kernel_file_response(&mut arena, line).ok_or(KernelError::OutOfMemory)?)
         }
         None => None,
     };
+    let framebuffer_ptr = if facts.framebuffers.is_empty() {
+        None
+    } else {
+        Some(
+            build_framebuffer_response(&mut arena, facts.framebuffers)
+                .ok_or(KernelError::OutOfMemory)?,
+        )
+    };
 
     Ok(ResponseAddrs {
         memmap: Some(mm_ptr),
         hhdm: Some(hhdm_ptr),
-        framebuffer: None,
+        framebuffer: framebuffer_ptr,
         rsdp: rsdp_ptr,
         executable_address: Some(ea_ptr),
         kernel_file: kernel_file_ptr,
@@ -1790,14 +1954,12 @@ fn build_all_responses(
 /// the image, and stage that copy. The result holds everything the trampoline
 /// needs; nothing is quiesced and no jump is made.
 ///
-/// `rsdp_address` is the running kernel's RSDP (physical under base revision 3),
-/// passed through so the new kernel finds ACPI. `cmdline`, when given, is the
-/// new kernel's command line, carried by a kernel-file response with no file
-/// ([`build_kernel_file_response`]); without it the new kernel boots with none.
-/// The framebuffer response is not built: the new kernel treats its absence as
-/// "not provided" and boots serial-only, without a display -- the remaining
-/// gap for a full-fidelity restart (todo.txt kexec, known-issues
-/// `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`).
+/// `facts` is what the new kernel is told ([`HandoffFacts`]): the memory map
+/// and HHDM offset; the RSDP (physical under base revision 3), so it finds
+/// ACPI; the command line, carried by a kernel-file response with no file
+/// ([`build_kernel_file_response`]) -- without one it boots with none; and the
+/// framebuffers, so it has a screen. A framebuffer the memory map does not
+/// describe is not passed on ([`passable_framebuffers`]).
 ///
 /// On any failure every frame allocated so far is freed.
 ///
@@ -1807,13 +1969,9 @@ fn build_all_responses(
 /// the arena cannot be allocated or overflows; [`KernelError::InvalidArgument`]
 /// if a handoff frame collides with the destination (the rare case
 /// [`plan_destination_high`] is designed to avoid).
-pub fn prepare_handoff(
-    image: &[u8],
-    memory_map: &[&MemmapEntry],
-    hhdm: u64,
-    rsdp_address: Option<u64>,
-    cmdline: Option<&[u8]>,
-) -> KernelResult<PreparedHandoff> {
+pub fn prepare_handoff(image: &[u8], facts: &HandoffFacts<'_>) -> KernelResult<PreparedHandoff> {
+    let memory_map = facts.memory_map;
+    let hhdm = facts.hhdm;
     let parsed = parse_kernel_elf(image).map_err(|e| {
         crate::serial_println!("[kexec] the image is not a kernel this can load: {:?}", e);
         e.as_kernel_error()
@@ -1836,20 +1994,30 @@ pub fn prepare_handoff(
         dest_base
     );
 
-    let tables = build_handoff_tables(&parsed, dest_base, hhdm, &direct_map_ranges(memory_map))
-        .map_err(|e| refused("the page tables", e))?;
-
-    match prepare_after_tables(
-        image,
+    let tables = build_handoff_tables(
         &parsed,
-        memory_map,
-        hhdm,
         dest_base,
-        span,
-        rsdp_address,
-        cmdline,
-        &tables,
-    ) {
+        hhdm,
+        &direct_map_ranges(memory_map),
+        &framebuffer_ranges(memory_map),
+    )
+    .map_err(|e| refused("the page tables", e))?;
+
+    // Only the framebuffers the map describes, which the tables just mapped.
+    let framebuffers = passable_framebuffers(facts.framebuffers, memory_map, hhdm);
+    if framebuffers.len() < facts.framebuffers.len() {
+        crate::serial_println!(
+            "[kexec] {} of {} framebuffer(s) lie outside the memory map's framebuffer entries and are not passed on",
+            facts.framebuffers.len().saturating_sub(framebuffers.len()),
+            facts.framebuffers.len()
+        );
+    }
+    let facts = HandoffFacts {
+        framebuffers: &framebuffers,
+        ..*facts
+    };
+
+    match prepare_after_tables(image, &parsed, &facts, dest_base, span, &tables) {
         Ok((staged, arena_frames)) => Ok(PreparedHandoff {
             entry: parsed.entry,
             dest_base,
@@ -1868,18 +2036,15 @@ pub fn prepare_handoff(
 /// The part of [`prepare_handoff`] after the page tables are built: the arena,
 /// responses, request patching, staging, and the destination-collision check.
 /// Frees the arena and staging on its own errors; the caller frees the tables.
-#[allow(clippy::too_many_arguments)] // the orchestration's inputs, threaded once
 fn prepare_after_tables(
     image: &[u8],
     parsed: &ParsedKernel,
-    memory_map: &[&MemmapEntry],
-    hhdm: u64,
+    facts: &HandoffFacts<'_>,
     dest_base: u64,
     span: u64,
-    rsdp_address: Option<u64>,
-    cmdline: Option<&[u8]>,
     tables: &HandoffTables,
 ) -> KernelResult<(StagedImage, alloc::vec::Vec<PhysFrame>)> {
+    let hhdm = facts.hhdm;
     let arena_frame =
         handoff_frame_zeroed(dest_base).map_err(|e| refused("the response arena", e))?;
     let arena_frames = alloc::vec![arena_frame];
@@ -1888,14 +2053,11 @@ fn prepare_after_tables(
     // On any error, free the arena frame (and staging if it was built).
     let responses = match build_all_responses(
         arena_frame.addr(),
-        hhdm,
+        facts,
         dest_base,
         parsed,
-        memory_map,
         tables,
         &arena_frames,
-        rsdp_address,
-        cmdline,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -2482,10 +2644,19 @@ pub unsafe fn reload_self() -> KernelError {
     let Some(hhdm) = crate::mm::page_table::hhdm() else {
         return KernelError::NotSupported;
     };
-    let memory_map = crate::boot::memory_map();
-    let rsdp = crate::boot::rsdp_address();
     let cmdline = restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default());
-    let prepared = match prepare_handoff(image, memory_map, hhdm, rsdp, Some(&cmdline)) {
+    let framebuffers: alloc::vec::Vec<FramebufferDesc> = crate::boot::framebuffers()
+        .iter()
+        .map(|fb| FramebufferDesc::of(fb))
+        .collect();
+    let facts = HandoffFacts {
+        memory_map: crate::boot::memory_map(),
+        hhdm,
+        rsdp_address: crate::boot::rsdp_address(),
+        cmdline: Some(&cmdline),
+        framebuffers: &framebuffers,
+    };
+    let prepared = match prepare_handoff(image, &facts) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -2869,11 +3040,27 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x80_0000,
             },
         ];
-        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, &direct).map_err(|e| {
-            crate::serial_println!("  FAIL: build_handoff_tables: {:?}", e);
-            KernelError::InternalError
-        })?;
+        // And one page of framebuffer, at 2 GiB.
+        let framebuffer = [PhysRange {
+            start: 0x8000_0000,
+            end: 0x8000_1000,
+        }];
+        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, &direct, &framebuffer)
+            .map_err(|e| {
+                crate::serial_println!("  FAIL: build_handoff_tables: {:?}", e);
+                KernelError::InternalError
+            })?;
         let pml4 = tables.pml4_phys;
+
+        // The framebuffer: write-combining, not executable.
+        // SAFETY: `pml4` is the table just built, reachable via `real_hhdm`.
+        let fb_map = unsafe { translate(pml4, real_hhdm.wrapping_add(0x8000_0000), real_hhdm) };
+        selftest::check!(
+            fb_map.is_some_and(|(p, f)| p == 0x8000_0000
+                && f.contains(PageFlags::WRITE_COMBINING)
+                && f.contains(PageFlags::NO_EXECUTE)),
+            "the framebuffer is direct-mapped write-combining and not executable"
+        );
 
         // The direct map: hhdm+0 -> physical 0, writable, executable (NX clear).
         // SAFETY: `pml4` is the table just built, reachable via `real_hhdm`.
@@ -3101,6 +3288,100 @@ pub fn self_test() -> KernelResult<()> {
             "the restart's kernel file has an empty path, not a null one"
         );
     }
+    // ---- the framebuffer response, and which framebuffers pass (pure) ----
+    {
+        let screen = FramebufferDesc {
+            address: FAKE_HHDM.wrapping_add(0x8000_0000),
+            width: 1024,
+            height: 768,
+            pitch: 4096,
+            bpp: 32,
+            memory_model: 1,
+            masks: [8, 16, 8, 8, 8, 0],
+        };
+        let stray = FramebufferDesc {
+            address: FAKE_HHDM.wrapping_add(0x9000_0000),
+            ..screen
+        };
+        let mut fb_staging = alloc::vec![0u8; 512];
+        let fb_ptr = {
+            let mut arena = HandoffArena::new(&mut fb_staging, FAKE_PHYS, FAKE_HHDM);
+            build_framebuffer_response(&mut arena, &[stray, screen])
+                .ok_or(KernelError::InternalError)?
+        };
+        let resp = to_off(fb_ptr);
+        selftest::check_eq!(
+            (
+                le_u64(&fb_staging, resp),
+                le_u64(&fb_staging, resp.saturating_add(8))
+            ),
+            (Some(0), Some(2)),
+            "framebuffer response: revision 0, two framebuffers"
+        );
+        let array =
+            le_u64(&fb_staging, resp.saturating_add(16)).ok_or(KernelError::InternalError)?;
+        let second = le_u64(&fb_staging, to_off(array).saturating_add(8))
+            .ok_or(KernelError::InternalError)?;
+        let at = to_off(second);
+        let bytes = fb_staging
+            .get(at..at.saturating_add(LIMINE_FRAMEBUFFER_SIZE))
+            .unwrap_or_default();
+        selftest::check_eq!(
+            (
+                le_u64(bytes, 0),
+                le_u64(bytes, 8),
+                le_u64(bytes, 16),
+                le_u64(bytes, 24),
+                le_u16(bytes, 32),
+            ),
+            (
+                Some(screen.address),
+                Some(1024),
+                Some(768),
+                Some(4096),
+                Some(32)
+            ),
+            "the second descriptor's address, size, pitch and depth, in Limine's layout"
+        );
+        selftest::check_eq!(
+            bytes.get(34..41),
+            Some([1u8, 8, 16, 8, 8, 8, 0].as_slice()),
+            "its memory model and mask bytes"
+        );
+        selftest::check_eq!(
+            (le_u64(bytes, 48), le_u64(bytes, 56)),
+            (Some(0), Some(0)),
+            "no EDID is passed on"
+        );
+
+        let map_entries = [
+            MemmapEntry {
+                base: 0x10_0000,
+                length: 0x100_0000,
+                type_: memmap_type::USABLE,
+            },
+            MemmapEntry {
+                base: 0x8000_0000,
+                length: 0x40_0000,
+                type_: memmap_type::FRAMEBUFFER,
+            },
+        ];
+        let map_refs: alloc::vec::Vec<&MemmapEntry> = map_entries.iter().collect();
+        selftest::check_eq!(
+            framebuffer_ranges(&map_refs)
+                .iter()
+                .map(|r| (r.start, r.end))
+                .collect::<alloc::vec::Vec<_>>(),
+            alloc::vec![(0x8000_0000, 0x8040_0000)],
+            "the framebuffer ranges are the FRAMEBUFFER entries"
+        );
+        selftest::check_eq!(
+            passable_framebuffers(&[stray, screen], &map_refs, FAKE_HHDM),
+            alloc::vec![screen],
+            "a framebuffer outside the map's framebuffer entries is not passed on"
+        );
+    }
+
     selftest::check_eq!(
         restart_cmdline(b"  sched.boot_deadline_ms=9 kexec.selftest=1\tselftest.skip=1 "),
         b"sched.boot_deadline_ms=9 selftest.skip=1".to_vec(),
@@ -3165,13 +3446,14 @@ pub fn self_test() -> KernelResult<()> {
         let fw = crate::boot::memory_map();
         if !fw.is_empty() {
             let img = build_test_elf();
-            match prepare_handoff(
-                &img,
-                fw,
-                real_hhdm,
-                Some(0x000f_e000),
-                Some(b"selftest.skip=1"),
-            ) {
+            let facts = HandoffFacts {
+                memory_map: fw,
+                hhdm: real_hhdm,
+                rsdp_address: Some(0x000f_e000),
+                cmdline: Some(b"selftest.skip=1"),
+                framebuffers: &[],
+            };
+            match prepare_handoff(&img, &facts) {
                 Ok(prep) => {
                     selftest::check!(!prep.copy_ops().is_empty(), "prepared handoff has copy ops");
                     selftest::check_eq!(prep.entry, TEST_ENTRY, "prepared handoff entry point");

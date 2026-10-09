@@ -59249,10 +59249,14 @@ reference, and its comments say why:
     kernel could not map the APIC/IOAPIC uncached over write-back huge pages.
   - The command line is passed (a kernel-file response with no file), minus
     `kexec.selftest=1`.
-**Still open, in order:** (1) a `boot-test.sh` kexec flag that boots
-`selftest.skip=1 kexec.selftest=1` and requires a second banner then BOOT_OK
-(5c's harness half; today only `/tmp/fastboot.sh`-style QEMU runs check it);
-(2) the framebuffer response (known-issues `A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`);
-(3) SMP -- validated only on one CPU; the APs are INIT'd and the new kernel
-must restart them; (4) only then wire `sys_power_reload` (still `NotSupported`)
-and answer lane C's `requests/c-ab-a-restart-that-keeps-the-computer-on.md`.
+**Still open, in order:** (1) DONE 2026-10-08 as `python scripts/guest.py
+kexec` rather than a boot-test.sh flag (boot-test.sh refuses selftest.skip,
+on purpose): boots the last boot test's ESP with `kexec.selftest=1` and
+requires the reload, a second banner, and the restarted kernel's agent
+answering; not run by the boot test itself yet -- run it after a boot until
+`sys_power_reload` is wired, then make it automatic; (2) DONE 2026-10-08:
+the framebuffer response and its write-combining direct map (known-issues
+`A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`); (3) SMP -- validated only on one CPU;
+the APs are INIT'd and the new kernel must restart them; (4) only then wire
+`sys_power_reload` (still `NotSupported`) and answer lane C's
+`requests/c-ab-a-restart-that-keeps-the-computer-on.md`.

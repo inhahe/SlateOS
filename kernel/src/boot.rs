@@ -284,6 +284,19 @@ pub fn parse_boot_info() -> Option<BootInfo> {
     })
 }
 
+/// The bootloader's framebuffers, as its response describes them -- every
+/// field, which [`parse_boot_info`]'s `FramebufferInfo` keeps only some of --
+/// for `kexec`, which hands a restarted kernel the same screen. Empty when the
+/// bootloader answered with none. The descriptors live as long as the kernel
+/// (bootloader-reclaimable memory, which SlateOS never reclaims).
+#[must_use]
+pub fn framebuffers() -> &'static [&'static crate::limine::Framebuffer] {
+    match FRAMEBUFFER_REQUEST.response() {
+        Some(r) => r.framebuffers(),
+        None => &[],
+    }
+}
+
 /// The bootloader's physical memory map, without the logging [`parse_boot_info`]
 /// does — the same slice it returns in `BootInfo::memory_map`.
 ///

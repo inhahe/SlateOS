@@ -1,6 +1,14 @@
 ### [A] A kernel started by `kexec` has no display -- the handoff answers no framebuffer request -- 2026-10-08
 
-**Status:** OPEN -- the gap left before `power.reload` can be what lane C's
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+The handoff now passes the running kernel's framebuffers
+(`kexec::build_framebuffer_response`, `FramebufferDesc`) and maps the
+`FRAMEBUFFER` memory-map entries write-combining in the new direct map
+(`framebuffer_ranges`); a framebuffer outside those entries is not passed on
+(`passable_framebuffers`). A self-reload under QEMU reports the same
+`[boot] Framebuffer: 1280x800` in both kernels and no warning the first
+lacks. Self-tests: the response's layout, the filter, the mapping's memory
+type. Was: the gap left before `power.reload` could be what lane C's
 "Restart OS -- keep the computer on" needs
 (`requests/c-ab-a-restart-that-keeps-the-computer-on.md`).
 

@@ -18,41 +18,43 @@ This directory is distinct from:
 
 ### How an answer actually arrives — read this before assuming nobody replied
 
-The operator has answered this queue by writing a plain text file,
-**`open-questions-answers.txt`, in the integration tree** (`E:/visual studio projects/os`), one paragraph per question keyed by its ID. As of 2026-09-12 that
-file is dated 2026-09-07, holds about two dozen answers spanning all three lanes,
-and every one of them has been processed. **The channel works. What does not work
-is noticing it.**
+The operator answers this queue by writing a plain text file at the root of
+the integration tree (`E:/visual studio projects/os`):
+**`open-questions-answers*.txt`, with any suffix** -- `open-questions-answers.txt`
+(2026-09-07), then `open-questions-answers.2.txt` (2026-09-27) -- one paragraph
+per question, keyed by its id or by its title. Or in chat, in one lane's
+session, which then holds every lane's answers.
 
-- It is **untracked** — not ignored, just never added — so it exists in exactly one
-  directory on one machine. It is on no branch, in no lane's worktree, and in no
-  clone. Fetching and merging `origin/main`, which is what the start-of-task
-  checklist tells you to do, cannot show it to you.
-- **Nothing watches it.** No gate, no hook, no script mentions the filename.
-- It was found on 2026-09-12 **by accident**, in `git status` output during an
-  unrelated merge, five days after it was written.
-
-So: **check it at the start of a task**, alongside the merge. Reading the
-integration tree is fine — the rule against touching `os` is about *writing*.
-
-```bash
-cat "E:/visual studio projects/os/open-questions-answers.txt"
-```
+- The file is **untracked**: on no branch, in no lane's worktree. No merge of
+  `origin/main` will show it to you.
+- **`python scripts/check-lane-signals.py` watches for it.** Every lane runs it at
+  the start of a task and on every wakeup. It reports any answers file -- or a
+  new version of one, when the operator adds answers to it -- whose content
+  hash is not yet in `operator-answers/LEDGER.md`, with the ids in it by lane.
+- **What to do then** is in `CLAUDE.md`, "When the operator answers": copy the
+  file verbatim into `operator-answers/`, record your own lane's answers, send
+  every other lane with answers in it a notice naming its ids, and add the
+  file's section to the ledger -- the same day.
+- **The operator reads this directory in the integration tree**, so it is only as
+  current as that tree. The same script keeps it fast-forwarded to `main`.
+  Before it did, the operator answered 36 questions on 2026-09-27, every lane
+  recorded its answers that day, and two weeks later the operator still saw
+  every one of them listed as open -- in a tree 3,389 commits behind `main`
+  (`operator-answers/README.md`).
 
 A question sitting at `Status: OPEN` here is **not** evidence that the operator has
 not answered it. An entry can be open precisely because the operator *did* reply
-and asked for a clearer explanation — which is a reply, and which is invisible
-from this file alone.
+and asked for a clearer explanation -- which is a reply, and which is invisible
+from this directory alone: F-Q1's HEIC half, for one, was rewritten on
+2026-09-27 around the question the operator asked in answering it.
 
-*Both examples this note originally cited have since closed, which is worth
-saying rather than quietly editing: C-Q9 was written up as §841 on 2026-09-13,
-and lane B withdrew B-Q8's option (c) as overtaken on 2026-09-14. The point
-stands and the examples did not — so if you are checking the claim against them,
-check the dates first. Examples naming live entries go stale by being right;
-this note now names its examples as history instead. — lane C, 2026-09-14.*
-
-*Recorded by lane A. This describes what has been observed, not a policy the
-operator has set; if a different channel is preferred, say so and this goes away.*
+*History: the first answers file was found on 2026-09-12 by accident, in `git
+status` output during an unrelated merge, five days after it was written. This
+section then told lanes to `cat` it by name -- an instruction the second file's
+`.2` suffix would have walked straight past. The two examples it once cited have
+closed (C-Q9 became §841 on 2026-09-13; lane B withdrew B-Q8's option (c) on
+2026-09-14). -- lanes A and C. The policy above is the operator's, asked for on
+2026-10-09.*
 
 Format for each entry — **written for a reader who does not know the
 subsystem**, because an entry the operator cannot decide from has failed no

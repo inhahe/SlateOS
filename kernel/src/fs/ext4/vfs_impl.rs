@@ -2082,7 +2082,8 @@ fn mode_to_entry_type(mode: u16) -> EntryType {
 /// The device a character or block device inode names, as Linux's ext4
 /// stores it (`ext4_iget`): the old 8:8 encoding in `i_block[0]` when that
 /// is non-zero, else the new encoding in `i_block[1]` (`new_decode_dev`:
-/// major in bits 8-19, minor in bits 0-7 and 20-31). [`DevNum::NONE`] for
+/// major in bits 8-19, minor in bits 0-7 and 20-31).
+/// [`DevNum::NONE`](crate::fs::devnum::DevNum::NONE) for
 /// any other inode, whose `i_block` holds block pointers or an extent tree.
 fn inode_rdev(inode: &super::ondisk::Ext4Inode) -> crate::fs::devnum::DevNum {
     use crate::fs::devnum::DevNum;

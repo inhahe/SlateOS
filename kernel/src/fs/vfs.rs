@@ -338,7 +338,8 @@ pub struct FileMeta {
     /// 0, so files on two filesystems that shared an inode number were one.
     pub dev: u32,
     /// The device a character or block device node names (`st_rdev`), in
-    /// Linux's numbering ([`crate::fs::devnum`]); [`DevNum::NONE`] for
+    /// Linux's numbering ([`crate::fs::devnum`]);
+    /// [`DevNum::NONE`](crate::fs::devnum::DevNum::NONE) for
     /// anything that is not a device node.
     pub rdev: crate::fs::devnum::DevNum,
 

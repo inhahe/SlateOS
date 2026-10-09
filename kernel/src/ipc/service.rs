@@ -736,7 +736,8 @@ pub fn key_id(name: &[u8]) -> u64 {
 ///
 /// # Errors
 ///
-/// - [`InvalidHandle`] -- the listener does not exist, or is already closed.
+/// - [`InvalidHandle`](KernelError::InvalidHandle) -- the listener does not
+///   exist, or is already closed.
 pub fn dup_listener(listener: ServiceListenerHandle) -> KernelResult<()> {
     let mut reg = SERVICE_REGISTRY.lock();
     let entry = reg

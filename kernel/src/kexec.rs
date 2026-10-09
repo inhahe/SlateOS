@@ -1211,8 +1211,8 @@ unsafe fn map_huge(
 /// map this region"), and reaches ACPI tables with `map_4k_if_absent`; a
 /// direct map that already covered those addresses with write-back huge pages
 /// refused the first and served the device registers cached. That is what the
-/// first self-reload to boot through did (2026-10-08: "[apic] WARNING: Failed
-/// to map APIC MMIO", "[ioapic] WARNING: MMIO map failed"), when the handoff
+/// first self-reload to boot through did (2026-10-08: `[apic] WARNING: Failed
+/// to map APIC MMIO`, `[ioapic] WARNING: MMIO map failed`), when the handoff
 /// mapped everything from 0 to the top of RAM.
 ///
 /// The framebuffer's entries are the other part of Limine's direct map, mapped

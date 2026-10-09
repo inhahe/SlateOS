@@ -8545,7 +8545,13 @@ check_kernel_docs() {
     # 274 -> 260 on 2026-09-26: the eleven dead links lane B's
     # check-doc-links.py found in the kernel, plus proc/elf.rs's link to
     # ExceptionContext, which is in scope only in proc/exception.rs.
-    local ceiling=260
+    #
+    # 260 -> 250 on 2026-10-08: lane A's debug boot 14 rose to 261, and the
+    # ten links on lines added since main went with the one -- quoted serial
+    # text read as links (`[apic] WARNING`), shell usage brackets
+    # (`namespace [list]`), and paths out of scope (DevNum::NONE,
+    # task::DEFAULT_PRIORITY, page_table::translate, a private fn).
+    local ceiling=250
     local log start rc unresolved tags secs
 
     echo "=== Checking the kernel's intra-doc links (nothing else runs rustdoc) ==="

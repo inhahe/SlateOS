@@ -6855,7 +6855,8 @@ struct SubpageFill {
 /// permissions and (for file-backed VMAs) its own file offset.
 ///
 /// The frame is allocated lazily on the first faulting subpage and *reused*
-/// by later faults on its siblings (found via [`page_table::translate`]) --
+/// by later faults on its siblings (found via
+/// [`crate::mm::page_table::translate`]) --
 /// when this address space alone holds it; see the body. RSS accounting,
 /// reclaim registration, and the reverse map are keyed on the 16 KiB frame
 /// base and applied exactly once, matching the fast path's `map_frame`.

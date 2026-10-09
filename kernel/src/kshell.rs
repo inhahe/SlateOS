@@ -30045,8 +30045,11 @@ fn cmd_audit(args: &str) {
 /// processes (`unshare -m`, `setns`), not from here.
 ///
 /// Usage:
-///   namespace [list]      - every mount namespace, the system's first
-///   namespace mounts ID   - the mounts in one
+///
+/// ```text
+/// namespace [list]      every mount namespace, the system's first
+/// namespace mounts ID   the mounts in one
+/// ```
 fn cmd_namespace(args: &str) {
     use crate::fs::mntns;
 
@@ -96163,9 +96166,12 @@ fn cmd_powerwake(args: &str) {
 /// counts, as `fs::diskio` projects them.
 ///
 /// Usage:
-///   diskio [stats]        - every device together
-///   diskio list           - one line per device
-///   diskio device NAME    - one device in full
+///
+/// ```text
+/// diskio [stats]        every device together
+/// diskio list           one line per device
+/// diskio device NAME    one device in full
+/// ```
 ///
 /// `reset` went on 2026-10-08 with the table it cleared: the counts are the
 /// block layer's now, which -- as Linux's `/proc/diskstats` -- run from the

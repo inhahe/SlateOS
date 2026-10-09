@@ -1380,7 +1380,8 @@ pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
 /// - nice `-20..=-1`: `8 + round((nice + 20) * 7 / 19)`, levels 8..=15;
 ///
 /// which yields `nice -20 → 8`, `nice 0 → 16` (==
-/// [`task::DEFAULT_PRIORITY`]), and `nice 19 → 31`. Inputs are clamped to
+/// [`crate::sched::task::DEFAULT_PRIORITY`]), and `nice 19 → 31`. Inputs are
+/// clamped to
 /// the valid nice range first.
 #[must_use]
 pub fn nice_to_priority(nice: i32) -> u8 {

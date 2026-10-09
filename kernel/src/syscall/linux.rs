@@ -1395,7 +1395,8 @@ pub mod restart {
     /// Build the in-kernel return value for an interrupted blocking syscall that
     /// should participate in `SA_RESTART` semantics.  `sentinel` is one of the
     /// `ERESTART*` constants in this module; the result carries it encoded
-    /// ([`encode`]), so the signal-delivery checkpoint ([`build_linux_rt_frame`]
+    /// ([`encode`]), so the signal-delivery checkpoint
+    /// ([`super::build_linux_rt_frame`]
     /// for the handler case, [`super::resolve_syscall_restart`] for the
     /// no-handler case) can resolve it into either a restart or a user-visible
     /// `-EINTR`.  It is never returned directly to ring 3 — the backstops above
@@ -2362,7 +2363,7 @@ pub struct RtFrameEntry {
 /// frame could not be written -- the stack would underflow, is not writable,
 /// or the frame does not fit the alternate stack it belongs on -- and changes
 /// nothing; the caller then does what Linux's `force_sigsegv` does (see
-/// [`crate::syscall::handlers::deliver_linux_signal`] and the exception
+/// `syscall::handlers::deliver_linux_signal` and the exception
 /// ISRs' `try_deliver_linux_fault_signal`).
 #[must_use]
 pub fn emit_linux_rt_frame(

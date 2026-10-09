@@ -44,9 +44,27 @@ sockets and go on. So the boot thread is stuck in `wait_for`'s
 behind the busy sender running on another CPU (a lock or a wakeup lost the
 same way). One CPU never shows it.
 
-**Next step:** reproduce with `-smp 2` under MTTCG, then name the boot
-thread's wait: the hard-lockup watchdog's NMI dump (`--hard-lockup-watchdog`)
-or a `[sched]` dump of every task's state and wait channel at the deadline.
+**It is starvation, not a deadlock** (2 vCPUs under MTTCG, the QEMU
+monitor's `info registers -a` and stack words, symbolized; 2026-10-08):
+
+- The load does end -- at its deadline: `idle_beside_busy` reports
+  `"samples":2, "errors":14, "busy_bytes":10228736, "window_ms":234524,
+  "timed_out":true`, and the boot goes on. On one CPU it takes about 7 s and
+  fails nothing.
+- Throughout, **CPU 0 is idle in `hlt`** (interrupts on), and **CPU 1 runs the
+  busy sender** -- caught inside `KernelHeap::dealloc` / `check_redzone`,
+  re-reading its APIC ID (`current_cpu_index`) on the heap's hot path: busy,
+  not stuck. So the prober, the boot thread and the netstack daemon are
+  runnable (or soon woken) on CPU 1's queue while CPU 0 has nothing: no idle
+  CPU takes work from a busy one, and CPU 1 barely time-slices the busy
+  sender against them (two probes in four minutes).
+
+**What to look at:** where a woken task is queued (`sched::wake` and
+`try_wake` -- the waker's CPU, the task's last one, or an idle one), whether
+an idle CPU ever pulls from a loaded one (`sched_migrate`, the idle loop),
+and why round-robin at priority 16 on CPU 1 does not give the prober its
+turns -- the anti-starvation booster is per-CPU, and a task queued behind a
+CPU-bound one should still get a slice each tick.
 
 **What would make it stay fixed:** a boot test on more than one CPU. Today
 `scripts/boot-test.sh` starts QEMU without `-smp`, so a multi-CPU regression

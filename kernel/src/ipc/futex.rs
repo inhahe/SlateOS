@@ -4653,10 +4653,10 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
     let word = AtomicU32::new(0);
     let addr = (&raw const word) as u64;
 
-    // Spawn the owner; let it acquire the PI lock and park.
+    // Spawn the owner; let it acquire the PI lock and park -- on whichever
+    // CPU it runs (`selftest::wait_until`).
     let owner_id = sched::spawn(b"pi-to-own", 20, pi_timeout_owner_task, addr, 0)?;
-    sched::yield_now();
-    if PI_TO_STAGE.load(Ordering::SeqCst) != 1 {
+    if !crate::selftest::wait_until(2000, || PI_TO_STAGE.load(Ordering::SeqCst) == 1) {
         serial_println!("[futex]   FAIL: pi-timeout owner did not acquire lock");
         return Err(KernelError::InternalError);
     }
@@ -4687,13 +4687,11 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // Wake the owner so it unlocks and exits cleanly.
+    // Wake the owner so it unlocks and exits cleanly -- and wait for it, on
+    // whichever CPU the wake put it (`selftest::wait_until`).
     PI_TO_CONTROL.store(0, Ordering::SeqCst);
     futex_wake((&raw const PI_TO_CONTROL) as u64, 1);
-    for _ in 0..4 {
-        sched::yield_now();
-    }
-    if PI_TO_STAGE.load(Ordering::SeqCst) != 2 {
+    if !crate::selftest::wait_until(2000, || PI_TO_STAGE.load(Ordering::SeqCst) == 2) {
         serial_println!("[futex]   FAIL: pi-timeout owner did not release");
         return Err(KernelError::InternalError);
     }

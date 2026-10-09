@@ -2027,6 +2027,80 @@ fn frame_group(pml4_phys: u64, virt: VirtAddr, hhdm: u64) -> Option<(u64, usize)
     Some((pde.phys_addr(), virt.pt_index()))
 }
 
+/// Every 16 KiB frame of the user half of the address space at `pml4_phys`
+/// that has a page table, with its four 4 KiB entries in whatever state each
+/// is in -- the walk [`clear_user_address_space`] makes, reading only.
+/// `visit` is called with the frame's address and its entries, in address
+/// order, and the walk stops early when it answers `false`.
+///
+/// For a caller looking for something across a whole address space: swap's
+/// `swapoff` finds the frames whose entries name an area it is emptying.
+/// The entries are read without the address space's page-table lock
+/// ([`super::as_lock`]), so they can change under the walk; a caller acts on
+/// what it found under that lock, checking it again first, as swap-in does.
+/// Huge mappings (1 GiB, 2 MiB) are passed by: user space has none.
+///
+/// # Safety
+///
+/// `pml4_phys` must be a valid PML4 whose tables stay allocated for the
+/// walk: the caller's own, or another process's held by a pin
+/// (`proc::pcb::pin_address_space`). Tables are freed only when an address
+/// space goes, and a pin keeps that from happening.
+pub(crate) unsafe fn for_each_user_frame(
+    pml4_phys: u64,
+    mut visit: impl FnMut(VirtAddr, [PageTableEntry; HW_PAGES_PER_FRAME]) -> bool,
+) {
+    let Some(hhdm) = hhdm() else {
+        return;
+    };
+    // The user half: PML4 entries 0-255.
+    for pml4_idx in 0..ENTRIES_PER_TABLE / 2 {
+        // SAFETY: pml4_phys is valid (the caller's contract), index < 512.
+        let pml4e = unsafe { read_entry(pml4_phys, pml4_idx, hhdm) };
+        if !pml4e.is_present() {
+            continue;
+        }
+        let pdpt_phys = pml4e.phys_addr();
+        for pdpt_idx in 0..ENTRIES_PER_TABLE {
+            // SAFETY: a table a present entry names, index < 512.
+            let pdpte = unsafe { read_entry(pdpt_phys, pdpt_idx, hhdm) };
+            if !pdpte.is_present() || pdpte.is_huge() {
+                continue;
+            }
+            let pd_phys = pdpte.phys_addr();
+            for pd_idx in 0..ENTRIES_PER_TABLE {
+                // SAFETY: as above.
+                let pde = unsafe { read_entry(pd_phys, pd_idx, hhdm) };
+                if !pde.is_present() || pde.is_huge() {
+                    continue;
+                }
+                let pt_phys = pde.phys_addr();
+                for base_pt_idx in (0..ENTRIES_PER_TABLE).step_by(HW_PAGES_PER_FRAME) {
+                    let mut parts = [PageTableEntry::EMPTY; HW_PAGES_PER_FRAME];
+                    for (sub, part) in parts.iter_mut().enumerate() {
+                        // SAFETY: as above; base_pt_idx is a multiple of 4
+                        // below 512 and sub < 4, so the index stays in the
+                        // table.
+                        *part =
+                            unsafe { read_entry(pt_phys, base_pt_idx.saturating_add(sub), hhdm) };
+                    }
+                    if parts.iter().all(|p| p.raw() == 0) {
+                        continue;
+                    }
+                    // The user half has bit 47 clear: no sign extension.
+                    let va = ((pml4_idx as u64) << 39)
+                        | ((pdpt_idx as u64) << 30)
+                        | ((pd_idx as u64) << 21)
+                        | ((base_pt_idx as u64) << 12);
+                    if !visit(VirtAddr::new(va), parts) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The four 4 KiB entries of the 16 KiB frame at `virt`, whatever state
 /// each is in: present, empty, or a swap entry. `None` when there is no page
 /// table for them, or `virt` is not a canonical frame address.

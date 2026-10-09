@@ -294,6 +294,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/mkdir-diff.sh` | Differential test: our `mkdir` against GNU coreutils 9.4's. |
 | `scripts/mkfifo-diff.sh` | Differential test: our `mkfifo` against GNU coreutils 9.4's. |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
+| `scripts/mkswap.py` | Write a Linux swap-area header (mkswap's, version 1) onto an image, so SlateOS's kernel takes it as swap. |
 | `scripts/mktemp-diff.sh` | mktemp-diff.sh — compare our `mktemp` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/mono-spike/bcl.sh` | Build Mono's class libraries on the host, and stage what SlateOS's mono needs. |
 | `scripts/mono-spike/run.sh` | Cross-compile the Mono runtime (mono-sgen) and link it against SlateOS's libc.a. |
@@ -564,4 +565,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_554 scripts._
+_555 scripts._

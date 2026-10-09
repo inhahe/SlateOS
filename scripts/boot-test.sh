@@ -9017,6 +9017,13 @@ if [ ! -f "$SWAP_IMG" ]; then
     echo "=== Creating 16 MiB swap disk image ==="
     dd if=/dev/zero of="$SWAP_IMG" bs=1M count=16 status=none 2>/dev/null
 fi
+# The swap header, every run: since 2026-10-09 the kernel takes a disk for
+# swap only when its first slot says it is swap (mm::swap::parse_header), and
+# an image made before then is all zeros. Only the header page is written,
+# and a second run changes nothing (scripts/mkswap.py).
+if ! python "$PROJECT_ROOT/scripts/mkswap.py" "$SWAP_IMG" >/dev/null; then
+    echo "WARNING: could not write the swap header on $SWAP_IMG; the boot runs without disk swap" >&2
+fi
 
 # Step 3a: Backing store for the NVMe controller (see the device notes above
 # the QEMU invocation).  `-device nvme` requires a drive — a controller with no

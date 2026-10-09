@@ -493,6 +493,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "live-counter-ledger.txt",
         "merge-readiness.py",
         "migrate-worktrees-to-drive.ps1",
+        "mkswap.py",
         "msysbash.py",
         "mutate-gate.py",
         "never-read-probe.py",

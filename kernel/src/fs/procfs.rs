@@ -2003,32 +2003,56 @@ fn gen_bcache() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// `/proc/swaps` — active swap devices, Linux-compatible format.
+/// `/proc/swaps` — the active swap areas, in Linux's format to the byte
+/// (`mm/swapfile.c`, `swap_show`): the path, padded with spaces to column
+/// 40 (one at least); `partition` for a device or the compressed tier,
+/// `file` for a file; the pages it can hold and those it holds, in KiB; the
+/// priority. Space, tab, newline and backslash in a path are written as
+/// `\ooo`, as Linux's `seq_file_path` writes them; every other byte as it is.
 ///
-/// Shows each swap device's type, capacity, usage, and priority.
+/// Until 2026-10-09 the columns were SlateOS's own (`zram`/`disk:vdb`,
+/// `memory`/`disk`, fewer tabs), which `swapon --show` and `free` read as
+/// Linux's.
 fn gen_swaps() -> Vec<u8> {
     let devices = crate::mm::swap::list_devices();
-
-    let mut s = String::with_capacity(256);
-    // Header matching Linux's /proc/swaps format.
-    s.push_str("Filename\t\t\tType\t\tSize\tUsed\tPriority\n");
-
-    if devices.is_empty() {
-        // No swap devices.
-        return s.into_bytes();
-    }
-
+    let mut s = Vec::with_capacity(128usize.saturating_mul(devices.len().saturating_add(1)));
+    s.extend_from_slice(b"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
     for dev in &devices {
-        // Size/used in KiB (1 slot = 1 frame = 16 KiB).
-        let size_kib = (dev.total_slots as u64).saturating_mul(16);
-        let used_kib = (dev.used_slots as u64).saturating_mul(16);
-        s.push_str(&format!(
-            "{}\t\t\t{}\t\t{}\t{}\t{}\n",
-            dev.name, dev.device_type, size_kib, used_kib, dev.priority
-        ));
+        let mut path = Vec::with_capacity(dev.path.len());
+        for &b in &dev.path {
+            if matches!(b, b' ' | b'\t' | b'\n' | b'\\') {
+                path.extend_from_slice(format!("\\{b:03o}").as_bytes());
+            } else {
+                path.push(b);
+            }
+        }
+        let pad = 40usize
+            .checked_sub(path.len())
+            .filter(|&p| p > 0)
+            .unwrap_or(1);
+        s.extend_from_slice(&path);
+        s.extend(core::iter::repeat_n(b' ', pad));
+        let kind: &[u8] = if dev.device_type == "file" {
+            b"file\t"
+        } else {
+            b"partition"
+        };
+        s.extend_from_slice(kind);
+        // 1 slot = 1 page = 16 KiB.
+        let size = u64::from(dev.total_slots).saturating_mul(16);
+        let used = u64::from(dev.used_slots).saturating_mul(16);
+        let wide = |kib: u64| if kib < 10_000_000 { "\t" } else { "" };
+        s.extend_from_slice(
+            format!(
+                "\t{size}\t{}{used}\t{}{}\n",
+                wide(size),
+                wide(used),
+                dev.priority
+            )
+            .as_bytes(),
+        );
     }
-
-    s.into_bytes()
+    s
 }
 
 /// `/proc/cas` — Content-addressed store statistics.

@@ -129,6 +129,12 @@
 #                                       # An unrecognised value is an error, not
 #                                       # a fallback: a typo must not silently
 #                                       # measure the other profile.
+#   ./scripts/boot-test.sh --smp=N      # boot on N CPUs (1-16, default 1),
+#                                       # under multi-threaded TCG unless
+#                                       # QEMU_EXTRA names an accelerator. A
+#                                       # boot of the tree, not an experiment:
+#                                       # its row carries `cpus` and its own
+#                                       # wall-time population.
 #   ./scripts/boot-test.sh --bench      # wait for BENCH_OK and print benchmark
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
@@ -353,6 +359,13 @@ check_selftest_failures() {
     if grep -iq "self-test failed" "$file"; then
         echo "SELF-TEST FAILURE detected in serial log:"
         grep -in "self-test failed" "$file" || true
+        # A keep-going boot ran on past each failure so as to list them all:
+        # list what each one said, too, since the line above names only the
+        # subsystem (see report_kernel_death's context window for why).
+        if keep_going_boot; then
+            echo "Every FAIL: line (selftest.keep_going=1):"
+            grep -an "FAIL:" "$file" | head -200 || true
+        fi
 
         # Lane A's own dropbox is a record of findings, not only a queue of
         # asks.  On 2026-09-21 a whole session re-derived two diagnoses that
@@ -529,8 +542,9 @@ check_bench_coverage() {
 # Returns 0 if the log shows a dead kernel, 1 otherwise.
 # Fail a boot in which a file-identity rung SKIPPED instead of running.
 #
-# WHY THIS EXISTS: the four rungs that prove the path-keyed tables (flock,
-# sealing, record locks, immutable flags) now key on FileId rather than on a
+# WHY THIS EXISTS: the rungs that prove the path-keyed tables (flock,
+# sealing, record locks -- and the immutable flags' table, until it was removed
+# on 2026-10-02) now key on FileId rather than on a
 # path string each open with two `return Ok(())` escapes -- one if /tmp cannot
 # hard-link, one if the two names do not resolve to one identity. Both print
 # SKIPPED and both return SUCCESS, because a kernel that genuinely cannot
@@ -582,10 +596,10 @@ check_identity_rungs() {
         grep -a 'identity rung SKIPPED' "$file" | head -8 | sed 's/^/  /'
         echo "  A skip here means /tmp cannot hard-link, or two names for one"
         echo "  file do not share an inode. Either falsifies the premise of the"
-        echo "  FileId conversion (kernel/src/fs/{vfs,sealing,reclock,immutable}.rs)."
+        echo "  FileId conversion (kernel/src/fs/{vfs,sealing,reclock}.rs)."
         return 1
     fi
-    # Fewer than four means a rung did not reach its verdict at all -- an
+    # Fewer than expected means a rung did not reach its verdict at all -- an
     # early `?` on an unrelated error, or a self_test that stopped being
     # called. Neither prints FAIL, so nothing else would notice.
     if [ "${ran:-0}" -lt "$expected" ]; then
@@ -597,10 +611,38 @@ check_identity_rungs() {
     fi
     return 0
 }
+#
+# Under `selftest.keep_going=1` (SLATE_CMDLINE) a FATAL: line is a self-test
+# failure the kernel reported and carried on past -- it prints "[selftest]
+# selftest.keep_going: carrying on past ..." next -- so it is not a death, and
+# stopping there would throw away the rest of the list the mode exists to
+# collect. rq33 (2026-10-02) was stopped 93 s into QEMU, two failures in, for
+# exactly that. A panic is a death then, and so is a FATAL that is not a
+# self-test's -- "FATAL: Unrecoverable kernel page fault. Halting." is the
+# exception handler stopping the kernel, which nothing carries on past. Lane
+# A's debug boot 13 (2026-10-08) halted on one at about 1500 s of QEMU and the
+# harness, which looked only for panic lines, waited out the rest of its
+# 2400 s timeout on a dead kernel. A self-test's FATAL says `self-test failed`
+# (`selftest::report`); the FATAL lines still fail the boot at the end
+# (`check_selftest_failures` when the marker is reached, the post-loop check
+# when it is not).
+keep_going_boot() {
+    case " ${KERNEL_CMDLINE:-} " in
+        *" selftest.keep_going=1 "*) return 0 ;;
+    esac
+    return 1
+}
 kernel_is_dead() {
     local file="$1"
     [ -f "$file" ] || return 1
-    grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+    if keep_going_boot; then
+        grep -aEq '^(!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null && return 0
+        # A FATAL that is not a self-test's: any line of the first grep's that
+        # the second does not drop.
+        grep -a '^FATAL:' "$file" 2>/dev/null | grep -avq 'self-test failed'
+    else
+        grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+    fi
 }
 
 # Print the death evidence from a serial log.  Shared by the in-loop early exit
@@ -1866,6 +1908,9 @@ BENCH_TIMEOUT=1200
 NO_BUILD=0
 NO_STAGE=0
 BENCH=0
+# The gate cache (design-decisions 979): 1 unless --no-gate-cache.  Release and
+# bench boots switch it off where the gate phase starts, whatever this says.
+GATE_CACHE_REQ=1
 # Serial-stall wedge detector (opt-in; 0 = disabled).  A genuinely wedged kernel
 # stops emitting serial output, whereas a merely-slow boot keeps printing as it
 # grinds through the self-test suite.  When --stall-secs=N (N>0) is set, the wait
@@ -1996,10 +2041,17 @@ USB_IMAGE=0
 # See the --no-rootfs case in the arg parser.
 NO_ROOTFS=0
 
+# How many CPUs QEMU gives the guest. See the --smp case in the arg parser.
+SMP_CPUS=1
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
+        # --no-gate-cache runs every gate, replaying none from the gate cache
+        # (design-decisions 979).  Release and bench boots do the same without
+        # being asked: they are the full, uncached check.
+        --no-gate-cache) GATE_CACHE_REQ=0 ;;
         # --no-stage implies --no-build: boot exactly the image already in the
         # ESP, touching neither the compiler nor build/esp.  This is what makes a
         # long soak reproducible.  `--no-build` alone is NOT enough: staging runs
@@ -2074,6 +2126,67 @@ for arg in "$@"; do
         # exists to prevent, so record_boot_history() adds one -- the run is
         # excluded from the consecutive-clean streak in both directions.
         --no-rootfs) NO_ROOTFS=1 ;;
+        # --smp=N boots the kernel on N CPUs. Every boot before 2026-10-09 ran on
+        # one -- QEMU's default, since nothing here passed -smp -- so nothing
+        # checked that the kernel works on more, and on two it did not: the
+        # first two-CPU boots found application processors that stopped ticking,
+        # a container's first program running before it was in its container,
+        # and an AP that took CPU 0's identity while it started (known-issues
+        # A-SMP-APS-STOP-TICKING-AND-NO-BOOT-TEST-RUNS-MORE-THAN-ONE-CPU). Its
+        # own flag rather than QEMU_EXTRA="-smp 2", which marks the run an
+        # experiment: a boot on two CPUs is a boot of the tree, with its own
+        # population (boot-history.py's `cpus`). Capped at the kernel's MAX_CPUS.
+        --smp=*)
+            SMP_CPUS="${arg#*=}"
+            case "$SMP_CPUS" in
+                ''|*[!0-9]*) echo "ERROR: --smp takes a number of CPUs, got '$SMP_CPUS'" >&2
+                             exit 1 ;;
+            esac
+            if [ "$SMP_CPUS" -lt 1 ] || [ "$SMP_CPUS" -gt 16 ]; then
+                echo "ERROR: --smp must be 1 to 16 (the kernel's MAX_CPUS), got $SMP_CPUS" >&2
+                exit 1
+            fi
+            ;;
+        # Anything else is refused, for --profile's reason: a flag this loop
+        # does not know used to fall through the `case` and be dropped, so the
+        # run went ahead in its default shape under a name that said otherwise.
+        # `--release` -- natural, and not a flag here -- produced a 54-minute
+        # *debug* boot on 2026-10-09 that its author took for the release boot
+        # the pre-push staleness gate asks for. Refusing costs one re-type; the
+        # silent default cost the whole run, and could as easily have cost a
+        # soak that was not the soak it was labelled.
+        *)
+            echo "ERROR: boot-test.sh does not take '$arg'." >&2
+            echo "       The flags it takes are listed under 'Usage:' at the top of" >&2
+            echo "       scripts/boot-test.sh. For a release build: --profile=release." >&2
+            exit 1
+            ;;
+    esac
+done
+
+# A boot test proves a kernel by running its self-tests. `selftest.skip` turns
+# every one of them off -- it exists for scripts/guest.py's guest, which boots
+# what this script built so that a program can be tried in it -- and a boot that
+# ran none would pass on any kernel, so it is refused here, before the gates
+# and the build, whatever value it is given. `bench.skip` leaves the benchmark
+# task unstarted, which only matters to a --bench run: it would wait for a
+# BENCH_OK that never comes. `read -a` rather than an unquoted expansion, which
+# would glob.
+read -r -a _slate_words <<< "${SLATE_CMDLINE:-}"
+for _word in "${_slate_words[@]}"; do
+    case "$_word" in
+        selftest.skip|selftest.skip=*)
+            echo "ERROR: SLATE_CMDLINE holds '$_word'. selftest.skip, in any form, is" >&2
+            echo "       scripts/guest.py's: a boot test that runs no self-tests proves nothing." >&2
+            exit 1
+            ;;
+        bench.skip|bench.skip=*)
+            if [ "$BENCH" -eq 1 ]; then
+                echo "ERROR: SLATE_CMDLINE holds '$_word', and --bench waits for the" >&2
+                echo "       benchmarks it leaves unrun." >&2
+                exit 1
+            fi
+            ;;
     esac
 done
 
@@ -3075,6 +3188,12 @@ print_bench_results() {
         bench_args+=(--experiment "$BENCH_EXPERIMENT")
     elif [ -n "${QEMU_EXTRA:-}" ]; then
         bench_args+=(--experiment "QEMU_EXTRA=$QEMU_EXTRA (non-default emulator flags)")
+    elif [ "$SMP_CPUS" -gt 1 ]; then
+        # Every benchmark baseline was measured on one CPU, and the history
+        # has no field to tell a two-CPU run's numbers from them. Recorded,
+        # never a baseline, until bench-history.py learns the CPU count as
+        # boot-history.py has.
+        bench_args+=(--experiment "--smp=$SMP_CPUS (benchmark baselines are one-CPU)")
     fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
@@ -3186,6 +3305,7 @@ record_boot_outcome() {
     # whatever HEAD happens to be now; see the BT_HEAD block near the top.
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
                 --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}"
+                --cpus "$SMP_CPUS"
                 --commit "${BT_HEAD:-unknown}" --branch "${BT_BRANCH:-unknown}")
     # Passed only when the file exists, so a --no-boot run (or one that died
     # before QEMU launched) hands the recorder nothing rather than a leftover
@@ -3830,6 +3950,47 @@ CHECKER_TIMING_LOG="$CHECKER_LOGDIR/boot-test-gate-timing.$$.tsv"
 export CHECKER_TIMING_LOG
 : >"$CHECKER_TIMING_LOG" 2>/dev/null || CHECKER_TIMING_LOG=""
 
+# The gate cache (design-decisions 979, C-Q11 idea 2; scripts/gate-cache.py).
+# A Python gate whose every recorded input -- the files and listings it read,
+# the paths it asked about, the variables it read, the git answers it got --
+# is unchanged since it last passed replays that pass instead of running, and
+# says HIT on its last line.  Measured before it existed: 55% of gate time went
+# to gates that never refused, over inputs most changes do not touch
+# (design-decisions 974).
+#
+# Off for release and bench boots, which are the full, uncached check, and
+# with --no-gate-cache.  A random tenth of would-be hits run fresh anyway and
+# are compared (GATE_CACHE_VERIFY_RATE); one that disagrees writes DISABLED to
+# the store, which turns the cache off for every lane until someone reads it.
+GATE_CACHE=0
+_gc_why=""
+if [ "$GATE_CACHE_REQ" = "0" ]; then
+    _gc_why="--no-gate-cache"
+elif [ "$BENCH" -eq 1 ] || [ "$BENCH_PROFILE" = "release" ]; then
+    _gc_why="a release or bench boot runs every gate"
+elif [ ! -f "$PROJECT_ROOT/scripts/gate-cache.py" ]; then
+    _gc_why="scripts/gate-cache.py is missing"
+else
+    GATE_CACHE=1
+fi
+GATE_CACHE_DRIVER="$PROJECT_ROOT/scripts/gate-cache.py"
+GATE_CACHE_LOG="$CHECKER_LOGDIR/boot-test-gate-cache.$$.tsv"
+export GATE_CACHE GATE_CACHE_DRIVER GATE_CACHE_LOG
+if [ "$GATE_CACHE" = "1" ]; then
+    : >"$GATE_CACHE_LOG" 2>/dev/null || GATE_CACHE_LOG=""
+    _gc_common=$(git -C "$PROJECT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -n "$_gc_common" ] && [ -f "$_gc_common/gate-cache/DISABLED" ]; then
+        echo "=== Gate cache: DISABLED -- a verification caught it replaying a wrong verdict ==="
+        sed 's/^/    /' "$_gc_common/gate-cache/DISABLED"
+        echo "    Every gate runs until someone finds the cause and deletes"
+        echo "    $_gc_common/gate-cache/DISABLED."
+    else
+        echo "=== Gate cache: on (a fresh run for ${GATE_CACHE_VERIFY_RATE:-0.1} of would-be hits; --no-gate-cache runs every gate) ==="
+    fi
+else
+    echo "=== Gate cache: off ($_gc_why) ==="
+fi
+
 # A landed request is stamped, not deleted (roadmap.md rule 2, §315).
 #
 # This runs FIRST, ahead of every other gate, because it is the only one here
@@ -3887,6 +4048,53 @@ check_requests_not_deleted() {
 }
 
 check_requests_not_deleted
+
+# Every tracked file has exactly one owner (design-decisions §973, the
+# operator's answer to A-Q11).  Until 2026-09-27 which-lane.py gave about a
+# thousand files to nobody -- scripts/, requests/, the root crates, the files at
+# the top of the tree -- and two lanes once edited one of them, the push hook,
+# on the same night, each believing it was theirs.  The table now answers every
+# path with a lane, the operator, or a shared-document rule; this refuses a
+# file it cannot answer, a table line naming nothing tracked, and a script
+# owned twice, so a new file gets its owner in the commit that creates it.
+#
+# The self-test runs first and a failure disqualifies the verdict: every lane's
+# write scope rests on these answers, so a table that misreads a path is worse
+# than no gate.
+check_every_file_owned() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== file-ownership check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the ownership table against its own cases ==="
+    if ! run_checker which-lane-selftest "$py" "$PROJECT_ROOT/scripts/which-lane.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  which-lane.py failed its own self-test, so" >&2
+        echo "its answer to \"whose file is this?\" -- which every lane's write scope" >&2
+        echo "rests on -- is not trustworthy until it passes." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every tracked file has an owner ==="
+    if run_checker which-lane-check-all "$py" "$PROJECT_ROOT/scripts/which-lane.py" --check-all; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Every tracked file has exactly one owner" >&2
+    echo "(design-decisions §973); the lines above name what has none, what the" >&2
+    echo "table lists that no longer exists, or what it lists twice.  How to give" >&2
+    echo "a new file its owner is printed with them." >&2
+    exit 1
+}
+
+check_every_file_owned
 
 # A file declared `text eol=lf` that holds CRLF on disk, which no git command
 # you would think to run will tell you about.
@@ -4172,6 +4380,50 @@ check_text_mode_writes() {
 }
 
 check_text_mode_writes
+
+# Its companion, lane C's (requests/c-a-wire-check-destructive-writes-into-
+# the-boot-test.md): a truncating write under scripts/ -- `open(p, "w")`,
+# `Path.write_text(...)` -- aimed at a file the tree already has empties the
+# file before the call's arguments are checked, so a mistyped `newline=`
+# destroys it and then raises. That is how scripts/hooks/pre-push was emptied
+# on 2026-09-17. The push hook runs it for pushes that touch scripts/; this
+# catches what reached a branch without being pushed.
+check_destructive_writes() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== destructive-write check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the destructive-write gate against its own cases ==="
+    if ! run_checker destructive-writes-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-destructive-writes.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The destructive-write gate fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that no script truncates a file the tree already has ==="
+    if run_checker destructive-writes "$py" \
+            "$PROJECT_ROOT/scripts/check-destructive-writes.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A script above opens a file the tree already" >&2
+    echo "has for a truncating write, which empties it before the call's arguments" >&2
+    echo "are checked -- how scripts/hooks/pre-push was emptied on 2026-09-17." >&2
+    echo "Write it with safewrite.write_text, which writes beside the target and" >&2
+    echo "renames over it." >&2
+    exit 1
+}
+
+check_destructive_writes
 
 # `check_libc_shape` began, from the day it was wired until 2026-09-04, with
 # `py="$(find_python)" || return 0`.  `find_python` is defined nowhere -- not
@@ -4841,6 +5093,19 @@ check_vfs_lock_order() {
         return 0
     fi
 
+    # Its own cases first.  It once passed a tree with an AB/BA inversion in it:
+    # vfs.rs was exempt wholesale, so `LOCK_TABLE.lock()` held across
+    # `Self::file_identity_resolved` (which locks a mounted filesystem) went
+    # unseen until lockdep caught it at run time.  A checker that has stopped
+    # recognising that shape reports a clean tree, which reads exactly like one.
+    if ! run_checker check-vfs-under-lock-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-vfs-under-lock.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-vfs-under-lock.py fails its own" >&2
+        echo "cases, so its verdict on this tree means nothing either way." >&2
+        exit 1
+    fi
+
     echo "=== Checking for module locks held across a call into the VFS ==="
     if run_checker check-vfs-under-lock "$py" "$PROJECT_ROOT/scripts/check-vfs-under-lock.py"; then
         return 0
@@ -4885,6 +5150,14 @@ check_user_access_sites() {
     else
         echo "=== User-access-site check: skipped (no python) ===" >&2
         return 0
+    fi
+
+    if ! run_checker check-user-access-sites-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-user-access-sites.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-user-access-sites.py fails its" >&2
+        echo "own cases, so its verdict on the tree means nothing." >&2
+        return 1
     fi
 
     echo "=== Checking kernel writes to user memory ==="
@@ -5320,6 +5593,14 @@ check_usage_status() {
         return 0
     fi
 
+    if ! run_checker check-usage-status-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-status.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-usage-status.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
     echo "=== Checking that usage messages report failure ==="
     if run_checker check-usage-status "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
         return 0
@@ -5362,6 +5643,14 @@ check_query_status() {
     else
         echo "=== query-status check: skipped (no python) ===" >&2
         return 0
+    fi
+
+    if ! run_checker check-query-status-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-query-status.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-query-status.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
     fi
 
     echo "=== Checking that answering a query reports success ==="
@@ -5991,6 +6280,85 @@ check_libc_shape() {
 
 check_libc_shape
 
+# Lane D's three C-library gates (requests/d-a-run-check-libc-declared-in-
+# the-boot-test.md), beside check-libc-shape, so that a push that takes a
+# function away cannot pass:
+#   check-libc-declared    every function musl's headers declare is defined
+#                          by libc.a, and every public name it defines is
+#                          declared by a header;
+#   check-libc-prototypes  each of them takes and returns what its declaration
+#                          says, by the x86-64 calling convention;
+#   check-libc-overlay     posix/include, the header overlay C is built with,
+#                          declares what glibc 2.39's headers declare, where
+#                          they declare it.
+# Each needs zig to preprocess the headers and says so with exit 3, which
+# run_checker files as a skip. check-libc-declared also grades the archive a
+# host may not have built -- its exit 2 -- so that one call may skip on it, as
+# check-libc-shape's does; the other two read sources only, and a 2 from them
+# is a failure.
+check_libc_declarations() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== C library declarations: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the C-library declaration gates against their own cases ==="
+    if ! run_checker check-libc-declared-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-declared.py" --self-test \
+        || ! run_checker check-libc-prototypes-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-prototypes.py" --self-test \
+        || ! run_checker check-libc-overlay-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-overlay.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A C-library gate above fails its own" >&2
+        echo "cases, so its verdict on the C library means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that libc.a defines what the headers declare, and declares what it defines ==="
+    if ! run_checker --may-skip check-libc-declared "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-declared.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A function the headers declare is missing" >&2
+        echo "from libc.a, or libc.a exports a name no header declares, or a" >&2
+        echo "baseline entry is now defined and its exemption is stale.  A C" >&2
+        echo "program calling a missing one compiles and then fails to link." >&2
+        exit 1
+    fi
+    if [ -n "$RUN_CHECKER_SKIPPED" ]; then
+        echo "=== libc.a declarations: skipped (${RUN_CHECKER_SKIP_REASON:-no reason given}) ==="
+    fi
+
+    echo "=== Checking that each declared function takes and returns what its declaration says ==="
+    if ! run_checker check-libc-prototypes "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-prototypes.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A C-library function above takes or" >&2
+        echo "returns other than its header declares -- a four-byte timer_t" >&2
+        echo "against the header's eight is the kind of thing this finds.  A C" >&2
+        echo "caller passes and reads by the declaration, so it gets garbage." >&2
+        exit 1
+    fi
+
+    echo "=== Checking posix/include against glibc's headers ==="
+    if ! run_checker check-libc-overlay "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-overlay.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  posix/include, the header overlay C is" >&2
+        echo "compiled with, declares something other than glibc 2.39 does, or" >&2
+        echo "where it does not, or a header no longer compiles under one of the" >&2
+        echo "feature-macro settings." >&2
+        exit 1
+    fi
+}
+
+check_libc_declarations
+
 # A diagnostic that names the wrong command is caught by nothing else.
 #
 # The operand helpers are handed their command's name as a bare string literal:
@@ -6262,6 +6630,24 @@ check_variant_lists() {
         echo "scripts it describes, so searching it would answer about a tree" >&2
         echo "that no longer exists.  Regenerate:" >&2
         echo "    python scripts/gen-script-index.py" >&2
+        return 1
+    fi
+
+    # programs.md: every program the workspace builds, recorded (design-
+    # decisions §1053; requests/b-a-a-gate-for-the-program-catalogue.md).
+    echo "=== Checking that programs.md lists every program the workspace builds ==="
+    if ! run_checker program-catalogue-selftest "$py" "$PROJECT_ROOT/scripts/check-program-catalogue.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  program-catalogue.py no longer agrees" >&2
+        echo "with its own cases." >&2
+        return 1
+    fi
+    if ! run_checker program-catalogue "$py" "$PROJECT_ROOT/scripts/check-program-catalogue.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  programs.md does not list what the" >&2
+        echo "workspace builds: a program was added, removed or re-described" >&2
+        echo "without the list.  Regenerate it, and commit it with the program:" >&2
+        echo "    python scripts/program-catalogue.py" >&2
         return 1
     fi
 
@@ -7397,10 +7783,25 @@ check_python_suites() {
         # evidence available afterwards was how far the alphabet got. One
         # number per suite turns that into an attribution.
         suite_start=$(date +%s)
-        out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        # Through the gate cache when it is on (design-decisions 979): a suite
+        # whose inputs are all unchanged replays its last passing run.  The
+        # cache's own note is kept out of the one-line summary below -- that
+        # line is the suite's own last line, which is what says what it proved
+        # -- and is shown as a tag instead, so a replayed suite never reads as
+        # one that ran.
+        if [ "${GATE_CACHE:-0}" = "1" ]; then
+            out="$(PYTHONIOENCODING=:replace "$py" "$GATE_CACHE_DRIVER" --label "$(basename "$f")" -- "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        else
+            out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        fi
         suite_secs=$(( $(date +%s) - suite_start ))
+        # `|| true` on both: under `set -euo pipefail` a grep that matches
+        # nothing -- every suite, when the cache is off -- would end the boot.
+        suite_cache=$(printf '%s\n' "$out" | grep '^gate-cache: ' | tail -1 | awk '{print $2}' || true)
+        out=$(printf '%s\n' "$out" | grep -v '^gate-cache: ' || true)
+        [ -n "$suite_cache" ] && suite_cache="  [gate cache: $suite_cache]"
         if [ "$rc" -eq 0 ]; then
-            printf '    %-32s %5ss  %s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)"
+            printf '    %-32s %5ss  %s%s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)" "$suite_cache"
             # A passing suite is reported by its LAST LINE ONLY, so a suite that
             # drops a group and still ends with "all N passed" reports a skip
             # that nothing above this line can see.  That is not hypothetical:
@@ -8191,7 +8592,17 @@ check_kernel_docs() {
     # links qualified, 11 TaskState variants, and 9 smaller defects. Lowered
     # because a ratchet nobody lowers is just a ceiling, and 22 links of
     # slack is 22 new broken links that could land without the gate moving.
-    local ceiling=274
+    #
+    # 274 -> 260 on 2026-09-26: the eleven dead links lane B's
+    # check-doc-links.py found in the kernel, plus proc/elf.rs's link to
+    # ExceptionContext, which is in scope only in proc/exception.rs.
+    #
+    # 260 -> 250 on 2026-10-08: lane A's debug boot 14 rose to 261, and the
+    # ten links on lines added since main went with the one -- quoted serial
+    # text read as links (`[apic] WARNING`), shell usage brackets
+    # (`namespace [list]`), and paths out of scope (DevNum::NONE,
+    # task::DEFAULT_PRIORITY, page_table::translate, a private fn).
+    local ceiling=250
     local log start rc unresolved tags secs
 
     echo "=== Checking the kernel's intra-doc links (nothing else runs rustdoc) ==="
@@ -8270,6 +8681,24 @@ echo "=== Gates OK (${GATES_SECONDS}s) ==="
 # `run_checker`), so a small top-N over a large remainder means the expensive
 # work is somewhere this instrument cannot see, and that is worth knowing
 # immediately rather than concluding after optimising the wrong thing.
+if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_LOG:-}" ] && [ -s "$GATE_CACHE_LOG" ]; then
+    # One line per outcome, with the seconds it took, so a boot says both how
+    # much the cache saved and how much of the phase it could not touch.
+    echo "=== Gate cache: $(awk -F'\t' '
+        { n[$2]++; s[$2] += $3 }
+        END {
+            out = ""
+            for (k in n) out = out sprintf("%s%d %s (%.0fs)", (out == "" ? "" : ", "), n[k], tolower(k), s[k])
+            print out
+        }' "$GATE_CACHE_LOG") ==="
+    if grep -q "VERIFY-FAILED" "$GATE_CACHE_LOG"; then
+        # Named here, because the note itself ("VERIFY FAILED for ...") is the
+        # gate's stderr, which a gate that passed keeps in its own log rather
+        # than on this console -- "see above" pointed at nothing (rq43).
+        _vf_gates=$(awk -F'\t' '$2 == "VERIFY-FAILED" { print $1 }' "$GATE_CACHE_LOG" | sort -u | tr '\n' ' ')
+        echo "=== Gate cache: a verification FAILED this run (${_vf_gates% }) -- the cache is now off; why is in that gate's log under $CHECKER_LOGDIR and in the store's DISABLED file ==="
+    fi
+fi
 if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -s "$CHECKER_TIMING_LOG" ]; then
     _gt_n=$(wc -l <"$CHECKER_TIMING_LOG" | tr -d ' ')
     _gt_sum=$(awk -F'\t' '{s += $2} END {print s + 0}' "$CHECKER_TIMING_LOG")
@@ -8488,10 +8917,14 @@ if [ "$NO_STAGE" -eq 0 ] && [ "$STAGED_KERNEL" -ot "$KERNEL_BIN" ]; then
     exit 1
 fi
 
-cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
-
-# Kernel cmdline injection (a Limine `cmdline:` line on the single boot entry;
-# indented so it associates with that entry).
+# Kernel cmdline injection: a Limine `cmdline:` line in the *first* boot entry
+# -- the one Limine starts when its timeout runs out -- placed on the line after
+# that entry's `kernel_path:` and indented so it belongs to the entry. This
+# appended the line to the end of the file while the file had one entry; since
+# limine.conf gained a second (the recovery entry), the end of the file is the
+# recovery entry, so appending would leave the entry actually booted without
+# the deadline below. The first entry may not carry a `cmdline:` of its own:
+# Limine would see two, and which one wins is not something to depend on.
 #
 # Always passed: `sched.boot_deadline_ms`, this harness's own boot timeout. The
 # kernel's boot-window liveness watchdog derives its wall-clock deadline from it
@@ -8506,11 +8939,45 @@ cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
 # (parsed by fs::kernparam) — e.g. to arm the B-KNULLJUMP corruption hunt under
 # the soak harness:
 #     SLATE_CMDLINE="mm.corruption_hunt=1" ./scripts/boot-test.sh
+# or to have one failing boot list every failing self-test rather than stop at
+# the first (selftest::keep_going; a boot that passes with it is an ordinary
+# pass, since nothing changes until something fails):
+#     SLATE_CMDLINE="selftest.keep_going=1" ./scripts/boot-test.sh
 KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
 if [ -n "${SLATE_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"
 fi
-printf '    cmdline: %s\n' "$KERNEL_CMDLINE" >> "$ESP_DIR/limine.conf"
+# ENVIRON rather than `awk -v`, which would read backslash escapes in an
+# SLATE_CMDLINE value as escapes.
+limine_rc=0
+KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" awk '
+    substr($0, 1, 1) == "/" { entry++ }
+    entry == 1 && $1 == "cmdline:" { clash = 1 }
+    { print }
+    entry == 1 && !done && $1 == "kernel_path:" {
+        print ENVIRON["KERNEL_CMDLINE_LINE"]
+        done = 1
+    }
+    END { exit clash ? 3 : (done ? 0 : 2) }
+' "$PROJECT_ROOT/limine.conf" > "$ESP_DIR/limine.conf" || limine_rc=$?
+case "$limine_rc" in
+    0) ;;
+    2)
+        echo "ERROR: limine.conf's first entry has no kernel_path: line to put" >&2
+        echo "       the kernel command line after." >&2
+        exit 1
+        ;;
+    3)
+        echo "ERROR: limine.conf's first entry has a cmdline: of its own, and" >&2
+        echo "       this harness would give it a second. Put its words in" >&2
+        echo "       SLATE_CMDLINE, or merge them into KERNEL_CMDLINE here." >&2
+        exit 1
+        ;;
+    *)
+        echo "ERROR: could not write $ESP_DIR/limine.conf (awk exit $limine_rc)." >&2
+        exit 1
+        ;;
+esac
 echo "=== Kernel cmdline: $KERNEL_CMDLINE ==="
 
 # Step 2b: Build the real USB image, if asked for.
@@ -8623,6 +9090,29 @@ if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
 fi
 
+# The virtio console's self-test port (`virtio::console::self_test`,
+# design-decisions 1534). Behind it, a UDP chardev that sends to its own
+# receiving address: what the guest writes to the port comes straight back in
+# on it, so the guest checks both directions itself, and nothing on this side
+# has to feed it or read it. (Not a file: QEMU on Windows takes no input file
+# for a file chardev, and one that reaches the end of its input closes the
+# port's host end.) The port number is one the OS hands out as free, so it is
+# outside the ranges Windows reserves; between this probe and QEMU binding it,
+# another process could take it, and QEMU would then refuse to start, loudly.
+#
+# The device costs four of the 16 queues the virtio descriptor pool holds for
+# every device together (`ada::MAX_QUEUES`): two for its control channel and
+# two for the port. With the two disks, the NIC, the GPU and the sound card,
+# this boot uses 14.
+VCON_PORT="$(python -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+# SC2054: the commas are QEMU's property separators within one argument.
+# shellcheck disable=SC2054
+VCON_ARGS=(
+    -device virtio-serial-pci,max_ports=2
+    -chardev "udp,id=vcon0,host=127.0.0.1,port=$VCON_PORT,localaddr=127.0.0.1,localport=$VCON_PORT"
+    -device virtserialport,chardev=vcon0,name=org.slateos.selftest.0
+)
+
 # CPU model.  QEMU's default (`qemu64`) advertises no SMEP, SMAP or UMIP, so
 # without this the kernel's supervisor-mode protections are silently inert under
 # test: `smep_smap::init()` logs "not supported by CPU", never touches CR4, and
@@ -8642,6 +9132,17 @@ else
     QEMU_CPU_OVERRIDDEN=0
 fi
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
+
+# The CPUs (--smp). More than one runs under multi-threaded TCG -- one host
+# thread per guest CPU, which is what lets two CPUs truly run at once and so
+# what finds the races -- unless QEMU_EXTRA names an accelerator of its own.
+SMP_ARGS=(-smp "$SMP_CPUS")
+if [ "$SMP_CPUS" -gt 1 ]; then
+    case " ${QEMU_EXTRA:-} " in
+        *" -accel "*) : ;;
+        *) SMP_ARGS+=(-accel "tcg,thread=multi") ;;
+    esac
+fi
 
 # Extra QEMU arguments, for diagnosing emulator-side effects without touching
 # the guest.  Word-split on purpose so a caller can pass several:
@@ -9273,7 +9774,7 @@ fi
 
 # Step 4: Boot QEMU
 contention_notice "the moment before QEMU"
-echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
+echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU, cpus: $SMP_CPUS) ==="
 rm -f "$SERIAL_FILE"
 # Removed together with the serial log, and for the identical reason: both are
 # evidence about *this* boot, and a leftover from the previous one is worse
@@ -9429,6 +9930,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
+    "${VCON_ARGS[@]}" \
     "${WATCHDOG_ARGS[@]}" \
     "${MONITOR_ARGS[@]}" \
     -device "$GPU_DEVICE" \
@@ -9450,6 +9952,7 @@ QEMU_START_EPOCH=$(date +%s)
     -no-reboot \
     -m 3072M \
     -cpu "$QEMU_CPU" \
+    "${SMP_ARGS[@]}" \
     "${QEMU_EXTRA_ARGS[@]}" \
     -machine q35 2> "$QEMU_STDERR" &
 QEMU_PID=$!
@@ -9625,7 +10128,34 @@ stall_wedge_message() {
 scan_own_output_throttled() {
     [ $((ELAPSED - OWN_LAST_SCAN)) -ge "$OWN_SCAN_EVERY" ] || return 0
     OWN_LAST_SCAN=$ELAPSED
+    OWN_SCAN_OWED=0
     scan_own_output "$1"
+}
+
+# note_serial_growth FILE -- the wait loop's record of the serial log, each
+# pass: when it last grew at all (STALL_*), and a throttled scan for the
+# boot's own output whenever one is owed -- after any growth, until a scan
+# has read it, whether or not the log grows again.
+#
+# "Whether or not" is the point. The scan used to run only on a pass that saw
+# growth, so a log that grew inside the throttle's interval and then went
+# quiet kept its last lines unread until the timeout path's final scan, which
+# stamped them with that moment: rq39 (2026-10-02) sat 34 minutes on a hung
+# self-test and was reported as "own output grew 0s ago", a budget too small.
+# With the scan owed, the record is never more than OWN_SCAN_EVERY seconds
+# behind the log, as the throttle's own comment promises.
+note_serial_growth() {
+    local cur_size
+    cur_size=$(wc -c < "$1" 2>/dev/null || echo 0)
+    if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
+        STALL_LAST_SIZE=$cur_size
+        STALL_LAST_GROWTH=$ELAPSED
+        OWN_SCAN_OWED=1
+    fi
+    if [ "$OWN_SCAN_OWED" -eq 1 ]; then
+        scan_own_output_throttled "$1"
+    fi
+    return 0
 }
 
 # own_output_stalled FILE -- true when --stall-secs is set and the boot has
@@ -9662,6 +10192,7 @@ OWN_LAST_GROWTH=0
 OWN_LAST_LINE=""
 OWN_LAST_SCAN=-100
 OWN_SCAN_EVERY=10
+OWN_SCAN_OWED=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
@@ -9714,12 +10245,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # slow host that would eventually reach the marker): capture the RIP and
     # exit 2.
     if [ -f "$SERIAL_FILE" ]; then
-        cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
-        if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
-            STALL_LAST_SIZE=$cur_size
-            STALL_LAST_GROWTH=$ELAPSED
-            scan_own_output_throttled "$SERIAL_FILE"
-        fi
+        note_serial_growth "$SERIAL_FILE"
         if own_output_stalled "$SERIAL_FILE"; then
             stall_wedge_message
             if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then

@@ -45,8 +45,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// Sized for the **whole** vector space rather than for the vectors that
 /// looked interesting when this was written.  It was 48, on the reasoning that
 /// 32 exceptions plus 16 device IRQs was everything worth keeping — but the IDT
-/// installs handlers on 33–56 (24 IOAPIC inputs, not 16), and on 251, 252 and
-/// 255 for the two IPIs and the APIC spurious vector.  Every one of those past
+/// installs handlers on 33–56 (24 IOAPIC inputs, not 16), and on 250, 251,
+/// 252 and 255 for the three IPIs and the APIC spurious vector.  Every one of those past
 /// 47 landed outside the array, where `count_vector`'s `.get()` dropped it
 /// silently.  An array that cannot represent a third of the installed handlers
 /// is not a smaller version of this one, it is a wrong one; 2 KiB of `.bss` is
@@ -322,6 +322,7 @@ pub fn vector_name(vector: usize) -> &'static str {
             .unwrap_or("(exception)"),
         32 => "APIC Timer",
         33..=56 => "Device IRQ",
+        250 => "Cross-CPU Barrier IPI",
         251 => "TLB Shootdown IPI",
         252 => "Reschedule IPI",
         255 => "APIC Spurious",
@@ -437,10 +438,69 @@ pub struct InterruptStackFrame {
     pub ss: u64,
 }
 
+/// On an interrupt's or an exception's way back to ring 3, the work Linux's
+/// `exit_to_user_mode_loop` does on every return to user mode: the rseq work
+/// a dispatch left the interrupted thread owing (`crate::rseq`), and a
+/// pending signal -- which until 2026-10-07 was looked for only on a system
+/// call's return, so a program computing in a loop never saw `^C` or a
+/// timer's signal reach its handler, and until 2026-10-08 not on an
+/// exception's.
+///
+/// Round again while the thread was switched out during the signal step (its
+/// new CPU then owes it the rseq work) or the rseq work posted `SIGSEGV`;
+/// every check is made with interrupts off, so nothing found after the last
+/// one is left behind. Returns with interrupts off, for the stub's `iretq`.
+///
+/// Called by [`irq_common_dispatch`] once the interrupt has been handled and
+/// any preemption done, and by [`exception_exit`] once an exception's handler
+/// returns, on the interrupted thread's own kernel stack. A no-op unless the
+/// frame says ring 3.
+fn exit_to_user_mode(frame: *mut InterruptStackFrame) {
+    // SAFETY: `frame` is the stub's saved frame on this kernel stack.
+    let cs = unsafe { (*frame).cs };
+    if cs & 3 != 3 {
+        return;
+    }
+    let mut signals = crate::proc::signal::any_pending();
+    loop {
+        // SAFETY: the frame is ours until the stub's `iretq`, and no other
+        // reference to it is live while this one is.
+        let posted = crate::rseq::exit_to_user(unsafe { &mut (*frame).rip });
+        if !(signals || posted) {
+            return;
+        }
+        signals = false;
+        // SAFETY: every stub pushes the error code and the fifteen registers
+        // directly below the frame (`saved_registers_from_frame`), on this same
+        // stack, and nothing else refers to them until the stub pops them.
+        let gprs = unsafe { &mut *saved_registers_from_frame(frame) };
+        // SAFETY: as above; the frame is ours until the stub's `iretq`.
+        let iret = unsafe { &mut *frame };
+        crate::syscall::handlers::deliver_pending_signal_on_interrupt_exit(gprs, iret);
+        // Interrupts are off again: whether the signal step moved the thread
+        // is settled.
+        if !crate::rseq::pending_here() {
+            return;
+        }
+    }
+}
+
+/// The return-to-user-mode work after an exception's handler: the exception
+/// stubs for every vector a ring-3 thread can raise and resume from call it
+/// (not NMI, the double fault or the machine check, which can arrive in any
+/// context and must not turn interrupts on). Without it, a thread whose page
+/// fault waited for I/O -- or was preempted while being resolved -- went back
+/// into an rseq critical section without its abort, and with a `cpu_id` of
+/// the CPU it had left.
+#[unsafe(no_mangle)]
+extern "C" fn exception_exit(frame: *mut InterruptStackFrame) {
+    exit_to_user_mode(frame);
+}
+
 // ---------------------------------------------------------------------------
 // Per-CPU hardware-IRQ stacks (B-DF1 / open-questions Q7, option A)
 //
-// Hardware IRQs (vectors 32–56, plus the 251/252/255 APIC IPIs) are
+// Hardware IRQs (vectors 32–56, plus the 250/251/252/255 APIC IPIs) are
 // configured with IST index 0, meaning the CPU does NOT switch stacks on
 // entry — the interrupt frame is pushed onto whatever stack the interrupted
 // code was using.  Heavy in-kernel code running on a near-full 64 KiB kernel
@@ -683,6 +743,7 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
 
     match vector {
         32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        250 => charged_to_irq(crate::cpusync::handle_cpu_sync_irq),
         251 => charged_to_irq(|| crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0)),
         252 => charged_to_irq(|| crate::apic::handle_reschedule_irq(frame_ref, 0)),
         255 => charged_to_irq(|| crate::apic::handle_spurious_irq(frame_ref, 0)),
@@ -763,6 +824,7 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
         // (pre-existing behaviour: safe, but without overflow isolation).
         dispatch_vector(frame, vector);
         crate::sched::do_deferred_preempt();
+        exit_to_user_mode(frame);
         return;
     }
 
@@ -789,6 +851,7 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
         run_on_irq_stack(top, frame, vector);
     }
     crate::sched::do_deferred_preempt();
+    exit_to_user_mode(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -845,8 +908,23 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
 // ---------------------------------------------------------------------------
 
 /// Generate an assembly stub for an exception WITHOUT a CPU error code.
+///
+/// With `exit_to_user`, the stub calls [`exception_exit`] after the handler,
+/// for the return-to-user-mode work; without it -- NMI, the machine check
+/// and the catch-all vector -- the handler's return goes straight to `iretq`.
 macro_rules! isr_stub_no_error {
     ($stub:ident, $handler:ident) => {
+        isr_stub_no_error!(@emit $stub, $handler,);
+    };
+    ($stub:ident, $handler:ident, exit_to_user) => {
+        isr_stub_no_error!(
+            @emit $stub,
+            $handler,
+            "lea rdi, [rsp + 128]", // the frame again: the call clobbered RDI
+            "call exception_exit"
+        );
+    };
+    (@emit $stub:ident, $handler:ident, $($exit:literal),*) => {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
@@ -874,6 +952,7 @@ macro_rules! isr_stub_no_error {
             "lea rdi, [rsp + 128]", // 16 pushes × 8 bytes = 128
             "xor esi, esi",         // error code = 0
             concat!("call ", stringify!($handler)),
+            $($exit,)*
             "pop r15",
             "pop r14",
             "pop r13",
@@ -899,8 +978,22 @@ macro_rules! isr_stub_no_error {
 }
 
 /// Generate an assembly stub for an exception WITH a CPU error code.
+///
+/// `exit_to_user` as for [`isr_stub_no_error`]; the double fault goes
+/// without.
 macro_rules! isr_stub_with_error {
     ($stub:ident, $handler:ident) => {
+        isr_stub_with_error!(@emit $stub, $handler,);
+    };
+    ($stub:ident, $handler:ident, exit_to_user) => {
+        isr_stub_with_error!(
+            @emit $stub,
+            $handler,
+            "lea rdi, [rsp + 128]", // the frame again: the call clobbered RDI
+            "call exception_exit"
+        );
+    };
+    (@emit $stub:ident, $handler:ident, $($exit:literal),*) => {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
@@ -928,6 +1021,7 @@ macro_rules! isr_stub_with_error {
             "lea rdi, [rsp + 128]", // frame is at 15 GPRs + error code = 128 bytes
             "mov rsi, [rsp + 120]", // error code is at 15 GPRs × 8 = 120
             concat!("call ", stringify!($handler)),
+            $($exit,)*
             "pop r15",
             "pop r14",
             "pop r13",
@@ -952,25 +1046,32 @@ macro_rules! isr_stub_with_error {
     };
 }
 
-// Generate all exception stubs.
-isr_stub_no_error!(isr_divide_error, handle_divide_error);
-isr_stub_no_error!(isr_debug, handle_debug);
+// Generate all exception stubs. Every vector a ring-3 thread can raise and
+// resume from does the return-to-user-mode work (`exit_to_user`); NMI, the
+// double fault and the machine check -- which can interrupt any context, the
+// first two on their own stacks -- do not.
+isr_stub_no_error!(isr_divide_error, handle_divide_error, exit_to_user);
+isr_stub_no_error!(isr_debug, handle_debug, exit_to_user);
 isr_stub_no_error!(isr_nmi, handle_nmi);
-isr_stub_no_error!(isr_breakpoint, handle_breakpoint);
-isr_stub_no_error!(isr_overflow, handle_overflow);
-isr_stub_no_error!(isr_bound_range, handle_bound_range);
-isr_stub_no_error!(isr_invalid_opcode, handle_invalid_opcode);
-isr_stub_no_error!(isr_device_not_avail, handle_device_not_avail);
+isr_stub_no_error!(isr_breakpoint, handle_breakpoint, exit_to_user);
+isr_stub_no_error!(isr_overflow, handle_overflow, exit_to_user);
+isr_stub_no_error!(isr_bound_range, handle_bound_range, exit_to_user);
+isr_stub_no_error!(isr_invalid_opcode, handle_invalid_opcode, exit_to_user);
+isr_stub_no_error!(isr_device_not_avail, handle_device_not_avail, exit_to_user);
 isr_stub_with_error!(isr_double_fault, handle_double_fault);
-isr_stub_with_error!(isr_invalid_tss, handle_invalid_tss);
-isr_stub_with_error!(isr_seg_not_present, handle_seg_not_present);
-isr_stub_with_error!(isr_stack_segment, handle_stack_segment);
-isr_stub_with_error!(isr_general_protection, handle_general_protection);
-isr_stub_with_error!(isr_page_fault, handle_page_fault);
-isr_stub_no_error!(isr_x87_fp, handle_x87_fp);
-isr_stub_with_error!(isr_alignment_check, handle_alignment_check);
+isr_stub_with_error!(isr_invalid_tss, handle_invalid_tss, exit_to_user);
+isr_stub_with_error!(isr_seg_not_present, handle_seg_not_present, exit_to_user);
+isr_stub_with_error!(isr_stack_segment, handle_stack_segment, exit_to_user);
+isr_stub_with_error!(
+    isr_general_protection,
+    handle_general_protection,
+    exit_to_user
+);
+isr_stub_with_error!(isr_page_fault, handle_page_fault, exit_to_user);
+isr_stub_no_error!(isr_x87_fp, handle_x87_fp, exit_to_user);
+isr_stub_with_error!(isr_alignment_check, handle_alignment_check, exit_to_user);
 isr_stub_no_error!(isr_machine_check, handle_machine_check);
-isr_stub_no_error!(isr_simd_fp, handle_simd_fp);
+isr_stub_no_error!(isr_simd_fp, handle_simd_fp, exit_to_user);
 
 // Default handler for unregistered vectors.
 isr_stub_no_error!(isr_default, handle_default);
@@ -1044,6 +1145,9 @@ macro_rules! irq_stub {
 
 // Timer (vector 32) — driven by the Local APIC timer.
 irq_stub!(isr_timer, 32);
+// Cross-CPU barrier IPI (vector 250) — membarrier's expedited commands
+// (`cpusync`).
+irq_stub!(isr_cpu_sync, 250);
 // TLB shootdown IPI (vector 251) — sent by other CPUs to request TLB flush.
 irq_stub!(isr_tlb_shootdown, 251);
 // Reschedule IPI (vector 252) — sent to wake idle CPUs when work is enqueued.
@@ -1104,23 +1208,28 @@ fn is_userspace_exception(frame: &InterruptStackFrame) -> bool {
 ///   rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15
 /// low address ← RSP
 /// ```
+///
+/// The stubs restore these on the way out, so a handler that changes them
+/// changes what the interrupted code resumes with -- how a signal handler is
+/// entered from an interrupt or a fault.
 #[repr(C)]
-struct SavedRegisters {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rbx: u64,
-    rdx: u64,
-    rcx: u64,
-    rax: u64,
+#[allow(missing_docs)] // The registers' own names say what they are.
+pub struct SavedRegisters {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rax: u64,
 }
 
 /// Get a mutable pointer to the saved registers on the kernel stack.
@@ -1237,10 +1346,24 @@ fn try_dispatch_user_exception(
     // "return address" that the handler's RET will pop.  We use 0
     // (which will fault if the handler tries to return without calling
     // SYS_EXIT or SYS_EXCEPTION_RETURN — this is intentional).
-    #[allow(clippy::arithmetic_side_effects)]
+    // The thread's FPU state, kept above the context for the return to put
+    // back: the handler may use any register, and the faulting code had live
+    // values in all of them. The handler still sees the live state (an SSE
+    // fault's handler may want MXCSR's flags), unlike a signal handler.
+    let fpu_image = crate::sched::fpu::capture_signal_image();
+
     let ctx_size = EXCEPTION_CONTEXT_SIZE as u64;
-    #[allow(clippy::arithmetic_side_effects)]
-    let new_rsp = (rsp - ctx_size - 8) & !0xF; // 16-byte align
+    // Context, the null return slot above it, then the kernel's extension
+    // (`SignalFrameExt`) and the FPU image -- below the faulting function's
+    // 128-byte red zone, which it may be using (Linux's `get_sigframe`).
+    let frame_size = ctx_size
+        .saturating_add(8)
+        .saturating_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64)
+        .saturating_add(fpu_image.len() as u64);
+    let new_rsp = rsp
+        .wrapping_sub(crate::proc::linux_sigframe::RED_ZONE)
+        .wrapping_sub(frame_size)
+        & !0xF; // 16-byte align
 
     let ctx_addr = new_rsp;
 
@@ -1300,6 +1423,24 @@ fn try_dispatch_user_exception(
         return false;
     }
     if crate::mm::user::write_user_value::<u64>(ctx_addr.wrapping_add(ctx_size), 0u64).is_err() {
+        return false;
+    }
+    let ext_addr = ctx_addr.wrapping_add(ctx_size).wrapping_add(8);
+    let ext = crate::proc::signal::SignalFrameExt {
+        magic: crate::proc::signal::SIGNAL_FRAME_EXT_MAGIC,
+        rcx,
+        r11,
+        fpu_len: fpu_image.len() as u64,
+    };
+    let fpu_addr = ext_addr.wrapping_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64);
+    // SAFETY: `fpu_image` is a live kernel buffer of the length passed;
+    // `copy_to_user` validates the destination itself.
+    let fpu_written =
+        unsafe { crate::mm::user::copy_to_user(fpu_image.as_ptr(), fpu_addr, fpu_image.len()) };
+    if fpu_written.is_err()
+        || crate::mm::user::write_user_value::<crate::proc::signal::SignalFrameExt>(ext_addr, ext)
+            .is_err()
+    {
         return false;
     }
 
@@ -1862,6 +2003,10 @@ fn linux_fault_mapping(code: crate::proc::exception::ExceptionCode) -> Option<(u
         | E::GeneralProtectionFault => (SIGSEGV, SI_KERNEL),
         // #PF handled separately with the precise present-bit si_code.
         E::AccessViolation => return None,
+        // A Linux process's `int3` is sent as `do_int3_user` sends it
+        // (`handle_breakpoint`), before any mapping; this is for
+        // completeness.
+        E::Breakpoint => (5, SI_KERNEL), // SIGTRAP
     })
 }
 
@@ -1878,10 +2023,173 @@ fn linux_fault_mapping(code: crate::proc::exception::ExceptionCode) -> Option<(u
 ///
 /// Returns `true` if delivered (the ISR should return and let `IRETQ` run the
 /// handler).  Returns `false` if the process is native (keeps the SEH
-/// trampoline, design-decision #4), has no handler for `sig`, or the user
-/// stack is unusable — in which case the caller proceeds to native SEH
-/// dispatch / terminate (the kernel default for an undelivered fault).
+/// trampoline, design-decision #4), has no handler for `sig`, blocks `sig`,
+/// or no frame can be built for it nor for the `SIGSEGV` sent in its place —
+/// in which case the caller proceeds to native SEH dispatch / terminate (the
+/// kernel default for an undelivered fault).
+///
+/// A fault's signal cannot wait, pending, while the program goes on: going
+/// on would re-run the faulting instruction. So, as Linux's
+/// `force_sig_info_to_task` does, a blocked or ignored one takes its default
+/// action, which for every fault ends the program -- a fault inside a
+/// handler for that same fault ends it rather than nesting the handler. A
+/// frame that cannot be built (the stack is gone; it does not fit the
+/// alternate stack) is answered with `SIGSEGV`, as Linux's `force_sigsegv`
+/// does: delivered here if it has a handler that can run, its default action
+/// -- the end -- otherwise.
+///
+/// A traced thread stops first (`crate::proc::ptrace::fault_stop`), and its
+/// tracer decides what the fault comes to: nothing -- this answers `true` and
+/// the instruction runs again, or the program runs on where the tracer put
+/// it -- or this signal, delivered as it would be untraced.
 fn try_deliver_linux_fault_signal(
+    frame: &InterruptStackFrame,
+    sig: u32,
+    si_code: i32,
+    addr: u64,
+) -> bool {
+    if traced_fault_stop(frame, sig, si_code, addr) == Some(true) {
+        return true;
+    }
+    deliver_linux_fault_signal(frame, sig, si_code, addr)
+}
+
+/// The interrupted user registers of the exception whose stub frame is at
+/// `frame_ptr`: the frame, and the fifteen the stub saved below it.
+///
+/// # Safety
+///
+/// `frame_ptr` is an exception stub's frame on this kernel stack, the
+/// exception taken from user mode, and nothing else refers to it or to the
+/// saved registers while this reads them.
+unsafe fn trap_regs(frame_ptr: *const InterruptStackFrame) -> crate::syscall::linux::LinuxTrapRegs {
+    use core::ptr::read_volatile;
+    // SAFETY: the caller's contract; the saved registers sit 128 bytes below
+    // the frame (the stub layout, `saved_registers_from_frame`).
+    unsafe {
+        let saved = saved_registers_from_frame(frame_ptr);
+        crate::syscall::linux::LinuxTrapRegs {
+            rax: read_volatile(addr_of!((*saved).rax)),
+            rbx: read_volatile(addr_of!((*saved).rbx)),
+            rcx: read_volatile(addr_of!((*saved).rcx)),
+            rdx: read_volatile(addr_of!((*saved).rdx)),
+            rsi: read_volatile(addr_of!((*saved).rsi)),
+            rdi: read_volatile(addr_of!((*saved).rdi)),
+            rbp: read_volatile(addr_of!((*saved).rbp)),
+            r8: read_volatile(addr_of!((*saved).r8)),
+            r9: read_volatile(addr_of!((*saved).r9)),
+            r10: read_volatile(addr_of!((*saved).r10)),
+            r11: read_volatile(addr_of!((*saved).r11)),
+            r12: read_volatile(addr_of!((*saved).r12)),
+            r13: read_volatile(addr_of!((*saved).r13)),
+            r14: read_volatile(addr_of!((*saved).r14)),
+            r15: read_volatile(addr_of!((*saved).r15)),
+            rip: read_volatile(addr_of!((*frame_ptr).rip)),
+            rsp: read_volatile(addr_of!((*frame_ptr).rsp)),
+            rflags: read_volatile(addr_of!((*frame_ptr).rflags)),
+        }
+    }
+}
+
+/// Put `regs` back where [`trap_regs`] read them, for the stub's `iretq`.
+///
+/// # Safety
+///
+/// As for [`trap_regs`], and nothing else writes them meanwhile.
+unsafe fn set_trap_regs(
+    frame_ptr: *mut InterruptStackFrame,
+    regs: &crate::syscall::linux::LinuxTrapRegs,
+) {
+    use core::ptr::write_volatile;
+    // SAFETY: the caller's contract, as in `trap_regs`.
+    unsafe {
+        let saved = saved_registers_from_frame(frame_ptr);
+        write_volatile(addr_of_mut!((*saved).rax), regs.rax);
+        write_volatile(addr_of_mut!((*saved).rbx), regs.rbx);
+        write_volatile(addr_of_mut!((*saved).rcx), regs.rcx);
+        write_volatile(addr_of_mut!((*saved).rdx), regs.rdx);
+        write_volatile(addr_of_mut!((*saved).rsi), regs.rsi);
+        write_volatile(addr_of_mut!((*saved).rdi), regs.rdi);
+        write_volatile(addr_of_mut!((*saved).rbp), regs.rbp);
+        write_volatile(addr_of_mut!((*saved).r8), regs.r8);
+        write_volatile(addr_of_mut!((*saved).r9), regs.r9);
+        write_volatile(addr_of_mut!((*saved).r10), regs.r10);
+        write_volatile(addr_of_mut!((*saved).r11), regs.r11);
+        write_volatile(addr_of_mut!((*saved).r12), regs.r12);
+        write_volatile(addr_of_mut!((*saved).r13), regs.r13);
+        write_volatile(addr_of_mut!((*saved).r14), regs.r14);
+        write_volatile(addr_of_mut!((*saved).r15), regs.r15);
+        write_volatile(addr_of_mut!((*frame_ptr).rip), regs.rip);
+        write_volatile(addr_of_mut!((*frame_ptr).rsp), regs.rsp);
+        write_volatile(addr_of_mut!((*frame_ptr).rflags), regs.rflags);
+    }
+}
+
+/// A traced thread's stop for an exception it took from user mode that
+/// raises `sig` (`si_code`, at `addr`), from the exception handler
+/// ([`crate::proc::ptrace::fault_stop`]). `None`: not traced -- deliver as
+/// untraced. `Some(true)`: decided, nothing more to do here -- the tracer
+/// gave no signal, or put another in this one's place, queued for the
+/// thread. `Some(false)`: the tracer let this signal go on -- deliver it as
+/// untraced.
+///
+/// The stop parks the thread, so interrupts go on first, as a page fault's
+/// resolution turns them on: the exception came from user mode, so nothing
+/// it interrupted holds a kernel lock (the exit turns them off again).
+fn traced_fault_stop(
+    frame: &InterruptStackFrame,
+    sig: u32,
+    si_code: i32,
+    addr: u64,
+) -> Option<bool> {
+    let task_id = sched::current_task_id();
+    if !is_userspace_exception(frame) || !crate::proc::ptrace::is_traced(task_id) {
+        return None;
+    }
+    let pid = crate::proc::thread::owner_process(task_id).filter(|&p| p != 0)?;
+    let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
+    // SAFETY: an exception stub's frame from user mode, on this kernel stack;
+    // the handler holds no other reference to it while this runs.
+    let mut regs = unsafe { trap_regs(frame_ptr) };
+    // SAFETY: from user mode, as above: no kernel lock is held by what the
+    // exception interrupted.
+    unsafe {
+        cpu::sti();
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::fault(sig as i32, si_code, addr);
+    let out = crate::proc::ptrace::fault_stop(pid, task_id, sig, siginfo, &mut regs)?;
+    if out.regs_changed {
+        // SAFETY: as for `trap_regs` above.
+        unsafe { set_trap_regs(frame_ptr, &regs) };
+    }
+    Some(out.sig == 0)
+}
+
+/// A trap a user program took -- `int3`, or a single step -- that raises
+/// `sig` (`si_code`, at `addr`): its tracer's to stop for first; then a Linux
+/// program's, delivered to its handler, or -- with none that can take it --
+/// its end, as Linux's `do_int3_user` and `send_sigtrap` (`force_sig`) end
+/// it. A native program has no such signal and runs on, as it always has.
+fn user_trap(frame: &InterruptStackFrame, sig: u32, si_code: i32, addr: u64) {
+    if traced_fault_stop(frame, sig, si_code, addr) == Some(true) {
+        return;
+    }
+    let task_id = sched::current_task_id();
+    let Some(pid) = crate::proc::thread::owner_process(task_id).filter(|&p| p != 0) else {
+        return;
+    };
+    if crate::proc::pcb::get_abi_mode(pid) != Some(crate::proc::pcb::AbiMode::Linux) {
+        return;
+    }
+    if deliver_linux_fault_signal(frame, sig, si_code, addr) {
+        return;
+    }
+    crate::syscall::handlers::kill_current_for_signal(pid, task_id, sig);
+}
+
+/// [`try_deliver_linux_fault_signal`] without the tracer's stop.
+fn deliver_linux_fault_signal(
     frame: &InterruptStackFrame,
     sig: u32,
     si_code: i32,
@@ -1890,6 +2198,7 @@ fn try_deliver_linux_fault_signal(
     use crate::proc::thread;
     use crate::syscall::linux::{self, LinuxDisposition, LinuxTrapRegs};
     use core::ptr::{read_volatile, write_volatile};
+    const SIGSEGV: u32 = 11;
 
     let task_id = sched::current_task_id();
     let pid = match thread::owner_process(task_id) {
@@ -1904,10 +2213,13 @@ fn try_deliver_linux_fault_signal(
     }
 
     // Resolve the disposition; only a real handler diverts the fault. SIG_DFL /
-    // SIG_IGN fall through to the kernel default (terminate for a fault).
+    // SIG_IGN fall through to the kernel default (terminate for a fault), and
+    // so does a handler the thread blocks (see above).
     let act = match linux::linux_disposition(pid, sig) {
-        LinuxDisposition::Handler(act) => act,
-        LinuxDisposition::Ignore | LinuxDisposition::Default => return false,
+        LinuxDisposition::Handler(act) if !crate::proc::signal::is_blocked(pid, sig) => act,
+        LinuxDisposition::Handler(_) | LinuxDisposition::Ignore | LinuxDisposition::Default => {
+            return false;
+        }
     };
 
     // Recover raw pointers to the interrupt frame + saved GPRs without forming
@@ -1919,7 +2231,7 @@ fn try_deliver_linux_fault_signal(
 
     // SAFETY: both pointers are valid and exclusively ours (interrupts disabled
     // on this CPU); volatile reads pick up the trapped register state.
-    let regs = unsafe {
+    let mut regs = unsafe {
         LinuxTrapRegs {
             rax: read_volatile(addr_of!((*saved_ptr).rax)),
             rbx: read_volatile(addr_of!((*saved_ptr).rbx)),
@@ -1942,6 +2254,23 @@ fn try_deliver_linux_fault_signal(
         }
     };
 
+    // An rseq critical section the fault is in is aborted first, so the frame
+    // records -- and the handler returns to -- its abort address: Linux's
+    // `rseq_signal_deliver`, from `setup_rt_frame`. The trapped state gets it
+    // too, so a SIGSEGV sent below in this signal's place records it as well.
+    // A malformed rseq area is Linux's `force_sigsegv(sig)` there: SIGSEGV is
+    // posted and this signal's frame built regardless, and the exit that
+    // follows (`exception_exit`) delivers the SIGSEGV, whose own delivery
+    // fails the same way and ends the program -- now, when `sig` is SIGSEGV.
+    let rseq_ok = crate::rseq::on_signal_delivery(&mut regs.rip);
+    // SAFETY: as for the writes below: `frame_ptr` is valid and exclusive.
+    unsafe {
+        write_volatile(addr_of_mut!((*frame_ptr).rip), regs.rip);
+    }
+    if !rseq_ok && !linux::force_sigsegv(pid, sig) {
+        return false;
+    }
+
     let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::fault(
         #[allow(clippy::cast_possible_wrap)]
         {
@@ -1953,7 +2282,18 @@ fn try_deliver_linux_fault_signal(
 
     let entry = match linux::emit_linux_rt_frame(pid, sig, &act, &regs, siginfo) {
         Some(e) => e,
-        None => return false, // user stack unusable — caller terminates.
+        // No frame for `sig`: SIGSEGV in its place (`force_sigsegv`), at no
+        // address and from the kernel, as Linux's `force_sig` sends it -- or,
+        // when SIGSEGV's own frame failed, the end.
+        None if sig != SIGSEGV => {
+            return try_deliver_linux_fault_signal(
+                frame,
+                SIGSEGV,
+                crate::proc::signal::si_code::SI_KERNEL,
+                0,
+            );
+        }
+        None => return false,
     };
 
     // Redirect IRETQ into the handler.  Volatile writes guarantee the stores
@@ -2014,8 +2354,77 @@ extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
 /// Handle #DB (Debug, vector 1).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
+    use crate::sched::debugreg::{self, dr6};
+    const SIGTRAP: u32 = 5;
+    const RFLAGS_TF: u64 = 1 << 8;
+    const RFLAGS_RF: u64 = 1 << 16;
     count_vector(1);
-    serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
+    // DR6 says why; the CPU never clears it, so it is cleared here, as
+    // Linux's `exc_debug` does. Positive polarity: 0 is "no cause".
+    let dr6 = debugreg::read_clear_dr6();
+    let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
+
+    if !is_userspace_exception(frame) {
+        if dr6 & !dr6::TRAP_BITS == 0 && dr6 != 0 {
+            // A data breakpoint the current thread's debugger set on a user
+            // address, hit by the kernel's own access for the thread -- a
+            // `read(2)` into a watched buffer: dismissed (`sched::debugreg`).
+            // Nothing that takes a lock: the access may be made under any.
+            return;
+        }
+        // The kernel sets no trap flag and runs no `int1`. Said lock-free --
+        // what this interrupted may hold the console's lock -- and a trap
+        // flag cleared, or the next instruction traps again.
+        if dr6 & dr6::STEP != 0 {
+            // SAFETY: this exception's own frame on this stack; the stub's
+            // `iretq` reads RFLAGS from it, and nothing else refers to it.
+            unsafe {
+                let rflags = core::ptr::read_volatile(addr_of!((*frame_ptr).rflags));
+                core::ptr::write_volatile(addr_of_mut!((*frame_ptr).rflags), rflags & !RFLAGS_TF);
+            }
+        }
+        emergency_println!(
+            "EXCEPTION: Debug (#DB) in kernel mode at {:#x}, DR6 {:#x}",
+            frame.rip,
+            dr6
+        );
+        return;
+    }
+
+    // From user mode: a single step, a hardware breakpoint or watchpoint, or
+    // `int1` (`sched::debugreg::classify_user_exception`, against the
+    // breakpoints this CPU was given for the thread).
+    let what =
+        debugreg::classify_user_exception(dr6, debugreg::loaded_dr7(sched::current_cpu_id()));
+    if what.resume_flag {
+        // An execution breakpoint is a fault, taken before its instruction:
+        // the resume flag lets the instruction run when the thread goes back
+        // to it, rather than fire again (Linux's `hw_breakpoint_handler`).
+        // SAFETY: as above -- this exception's own frame.
+        unsafe {
+            let rflags = core::ptr::read_volatile(addr_of!((*frame_ptr).rflags));
+            core::ptr::write_volatile(addr_of_mut!((*frame_ptr).rflags), rflags | RFLAGS_RF);
+        }
+    }
+    let task_id = sched::current_task_id();
+    if crate::proc::ptrace::is_traced(task_id) {
+        // What this was is the thread's DR6 now, which its tracer reads at
+        // the stop -- GDB does at every single step's, to see whether a
+        // watchpoint fired. With interrupts on, as the stop itself runs.
+        // SAFETY: from user mode, so no kernel lock is held by what this
+        // interrupted.
+        unsafe {
+            cpu::sti();
+        }
+        // A thread that has gone has no registers to record.
+        let _ = sched::update_task_debug_regs(task_id, |r| r.record_dr6(what.dr6));
+    }
+    if let Some(si_code) = what.si_code {
+        // SIGTRAP at the instruction the thread goes back to (Linux's
+        // `send_sigtrap`): stopped for by its tracer, delivered to a Linux
+        // program.
+        user_trap(frame, SIGTRAP, si_code, frame.rip);
+    }
 }
 
 /// Handle NMI (Non-Maskable Interrupt, vector 2).
@@ -2032,6 +2441,9 @@ extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
     count_vector(2);
+    // A restart without the firmware stops every other CPU with an NMI: park
+    // here, for good, if that is what this one is (`kexec::stop_other_cpus`).
+    crate::kexec::park_if_restarting();
     // Read System Control Port B (port 0x61) to identify NMI source.
     // SAFETY: port 0x61 is always readable on PC-compatible hardware.
     let port_b: u8 = unsafe { crate::port::inb(0x61) };
@@ -2523,6 +2935,34 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     let rflags = cpu::read_rflags();
     BP_ENTRY_DF.store(rflags & RFLAGS_DF != 0, Ordering::Relaxed);
     BP_ENTRY_AC.store(rflags & RFLAGS_AC != 0, Ordering::Relaxed);
+    // A user program's `int3`: SIGTRAP from the kernel, `rip` already past
+    // the instruction, as Linux's `do_int3_user` sends it -- a debugger's
+    // breakpoint (`user_trap`). A native program no debugger traces gets a
+    // `Breakpoint` exception -- its handler's, or the end of the program,
+    // as any other fault it does not handle. Until the gate let ring 3 in
+    // (2026-10-08), a user `int3` was a #GP and ended the same way; for the
+    // few hours after, a native one was logged here and ran on, and the
+    // native probes that pad with `int3` after a call that must not return
+    // ran past their code when it did.
+    if is_userspace_exception(frame) {
+        let task = sched::current_task_id();
+        if crate::proc::ptrace::is_traced(task)
+            || crate::proc::thread::owner_process(task).and_then(crate::proc::pcb::get_abi_mode)
+                == Some(crate::proc::pcb::AbiMode::Linux)
+        {
+            const SIGTRAP: u32 = 5;
+            user_trap(frame, SIGTRAP, crate::proc::signal::si_code::SI_KERNEL, 0);
+            return;
+        }
+        log_exception(3, frame.rip, 0);
+        dispatch_or_kill_userspace(
+            "Breakpoint (#BP)",
+            frame,
+            crate::proc::exception::ExceptionCode::Breakpoint,
+            0,
+        );
+        return;
+    }
     // Say whether this breakpoint was asked for. The serial log is the only
     // artefact a failed boot leaves behind, and the host-side triage tools
     // (`scripts/boot-history.py`) decide "did the kernel die?" by reading the
@@ -3344,12 +3784,13 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
 /// only.  A `#TS` is therefore a kernel bug by construction, and halting is the
 /// correct response rather than a missing branch.
 ///
-/// Giving it a ring-3 path would also mean appending a twelfth value to
+/// Giving it a ring-3 path would also mean appending a value to
 /// `proc::exception::ExceptionCode`, which is a contiguous *userspace ABI*
-/// (`DivideError = 1` … `SimdFloatingPoint = 11`) with no `InvalidTss` variant.
+/// (`DivideError = 1` … `Breakpoint = 12`) with no `InvalidTss` variant.
 /// Appending is safe in that it renumbers nothing, but it is an ABI change made
 /// on the strength of symmetry alone, for a case the hardware cannot produce.
-/// **Do not add `ExceptionCode::InvalidTss`.**
+/// (`Breakpoint` was appended for one it can: a ring-3 `int3`, once the
+/// vector's gate let ring 3 in.) **Do not add `ExceptionCode::InvalidTss`.**
 ///
 /// The corollary is that this vector needs the fatal-fault hardening *more*
 /// unambiguously than its siblings, not less: every `#TS` is by the above a
@@ -3671,18 +4112,19 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
             // SAFETY: pml4 is the current process's page table (from CR3).
             if unsafe { mm::swap::is_swapped(pml4, virt) } {
-                // The page is swapped out — need to restore it.
-                // Determine the flags from the VMA, or use a safe default.
-                let flags = mm::page_table::PageFlags::PRESENT
-                    | mm::page_table::PageFlags::WRITABLE
-                    | mm::page_table::PageFlags::USER_ACCESSIBLE
-                    | mm::page_table::PageFlags::NO_EXECUTE;
-
+                // The page is swapped out — need to restore it, each 4 KiB
+                // part with the flags its swap entry kept. (Until 2026-10-03
+                // every part came back writable and non-executable, whatever
+                // it had been; and the swap entry was never found at all.)
                 // SAFETY: pml4 is valid, PTE contains a swap entry.
-                if unsafe { mm::swap::swap_in_page(pml4, virt, flags) }.is_ok() {
+                if let Ok(swapped) = unsafe { mm::swap::swap_in_page(pml4, virt) } {
                     // Re-register the restored page as reclaimable so it
-                    // can be swapped out again if memory pressure returns.
-                    mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                    // can be swapped out again if memory pressure returns
+                    // -- unless another CPU brought it back first, which
+                    // registered it.
+                    if let Some(flags) = swapped {
+                        mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                    }
                     mm::fault::record_swap_in();
                     mm::fault::record_user_resolved();
                     // Major fault: resolution required I/O (swap-in).
@@ -3698,11 +4140,26 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         // regions created by SYS_MMAP with MAP_LAZY).
         let task_id = sched::current_task_id();
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-        if pid != 0 && crate::proc::pcb::try_resolve_fault(pid, cr2, error) {
-            mm::fault::record_user_resolved();
-            // Minor fault: demand-zero / CoW resolved without I/O.
-            sched::account_fault(task_id, false);
-            return; // Demand-paged successfully — retry the instruction.
+        if pid != 0 {
+            // Waiting for the process table (and the address space's
+            // page-table lock) is safe here: this is a fault from user mode,
+            // which runs with interrupts on, and the handler turned them back
+            // on above, so a holder waiting for a TLB shootdown on this CPU
+            // is answered, and this CPU holds no kernel lock. Until
+            // 2026-10-03 a busy table was taken as an unresolvable fault, and
+            // the process was sent SIGSEGV for a page it had every right to.
+            // `Busy` -- the table held by this very task -- cannot happen for
+            // a user-mode fault; it would retry the access.
+            match crate::proc::pcb::resolve_fault(pid, cr2, error, true) {
+                crate::proc::pcb::FaultOutcome::Resolved => {
+                    mm::fault::record_user_resolved();
+                    // Minor fault: demand-zero / CoW resolved without I/O.
+                    sched::account_fault(task_id, false);
+                    return; // Demand-paged successfully — retry the instruction.
+                }
+                crate::proc::pcb::FaultOutcome::Busy => return,
+                crate::proc::pcb::FaultOutcome::Unresolvable => {}
+            }
         }
 
         // Second, try stack growth (stack VMAs are handled separately
@@ -4071,11 +4528,17 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
         }
     };
 
-    // Map the frame with user read/write/no-execute permissions.
-    let flags = PageFlags::PRESENT
+    // Map the frame with user read/write/no-execute permissions -- and
+    // locked, when the page it grows from is (`mlock`): Linux's stack VMA
+    // grows keeping its flags, and this stack has no VMA to keep them.
+    let locked = mm::mlock::stack_growth_locked(pml4_phys, page_addr, USER_STACK_TOP);
+    let mut flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
         | PageFlags::USER_ACCESSIBLE
         | PageFlags::NO_EXECUTE;
+    if locked {
+        flags |= PageFlags::MLOCKED;
+    }
 
     let virt = VirtAddr::new(page_addr);
     // SAFETY: pml4_phys is the current CR3 (valid), phys_frame is
@@ -4084,7 +4547,8 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     match unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) } {
         Ok(()) => {
             // Register the new page as reclaimable so the Clock algorithm
-            // can swap it out under memory pressure.
+            // can swap it out under memory pressure (a locked one it passes
+            // by until it is unlocked).
             mm::swap::register_reclaimable(pml4_phys, virt.as_u64(), flags);
             true
         }
@@ -4257,7 +4721,13 @@ pub unsafe fn init() {
         // exhausted or wedged (hardware IST switches the stack before pushing
         // the frame — a stub-level RSP switch cannot).  See gdt::NMI_STACKS.
         idt.entries[2] = IdtEntry::new(isr_nmi as *const () as u64, cs, 2, 0);
-        idt.entries[3] = IdtEntry::new(isr_breakpoint as *const () as u64, cs, 0, 0);
+        // DPL 3, as Linux's `SYSG(X86_TRAP_BP)`: a program's `int3` is an
+        // instruction it may execute, and its #BP is the SIGTRAP a debugger's
+        // breakpoint gives (`handle_breakpoint`). At DPL 0 a ring-3 `int3`
+        // was a #GP instead -- SIGSEGV, never SIGTRAP -- until 2026-10-08:
+        // the ptrace tier-2 test's thread stopped with SIGSEGV at its
+        // breakpoint (debug boot 13 of lane-a).
+        idt.entries[3] = IdtEntry::new(isr_breakpoint as *const () as u64, cs, 0, 3);
         idt.entries[4] = IdtEntry::new(isr_overflow as *const () as u64, cs, 0, 0);
         idt.entries[5] = IdtEntry::new(isr_bound_range as *const () as u64, cs, 0, 0);
         idt.entries[6] = IdtEntry::new(isr_invalid_opcode as *const () as u64, cs, 0, 0);
@@ -4279,6 +4749,8 @@ pub unsafe fn init() {
         // Hardware IRQ vectors.
         // Vector 32: APIC timer interrupt.
         idt.entries[32] = IdtEntry::new(isr_timer as *const () as u64, cs, 0, 0);
+        // Vector 250: cross-CPU barrier IPI (`cpusync`).
+        idt.entries[250] = IdtEntry::new(isr_cpu_sync as *const () as u64, cs, 0, 0);
         // Vector 251: TLB shootdown IPI.
         idt.entries[251] = IdtEntry::new(isr_tlb_shootdown as *const () as u64, cs, 0, 0);
         // Vector 252: Reschedule IPI (wake idle CPU when work enqueued).

@@ -15,7 +15,6 @@
 //!
 //! Integration:
 //!   → netsettings (interface/zone association)
-//!   → appregistry (app name lookup)
 //!   → notifcenter (block notifications)
 //!   → audit (log blocked connections)
 //! ```

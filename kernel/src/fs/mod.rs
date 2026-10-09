@@ -31,16 +31,13 @@ pub mod acpistat;
 pub mod aiostat;
 pub mod appcompat;
 pub mod appdefaults;
-pub mod applaunch;
 pub mod appnotify;
 pub mod apppermissions;
-pub mod appregistry;
 pub mod appsandbox;
-pub mod appstore;
 pub mod ar;
 pub mod archive;
-pub mod associations;
 pub mod atime;
+pub mod attr_policy;
 pub mod audiodevice;
 pub mod audioeq;
 pub mod audiomux;
@@ -83,7 +80,6 @@ pub mod colorblind;
 pub mod colorpicker;
 pub mod colorscheme;
 pub mod colortemp;
-pub mod columnview;
 pub mod compress;
 pub mod compstat;
 pub mod conformance;
@@ -102,12 +98,12 @@ pub mod credentials;
 pub mod cursorsettings;
 pub mod datausage;
 pub mod dedup;
-pub mod defaultapps;
 pub mod deferred_ops;
 pub mod detailcols;
 pub mod devfreq;
 pub mod devfs;
 pub mod devicemgr;
+pub mod devnum;
 pub mod devpair;
 pub mod dictation;
 pub mod directio;
@@ -118,7 +114,6 @@ pub mod diskhealth;
 pub mod diskio;
 pub mod diskquota;
 pub mod disksmart;
-pub mod diskstat;
 pub mod display;
 pub mod displayarrange;
 pub mod displaycal;
@@ -147,7 +142,6 @@ pub mod fat;
 pub mod fcomment;
 pub mod fcompress;
 pub mod fdtable;
-pub mod fileinfo;
 pub mod filelock;
 pub mod fileops;
 pub mod filepicker;
@@ -155,10 +149,8 @@ pub mod filerules;
 pub mod fileselect;
 pub mod fileshare;
 pub mod filetransfer;
-pub mod filetype;
 pub mod filevault;
 pub mod fileversion;
-pub mod findex;
 pub mod fnotify;
 pub mod focusassist;
 pub mod focussession;
@@ -188,7 +180,6 @@ pub mod hotkeys;
 pub mod hwmonitor;
 pub mod hwrng;
 pub mod ime;
-pub mod immutable;
 pub mod index;
 pub mod inodestat;
 pub mod inputa11y;
@@ -242,12 +233,11 @@ pub mod memfs;
 pub mod memlayout;
 pub mod mempress;
 pub mod migstat;
-pub mod mime;
 pub mod mmapstat;
 pub mod mmtune;
+pub mod mntns;
 pub mod mobilelink;
 pub mod monitors;
-pub mod mount_ns;
 pub mod mousegestures;
 pub mod mousesettings;
 pub mod msivec;
@@ -280,7 +270,6 @@ pub mod ntfs;
 pub mod numastat;
 pub mod oobe;
 pub mod oomkiller;
-pub mod openwith;
 pub mod osreset;
 pub mod overlay;
 pub mod pagecache;
@@ -298,7 +287,6 @@ pub mod pftrack;
 pub mod pgtable;
 pub mod pidfd;
 pub mod pidstat;
-pub mod pinnedapps;
 pub mod pipe;
 pub mod pipestat;
 pub mod pkgmgr;
@@ -311,7 +299,6 @@ pub mod powerprofile;
 pub mod powerstat;
 pub mod powerwake;
 pub mod prefetch;
-pub mod preview;
 pub mod printmgr;
 pub mod printqueue;
 pub mod procfs;
@@ -379,7 +366,6 @@ pub mod speechio;
 pub mod spellcheck;
 pub mod splice;
 pub mod splitview;
-pub mod startmenu;
 pub mod startupopt;
 pub mod startuprepair;
 pub mod statusbar;
@@ -460,6 +446,7 @@ pub mod winsnap;
 pub mod wintiling;
 pub mod wqstat;
 pub mod writeback;
+pub mod xattr_policy;
 pub mod xz;
 pub mod zfs;
 pub mod zip;
@@ -468,4 +455,44 @@ pub mod zstd;
 
 pub use vfs::{
     DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, Vfs, XattrSetMode,
+    XattrTarget,
 };
+
+/// A new instance of the filesystem `fstype` names, over the block device
+/// `source` for the types that live on one: what `mount(2)` and the native
+/// `SYS_FS_MOUNT` make before mounting it. One table for both, so the two
+/// cannot come to mean different things by one type name.
+///
+/// `source` is a block device's registered name (`vda`, `sda1`), or that name
+/// under `/dev/`, as a Linux program writes it. Ignored by the types that live
+/// on none (`tmpfs`, `proc`, `sysfs`, `devtmpfs`).
+///
+/// # Errors
+///
+/// `NotSupported` for a type this kernel has no driver for; the driver's own
+/// refusal of the device (`NotFound` for one that is not there).
+pub fn new_filesystem(
+    fstype: &str,
+    source: &str,
+) -> crate::error::KernelResult<alloc::boxed::Box<dyn vfs::FileSystem>> {
+    use alloc::boxed::Box;
+    let device = source.strip_prefix("/dev/").unwrap_or(source);
+    let fs: Box<dyn vfs::FileSystem> = match fstype {
+        "ext4" => Box::new(ext4::vfs_impl::Ext4Fs::open(device)?),
+        "tmpfs" | "memfs" | "ramfs" => Box::new(memfs::MemFs::new()),
+        "iso9660" | "iso" | "cd9660" => Box::new(iso9660::Iso9660Fs::open(device)?),
+        // Read-only drivers: a mount asked for read-write gets one that
+        // refuses each write, as before.
+        "ntfs" | "ntfs3" => Box::new(ntfs::NtfsFs::open(device)?),
+        "btrfs" => Box::new(btrfs::BtrfsFs::open(device)?),
+        "f2fs" => Box::new(f2fs::F2fsFs::open(device)?),
+        "zfs" => Box::new(zfs::ZfsFs::open(device)?),
+        // `devtmpfs` is Linux's name for what devfs is here.
+        "devfs" | "dev" | "devtmpfs" => Box::new(devfs::DevFs::new()),
+        "proc" | "procfs" => Box::new(procfs::ProcFs::new()),
+        "sysfs" | "sys" => Box::new(sysfs::SysFs::new()),
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => Box::new(fat::FatFs::mount(device)?),
+        _ => return Err(crate::error::KernelError::NotSupported),
+    };
+    Ok(fs)
+}

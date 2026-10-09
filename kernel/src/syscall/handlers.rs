@@ -207,11 +207,43 @@ fn caller_pid() -> Option<u64> {
 /// This mirrors the `options.parent != 0` condition on the pty arm of
 /// [`crate::proc::spawn`]'s `fd_map` loop.
 fn require_file_handle_owner(handle: u64) -> Result<(), KernelError> {
+    require_ipc_handle(ResourceType::File, handle)
+}
+
+/// The calling process holds this IPC handle: it created it, accepted it, or
+/// was given it on a path that registered it in its `ipc_handles`.
+///
+/// **The handle value is not the capability.** Most IPC handles in this kernel
+/// are a counter shifted left with a side bit -- a channel's is
+/// `(channel_id << 1) | side`, with ids counting up from 1 -- so any process
+/// can name every channel, pipe or socket in the system by counting. Until
+/// 2026-10-01 most of the syscalls that take one did no more than look the
+/// value up, so any process could send on, read from or close another's
+/// channel -- logind's and netstack's included
+/// (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`).
+/// Possession is what makes a handle unforgeable, as design.txt requires of
+/// every kernel object; the value only says which one.
+///
+/// A handle the caller does not hold answers `InvalidHandle`, the same as one
+/// that names nothing: telling the two apart would let a process learn which
+/// handle values are live in other processes.
+///
+/// A bare kernel task (no calling process) passes: it holds handles nothing
+/// registered against a pid, and no user process is claiming anything.
+fn require_ipc_handle(resource_type: ResourceType, handle: u64) -> Result<(), KernelError> {
     match caller_pid() {
-        Some(pid) if !pcb::owns_ipc_handle(pid, ResourceType::File, handle) => {
+        Some(pid) if !pcb::owns_ipc_handle(pid, resource_type, handle) => {
             Err(KernelError::InvalidHandle)
         }
         _ => Ok(()),
+    }
+}
+
+/// Record a handle the kernel has just given the calling process, so that
+/// [`require_ipc_handle`] lets it be used and the process's death releases it.
+fn register_for_caller(resource_type: ResourceType, handle: u64) {
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, resource_type, handle);
     }
 }
 
@@ -438,27 +470,65 @@ pub fn sys_yield(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `SYS_EXIT` — exit the current task.
+/// `SYS_EXIT` — end the calling process, every thread of it, with exit
+/// status `arg0`: the native `_exit` (and Linux's `exit_group`). See
+/// [`crate::proc::thread::exit_group_current`]. Never returns.
 ///
-/// Notifies the thread/process system before terminating.  If this
-/// was the last thread in a process, the process becomes a zombie.
+/// Until 2026-10-08 this ended the calling thread alone, so a program whose
+/// other threads were alive at its `exit` never ended.
 pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
     let exit_code = args.arg0 as i32;
+    crate::proc::thread::exit_group_current(exit_code, None)
+}
+
+/// [`sys_exit`] from the system-call path, the caller's registers in
+/// `frame`: its tracer's `PTRACE_EVENT_EXIT` stop shows them. Never returns.
+pub(crate) fn sys_exit_with_frame(frame: &mut super::entry::SyscallFrame) -> ! {
+    #[allow(clippy::cast_possible_truncation)]
+    let exit_code = frame.arg0 as i32;
+    // `rax` as during any call.
+    let regs = regs_from_syscall_frame(frame, -38);
+    crate::proc::thread::exit_group_current(exit_code, Some((regs, frame.syscall_nr)))
+}
+
+/// Linux `exit` (60): end the calling thread alone -- the rest of its process
+/// runs on. Its code is the process's status if it is the last thread and no
+/// group exit decided one (the last thread's code, measured on Linux 6.6:
+/// not the first thread's). Never returns.
+pub fn sys_exit_thread(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let exit_code = args.arg0 as i32;
+    exit_thread(exit_code)
+}
+
+/// [`sys_exit_thread`] from the system-call path, the caller's registers in
+/// `frame`: its tracer's `PTRACE_EVENT_EXIT` stop shows them, the code
+/// (`(code & 0xff) << 8`) its message. Never returns.
+pub(crate) fn sys_exit_thread_with_frame(frame: &mut super::entry::SyscallFrame) -> ! {
+    #[allow(clippy::cast_possible_truncation)]
+    let exit_code = frame.arg0 as i32;
+    // `rax` as during any call.
+    let regs = regs_from_syscall_frame(frame, -38);
+    #[allow(clippy::cast_sign_loss)]
+    let status = ((exit_code & 0xff) << 8) as u64;
+    crate::proc::ptrace::exit_stop(regs, frame.syscall_nr, status);
+    exit_thread(exit_code)
+}
+
+/// The body of [`sys_exit_thread`]: the code recorded -- for the process,
+/// and for a tracer that waits for this thread apart from it -- then the
+/// thread gone.
+fn exit_thread(exit_code: i32) -> ! {
     let task_id = sched::current_task_id();
-
-    // Store exit code in the PCB before on_thread_exit transitions
-    // the process to Zombie.  remove_thread() has a guard that only
-    // sets exit_code=0 when None, so our explicit code wins.
-    // Bare kernel tasks (no owning process) simply skip this.
+    // A kernel task has no process to give a status to. A process that is
+    // gone cannot be told one.
     if let Some(pid) = crate::proc::thread::owner_process(task_id) {
-        let _ = crate::proc::pcb::set_exit_code(pid, exit_code);
+        let _ = crate::proc::pcb::set_thread_exit_code(pid, exit_code);
     }
-
-    // Notify the thread system so the owning process can transition
-    // to Zombie when its last thread exits.  For bare kernel tasks
-    // (not owned by any process), this is a harmless no-op.
+    crate::proc::ptrace::note_exit_code(task_id, exit_code);
+    // The process becomes a zombie when its last thread has gone.
     crate::proc::thread::on_thread_exit(task_id);
-
     sched::task_exit()
 }
 
@@ -618,7 +688,10 @@ pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
         // The ISR will increment the pending counter and attempt to wake
         // us immediately (via try_wake).  If that fails, the timer ISR's
         // deferred-wake scan will catch it within ~10 ms.
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Io,
+            u64::from(irq_u32),
+        ));
     }
 }
 
@@ -908,7 +981,9 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
-    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_WRITE};
+    use super::number::{
+        MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_SHARED, MAP_WRITE,
+    };
     use crate::mm::frame::{FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
@@ -917,6 +992,14 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     let size = args.arg1;
     let mut flags = args.arg2;
     let phys_addr = args.arg3;
+    // Shared anonymous memory is always committed: a page faulted in lazily
+    // would be faulted separately in each process after a fork and share
+    // nothing (see `MAP_SHARED`). An explicit request for both is a contract
+    // nobody can keep; device memory is shared already, so MMIO ignores it.
+    let shared_anon = flags & MAP_SHARED != 0 && flags & MAP_MMIO == 0;
+    if shared_anon && flags & MAP_LAZY != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
 
     // If the caller didn't explicitly specify a commit bit (MAP_LAZY /
     // MAP_MMIO), pick the default commit mode.  A per-process policy
@@ -924,7 +1007,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // the system-wide default (PARAM_MM_LAZY_DEFAULT) applies.  MMIO
     // mappings are always committed (they must map specific physical
     // addresses), so they bypass this entirely.
-    if flags & (MAP_LAZY | MAP_MMIO) == 0 {
+    if flags & (MAP_LAZY | MAP_MMIO) == 0 && !shared_anon {
         let sysctl_lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
         let policy = thread::owner_process(sched::current_task_id())
             .and_then(pcb::get_mmap_commit_policy)
@@ -980,6 +1063,13 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     }
     if flags & MAP_NOCACHE != 0 {
         page_flags |= PageFlags::NO_CACHE;
+    }
+    // Shared anonymous memory: fork maps these frames into the child as they
+    // are instead of copy-on-write, and a futex in them is keyed by the
+    // physical page (`ipc::futex`). The VMA carries the flag too, so the
+    // committed path below maps every page with it.
+    if shared_anon {
+        page_flags |= PageFlags::SHARED;
     }
 
     // Pick a virtual address.
@@ -1044,9 +1134,16 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
             // SAFETY: pml4_phys is valid, phys is a device MMIO address
             // (not managed by our allocator), virt is in user space.
-            if let Err(e) =
-                unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags) }
-            {
+            // SHARED: device memory is shared with the device by definition;
+            // a fork that made it copy-on-write would copy registers into RAM.
+            if let Err(e) = unsafe {
+                page_table::map_frame(
+                    pml4_phys,
+                    VirtAddr::new(va),
+                    phys,
+                    page_flags | PageFlags::SHARED,
+                )
+            } {
                 serial_println!(
                     "[mmap] MMIO map failed at va={:#x} pa={:#x}: {:?}",
                     va,
@@ -1093,6 +1190,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
                 end: base_vaddr.saturating_add(size_aligned),
                 kind: VmaKind::Anonymous,
                 flags: page_flags,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             };
 
             if let Err(e) = pcb::add_vma(pid, vma) {
@@ -1139,6 +1237,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
                 end: base_vaddr.saturating_add(size_aligned),
                 kind: VmaKind::Anonymous,
                 flags: page_flags,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             };
 
             if let Err(e) = pcb::add_vma(pid, vma) {
@@ -1195,32 +1294,39 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_MUNMAP` — unmap a region from the calling process's address space.
 ///
 /// `arg0`: virtual address (must be frame-aligned).
-/// `arg1`: size in bytes (rounded up to frame boundary).
+/// `arg1`: size in bytes (rounded up to frame boundary; zero is refused).
 ///
-/// For anonymous mappings, the physical frames are freed back to the
-/// allocator.  For MMIO mappings, only the page table entries are
-/// cleared (the physical memory belongs to the device).
+/// The whole range must lie in the user half; see [`munmap_range`] for every
+/// refusal, all of which happen before anything is touched.  Pages not mapped
+/// are skipped, so unmapping an empty range succeeds.  Frames are freed
+/// refcount-aware once no sub-page of them is mapped (a frame another address
+/// space still maps survives); device (MMIO) frames are unmapped, never freed.
+/// Every VMA the range covers is trimmed or removed.
 ///
 /// Returns: 0 on success.
+///
+/// # History
+///
+/// Until 2026-09-26 this took `arg0`/`arg1` as given: it checked alignment,
+/// then unmapped and freed every frame in the range with no check that the
+/// range was the caller's -- so any process could unmap *kernel* pages (the
+/// kernel half of every PML4 is the shared kernel tables) and hand their
+/// frames back to the allocator, with no capability.  It also freed each frame
+/// before the TLB shootdown, iterated a length the caller chose with unchecked
+/// arithmetic, and dropped only a VMA that began exactly at `arg0`.  Found by
+/// lane D reading the code (known-issues.md
+/// `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  `SYS_SHM_UNMAP` is this same
+/// function and had the same hole.
 pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::{self, FRAME_SIZE};
-    use crate::mm::page_table::{self, VirtAddr};
     use crate::proc::{pcb, thread};
 
-    let vaddr = args.arg0;
-    let size = args.arg1;
+    // Every argument check first: nothing below may run on a range that has
+    // not been proven to be the caller's own half of the address space.
+    let (start, end) = match munmap_range(args.arg0, args.arg1) {
+        Ok(range) => range,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    if size == 0 {
-        return SyscallResult::ok(0);
-    }
-
-    // Validate alignment.
-    let frame_size = FRAME_SIZE as u64;
-    if !vaddr.is_multiple_of(frame_size) {
-        return SyscallResult::err(KernelError::BadAlignment);
-    }
-
-    // Get the calling process's PML4.
     let task_id = sched::current_task_id();
     let pid = thread::owner_process(task_id).unwrap_or(0);
     let pml4_phys = match pcb::get_pml4(pid) {
@@ -1228,69 +1334,65 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
         _ => return SyscallResult::err(KernelError::NoSuchProcess),
     };
 
-    // Round size up.
-    #[allow(clippy::arithmetic_side_effects)]
-    let size_aligned = (size.saturating_add(frame_size - 1)) & !(frame_size - 1);
-    #[allow(clippy::arithmetic_side_effects)]
-    let num_frames = (size_aligned / frame_size) as usize;
+    // Clears the PTEs, shoots down every TLB once for the range, and only then
+    // frees the frames (see its doc for why that order is the point).
+    let pages = crate::mm::user::unmap_user_range(pml4_phys, start, end);
 
-    let mut unmapped = 0usize;
-
-    for i in 0..num_frames {
-        #[allow(clippy::arithmetic_side_effects)]
-        let va = vaddr + (i as u64) * frame_size;
-
-        // Unmap returns the physical frame that was mapped.
-        // SAFETY: pml4_phys is valid, va was mapped by a previous mmap.
-        match unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(va)) } {
-            Ok(phys) => {
-                // Check if this is allocator-owned memory (not MMIO).
-                // MMIO physical addresses are typically above the usable
-                // RAM range.  A proper VMA tracker would record this;
-                // for now, we check if the frame belongs to the allocator.
-                if frame::is_allocator_owned(phys) {
-                    // SAFETY: The frame was allocated by our allocator
-                    // (verified by is_allocator_owned), the mapping was
-                    // just removed so no references remain.
-                    unsafe {
-                        let _ = frame::free_frame(phys);
-                    }
-                }
-                unmapped = unmapped.saturating_add(1);
-            }
-            Err(_) => {
-                // Frame wasn't mapped — skip silently (idempotent).
-            }
-        }
+    // Trim or drop every VMA the range covers, so a later fault in it is a
+    // fault, not a demand-page into memory the process has given back.
+    if let Err(e) = pcb::remove_vma_range(pid, start, end) {
+        return SyscallResult::err(e);
     }
 
-    // Flush the TLB for the whole unmapped range.  CRITICAL: `unmap_frame`
-    // only clears the page-table entries — it does NOT invalidate the TLB
-    // (its doc-comment makes flushing the caller's responsibility).  Without
-    // this flush the CPU keeps a stale VA→frame translation cached, so the
-    // process can continue to read/write a frame that we have already freed
-    // back to the buddy allocator.  Once that frame is recycled (its first
-    // 16 bytes become an intrusive `FreeNode`, or it is remapped elsewhere),
-    // the stale writes corrupt allocator state — observed as a kernel #PF in
-    // `BuddyAllocator::remove_free` dereferencing a user VA that had leaked
-    // into the free list.  Flush before the frames can be reused by anyone.
-    mmap_flush_range(vaddr, vaddr.saturating_add(size_aligned));
-
-    // Also remove any per-process VMA that starts at this address.
-    // Both committed and lazy (MAP_LAZY) mmap regions register a VMA, so
-    // this drops the address-space record alongside the unmapped frames.
-    // If no VMA matches (e.g. a partial unmap that doesn't start on a VMA
-    // boundary), this is a no-op.
-    pcb::remove_vma(pid, vaddr);
-
     serial_println!(
-        "[mmap] Unmapped {} frames at {:#x}..{:#x}",
-        unmapped,
-        vaddr,
-        vaddr + size_aligned
+        "[mmap] Unmapped {} page(s) at {:#x}..{:#x}",
+        pages,
+        start,
+        end
     );
 
     SyscallResult::ok(0)
+}
+
+/// The range a native `munmap(addr, len)` covers, or why it is refused.
+///
+/// Refused, in this order (Linux 6.6's `do_vmi_munmap` order, with the native
+/// ABI's own alignment error), before anything is touched:
+///
+/// | input | error |
+/// |---|---|
+/// | `addr` not 16 KiB-aligned | `BadAlignment` |
+/// | `len == 0` | `InvalidArgument` (POSIX: EINVAL) |
+/// | `len` rounded up to a frame overflows | `InvalidArgument` |
+/// | `addr + len` overflows | `InvalidArgument` |
+/// | any byte at or above `USER_SPACE_END` | `InvalidArgument` |
+///
+/// Otherwise `(addr, addr + len rounded up to a frame)`, wholly in the user
+/// half.  `len == 0` used to succeed doing nothing; POSIX and Linux both say
+/// EINVAL, and lane D asked for the same when it found the kernel-half hole.
+pub(crate) fn munmap_range(addr: u64, len: u64) -> Result<(u64, u64), KernelError> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::USER_SPACE_END;
+
+    let frame_size = FRAME_SIZE as u64;
+    let mask = frame_size.wrapping_sub(1);
+    if addr & mask != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+    if len == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let len_aligned = len
+        .checked_add(mask)
+        .map(|v| v & !mask)
+        .ok_or(KernelError::InvalidArgument)?;
+    let end = addr
+        .checked_add(len_aligned)
+        .ok_or(KernelError::InvalidArgument)?;
+    if addr >= USER_SPACE_END || end > USER_SPACE_END {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok((addr, end))
 }
 
 /// `mprotect(addr, len, prot)` — native ABI (`SYS_MPROTECT` = 22).
@@ -1448,11 +1550,10 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
         channel::create()
     };
 
-    // Register both endpoints for cleanup on process death.
-    if let Some(pid) = caller_pid() {
-        pcb::register_ipc_handle(pid, ResourceType::Channel, ep0.raw());
-        pcb::register_ipc_handle(pid, ResourceType::Channel, ep1.raw());
-    }
+    // Both endpoints are the caller's: usable by it alone, released when it
+    // dies.
+    register_for_caller(ResourceType::Channel, ep0.raw());
+    register_for_caller(ResourceType::Channel, ep1.raw());
 
     // Pack handles into the two return registers.
     #[allow(clippy::cast_possible_wrap)]
@@ -1462,6 +1563,21 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok2(r0, r1)
 }
 
+/// Copy a channel message body in from user space, refusing an oversize one
+/// before anything is allocated or read.
+///
+/// A body above [`crate::ipc::channel::MAX_MESSAGE_SIZE`] is `MessageTooLarge`
+/// -- the error `Message::from_bytes` gives -- but decided here, from the
+/// length, rather than after the syscall had copied up to 1 GiB of the
+/// caller's memory into the kernel for a message that could never be sent.
+fn read_message_body(ptr: u64, len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    let max = crate::ipc::channel::MAX_MESSAGE_SIZE;
+    if len > max {
+        return Err(KernelError::MessageTooLarge);
+    }
+    crate::mm::user::read_user_vec(ptr, len, max)
+}
+
 /// `SYS_CHANNEL_SEND` — send a message on a channel.
 ///
 /// `arg0`: channel handle.
@@ -1469,6 +1585,9 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: length of message data.
 pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -1478,7 +1597,7 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     // Copy the message body into the kernel before parsing it: `Message` owns
     // its bytes and the send path can block, so a slice over user memory would
     // be both a SMAP violation and a TOCTOU hazard (see `sys_pipe_write`).
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_message_body(args.arg1, len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1503,6 +1622,9 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success.
 pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -1552,6 +1674,9 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length, 0 if empty, negative error code on failure.
 pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -1598,6 +1723,9 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: channel handle.
 pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Channel, handle.raw());
     }
@@ -1615,6 +1743,9 @@ pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success, `TimedOut` if deadline expires.
 pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -1662,6 +1793,9 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success, `TimedOut` if deadline expires.
 pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -1669,7 +1803,7 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_message_body(args.arg1, data_len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1694,13 +1828,16 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
 
     if args.arg1 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_message_body(args.arg1, data_len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1727,6 +1864,9 @@ pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let caps_count = args.arg4 as usize;
 
@@ -1741,7 +1881,7 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
     // can block on a full queue.  Transferring capabilities out of a slice that
     // a peer thread could remap mid-send would be especially bad: the handles
     // the kernel installs in the receiver would not be the ones it validated.
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_message_body(args.arg1, data_len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1774,6 +1914,9 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
 /// Returns (rdx): number of capability handles received.
 pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let caps_out_cap = args.arg4 as usize;
 
@@ -2202,6 +2345,301 @@ pub fn sys_pipe_create(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok2(r0, r1)
 }
 
+/// The most bytes one pipe call can move: one pipe buffer, which
+/// [`pipe::set_capacity`] never lets exceed
+/// [`pipe::MAX_PIPE_BUFFER_CAPACITY`].
+///
+/// Every pipe transfer is partial -- a write stores what fits, a read or a
+/// peek returns what is buffered -- so a `len` beyond this asks for more than
+/// any single call can deliver.  Bouncing it through the kernel anyway held a
+/// kernel copy of the whole user buffer for the length of the call -- up to
+/// 1 GiB since large allocations reach vmalloc (design-decisions.md §959) --
+/// and on the read side zeroed it and page-walked the whole range first.  See
+/// [`read_call_buffer`] and known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`.
+const PIPE_CALL_MAX: usize = pipe::MAX_PIPE_BUFFER_CAPACITY;
+
+/// As [`PIPE_CALL_MAX`], for a socketpair endpoint, whose ring is fixed at
+/// [`stream_socket::MAX_TRANSFER`].
+const SOCKETPAIR_CALL_MAX: usize = stream_socket::MAX_TRANSFER;
+
+/// Copy in the part of a user buffer that one call can move.
+///
+/// The caller's whole claim `(ptr, len)` is checked as a user span first --
+/// arithmetic only, as Linux's `access_ok`, so a length that runs into kernel
+/// space is still `InvalidAddress` -- and then only `min(len, call_max)`
+/// bytes are copied, validated as they are.  A buffer whose unmapped tail no
+/// call could reach is therefore no longer refused: the kernel never needed
+/// those bytes, and Linux does not refuse it either.
+fn read_call_buffer(ptr: u64, len: usize, call_max: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    crate::mm::user::check_user_span(ptr, len)?;
+    crate::mm::user::read_user_vec(ptr, len.min(call_max), usize::MAX)
+}
+
+/// The receiving twin of [`read_call_buffer`]: the whole `(ptr, cap)` claim
+/// is span-checked, `fill` gets a kernel buffer of at most `call_max` bytes,
+/// and what it reports is copied out.
+fn with_call_out_buf<F>(ptr: u64, cap: usize, call_max: usize, fill: F) -> KernelResult<usize>
+where
+    F: FnOnce(&mut [u8]) -> KernelResult<usize>,
+{
+    crate::mm::user::check_user_span(ptr, cap)?;
+    crate::mm::user::with_user_out_buf(ptr, cap.min(call_max), usize::MAX, fill)
+}
+
+// ---------------------------------------------------------------------------
+// A buffer that cannot be used
+// ---------------------------------------------------------------------------
+//
+// Linux makes every check a read or a write has before it copies, and faults
+// only at the copy: a NULL, unmapped or read-only buffer is `EFAULT` only where
+// bytes would have moved, and then a pipe or a socket keeps its bytes and a
+// file's offset stays. So such a read at the end of a file is 0, on an empty
+// non-blocking pipe `EAGAIN`, on a directory `EISDIR`, on a handle open the
+// other way `EBADF`; `/dev/null` takes such a write. Until 2026-10-07 the
+// handlers refused the buffer first -- a NULL one as `InvalidArgument` -- and
+// the C library put `EFAULT` in front of them (lane D's
+// `requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`).
+// The handlers below ask whether the buffer is usable before they take or
+// give anything, and when it is not, ask the object instead.
+
+/// Whether the part of a user output buffer one call could fill can take
+/// bytes. See the section note.
+fn out_buffer_usable(ptr: u64, cap: usize, call_max: usize) -> bool {
+    crate::mm::user::validate_user_write(ptr, cap.min(call_max)).is_ok()
+}
+
+/// Whether the part of a user input buffer one call could take can be read.
+/// See the section note.
+fn in_buffer_usable(ptr: u64, len: usize, call_max: usize) -> bool {
+    crate::mm::user::validate_user_read(ptr, len.min(call_max)).is_ok()
+}
+
+/// A read's answer for a buffer that cannot take its bytes, from the object's
+/// probe: bytes there, `InvalidAddress` (`EFAULT`), none taken; end of file,
+/// 0; the probe's own error (`WouldBlock`, `TimedOut`, `Interrupted`, the
+/// object's refusal) as it is.
+fn unusable_read_answer(probe: KernelResult<bool>) -> SyscallResult {
+    match probe {
+        Ok(true) => SyscallResult::err(KernelError::InvalidAddress),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// A write's answer for a buffer that cannot be read, from the object's
+/// probe: room, `InvalidAddress` (`EFAULT`), nothing written; else the
+/// probe's own error (`ChannelClosed` for a reader gone, `WouldBlock`, ...).
+fn unusable_write_answer(probe: KernelResult<()>) -> SyscallResult {
+    match probe {
+        Ok(()) => SyscallResult::err(KernelError::InvalidAddress),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// A transfer's count, or its error.
+fn count_or_err(r: KernelResult<usize>) -> SyscallResult {
+    match r {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => SyscallResult::ok(n as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// The body of the three pipe writes; `patience` says which.
+///
+/// Linux's `pipe_write`, in its order: a handle that is not a write end is
+/// refused; a write of nothing is 0 ("null write succeeds"); a range past
+/// user space is `InvalidAddress`. A buffer that cannot be read is answered
+/// by the pipe: a reader gone `ChannelClosed` (`EPIPE`), full the wait the
+/// call allows, room `InvalidAddress` with nothing written.
+fn pipe_write_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if !handle.writes() {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    let (buf, len) = (args.arg1, args.arg2 as usize);
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
+    }
+    if !in_buffer_usable(buf, len, PIPE_CALL_MAX) {
+        return unusable_write_answer(pipe::probe_write(handle, patience));
+    }
+    // Bounce the payload into the kernel before calling `pipe::write`, which
+    // blocks.  Handing the callee a slice over user memory would be wrong
+    // twice over: the supervisor access happens outside any STAC window once
+    // SMAP is on, and — SMAP or not — another thread in the same process can
+    // unmap or remap the range while this one sleeps on the pipe, turning the
+    // slice into a dangling pointer.  Copying first makes both impossible.
+    // (Non-blocking calls are bounced too: `try_write` still touches the
+    // buffer from supervisor mode, which SMAP forbids outside a STAC window.)
+    // A blocking write longer than one bounce takes every byte all the same,
+    // as POSIX asks of a blocking write (`write_all_blocking`).
+    if patience == pipe::Patience::Forever && len > PIPE_CALL_MAX {
+        return count_or_err(write_all_blocking(handle, buf, len));
+    }
+    let data = match read_call_buffer(buf, len, PIPE_CALL_MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    count_or_err(match patience {
+        pipe::Patience::Forever => pipe::write(handle, &data),
+        pipe::Patience::Never => pipe::try_write(handle, &data),
+        pipe::Patience::Upto(ns) => pipe::write_timeout(handle, &data, ns),
+    })
+}
+
+/// A blocking pipe write of `len` bytes at user `buf`, more than one bounce
+/// ([`PIPE_CALL_MAX`]) holds: every byte goes in, a bounce at a time, as
+/// POSIX asks of a blocking write and Linux's `pipe_write` does. A signal or
+/// a reader gone after some went in ends it with the count so far -- the
+/// bounce's own write answers that way -- and so does a buffer that cannot
+/// be read further on.
+fn write_all_blocking(handle: PipeHandle, buf: u64, len: usize) -> KernelResult<usize> {
+    let mut done = 0usize;
+    while done < len {
+        let at = buf
+            .checked_add(done as u64)
+            .ok_or(KernelError::InvalidAddress)?;
+        let data = match read_call_buffer(at, len.saturating_sub(done), PIPE_CALL_MAX) {
+            Ok(d) => d,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        };
+        match pipe::write(handle, &data) {
+            Ok(n) => {
+                done = done.saturating_add(n);
+                if n < data.len() {
+                    break;
+                }
+            }
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(done)
+}
+
+/// The body of the three pipe reads; `patience` says which.
+///
+/// Linux's `pipe_read`, in its order: a handle that is not a read end is
+/// refused; a read of nothing is 0 ("null read succeeds"); a range past user
+/// space is `InvalidAddress`. A buffer that cannot take the bytes is answered
+/// by the pipe: end of file 0, empty the wait the call allows (`WouldBlock`,
+/// `TimedOut`, a park), bytes there `InvalidAddress` -- and they stay for the
+/// next read.
+fn pipe_read_common(args: &SyscallArgs, patience: pipe::Patience) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if !handle.reads() {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    let (buf, cap) = (args.arg1, args.arg2 as usize);
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, cap) {
+        return SyscallResult::err(e);
+    }
+    if !out_buffer_usable(buf, cap, PIPE_CALL_MAX) {
+        return unusable_read_answer(pipe::probe_read(handle, patience));
+    }
+    // A pipe read may block, so it fills a kernel-side buffer that is copied
+    // out only after it returns.  See `pipe_write_common` for why a user slice
+    // must never cross a blocking call.
+    count_or_err(with_call_out_buf(
+        buf,
+        cap,
+        PIPE_CALL_MAX,
+        |b| match patience {
+            pipe::Patience::Forever => pipe::read(handle, b),
+            pipe::Patience::Never => pipe::try_read(handle, b),
+            pipe::Patience::Upto(ns) => pipe::read_timeout(handle, b, ns),
+        },
+    ))
+}
+
+/// The body of the three socketpair sends; `patience` says which.
+///
+/// Linux's `unix_stream_sendmsg`: a send of nothing is 0 unless it can never
+/// be received (`ChannelClosed`, `EPIPE`); a range past user space is
+/// `InvalidAddress`; a buffer that cannot be read is answered by the socket
+/// -- `ChannelClosed`, full the wait the call allows, room `InvalidAddress`
+/// with nothing sent.
+fn socketpair_send_common(args: &SyscallArgs, patience: stream_socket::Patience) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    let (buf, len) = (args.arg1, args.arg2 as usize);
+    if len == 0 {
+        return match stream_socket::probe_send(handle, stream_socket::Patience::Never) {
+            Err(e @ (KernelError::ChannelClosed | KernelError::InvalidHandle)) => {
+                SyscallResult::err(e)
+            }
+            _ => SyscallResult::ok(0),
+        };
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
+    }
+    if !in_buffer_usable(buf, len, SOCKETPAIR_CALL_MAX) {
+        return unusable_write_answer(stream_socket::probe_send(handle, patience));
+    }
+    // `stream_socket::send` blocks when the peer's buffer is full; see
+    // `pipe_write_common` for why the payload is copied in first.
+    let data = match read_call_buffer(buf, len, SOCKETPAIR_CALL_MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    count_or_err(match patience {
+        stream_socket::Patience::Forever => stream_socket::send(handle, &data),
+        stream_socket::Patience::Never => stream_socket::try_send(handle, &data),
+        stream_socket::Patience::Upto(ns) => stream_socket::send_timeout(handle, &data, ns),
+    })
+}
+
+/// The body of the three socketpair receives; `patience` says which.
+///
+/// Linux's `unix_stream_read_generic`: a receive of nothing is 0; a range
+/// past user space is `InvalidAddress`; a buffer that cannot take the bytes
+/// is answered by the socket -- end of file 0, empty the wait the call
+/// allows, bytes there `InvalidAddress`, and they stay for the next receive.
+fn socketpair_recv_common(args: &SyscallArgs, patience: stream_socket::Patience) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    let (buf, cap) = (args.arg1, args.arg2 as usize);
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, cap) {
+        return SyscallResult::err(e);
+    }
+    if !out_buffer_usable(buf, cap, SOCKETPAIR_CALL_MAX) {
+        return unusable_read_answer(stream_socket::probe_recv(handle, patience));
+    }
+    count_or_err(with_call_out_buf(
+        buf,
+        cap,
+        SOCKETPAIR_CALL_MAX,
+        |b| match patience {
+            stream_socket::Patience::Forever => stream_socket::recv(handle, b),
+            stream_socket::Patience::Never => stream_socket::try_recv(handle, b),
+            stream_socket::Patience::Upto(ns) => stream_socket::recv_timeout(handle, b, ns),
+        },
+    ))
+}
+
 /// `SYS_PIPE_WRITE` — write bytes to a pipe (blocking).
 ///
 /// `arg0`: write-end pipe handle.
@@ -2210,32 +2648,7 @@ pub fn sys_pipe_create(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of bytes written.
 pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // Bounce the payload into the kernel before calling `pipe::write`, which
-    // blocks.  Handing the callee a slice over user memory would be wrong
-    // twice over: the supervisor access happens outside any STAC window once
-    // SMAP is on, and — SMAP or not — another thread in the same process can
-    // unmap or remap the range while this one sleeps on the pipe, turning the
-    // slice into a dangling pointer.  Copying first makes both impossible.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match pipe::write(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let written = n as i64;
-            SyscallResult::ok(written)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_write_common(args, pipe::Patience::Forever)
 }
 
 /// `SYS_PIPE_READ` — read bytes from a pipe (blocking).
@@ -2246,77 +2659,21 @@ pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of bytes read (0 = EOF).
 pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // `pipe::read` blocks, so it fills a kernel-side buffer that is copied out
-    // only after it returns.  See `sys_pipe_write` for why a user slice must
-    // never cross a blocking call.
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        pipe::read(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let read_bytes = n as i64;
-            SyscallResult::ok(read_bytes)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_read_common(args, pipe::Patience::Forever)
 }
 
 /// `SYS_PIPE_TRY_WRITE` — non-blocking write to a pipe.
 ///
 /// Same as `SYS_PIPE_WRITE` but returns `WouldBlock` if buffer is full.
 pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // Non-blocking, but bounced anyway: `try_write` still touches the buffer
-    // from supervisor mode, which SMAP forbids outside a STAC window.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match pipe::try_write(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let written = n as i64;
-            SyscallResult::ok(written)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_write_common(args, pipe::Patience::Never)
 }
 
 /// `SYS_PIPE_TRY_READ` — non-blocking read from a pipe.
 ///
 /// Same as `SYS_PIPE_READ` but returns `WouldBlock` if empty.
 pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        pipe::try_read(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let read_bytes = n as i64;
-            SyscallResult::ok(read_bytes)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_read_common(args, pipe::Patience::Never)
 }
 
 /// `SYS_PIPE_CLOSE` — close a pipe handle.
@@ -2324,6 +2681,9 @@ pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: pipe handle (either end).
 pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Pipe, handle.raw());
     }
@@ -2341,6 +2701,9 @@ pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
 /// - bit 4 (0x10): hangup (other end closed)
 pub fn sys_pipe_poll(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let flags = pipe::poll_status(handle);
     SyscallResult::ok(flags as i64)
 }
@@ -2348,6 +2711,9 @@ pub fn sys_pipe_poll(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_PIPE_READABLE_BYTES` — return bytes buffered in a pipe.
 pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let bytes = pipe::readable_bytes(handle);
     SyscallResult::ok(bytes as i64)
 }
@@ -2361,24 +2727,7 @@ pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
 pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    let buf_cap = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        pipe::read_timeout(handle, buf, timeout_ns)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let read_bytes = n as i64;
-            SyscallResult::ok(read_bytes)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_read_common(args, pipe::Patience::Upto(args.arg3))
 }
 
 /// `SYS_PIPE_WRITE_TIMEOUT` — write to a pipe with a deadline.
@@ -2390,27 +2739,7 @@ pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: bytes written, `TimedOut` if deadline expires.
 pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = PipeHandle::from_raw(args.arg0);
-    let data_len = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && data_len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match pipe::write_timeout(handle, &data, timeout_ns) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let written = n as i64;
-            SyscallResult::ok(written)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    pipe_write_common(args, pipe::Patience::Upto(args.arg3))
 }
 
 /// `SYS_PIPE_PEEK` — copy buffered bytes out of a pipe without consuming them.
@@ -2424,6 +2753,9 @@ pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
 /// are left untouched — this is the non-destructive primitive behind `tee(2)`.
 pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let offset = args.arg1;
     let buf_cap = args.arg3 as usize;
 
@@ -2431,7 +2763,7 @@ pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg2, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg2, buf_cap, PIPE_CALL_MAX, |buf| {
         pipe::peek_at(handle, offset, buf)
     }) {
         Ok(n) => {
@@ -2451,6 +2783,9 @@ pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
 /// Consumes no bytes — the blocking-wait primitive `tee(2)` uses before peeking.
 pub fn sys_pipe_wait_readable(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     match pipe::wait_readable(handle) {
         Ok(true) => SyscallResult::ok(1),
         Ok(false) => SyscallResult::ok(0),
@@ -2483,99 +2818,30 @@ pub fn sys_socketpair_create(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_SOCKETPAIR_SEND` — send bytes on an endpoint (blocking).
 pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // `stream_socket::send` blocks when the peer's buffer is full; see
-    // `sys_pipe_write` for why the payload is copied in first.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match stream_socket::send(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let sent = n as i64;
-            SyscallResult::ok(sent)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_send_common(args, stream_socket::Patience::Forever)
 }
 
 /// `SYS_SOCKETPAIR_RECV` — receive bytes from an endpoint (blocking).
 pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        stream_socket::recv(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let recvd = n as i64;
-            SyscallResult::ok(recvd)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_recv_common(args, stream_socket::Patience::Forever)
 }
 
 /// `SYS_SOCKETPAIR_TRY_SEND` — non-blocking send.
 pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    let len = args.arg2 as usize;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match stream_socket::try_send(handle, &data) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let sent = n as i64;
-            SyscallResult::ok(sent)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_send_common(args, stream_socket::Patience::Never)
 }
 
 /// `SYS_SOCKETPAIR_TRY_RECV` — non-blocking receive.
 pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    let buf_cap = args.arg2 as usize;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        stream_socket::try_recv(handle, buf)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let recvd = n as i64;
-            SyscallResult::ok(recvd)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_recv_common(args, stream_socket::Patience::Never)
 }
 
 /// `SYS_SOCKETPAIR_CLOSE` — close an endpoint handle.
 pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::StreamSocket, handle.raw());
     }
@@ -2585,54 +2851,20 @@ pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_SOCKETPAIR_SEND_TIMEOUT` — send with a deadline.
 pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    let len = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match stream_socket::send_timeout(handle, &data, timeout_ns) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let sent = n as i64;
-            SyscallResult::ok(sent)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_send_common(args, stream_socket::Patience::Upto(args.arg3))
 }
 
 /// `SYS_SOCKETPAIR_RECV_TIMEOUT` — receive with a deadline.
 pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
-    let handle = StreamSocketHandle::from_raw(args.arg0);
-    let buf_cap = args.arg2 as usize;
-    let timeout_ns = args.arg3;
-
-    if args.arg1 == 0 && buf_cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        stream_socket::recv_timeout(handle, buf, timeout_ns)
-    }) {
-        Ok(n) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let recvd = n as i64;
-            SyscallResult::ok(recvd)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    socketpair_recv_common(args, stream_socket::Patience::Upto(args.arg3))
 }
 
 /// `SYS_SOCKETPAIR_POLL` — query endpoint readiness.
 pub fn sys_socketpair_poll(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let flags = stream_socket::poll_status(handle);
     SyscallResult::ok(i64::from(flags))
 }
@@ -2640,6 +2872,9 @@ pub fn sys_socketpair_poll(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_READABLE_BYTES` — bytes available to receive.
 pub fn sys_socketpair_readable_bytes(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let bytes = stream_socket::readable_bytes(handle);
     #[allow(clippy::cast_possible_wrap)]
     let b = bytes as i64;
@@ -2649,6 +2884,9 @@ pub fn sys_socketpair_readable_bytes(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_SHUTDOWN` — shut down one or both directions.
 pub fn sys_socketpair_shutdown(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let how = args.arg1 as u32;
     match stream_socket::shutdown(handle, how) {
         Ok(()) => SyscallResult::ok(0),
@@ -2762,14 +3000,93 @@ pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
 /// netstack forwarders and the ring-3 `netstack` daemon) share one region: the
 /// last reference dropped frees the frames, in any order.
 pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
-    use super::number::{MAP_READ, MAP_WRITE};
+    shm_map_into(ShmHandle::from_raw(args.arg0), args.arg1, None)
+}
+
+/// `SYS_SHM_MAP_AT` — map a shared memory region at the address the caller
+/// chooses (System V `shmat` with a non-null address; lane D's
+/// `d-a-shm-map-at-an-address`).
+///
+/// `arg0`: shared memory handle.  `arg1`: flags, as for [`sys_shm_map`], plus
+/// `MAP_FIXED` to replace whatever is mapped in the range.  `arg2`: the
+/// address, or 0 to let the kernel choose.  An address must be 16 KiB-
+/// aligned and, with the region's length, inside the general mmap window
+/// (`shm_reserve_at` says why).
+pub fn sys_shm_map_at(args: &SyscallArgs) -> SyscallResult {
+    let at = if args.arg2 == 0 {
+        None
+    } else {
+        Some(args.arg2)
+    };
+    shm_map_into(ShmHandle::from_raw(args.arg0), args.arg1, at)
+}
+
+/// Reserve `[addr, addr + size)` for a shared-memory mapping at the caller's
+/// chosen address, registering its `Fixed` VMA, and return `addr`.
+///
+/// The address must be frame-aligned, and the range must lie inside the
+/// VMA-tracked general mmap window, `USER_MMAP_BASE..USER_MMAP_END`.  Every
+/// mapping there has a VMA, so the VMA list answers "is anything there"
+/// completely; and nothing the kernel places on its own -- the device window's
+/// bump allocator, the image, the stack -- can land on the range later unseen.
+///
+/// An occupied range is `InvalidArgument`, as Linux's `shmat` answers `EINVAL`
+/// for an overlap -- unless `replace` (the caller's `MAP_FIXED`, Linux's
+/// `SHM_REMAP`): then whatever is mapped there is unmapped first, as
+/// `mmap(MAP_FIXED)` does.  The VMA is inserted by `pcb::add_vma`, which checks
+/// for an overlap under the process-table lock, so two threads mapping over
+/// one range cannot both succeed.
+fn shm_reserve_at(
+    pid: crate::proc::pcb::ProcessId,
+    pml4_phys: u64,
+    addr: u64,
+    size: u64,
+    page_flags: crate::mm::page_table::PageFlags,
+    replace: bool,
+) -> crate::error::KernelResult<u64> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::proc::pcb;
+
+    let frame_size = FRAME_SIZE as u64;
+    if !addr.is_multiple_of(frame_size) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let end = addr.checked_add(size).ok_or(KernelError::InvalidArgument)?;
+    if addr < USER_MMAP_BASE || end > USER_MMAP_END {
+        return Err(KernelError::InvalidArgument);
+    }
+    if replace {
+        // The count of pages unmapped is not needed: whatever was there is
+        // being replaced.
+        let _unmapped = crate::mm::user::unmap_user_range(pml4_phys, addr, end);
+        pcb::remove_vma_range(pid, addr, end)?;
+    }
+    match pcb::add_vma(
+        pid,
+        Vma {
+            start: addr,
+            end,
+            kind: VmaKind::Fixed,
+            flags: page_flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
+        },
+    ) {
+        Ok(()) => Ok(addr),
+        Err(KernelError::AlreadyExists) => Err(KernelError::InvalidArgument),
+        Err(e) => Err(e),
+    }
+}
+
+/// The body of [`sys_shm_map`] and [`sys_shm_map_at`]: map every frame of
+/// `handle`'s region, at `at` if given (see [`shm_reserve_at`]) or at an
+/// address the kernel chooses.
+fn shm_map_into(handle: ShmHandle, flags: u64, at: Option<u64>) -> SyscallResult {
+    use super::number::{MAP_FIXED, MAP_READ, MAP_WRITE};
     use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::mm::vma::VmaKind;
     use crate::proc::{pcb, thread};
-
-    let handle = ShmHandle::from_raw(args.arg0);
-    let flags = args.arg1;
 
     // Enforce region authorization: a userspace caller must be the region's
     // creator or have been granted access at a kernel→daemon handoff. Kernel
@@ -2802,7 +3119,12 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
     };
 
     // User page flags. Always PRESENT + USER + NO_EXECUTE; WRITABLE opt-in.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
+    // SHARED: the region is shared by design -- fork keeps the mapping
+    // shared instead of copy-on-write, compaction leaves the frames alone,
+    // and a futex on it is keyed by its physical address, so processes that
+    // map it at different addresses meet in one wait queue.
+    let mut page_flags =
+        PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE | PageFlags::SHARED;
     if flags & MAP_WRITE != 0 {
         page_flags |= PageFlags::WRITABLE;
     }
@@ -2812,13 +3134,26 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
     let size_aligned = (frame_addrs.len() as u64) * frame_size;
 
-    // Reserve a VA gap with a Fixed VMA (frames are pre-backed — a fault in
-    // this range is a bug, not demand paging). The reservation inserts the
-    // VMA atomically, so a rollback below must `remove_vma`.
-    let base = alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Fixed, page_flags);
-    if base == 0 {
-        return SyscallResult::err(KernelError::OutOfMemory);
-    }
+    // Reserve the VA range with a Fixed VMA (frames are pre-backed — a fault
+    // in this range is a bug, not demand paging): at the caller's address, or
+    // at a gap the kernel finds.  Either way the VMA is inserted atomically, so
+    // a rollback below must `remove_vma`.
+    let base = match at {
+        Some(addr) => {
+            let replace = flags & MAP_FIXED != 0;
+            match shm_reserve_at(pid, pml4_phys, addr, size_aligned, page_flags, replace) {
+                Ok(b) => b,
+                Err(e) => return SyscallResult::err(e),
+            }
+        }
+        None => {
+            let b = alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Fixed, page_flags);
+            if b == 0 {
+                return SyscallResult::err(KernelError::OutOfMemory);
+            }
+            b
+        }
+    };
 
     // Roll back frames [0, up_to): unmap each and drop the ref we added.
     let rollback = |up_to: usize| {
@@ -2941,6 +3276,9 @@ pub fn sys_eventfd_create(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_eventfd_write(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let value = args.arg1;
 
     match eventfd::write(handle, value) {
@@ -2956,6 +3294,9 @@ pub fn sys_eventfd_write(args: &SyscallArgs) -> SyscallResult {
 /// Returns: counter value (> 0).
 pub fn sys_eventfd_read(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match eventfd::read(handle) {
         Ok(val) => {
@@ -2974,6 +3315,9 @@ pub fn sys_eventfd_read(args: &SyscallArgs) -> SyscallResult {
 /// Returns: counter value, or `WouldBlock` if counter is 0.
 pub fn sys_eventfd_try_read(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match eventfd::try_read(handle) {
         Ok(val) => {
@@ -2990,6 +3334,9 @@ pub fn sys_eventfd_try_read(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: eventfd handle.
 pub fn sys_eventfd_close(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::EventFd, handle.raw());
     }
@@ -3005,6 +3352,9 @@ pub fn sys_eventfd_close(args: &SyscallArgs) -> SyscallResult {
 /// Returns: counter value, or `TimedOut` if deadline expires.
 pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match eventfd::read_timeout(handle, timeout_ns) {
@@ -3024,6 +3374,9 @@ pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: timeout in nanoseconds.
 pub fn sys_eventfd_write_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let value = args.arg1;
     let timeout_ns = args.arg2;
 
@@ -3042,6 +3395,9 @@ pub fn sys_eventfd_write_timeout(args: &SyscallArgs) -> SyscallResult {
 /// consuming the eventfd value.
 pub fn sys_eventfd_has_value(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     SyscallResult::ok(i64::from(eventfd::has_value(handle)))
 }
 
@@ -3063,7 +3419,42 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         5 => Some(WaitSource::Timer(handle)),
         6 => Some(WaitSource::Semaphore(handle)),
         7 => Some(WaitSource::IoCompletion(handle)),
+        8 => Some(WaitSource::Listener(handle)),
         _ => None,
+    }
+}
+
+/// The caller holds what a completion-port source names, judged as that
+/// source's own syscalls judge it.
+///
+/// Registering a source that is not yours would tell you when another process's
+/// pipe or channel carries data, and park your task among its waiters.
+/// Unregistering is not checked this way: a source the caller has since closed
+/// must still come off its own port.
+///
+/// A process-exit source names a pid, not a handle; what it reveals, that a
+/// process ended, `/proc` already shows.
+fn require_wait_source(source: &WaitSource) -> Result<(), KernelError> {
+    match *source {
+        WaitSource::Channel(h) => require_ipc_handle(ResourceType::Channel, h),
+        WaitSource::PipeRead(h) | WaitSource::PipeWrite(h) => {
+            require_ipc_handle(ResourceType::Pipe, h)
+        }
+        WaitSource::EventFd(h) => require_ipc_handle(ResourceType::EventFd, h),
+        WaitSource::Timer(h) => require_ipc_handle(ResourceType::Timer, h),
+        WaitSource::IoCompletion(ring) => {
+            if crate::ipc::io_ring::owned_by_caller(ring) {
+                Ok(())
+            } else {
+                Err(KernelError::InvalidHandle)
+            }
+        }
+        WaitSource::Semaphore(h) => require_ipc_handle(ResourceType::Semaphore, h),
+        // A listener is registered under `Service` when `SYS_SERVICE_REGISTER`
+        // hands it out: knowing that a service has callers waiting is the
+        // service's business.
+        WaitSource::Listener(h) => require_ipc_handle(ResourceType::Service, h),
+        WaitSource::ProcessExit(_) => Ok(()),
     }
 }
 
@@ -3086,15 +3477,21 @@ pub fn sys_cp_create(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_CP_REGISTER` — register a source with a completion port.
 ///
 /// `arg0`: CP handle.
-/// `arg1`: source type (0-3).
+/// `arg1`: source type (0-8; see the syscall number's docs).
 /// `arg2`: source handle.
 /// `arg3`: `user_data`.
 pub fn sys_cp_register(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(source) = decode_wait_source(args.arg1, args.arg2) else {
         return SyscallResult::err(KernelError::InvalidArgument);
     };
+    if let Err(e) = require_wait_source(&source) {
+        return SyscallResult::err(e);
+    }
 
     match completion::register(cp, source, args.arg3) {
         Ok(()) => SyscallResult::ok(0),
@@ -3109,6 +3506,9 @@ pub fn sys_cp_register(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: source handle.
 pub fn sys_cp_unregister(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(source) = decode_wait_source(args.arg1, args.arg2) else {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -3143,6 +3543,7 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
         WaitSource::Timer(h) => (5, h),
         WaitSource::Semaphore(h) => (6, h),
         WaitSource::IoCompletion(h) => (7, h),
+        WaitSource::Listener(h) => (8, h),
     };
     CpEventRaw {
         source_type,
@@ -3194,6 +3595,9 @@ fn deliver_events(
 /// `arg2`: buffer capacity (max events).
 pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -3236,6 +3640,9 @@ pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
 /// Same arguments as `SYS_CP_WAIT`.
 pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -3271,6 +3678,9 @@ pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: CP handle.
 pub fn sys_cp_close(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::CompletionPort, cp.raw());
     }
@@ -3285,6 +3695,9 @@ pub fn sys_cp_close(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: source handle.
 pub fn sys_cp_notify(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(source) = decode_wait_source(args.arg1, args.arg2) else {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -3388,7 +3801,12 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    spawn_ex_common(&spawn_args, CapInherit::All, None)
+    spawn_ex_common(
+        &spawn_args,
+        CapInherit::All,
+        None,
+        crate::proc::spawn::SpawnAttrs::default(),
+    )
 }
 
 /// The body shared by `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_SPAWN_EX2`.
@@ -3410,8 +3828,9 @@ fn spawn_ex_common(
     spawn_args: &crate::proc::spawn::SpawnExArgs,
     cap_inherit: crate::proc::spawn::CapInherit<'_>,
     cwd: Option<&[u8]>,
+    attrs: crate::proc::spawn::SpawnAttrs,
 ) -> SyscallResult {
-    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_caps};
+    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_attrs};
 
     let elf_len = spawn_args.elf_len as usize;
     let name_len = if spawn_args.name_ptr == 0 {
@@ -3524,7 +3943,7 @@ fn spawn_ex_common(
         options = options.cwd(dir);
     }
 
-    match spawn_process_with_caps(&elf_data, &options, cap_inherit) {
+    match spawn_process_with_attrs(&elf_data, &options, cap_inherit, attrs) {
         Ok(result) =>
         {
             #[allow(clippy::cast_possible_wrap)]
@@ -3677,8 +4096,18 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
         }
     };
 
+    // The child's process group, session and signals (`posix_spawnattr_t`),
+    // judged here with the rest of the struct, before any image is read: a
+    // field this kernel cannot honour is refused, never ignored.
+    let attrs = match crate::proc::spawn::ex2_attrs(&ex2) {
+        Ok(a) => a,
+        Err(e) => return SyscallResult::err(e),
+    };
+
     match ex2.cap_mode {
-        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref()),
+        SPAWN_CAP_MODE_INHERIT_ALL => {
+            spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref(), attrs)
+        }
         SPAWN_CAP_MODE_SUBSET => {
             // A null pointer with a non-zero count is a caller bug, and is
             // refused rather than read as "no capabilities".
@@ -3733,7 +4162,12 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
                 ));
             }
 
-            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested), cwd.as_deref())
+            spawn_ex_common(
+                &spawn_args,
+                CapInherit::Subset(&requested),
+                cwd.as_deref(),
+                attrs,
+            )
         }
         // Not clamped and not defaulted — see the struct's `cap_mode` doc.
         _ => SyscallResult::err(KernelError::InvalidArgument),
@@ -3925,6 +4359,119 @@ pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(recorded as i64)
 }
 
+/// `SYS_PROCESS_SET_EXEC_CLOSE` (1090) -- name the handles the caller's next
+/// successful `exec` closes: those of the descriptors libc drops as
+/// close-on-exec, which no kept descriptor shares.
+///
+/// `arg0`: pointer to an array of [`FdMapEntry`](crate::proc::spawn::FdMapEntry)
+/// (`handle_type` and `handle` are read; `fd` is ignored). `arg1`: the count.
+/// An empty list (`arg1 == 0` or a null pointer) clears it. A handle type the
+/// kernel does not know refuses the whole list (`InvalidArgument`), so a libc
+/// that names one learns it now rather than at exec. Returns the number of
+/// entries recorded.
+///
+/// See [`Process::exec_close_handles`](crate::proc::pcb::Process::exec_close_handles)
+/// for when the handles are closed, and [`close_handle_at_exec`] for how.
+pub fn sys_process_set_exec_close(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+    use crate::proc::spawn::{FdMapEntry, fd_handle_type};
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0); // Kernel task: nothing to exec.
+    };
+    if args.arg1 == 0 || args.arg0 == 0 {
+        pcb::set_exec_close_handles(pid, alloc::vec::Vec::new());
+        return SyscallResult::ok(0);
+    }
+    let count = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    let entries = match crate::mm::user::read_user_items::<FdMapEntry>(args.arg0, count, FD_MAP_MAX)
+    {
+        Ok(entries) => entries,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut handles = alloc::vec::Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if entry.handle_type > fd_handle_type::LAST {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        handles.push((entry.handle_type, entry.handle));
+    }
+    let recorded = handles.len();
+    pcb::set_exec_close_handles(pid, handles);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(recorded as i64)
+}
+
+/// Close one of process `pid`'s handles for its successful `exec`, as
+/// `close()` would close it: deregistered from the process, then released
+/// through its type's close path, so the last writer of a pipe gives its
+/// reader end-of-file and the last close of a pty master hangs the slave up.
+///
+/// `Ok(true)` when the handle was closed. `Ok(false)` when it was left open:
+/// - a console handle, which has nothing to release;
+/// - a handle the process does not hold, so the list cannot reach anyone
+///   else's.
+///
+/// A TCP or UDP socket is released like any other: since 2026-10-02 each
+/// holder counts (`net::native_socket`), so the exec drops this process's
+/// hold and the socket ends only if it was the last. Until then a fork
+/// shared one socket rather than holding it, and these stayed open.
+///
+/// `Err` is the close's own failure.
+///
+/// # Errors
+///
+/// What `fs::handle::close` answers for a file handle it cannot close.
+pub(crate) fn close_handle_at_exec(
+    pid: crate::proc::pcb::ProcessId,
+    handle_type: u8,
+    handle: u64,
+) -> KernelResult<bool> {
+    use crate::proc::pcb;
+    use crate::proc::spawn::fd_handle_type;
+
+    let resource = match handle_type {
+        fd_handle_type::FILE => ResourceType::File,
+        fd_handle_type::PIPE => ResourceType::Pipe,
+        fd_handle_type::EVENTFD => ResourceType::EventFd,
+        fd_handle_type::STREAM_SOCKET => ResourceType::StreamSocket,
+        fd_handle_type::PTY => ResourceType::Pty,
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => ResourceType::NativeSocket,
+        fd_handle_type::UNIX_SOCKET => ResourceType::UnixSocket,
+        // CONSOLE: see above.
+        _ => return Ok(false),
+    };
+    if !pcb::owns_ipc_handle(pid, resource, handle) {
+        return Ok(false);
+    }
+    match handle_type {
+        fd_handle_type::FILE => {
+            // As `sys_fs_close`: the process's record locks on the file go
+            // with any descriptor for it. Locks themselves survive an exec.
+            super::record_lock::release_on_close(pid, super::record_lock::Target::File(handle));
+            crate::fs::handle::close(handle)?;
+        }
+        fd_handle_type::PIPE => pipe::close(PipeHandle::from_raw(handle)),
+        fd_handle_type::EVENTFD => eventfd::close(EventFdHandle::from_raw(handle)),
+        fd_handle_type::STREAM_SOCKET => {
+            stream_socket::close(StreamSocketHandle::from_raw(handle));
+        }
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => {
+            // An orderly close for the last holder, as `close(2)`. A close
+            // that fails has still let go of the handle, and the exec goes
+            // on, as it does for every other type here.
+            let _ = crate::net::native_socket::release(handle, NativeEnding::Close);
+        }
+        fd_handle_type::UNIX_SOCKET => {
+            // This process's hold; the socket ends only with its last.
+            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(handle));
+        }
+        _ => close_pty_handle(crate::tty::pty::PtyHandle::from_raw(handle)),
+    }
+    pcb::deregister_ipc_handle(pid, resource, handle);
+    Ok(true)
+}
+
 /// `SYS_PROCESS_GET_ARGS` — retrieve initial argv/envp.
 ///
 /// Called by the child during startup to read argv and envp data
@@ -4107,12 +4654,24 @@ mod wait_opt {
     /// asked and here is where to put it", because only the option word is
     /// something every existing caller demonstrably does set.
     pub const WINFO: u64 = 0x0002_0000;
+    /// Linux's thread-selection options, with Linux's values: `__WNOTHREAD`
+    /// (wait for the caller's own children only), `__WALL` (any kind of
+    /// child) and `__WCLONE` (clone children only). A debugger waits with
+    /// them (LLDB's `waitpid(-1, __WALL | __WNOTHREAD | WNOHANG)`); this
+    /// kernel's children are all of one kind, and accepts them as `wait4`
+    /// does.
+    pub const WNOTHREAD: u64 = 0x2000_0000;
+    /// See [`WNOTHREAD`].
+    pub const WALL: u64 = 0x4000_0000;
+    /// See [`WNOTHREAD`].
+    pub const WCLONE: u64 = 0x8000_0000;
 
     /// Every bit this syscall understands. Anything else is `EINVAL` — an
     /// unknown bit is a caller compiled against a *newer* kernel than this
     /// one, and silently ignoring it would grant it the old semantics under
     /// a name that promises different ones.
-    pub const KNOWN: u64 = WNOHANG | WUNTRACED | WCONTINUED | WPGID | WNOWAIT | WINFO;
+    pub const KNOWN: u64 =
+        WNOHANG | WUNTRACED | WCONTINUED | WPGID | WNOWAIT | WINFO | WNOTHREAD | WALL | WCLONE;
 }
 
 /// Size in bytes of the `WaitInfo` structure `sys_process_wait_status` can
@@ -4154,10 +4713,6 @@ pub const WAIT_INFO_SIZE: usize = 72;
 /// could only reach it through `copy_to_user` could not check it at all
 /// from a bare kernel task.
 pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; WAIT_INFO_SIZE] {
-    /// One tick is 10 ms at `USER_HZ == 100`; see `sys_getrusage`, which is
-    /// the other consumer of these same counters and must not disagree.
-    const US_PER_TICK: u64 = 10_000;
-
     let mut buf = [0u8; WAIT_INFO_SIZE];
     let mut put = |off: usize, v: u64| {
         if let Some(dst) = buf.get_mut(off..off.saturating_add(8)) {
@@ -4170,8 +4725,9 @@ pub(crate) fn wait_info_image(found: &crate::syscall::wait::FoundEvent) -> [u8; 
     let ws = found.to_wstatus() as u32;
     put(16, u64::from(ws)); // likewise: wstatus then zero pad
     let u = &found.usage;
-    put(24, u.user_ticks.saturating_mul(US_PER_TICK));
-    put(32, u.sys_ticks.saturating_mul(US_PER_TICK));
+    // Microseconds, truncated, of the precise split `ProcessUsage` holds.
+    put(24, u.utime_ns / 1_000);
+    put(32, u.stime_ns / 1_000);
     put(40, u.min_flt);
     put(48, u.maj_flt);
     put(56, u.nvcsw);
@@ -4331,6 +4887,7 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: options & wait_opt::WUNTRACED != 0,
             continued: options & wait_opt::WCONTINUED != 0,
+            traced: true,
         },
         nohang: options & wait_opt::WNOHANG != 0,
         nowait: options & wait_opt::WNOWAIT != 0,
@@ -4419,10 +4976,13 @@ fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
     let pid = caller_pid().unwrap_or(0);
     let tid = sched::current_task_id();
 
-    let (user_ticks, sys_ticks) = match who {
-        rusage_who::THREAD => sched::cpu_ticks(tid).unwrap_or((0, 0)),
-        rusage_who::CHILDREN => pcb::process_child_ticks(pid),
-        _ => crate::proc::thread::process_cpu_ticks(pid),
+    // The precise run time split by the tick ratio (Linux's
+    // `cputime_adjust`): the thread's, the process's, or its reaped
+    // children's.
+    let (utime_ns, stime_ns) = match who {
+        rusage_who::THREAD => sched::thread_times(tid).unwrap_or((0, 0)),
+        rusage_who::CHILDREN => pcb::process_child_times(pid),
+        _ => pcb::process_times(pid).unwrap_or((0, 0)),
     };
     let (min_flt, maj_flt) = match who {
         rusage_who::THREAD => sched::fault_counts(tid).unwrap_or((0, 0)),
@@ -4447,8 +5007,8 @@ fn collect_rusage(who: i32) -> (crate::proc::thread::ProcessUsage, u64) {
 
     (
         crate::proc::thread::ProcessUsage {
-            user_ticks,
-            sys_ticks,
+            utime_ns,
+            stime_ns,
             min_flt,
             maj_flt,
             nvcsw,
@@ -4469,14 +5029,9 @@ pub(crate) fn rusage_info_image(
     usage: &crate::proc::thread::ProcessUsage,
     maxrss_kib: u64,
 ) -> [u8; RUSAGE_INFO_SIZE] {
-    /// One tick is 10 ms at `USER_HZ == 100`. Shared with `wait_info_image`
-    /// and `linux::sys_getrusage`, which consume the same counters and must
-    /// not disagree about what a tick is worth.
-    const US_PER_TICK: u64 = 10_000;
-
     let &crate::proc::thread::ProcessUsage {
-        user_ticks,
-        sys_ticks,
+        utime_ns,
+        stime_ns,
         min_flt,
         maj_flt,
         nvcsw,
@@ -4489,8 +5044,10 @@ pub(crate) fn rusage_info_image(
             dst.copy_from_slice(&v.to_le_bytes());
         }
     };
-    put(0, user_ticks.saturating_mul(US_PER_TICK));
-    put(8, sys_ticks.saturating_mul(US_PER_TICK));
+    // Microseconds, truncated, as `wait_info_image` and the Linux
+    // `getrusage` give them.
+    put(0, utime_ns / 1_000);
+    put(8, stime_ns / 1_000);
     put(16, min_flt);
     put(24, maj_flt);
     put(32, nvcsw);
@@ -4589,6 +5146,7 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: false,
             continued: false,
+            traced: false,
         },
         nohang: false,
         nowait: false,
@@ -4614,7 +5172,9 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
                 // `unreachable!()` because a panic here would be a kernel
                 // panic reachable from an unprivileged syscall if that
                 // invariant ever broke.
-                wait::ChildEvent::JobControl(_) => SyscallResult::err(KernelError::InvalidArgument),
+                wait::ChildEvent::JobControl(_) | wait::ChildEvent::Traced(_) => {
+                    SyscallResult::err(KernelError::InvalidArgument)
+                }
             }
         }
         // `nohang: false`, so the primitive cannot report a miss.
@@ -4646,6 +5206,7 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
             exited: true,
             stopped: false,
             continued: false,
+            traced: false,
         },
         // The scan itself is the whole syscall — there is nothing to block on.
         nohang: true,
@@ -4666,7 +5227,9 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
                 }
                 // Unreachable — no job-control class was requested; see
                 // `sys_process_wait` for why this is handled, not panicked on.
-                wait::ChildEvent::JobControl(_) => SyscallResult::err(KernelError::InvalidArgument),
+                wait::ChildEvent::JobControl(_) | wait::ChildEvent::Traced(_) => {
+                    SyscallResult::err(KernelError::InvalidArgument)
+                }
             }
         }
         Ok(None) => SyscallResult::err(KernelError::WouldBlock),
@@ -4968,11 +5531,12 @@ pub fn sys_tty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// [`pcb::ctty_set_fg_pgrp`]: crate::proc::pcb::ctty_set_fg_pgrp
 pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     // A negative value is not a process group. Reject on the full 64-bit
-    // width rather than reproducing Linux's `int` wrap; 0 is rejected by
-    // `ctty_set_fg_pgrp` itself (there is no group 0 to hand a terminal to).
+    // width rather than reproducing Linux's `int` wrap. 0 goes on through the
+    // terminal checks and is then ESRCH, as in Linux's `tiocspgrp`: there is
+    // no group 0 (`pcb::ctty_set_fg_pgrp`).
     #[allow(clippy::cast_possible_wrap)]
     let pgid_signed = args.arg0 as i64;
-    if pgid_signed <= 0 {
+    if pgid_signed < 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     let pid = match caller_process_or_err() {
@@ -5525,47 +6089,36 @@ pub enum TtyCtlOutcome {
 /// see the signal, stopping it is not an option and POSIX substitutes an
 /// error (for reads) or lets the access through (for writes).
 ///
-/// Three sources are consulted, in order of how well the kernel can see them:
+/// Three sources are consulted, all of them the kernel's own:
 ///
-/// 1. **Blocked mask** — always authoritative; the kernel owns it for both
-///    ABIs.  This case is not merely a nicety: a blocked `SIGTTIN` stays
-///    pending and undeliverable, so posting it and returning `ERESTARTSYS`
-///    would restart the read, re-run this check, post again, and spin
-///    forever inside the kernel.
-/// 2. **No signal trampoline** — the process has no userspace dispatcher, so
+/// 1. **Blocked mask** — the kernel owns it for both ABIs.  This case is not
+///    merely a nicety: a blocked `SIGTTIN` stays pending and undeliverable,
+///    so posting it and returning `ERESTARTSYS` would restart the read,
+///    re-run this check, post again, and spin forever inside the kernel.
+/// 2. **Ignored set** — `SIG_IGN`, which both ABIs record in the kernel
+///    (`proc::signal::set_ignored`, the Linux `rt_sigaction`).  Until
+///    2026-10-01 only a Linux-ABI process's `SIG_IGN` was visible here, so a
+///    native shell that ignored `SIGTTOU` (as bash does) was signalled where
+///    POSIX lets it through, and a native read with `SIGTTIN` ignored ended
+///    in `EINTR` instead of `EIO` (`TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-
+///    TO-THE-KERNEL`).
+/// 3. **No signal trampoline** — the process has no userspace dispatcher, so
 ///    the kernel's own [`default_action`] table *is* its disposition.  For
 ///    `SIGTTIN`/`SIGTTOU` that is `Stop`, so this reports "not ignored"; the
 ///    branch exists so the rule is stated rather than assumed.
-/// 3. **Linux `SIG_IGN`** — only visible for a Linux-ABI process, whose
-///    `sigaction` table the kernel stores.
-///
-/// **A native-ABI process that sets `SIGTTIN` to `SIG_IGN` is not detected**,
-/// because a native process's dispositions live in userspace (see
-/// `SYS_SIGNAL_STOP_SELF`'s doc for why that is deliberate).  Such a caller
-/// gets `EINTR` from the interrupted read where POSIX specifies `EIO`: the
-/// kernel posts `SIGTTIN`, the userspace dispatcher resolves it to `SIG_IGN`
-/// and does nothing, and the restart sentinel becomes `EINTR` because a
-/// handler frame was built.  It does not hang, and it does not mis-stop —
-/// the failure is confined to the errno.  Fixing it properly means giving
-/// the kernel a view of native dispositions, which is a larger ABI decision;
-/// tracked in `todo.txt`.
 ///
 /// [`default_action`]: crate::proc::signal::default_action
 #[must_use]
 pub fn signal_ignored_or_blocked(pid: crate::proc::pcb::ProcessId, sig: u32) -> bool {
     use crate::proc::signal;
 
-    // 1. Blocked.
-    if signal::is_blocked(pid, sig) {
+    // 1. Blocked; 2. ignored.
+    if signal::is_blocked(pid, sig) || signal::is_ignored(pid, sig) {
         return true;
     }
-    // 2. No trampoline: the kernel's default-action table is the disposition.
-    if signal::trampoline(pid).is_none() {
-        return matches!(signal::default_action(sig), signal::DefaultAction::Ignore);
-    }
-    // 3. Explicit SIG_IGN, visible only for the Linux ABI.
-    crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux)
-        && crate::syscall::linux::linux_sigaction_is_ignore(pid, sig)
+    // 3. No trampoline: the kernel's default-action table is the disposition.
+    signal::trampoline(pid).is_none()
+        && matches!(signal::default_action(sig), signal::DefaultAction::Ignore)
 }
 
 /// What POSIX job control says should happen to a terminal access by `pid`.
@@ -5641,7 +6194,6 @@ pub fn tty_job_control_decide(pid: crate::proc::pcb::ProcessId, sig: u32) -> Tty
 #[must_use]
 pub fn tty_job_control_check(sig: u32) -> TtyCtlOutcome {
     use crate::proc::pcb;
-    use crate::proc::signal::si_code::SI_KERNEL;
 
     let Some(pid) = caller_pid() else {
         return TtyCtlOutcome::Done;
@@ -5653,20 +6205,13 @@ pub fn tty_job_control_check(sig: u32) -> TtyCtlOutcome {
     };
     // `decide` already established the caller is in a real group.
     let pgid = pcb::get_pgid(pid).unwrap_or(pid);
-    for target in pcb::pids_in_group(pgid) {
-        let send_args = SyscallArgs {
-            arg0: target,
-            arg1: u64::from(due),
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        // Best-effort, as in `deliver_console_signal`: a member that exited
-        // between the membership snapshot and delivery just fails its own
-        // send; the rest still receive it.
-        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
-    }
+    // The kernel's signal, not the caller's: every member gets it, the
+    // caller's siblings included (it may signal only its own children), and
+    // the caller -- which a stop parks -- gets it last.  Best-effort, as in
+    // `signal_foreground_group`: a member that exited between the membership
+    // snapshot and delivery just fails its own post, and the rest still
+    // receive it, so the tally has nothing to change here.
+    let _ = post_kernel_signal_to_members(&pcb::pids_in_group(pgid), due);
     // ERESTARTSYS, not a plain error: once a `SIGCONT` brings the caller back
     // to the foreground the access should simply proceed, which is what a
     // transparent restart gives.  (A native process that installed a handler
@@ -5759,7 +6304,6 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 /// error: Linux likewise generates no signal for a tty with no `tty->pgrp`.
 pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
     use crate::proc::pcb;
-    use crate::proc::signal::si_code::SI_KERNEL;
 
     let pgid = crate::tty::foreground_pgid(tty);
     if pgid == 0 {
@@ -5785,29 +6329,14 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
         tty,
         members
     );
-    let mut delivered = 0usize;
-    let mut failed = 0usize;
-    for target in members {
-        let send_args = SyscallArgs {
-            arg0: target,
-            arg1: u64::from(sig),
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        // Best-effort, per member: a member that exited between the membership
-        // snapshot and delivery just fails its own send and the rest still
-        // receive it. Counted rather than discarded so the aggregate can be
-        // judged even though no individual failure is worth reporting.
-        // (`SyscallResult` carries an i64 `value` whose negative range is the
-        // error code; it is not a `Result`.)
-        if sys_signal_send_with_info(&send_args, SI_KERNEL, 0).value < 0 {
-            failed = failed.saturating_add(1);
-        } else {
-            delivered = delivered.saturating_add(1);
-        }
-    }
+    // The kernel's signal, not the writer's: a terminal writing `^C` into a
+    // pty may signal only its own children, and the foreground job is
+    // usually its shell's. Best-effort, per member: a member that exited
+    // between the membership snapshot and delivery just fails its own post
+    // and the rest still receive it. Counted rather than discarded so the
+    // aggregate can be judged even though no individual failure is worth
+    // reporting.
+    let (delivered, failed) = post_kernel_signal_to_members(&members, u32::from(sig));
     // Silent unless NOTHING was delivered to a non-empty group: one member
     // exiting mid-delivery is benign, not one send succeeding is a fault, and
     // printing every failure would bury the second in the first.
@@ -6037,6 +6566,24 @@ pub fn sys_pty_master_try_write(args: &SyscallArgs) -> SyscallResult {
     pty_master_write_common(args, true)
 }
 
+/// The most bytes one pty master write takes: the terminal's input queue,
+/// [`crate::tty::INPUT_QUEUE_CAPACITY`] (4 KiB, Linux's `N_TTY_BUF_SIZE`).
+///
+/// Not a strict per-call maximum the way a pipe's buffer is: bytes the line
+/// discipline consumes without queueing -- an erase, a signal character --
+/// take no room, so an uncapped call could push any number of them through
+/// `tty::receive` while holding the device and pty tables. Capping the copy
+/// bounds that work, as Linux's own tty layer does by writing in chunks, and
+/// costs nothing a caller does not already handle: a write that fills the
+/// queue returns short anyway. See known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`.
+const PTY_WRITE_CALL_MAX: usize = crate::tty::INPUT_QUEUE_CAPACITY;
+
+/// The most bytes one pty master read returns: the output ring's capacity,
+/// [`crate::tty::pty::OUTPUT_CAPACITY`] -- a read never returns more than the
+/// ring holds.
+const PTY_READ_CALL_MAX: usize = crate::tty::pty::OUTPUT_CAPACITY;
+
 /// Body shared by the blocking and non-blocking master writes.
 fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
     let handle = match owned_pty_handle(args.arg0) {
@@ -6044,8 +6591,11 @@ fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallRes
         Err(e) => return SyscallResult::err(e),
     };
     let len = args.arg2 as usize;
-    if args.arg1 == 0 && len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    // Nothing to type is 0, as a terminal write of nothing is; a buffer that
+    // cannot be read is `InvalidAddress` from the copy below (Linux's
+    // `iterate_tty_write` faults at its copy, before the line discipline).
+    if len == 0 {
+        return SyscallResult::ok(0);
     }
     // Copied in first, on both paths. The blocking one obviously needs it — a
     // `&[u8]` over a user pointer held across a park can be unmapped by a
@@ -6053,7 +6603,7 @@ fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallRes
     // not "optimised away" for it: the pty table lock is held across the
     // transfer either way, and a fault taken there is just as unrecoverable as
     // one taken across a park.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, PTY_WRITE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -6103,10 +6653,24 @@ fn pty_master_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResu
         Err(e) => return SyscallResult::err(e),
     };
     let cap = args.arg2 as usize;
-    if args.arg1 == 0 && cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    // A buffer that cannot take the output: answered by the terminal, nothing
+    // taken -- output there `InvalidAddress`, the slave gone `IoError` (its
+    // hangup), none yet `WouldBlock` for a non-blocking read. A blocking read
+    // with nothing to read fails at once rather than after output arrives
+    // (Linux waits, then faults, and loses that output).
+    if cap > 0 && !out_buffer_usable(args.arg1, cap, PTY_READ_CALL_MAX) {
+        let err = if crate::tty::pty::readable_bytes(handle) > 0 {
+            KernelError::InvalidAddress
+        } else if crate::tty::pty::readable(handle) {
+            KernelError::IoError
+        } else if non_blocking {
+            KernelError::WouldBlock
+        } else {
+            KernelError::InvalidAddress
+        };
+        return SyscallResult::err(err);
     }
-    let result = crate::mm::user::with_user_out_buf(args.arg1, cap, usize::MAX, |buf| {
+    let result = with_call_out_buf(args.arg1, cap, PTY_READ_CALL_MAX, |buf| {
         if non_blocking {
             crate::tty::pty::master_try_read(handle, buf)
         } else {
@@ -6188,12 +6752,20 @@ fn pty_slave_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResul
     if cap == 0 {
         return SyscallResult::ok(0);
     }
-    if args.arg1 == 0 && cap > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
     let want = cap.min(crate::tty::MAX_CANON);
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, want) {
-        return SyscallResult::err(e);
+    // A buffer that cannot take the input: answered by the terminal, nothing
+    // taken -- a terminal gone is end of file, none ready `WouldBlock` for a
+    // non-blocking read, input ready `InvalidAddress`. A blocking read with
+    // nothing ready fails at once rather than after a line is typed (Linux
+    // waits, then faults, and loses the line).
+    if crate::mm::user::validate_user_write(args.arg1, want).is_err() {
+        if !crate::tty::exists(tty) {
+            return SyscallResult::ok(0);
+        }
+        if non_blocking && !crate::tty::input_ready(tty) {
+            return SyscallResult::err(KernelError::WouldBlock);
+        }
+        return SyscallResult::err(KernelError::InvalidAddress);
     }
 
     let mut kbuf = [0u8; crate::tty::MAX_CANON];
@@ -6358,18 +6930,41 @@ pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
     // handle and its foreground group is a property of *that* terminal's
     // session. Looking the caller up first would only turn a reserved handle's
     // `InvalidHandle` into a less specific verdict.
-    let tty = match owned_pty_handle(args.arg0) {
-        Ok(h) => h.id(),
+    let tty = match named_pgrp_terminal(args.arg0) {
+        Ok(tty) => tty,
         Err(e) => return SyscallResult::err(e),
     };
-    // No session holds this terminal — a pty whose slave has not yet run
-    // TIOCSCTTY. It has no foreground group, and ENOTTY says so; returning 0
-    // would be a pgid the caller could try to signal.
+    // No session holds this terminal: a pty whose slave has not yet run
+    // TIOCSCTTY, asked about through its master. Linux's `tiocgpgrp` answers
+    // 0 for it (no group, `pid_vnr(NULL)`), and so does this since
+    // 2026-10-01; it was ENOTTY.
     match crate::proc::pcb::ctty_fg_pgrp(tty) {
         #[allow(clippy::cast_possible_wrap)]
         Some(pgid) => SyscallResult::ok(pgid as i64),
-        None => SyscallResult::err(KernelError::NotSupported),
+        None => SyscallResult::ok(0),
     }
+}
+
+/// The terminal a named `SYS_PTY_GET_PGRP`/`SYS_PTY_SET_PGRP` acts on: the
+/// pty the caller holds `raw` for.
+///
+/// Through a **master**, any session's terminal: the master is the other
+/// side of the wire, so it is never the holder's controlling terminal. Through
+/// a **slave**, only the caller's own controlling terminal. A slave that is
+/// not is `NotSupported` (ENOTTY), as in Linux's `tiocgpgrp`/`tiocspgrp`
+/// (`tty == real_tty && current->signal->tty != real_tty`). Before
+/// 2026-10-01, a slave that was not the caller's terminal answered for that
+/// terminal anyway
+/// (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+fn named_pgrp_terminal(raw: u64) -> Result<crate::tty::TtyId, KernelError> {
+    let handle = owned_pty_handle(raw)?;
+    if handle.end() == crate::tty::pty::PtyEnd::Slave {
+        let pid = caller_process_or_err()?;
+        if crate::proc::pcb::ctty_tty_of(pid) != Some(handle.id()) {
+            return Err(KernelError::NotSupported);
+        }
+    }
+    Ok(handle.id())
 }
 
 /// `SYS_PTY_SET_PGRP` — hand a *named* terminal to a process group
@@ -6382,11 +6977,11 @@ pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// every existing caller uses.
 pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     // A negative value is not a process group. Rejected on the full 64-bit
-    // width rather than reproducing Linux's `int` wrap, matching 538; 0 is
-    // rejected further down, where "there is no group 0" is the message.
+    // width rather than reproducing Linux's `int` wrap, matching 538; 0 goes
+    // on through the terminal checks and is then ESRCH.
     #[allow(clippy::cast_possible_wrap)]
     let pgid_signed = args.arg1 as i64;
-    if pgid_signed <= 0 {
+    if pgid_signed < 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if args.arg0 == 0 {
@@ -6400,11 +6995,12 @@ pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
             TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
         };
     }
-    // As in `sys_pty_get_pgrp`, the named path needs no caller process: both
-    // the authority (the handle) and the POSIX group rule (the terminal's
-    // session) are properties of the terminal, not of who is asking.
-    let tty = match owned_pty_handle(args.arg0) {
-        Ok(h) => h.id(),
+    // As in `sys_pty_get_pgrp`: through a master the authority (the handle)
+    // and the POSIX group rule (the terminal's session) are properties of the
+    // terminal, not of who is asking; a slave must be the caller's own
+    // controlling terminal.
+    let tty = match named_pgrp_terminal(args.arg0) {
+        Ok(tty) => tty,
         Err(e) => return SyscallResult::err(e),
     };
     // SIGTTOU follows the terminal being written, not the caller — see
@@ -6735,11 +7331,273 @@ pub fn sys_process_set_credentials(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Write both fields back in a single update so uid and gid change together;
-    // a half-applied identity would otherwise be observable.
-    creds.uid = want_uid;
-    creds.gid = want_gid;
+    // a half-applied identity would otherwise be observable. A change sets
+    // every id of its kind -- real, effective, saved, filesystem -- as a
+    // privileged `setuid` does; this call is for a process giving up or
+    // taking on an identity, `SYS_PROCESS_SET_IDS` for moving between ids.
+    if want_uid != creds.uid {
+        creds.set_all_uids(want_uid);
+    }
+    if want_gid != creds.gid {
+        creds.set_all_gids(want_gid);
+    }
 
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_SET_IDS` -- the native setuid family. See
+/// [`SYS_PROCESS_SET_IDS`](super::number::SYS_PROCESS_SET_IDS).
+pub fn sys_process_set_ids(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{SET_IDS_FSUID, SET_IDS_GROUP, SET_IDS_RESUID, SET_IDS_REUID, SET_IDS_UID};
+    use crate::proc::setid::{self, Authority, Which};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let (which, op) = if args.arg0 >= SET_IDS_GROUP {
+        (Which::Group, args.arg0.wrapping_sub(SET_IDS_GROUP))
+    } else {
+        (Which::User, args.arg0)
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let (a, b, c) = (args.arg1 as u32, args.arg2 as u32, args.arg3 as u32);
+    let done = match op {
+        SET_IDS_UID => setid::set_id(pid, which, Authority::Native, a),
+        SET_IDS_REUID => setid::set_re_id(pid, which, Authority::Native, a, b),
+        SET_IDS_RESUID => setid::set_res_id(pid, which, Authority::Native, a, b, c),
+        SET_IDS_FSUID => {
+            let old = setid::set_fs_id(pid, which, Authority::Native, a);
+            return SyscallResult::ok(i64::from(old));
+        }
+        _ => Err(KernelError::InvalidArgument),
+    };
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_IDS` -- the caller's eight ids. See
+/// [`SYS_PROCESS_GET_IDS`](super::number::SYS_PROCESS_GET_IDS).
+pub fn sys_process_get_ids(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::setid::{self, Which};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(creds) = crate::proc::pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let mut out = [0u8; 32];
+    let all = setid::ids(&creds, Which::User)
+        .into_iter()
+        .chain(setid::ids(&creds, Which::Group))
+        .flat_map(u32::to_ne_bytes);
+    for (dst, byte) in out.iter_mut().zip(all) {
+        *dst = byte;
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, out.len()) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: 32 bytes at `arg0`, validated writable just above.
+    match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Namespaces as Linux has them, for native programs (1161-1166)
+// ---------------------------------------------------------------------------
+
+/// The calling process, for the namespace calls: `NoSuchProcess` for a
+/// kernel task, which is in no namespace to leave.
+fn namespace_caller() -> Result<crate::proc::pcb::ProcessId, KernelError> {
+    crate::proc::thread::owner_process(sched::current_task_id())
+        .filter(|&pid| pid != 0)
+        .ok_or(KernelError::NoSuchProcess)
+}
+
+/// The native authority to make and enter namespaces: a `Namespace`
+/// capability with `WRITE`, as `SYS_NS_CREATE` and `SYS_NS_ATTACH` ask.
+fn require_namespace_authority() -> Result<(), KernelError> {
+    require_cap_type(
+        crate::cap::ResourceType::Namespace,
+        crate::cap::Rights::WRITE,
+    )
+}
+
+/// `SYS_NAMESPACE_UNSHARE` -- see
+/// [`SYS_NAMESPACE_UNSHARE`](super::number::SYS_NAMESPACE_UNSHARE).
+pub fn sys_namespace_unshare(args: &SyscallArgs) -> SyscallResult {
+    let kinds = args.arg0;
+    if kinds == 0 {
+        return SyscallResult::ok(0);
+    }
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if let Err(e) = require_namespace_authority() {
+        return SyscallResult::err(e);
+    }
+    if kinds & !crate::nsfs::known_clone_flags() != 0 {
+        return SyscallResult::err(KernelError::NotSupported);
+    }
+    for &kind in crate::nsfs::KINDS {
+        if kinds & kind.clone_flag() != 0
+            && let Err(e) = crate::nsfs::unshare(pid, kind)
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NAMESPACE_OPEN` -- see
+/// [`SYS_NAMESPACE_OPEN`](super::number::SYS_NAMESPACE_OPEN).
+pub fn sys_namespace_open(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (kind, id) = match crate::fs::procfs::namespace_at(path.as_bytes()) {
+        None => return SyscallResult::err(KernelError::InvalidArgument),
+        Some(Err(e)) => return SyscallResult::err(e),
+        Some(Ok(found)) => found,
+    };
+    let raw = crate::nsfs::encode(kind, id);
+    if !crate::nsfs::retain(raw) {
+        // Gone since the link was read: its last holder let it go.
+        return SyscallResult::err(KernelError::NotFound);
+    }
+    crate::proc::pcb::register_ipc_handle(pid, crate::cap::ResourceType::Namespace, raw);
+    #[allow(clippy::cast_possible_wrap)] // the kind's tag is in bits 56..63, below the sign
+    SyscallResult::ok(raw as i64)
+}
+
+/// The kind and namespace of handle `raw`, if the caller holds it.
+fn held_namespace(
+    pid: crate::proc::pcb::ProcessId,
+    raw: u64,
+) -> Result<(crate::nsfs::NsKind, u64), KernelError> {
+    if !crate::proc::pcb::owns_ipc_handle(pid, crate::cap::ResourceType::Namespace, raw) {
+        return Err(KernelError::InvalidHandle);
+    }
+    crate::nsfs::decode(raw).ok_or(KernelError::InvalidHandle)
+}
+
+/// `SYS_NAMESPACE_ENTER` -- see
+/// [`SYS_NAMESPACE_ENTER`](super::number::SYS_NAMESPACE_ENTER).
+pub fn sys_namespace_enter(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (kind, id) = match held_namespace(pid, args.arg0) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 != 0 && args.arg1 != kind.clone_flag() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = require_namespace_authority() {
+        return SyscallResult::err(e);
+    }
+    match crate::nsfs::enter(pid, kind, id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NAMESPACE_ENTER_PROCESS` -- see
+/// [`SYS_NAMESPACE_ENTER_PROCESS`](super::number::SYS_NAMESPACE_ENTER_PROCESS).
+pub fn sys_namespace_enter_process(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+    let (target, kinds) = (args.arg0, args.arg1);
+    if kinds == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if kinds & !crate::nsfs::known_clone_flags() != 0 {
+        return SyscallResult::err(KernelError::NotSupported);
+    }
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if pcb::state(target).is_none_or(|s| s == pcb::ProcessState::Zombie) {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    if !pcb::may_inspect(Some(pid), Some(target)) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    if let Err(e) = require_namespace_authority() {
+        return SyscallResult::err(e);
+    }
+    for &kind in crate::nsfs::KINDS {
+        if kinds & kind.clone_flag() == 0 {
+            continue;
+        }
+        let Some(id) = crate::nsfs::of_process(kind, target) else {
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        };
+        if let Err(e) = crate::nsfs::enter(pid, kind, id) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NAMESPACE_CLOSE` -- see
+/// [`SYS_NAMESPACE_CLOSE`](super::number::SYS_NAMESPACE_CLOSE).
+pub fn sys_namespace_close(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // The record and the hold it stands for go together, once.
+    if !crate::proc::pcb::take_ipc_handle(pid, crate::cap::ResourceType::Namespace, args.arg0) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    crate::nsfs::release(args.arg0);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_NAMESPACE_INFO` -- see
+/// [`SYS_NAMESPACE_INFO`](super::number::SYS_NAMESPACE_INFO).
+pub fn sys_namespace_info(args: &SyscallArgs) -> SyscallResult {
+    let pid = match namespace_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (kind, id) = match held_namespace(pid, args.arg0) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut out = [0u8; 24];
+    let words = [
+        kind.clone_flag(),
+        crate::nsfs::inum(kind, id),
+        u64::from(crate::nsfs::dev()),
+    ];
+    for (dst, byte) in out
+        .iter_mut()
+        .zip(words.iter().flat_map(|w| w.to_ne_bytes()))
+    {
+        *dst = byte;
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, out.len()) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: 24 bytes at `arg1`, validated writable just above;
+    // `copy_to_user` re-checks the range and brackets the store with
+    // STAC/CLAC.
+    match unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) } {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -6822,27 +7680,79 @@ pub fn sys_process_get_nice(args: &SyscallArgs) -> SyscallResult {
 /// every task the process owns (nice→priority via
 /// [`thread::nice_to_priority`]) so the change actually affects scheduling.
 ///
-/// Per the thin-primitive contract (see the syscall-number doc), the
-/// `CAP_SYS_NICE` policy for priority raises is enforced by the userspace
-/// posix wrappers; the kernel only performs the mutation, always on the
-/// caller's own process. Returns the *previous* nice, biased by +20. Fails
-/// only if the caller has no owning process.
+/// A raise -- a nice below the current one -- is the kernel's to allow
+/// ([`priority::may_set_nice`](crate::proc::priority::may_set_nice)): within
+/// the process's `RLIMIT_NICE`, or with a Thread capability carrying
+/// IO_REALTIME, else `ResourceExhausted`. It was left to libc until
+/// 2026-10-01, so any program could reach nice -20, the top scheduler
+/// priority, with one direct call. Returns the *previous* nice, biased by
+/// +20.
 pub fn sys_process_set_nice(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{priority, thread};
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
+    match priority::set_own_nice(pid, unbias_nice(args.arg0)) {
+        Ok(old) => SyscallResult::ok(i64::from(old).saturating_add(20)),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
+    }
+}
 
-    // Un-bias arg0 (biased +20) back to a signed nice, clamping to the POSIX
-    // range. arg0 is u64; a caller passing a wild value is clamped, not UB.
+/// A nice passed biased by +20 (`0..=39`), as a signed nice: clamped, so a
+/// wild value is clamped rather than misread.
+fn unbias_nice(biased: u64) -> i32 {
+    let clamped = biased.min(39);
+    // 0..=39 fits an i32, and minus 20 is -20..=19.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let requested = (args.arg0 as i64).clamp(0, 39) as i32 - 20;
+    let nice = (clamped as i32).saturating_sub(20);
+    nice
+}
 
-    match thread::set_process_nice(pid, requested) {
-        Some(old) => SyscallResult::ok(i64::from(old) + 20),
-        None => SyscallResult::err(KernelError::NoSuchProcess),
+/// `SYS_PROCESS_GET_PRIORITY` (1088) -- `getpriority(which, who)`: the
+/// nice, biased by +20, of the process, group or user named. For a group or
+/// a user, it is the lowest nice among its processes, as Linux reports.
+///
+/// `which` is 0 (a process: `who` is a pid), 1 (a group: a pgid) or 2 (a
+/// user: a uid). `who` 0 is the caller's own. Reading needs no authority.
+/// `InvalidArgument` for another `which`; `NoSuchProcess` when nothing is
+/// named. See [`crate::proc::priority`].
+pub fn sys_process_get_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{priority, thread};
+
+    let Some(which) = priority::PrioWhich::from_raw(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    match priority::get_priority(caller, which, args.arg1) {
+        Ok(nice) => SyscallResult::ok(i64::from(nice).saturating_add(20)),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
+    }
+}
+
+/// `SYS_PROCESS_SET_PRIORITY` (1089) -- `setpriority(which, who, nice)`:
+/// set the nice of the process, group or user named. `nice` is biased by
+/// +20, as `SYS_PROCESS_SET_NICE` takes it.
+///
+/// Each named process is changed only if the caller may change it
+/// ([`crate::proc::priority::may_set_nice`]), and the answer folds the
+/// outcomes as Linux's does:
+/// - `NoSuchProcess` when nothing is named;
+/// - else `PermissionDenied` (no authority over one) or
+///   `ResourceExhausted` (a raise beyond its `RLIMIT_NICE`, without
+///   IO_REALTIME), whichever refusal came last;
+/// - else 0.
+pub fn sys_process_set_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{priority, thread};
+
+    let Some(which) = priority::PrioWhich::from_raw(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    match priority::set_priority(caller, which, args.arg1, unbias_nice(args.arg2)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
     }
 }
 
@@ -6928,138 +7838,200 @@ pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(out.len() as i64)
 }
 
-/// `SYS_CAP_REQUEST` — request a capability the caller does not hold.
-///
-/// Submits a request to the security policy handler.  The request
-/// includes a human-readable reason string that will be presented to
-/// the user for approval or denial.
-///
-/// `arg0`: resource type (`ResourceType` discriminant as u16).
-/// `arg1`: rights bitfield (`Rights` bits as u32).
-/// `arg2`: pointer to reason string (UTF-8, user buffer).
-/// `arg3`: length of reason string in bytes (max 256).
-///
-/// Returns: request ID (positive u64) on success.
-pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
+/// The calling process, for the broker's calls: `PermissionDenied` for a
+/// kernel task, which has no process to ask or answer for.
+fn broker_caller() -> KernelResult<crate::proc::pcb::ProcessId> {
+    match crate::proc::thread::owner_process(sched::current_task_id()) {
+        Some(pid) if pid != 0 => Ok(pid),
+        _ => Err(KernelError::PermissionDenied),
+    }
+}
+
+/// The body of [`sys_cap_request`] and [`sys_cap_request_for`]: the calling
+/// process asks for `rights_raw` on `(resource_type_raw, resource_id)`, for
+/// the reason at `reason_ptr`/`reason_len`.
+fn cap_request_common(
+    resource_type_raw: u64,
+    resource_id: u64,
+    rights_raw: u64,
+    reason_ptr: u64,
+    reason_len: u64,
+) -> KernelResult<u64> {
     use crate::cap::{self, Rights, request};
-    use crate::proc::{pcb, thread};
 
-    let resource_type_raw = args.arg0 as u16;
-    let rights_raw = args.arg1 as u32;
-    let reason_len = args.arg3 as usize;
+    // One table for the wire's numbers: `ResourceType::from_raw`, walked
+    // `1..=LAST` at boot (a hand-written copy here once stopped at 15).
+    let resource_type = u16::try_from(resource_type_raw)
+        .ok()
+        .and_then(cap::ResourceType::from_raw)
+        .ok_or(KernelError::InvalidArgument)?;
+    let rights = Rights::from_raw(rights_raw);
 
-    // Validate resource type.
-    //
-    // This used to be the same table written out by hand, and it had stopped at
-    // 15 (`Namespace`) while the enum grew to 30. A process asking the human to
-    // grant it `Drm`, `NetRaw`, `Pty`, `InputDevice`, `PrivilegedPort` or any
-    // of the other ten got `InvalidArgument` — the answer reserved for garbage
-    // — and there was no way to tell from the outside that the type existed and
-    // the list simply had not been updated. Nothing failed to compile, because
-    // an unmaintained list compiles perfectly.
-    //
-    // `ResourceType::from_raw` is now the one table, and
-    // `cap::groups::test_resource_type_from_raw` walks `1..=LAST` at boot so it
-    // cannot fall behind the enum again.
-    let Some(resource_type) = cap::ResourceType::from_raw(resource_type_raw) else {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    };
-
-    // Validate rights (must be non-zero).
-    let rights = Rights::from_raw(rights_raw as u64);
-    if rights.is_empty() {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    // An over-long reason is refused, not cut: it is shown to the human
+    // deciding, and a sentence cut short can read as more innocuous than it
+    // is.
+    let reason_len = usize::try_from(reason_len).map_err(|_| KernelError::InvalidArgument)?;
+    if reason_ptr == 0 || reason_len == 0 || reason_len > request::MAX_REASON_LEN {
+        return Err(KernelError::InvalidArgument);
     }
+    let reason_bytes = crate::mm::user::read_user_vec(reason_ptr, reason_len, CAP_REASON_MAX)?;
+    let reason = core::str::from_utf8(&reason_bytes).map_err(|_| KernelError::InvalidArgument)?;
 
-    // Validate reason string.  An over-long reason is rejected, not clipped
-    // at 256 as it used to be: this string is shown to the human deciding
-    // whether to grant the capability, and cutting it mid-sentence is a way
-    // to make a request read as more innocuous than it is.
-    if args.arg2 == 0 || reason_len == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    let pid = broker_caller()?;
+    let name =
+        crate::proc::pcb::name(pid).unwrap_or_else(|| alloc::string::String::from("unknown"));
+    request::request_capability(pid, &name, resource_type, resource_id, rights, reason)
+}
+
+/// A request id or a status as a system call's value.
+fn broker_value(v: u64) -> SyscallResult {
+    match i64::try_from(v) {
+        Ok(v) => SyscallResult::ok(v),
+        Err(_) => SyscallResult::err(KernelError::Overflow),
     }
-    let reason_bytes = match crate::mm::user::read_user_vec(args.arg2, reason_len, CAP_REASON_MAX) {
-        Ok(b) => b,
-        Err(e) => return SyscallResult::err(e),
-    };
-    let reason_str = match core::str::from_utf8(&reason_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
-    };
+}
 
-    // Get the calling process's PID and name.
-    let task_id = sched::current_task_id();
-    let pid = match thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return SyscallResult::err(KernelError::PermissionDenied),
-    };
-    let proc_name = pcb::name(pid).unwrap_or_else(|| alloc::string::String::from("unknown"));
-
-    // Submit the request.
-    match request::request_capability(pid, &proc_name, resource_type, rights, reason_str) {
-        Ok(id) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(id as i64)
-        }
+/// `SYS_CAP_REQUEST` (401) -- ask the user for authority over a whole class:
+/// [`sys_cap_request_for`] with object 0.
+///
+/// `arg0`: resource type; `arg1`: rights; `arg2`/`arg3`: the reason (UTF-8,
+/// at most 256 bytes). Returns the request's id.
+pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
+    match cap_request_common(args.arg0, 0, args.arg1, args.arg2, args.arg3) {
+        Ok(id) => broker_value(id),
         Err(e) => SyscallResult::err(e),
     }
 }
 
-/// `SYS_CAP_REQUEST_STATUS` — check the status of a capability request.
-///
-/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
-///
-/// Returns status as an integer:
-/// - 0 = Pending
-/// - 1 = Approved
-/// - 2 = Denied
-/// - 3 = TimedOut
-/// - 4 = Cancelled
+/// `SYS_CAP_REQUEST_FOR` (1154) -- ask the user for `arg2` rights on the
+/// object `(arg0 type, arg1 id)`, for the reason at `arg3`/`arg4`. Returns
+/// the request's id. See [`crate::cap::request`].
+pub fn sys_cap_request_for(args: &SyscallArgs) -> SyscallResult {
+    match cap_request_common(args.arg0, args.arg1, args.arg2, args.arg3, args.arg4) {
+        Ok(id) => broker_value(id),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_STATUS` (402) -- the status of request `arg0`, the
+/// caller's own or, for the handler, any: 0 Pending, 1 Approved, 2 Denied, 3
+/// TimedOut, 4 Cancelled. `NotFound` for one the caller may not see.
 pub fn sys_cap_request_status(args: &SyscallArgs) -> SyscallResult {
-    use crate::cap::request::{self, RequestStatus};
-
-    let request_id = args.arg0;
-
-    match request::get_status(request_id) {
-        Some(status) => {
-            let code = match status {
-                RequestStatus::Pending => 0,
-                RequestStatus::Approved => 1,
-                RequestStatus::Denied => 2,
-                RequestStatus::TimedOut => 3,
-                RequestStatus::Cancelled => 4,
-            };
-            SyscallResult::ok(code)
-        }
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::cap::request::status_for(args.arg0, pid) {
+        Some(status) => SyscallResult::ok(i64::from(status.code())),
         None => SyscallResult::err(KernelError::NotFound),
     }
 }
 
-/// `SYS_CAP_REQUEST_CANCEL` — cancel a pending capability request.
-///
-/// Only the process that submitted the request can cancel it.
-///
-/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
-///
-/// Returns 0 on success.
+/// `SYS_CAP_REQUEST_CANCEL` (403) -- cancel the caller's pending request
+/// `arg0`. Only the process that filed it may.
 pub fn sys_cap_request_cancel(args: &SyscallArgs) -> SyscallResult {
-    use crate::cap::request;
-    use crate::proc::thread;
-
-    let request_id = args.arg0;
-
-    // Get the calling process's PID.
-    let task_id = sched::current_task_id();
-    let pid = match thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return SyscallResult::err(KernelError::PermissionDenied),
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
     };
-
-    match request::cancel(request_id, pid) {
+    match crate::cap::request::cancel(args.arg0, pid) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_CAP_REQUEST_WAIT` (1155) -- wait until the caller's request `arg0`
+/// ends, for at most `arg1` nanoseconds (`u64::MAX`: as long as it lasts; 0:
+/// not at all), and return its status.
+pub fn sys_cap_request_wait(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::waiters::Patience;
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let patience = match args.arg1 {
+        0 => Patience::Never,
+        u64::MAX => Patience::Forever,
+        ns => Patience::Upto(ns),
+    };
+    match crate::cap::request::wait(args.arg0, pid, patience) {
+        Ok(status) => SyscallResult::ok(i64::from(status.code())),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_BROKER_REGISTER` (1150) -- the caller, holding `(CapBroker, 0,
+/// WRITE)`, becomes the process that answers capability requests. Returns the
+/// channel end it is told of them on.
+pub fn sys_cap_broker_register(_args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::{ResourceType, Rights};
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !pcb::has_capability_for(pid, ResourceType::CapBroker, 0, Rights::WRITE) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    match crate::cap::request::register_process_handler(pid) {
+        Ok(end) => broker_value(end.raw()),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_BROKER_UNREGISTER` (1151) -- the calling handler stops answering;
+/// what was pending is refused.
+pub fn sys_cap_broker_unregister(_args: &SyscallArgs) -> SyscallResult {
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::cap::request::unregister_process_handler(pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_DECIDE` (1152) -- the handler answers request `arg0`:
+/// `arg1` 1 allows (granting it), 0 denies. Returns the final status.
+pub fn sys_cap_request_decide(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::request::{self, Decider};
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let allow = match args.arg1 {
+        0 => false,
+        1 => true,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    match request::decide(args.arg0, allow, Decider::Handler(pid)) {
+        Ok(status) => SyscallResult::ok(i64::from(status.code())),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_LIST` (1153) -- the handler reads every pending request's
+/// record into `arg0` (`arg1` bytes; 0 asks the size). Returns the size.
+pub fn sys_cap_request_list(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::request;
+    let pid = match broker_caller() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !request::is_handler(pid) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    let records = request::pending_records();
+    let len = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    if len != 0 {
+        if len < records.len() {
+            return SyscallResult::err(KernelError::BufferTooSmall);
+        }
+        if let Err(e) = crate::mm::user::write_user_items(args.arg0, &records) {
+            return SyscallResult::err(e);
+        }
+    }
+    broker_value(u64::try_from(records.len()).unwrap_or(u64::MAX))
 }
 
 /// `SYS_SET_EXCEPTION_HANDLER` — register a per-process exception handler.
@@ -7123,6 +8095,41 @@ pub fn sys_exception_return_with_frame(frame: &mut super::entry::SyscallFrame) -
         return KernelError::InvalidAddress.code() as i64;
     }
 
+    // The kernel's extension above the context and its null return slot: the
+    // FPU image the fault interrupted, which every exception frame since
+    // 2026-10-07 carries. Read before anything changes.
+    let ext_addr = frame
+        .arg0
+        .wrapping_add(crate::proc::exception::EXCEPTION_CONTEXT_SIZE as u64)
+        .wrapping_add(8);
+    let fpu_image =
+        match crate::mm::user::read_user_value::<crate::proc::signal::SignalFrameExt>(ext_addr) {
+            Ok(e) if e.magic == crate::proc::signal::SIGNAL_FRAME_EXT_MAGIC && e.fpu_len != 0 => {
+                let max = crate::sched::fpu::signal_image_size();
+                let len = usize::try_from(e.fpu_len).unwrap_or(usize::MAX);
+                if len > max {
+                    return KernelError::InvalidArgument.code() as i64;
+                }
+                let at = ext_addr.wrapping_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64);
+                match crate::mm::user::read_user_vec(at, len, max) {
+                    Ok(v) => Some(v),
+                    Err(e) => return e.code() as i64,
+                }
+            }
+            Ok(_) => None,
+            Err(e) => return e.code() as i64,
+        };
+    if let Some(image) = fpu_image.as_deref() {
+        crate::sched::fpu::restore_signal_image(Some(image));
+    }
+
+    // Every register comes back from the context, RCX and R11 included --
+    // the fault interrupted the code anywhere -- so the exit is IRETQ, which
+    // can load them; SYSRETQ would overwrite both.
+    frame.rcx = ctx.rcx;
+    frame.r11 = ctx.r11;
+    frame.exit_full = 1;
+
     // Restore the SYSRET frame from the exception context.
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
@@ -7167,7 +8174,16 @@ fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
 
 /// `SYS_SIGNAL_REGISTER` — register the process-wide signal trampoline.
 ///
-/// `arg0`: trampoline address (0 to unregister).
+/// `arg0`: trampoline address (0 to unregister). `arg1`: frame flags --
+/// [`SIGNAL_FRAME_SIGINFO`](super::number::SIGNAL_FRAME_SIGINFO) asks for the
+/// extended frame, the context followed by the signal's `siginfo`. Answers the
+/// flags it will honour, so a libc can tell an older kernel (which answered 0
+/// whatever it was asked) by the answer.
+///
+/// Unknown flag bits are ignored rather than refused: the answer already says
+/// what took, and a refusal would make every new bit a flag day. That also
+/// makes a caller that never set `arg1` safe whatever the register held: the
+/// extended frame only adds bytes above a context that stays where it was.
 ///
 /// The address is rejected here if it is not in the user half.  Delivery
 /// installs it directly as the SYSRET RIP, and `sysretq` loads RIP while still
@@ -7177,6 +8193,7 @@ fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
 /// can actually diagnose it.
 pub fn sys_signal_register(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
+    use super::number::SIGNAL_FRAME_SIGINFO;
     let pid = match caller_process_or_err() {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
@@ -7185,8 +8202,20 @@ pub fn sys_signal_register(args: &super::dispatch::SyscallArgs) -> super::dispat
     if args.arg0 != 0 && args.arg0 >= crate::mm::page_table::USER_SPACE_END {
         return SyscallResult::err(KernelError::InvalidAddress);
     }
-    crate::proc::signal::register_trampoline(pid, args.arg0);
-    SyscallResult::ok(0)
+    // Unregistering honours nothing: there is no frame to build.
+    let honoured = if args.arg0 == 0 {
+        0
+    } else {
+        args.arg1 & SIGNAL_FRAME_SIGINFO
+    };
+    crate::proc::signal::register_trampoline_frame(
+        pid,
+        args.arg0,
+        honoured & SIGNAL_FRAME_SIGINFO != 0,
+    );
+    // `honoured` is at most SIGNAL_FRAME_SIGINFO (1), which fits.
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(honoured as i64)
 }
 
 /// `SYS_SIGNAL_ALTSTACK` (1071) -- record the alternate signal stack and the set
@@ -7204,8 +8233,11 @@ pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
     // A frame needs room for the SignalContext, its 16-byte alignment slack and
     // the fake return slot. Anything smaller is a stack the kernel could not
     // build a frame on, and accepting it would mean discovering that during
-    // delivery -- i.e. during a fault -- instead of here.
-    let minimum = crate::proc::signal::SIGNAL_CONTEXT_SIZE as u64 + 32;
+    // delivery -- i.e. during a fault -- instead of here. Sized for the
+    // extended frame (context plus siginfo tail), not the short one: the
+    // trampoline can be re-registered for it after this stack is set, and the
+    // stack must still hold a frame then.
+    let minimum = (crate::proc::signal::SIGNAL_FRAME_EXTENDED_SIZE as u64).saturating_add(32);
     if size != 0 && (size < minimum || sp.checked_add(size).is_none()) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
@@ -7324,7 +8356,8 @@ pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
     name_set_gated(
         args,
         crate::cap::Rights::SET_HOSTNAME,
-        crate::fs::nameservice::set_hostname,
+        // The caller's UTS namespace's: the system's only in the root.
+        crate::utsns::set_hostname_here,
     )
 }
 
@@ -7336,7 +8369,7 @@ pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
     name_set_gated(
         args,
         crate::cap::Rights::SET_HOSTNAME,
-        crate::fs::nameservice::set_domain,
+        crate::utsns::set_domainname_here,
     )
 }
 
@@ -7408,13 +8441,424 @@ pub fn sys_keylayout_set(args: &SyscallArgs) -> SyscallResult {
     )
 }
 
+/// The caller holds `(Process, ENROLL_SECUREBOOT)`: checked before any
+/// argument is read, so an unprivileged caller learns nothing about which
+/// entries exist from which error it gets back.
+fn require_secureboot_right() -> Result<(), KernelError> {
+    use crate::proc::thread;
+
+    let Some(pid) = thread::owner_process(sched::current_task_id()) else {
+        return Err(KernelError::NoSuchProcess);
+    };
+    if pcb::has_capability_type(
+        pid,
+        ResourceType::Process,
+        crate::cap::Rights::ENROLL_SECUREBOOT,
+    ) {
+        Ok(())
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// The caller holds `(Process, right)`, class-wide: the gate of the power
+/// calls, checked before anything is read, flushed or switched.
+/// `NoSuchProcess` for a kernel task, `PermissionDenied` for a process
+/// without it.
+fn require_process_class_right(right: crate::cap::Rights) -> Result<(), KernelError> {
+    use crate::proc::thread;
+
+    let Some(pid) = thread::owner_process(sched::current_task_id()) else {
+        return Err(KernelError::NoSuchProcess);
+    };
+    if pcb::has_capability_type(pid, ResourceType::Process, right) {
+        Ok(())
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// The caller holds `(Process, RELOAD_KERNEL)`, checked before the image is read
+/// so an unauthorised caller cannot even cause it to be copied.
+fn require_power_reload_right() -> Result<(), KernelError> {
+    require_process_class_right(crate::cap::Rights::RELOAD_KERNEL)
+}
+
+/// Say who asked for a power change, before it happens: the serial line, and
+/// the structured log (`roadmap-detailed` §1.5 has every power transition
+/// audit-logged with who asked).
+fn note_power_request(what: &str) {
+    let pid = caller_pid().unwrap_or(0);
+    let name = pcb::name(pid).unwrap_or_default();
+    serial_println!("[power] {} requested by process {} ({})", what, pid, name);
+    crate::klog!(
+        Info,
+        "power",
+        "power change requested: what={}, pid={}, name={}",
+        what,
+        pid,
+        name
+    );
+}
+
+/// `SYS_POWER_OFF` (1167) -- flush every filesystem and switch the machine
+/// off. See [`SYS_POWER_OFF`](crate::syscall::number::SYS_POWER_OFF).
+///
+/// Gated on [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF) before
+/// anything else. Returns only when no way of switching off worked:
+/// `NotSupported`, with the machine running on.
+pub fn sys_power_off(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_process_class_right(crate::cap::Rights::POWER_OFF) {
+        return SyscallResult::err(e);
+    }
+    if args.arg0 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    note_power_request("power off");
+    crate::power::try_power_off();
+    // Still here: the machine could not be switched off.
+    serial_println!("[power] no way of switching off worked; the machine runs on");
+    SyscallResult::err(KernelError::NotSupported)
+}
+
+/// `SYS_POWER_REBOOT` (1168) -- flush every filesystem and restart the
+/// machine through the firmware. See
+/// [`SYS_POWER_REBOOT`](crate::syscall::number::SYS_POWER_REBOOT).
+///
+/// Gated on [`Rights::REBOOT`](crate::cap::Rights::REBOOT) before anything
+/// else. Does not return once past the gate: the last of the reset methods, a
+/// triple fault, always resets.
+pub fn sys_power_reboot(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_process_class_right(crate::cap::Rights::REBOOT) {
+        return SyscallResult::err(e);
+    }
+    if args.arg0 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    note_power_request("restart");
+    crate::power::reboot()
+}
+
+/// The largest kernel image `SYS_POWER_RELOAD` copies in: four times the
+/// debug kernel (~29 MiB), and bounded so a caller's length cannot make the
+/// kernel allocate without limit. The image must also fit one contiguous run
+/// of free memory, which `kexec` checks.
+pub(crate) const RELOAD_IMAGE_MAX: usize = 128 << 20;
+
+/// The longest command line `SYS_POWER_RELOAD` passes on.
+pub(crate) const RELOAD_CMDLINE_MAX: usize = 4096;
+
+/// The image a `SYS_POWER_RELOAD` call restarts into: the running kernel's
+/// own, or one copied in from the caller.
+pub(crate) enum ReloadImage {
+    /// The file the bootloader loaded, `(image_ptr, image_len)` = `(0, 0)`.
+    Running(&'static [u8]),
+    /// The caller's bytes.
+    Copied(alloc::vec::Vec<u8>),
+}
+
+impl ReloadImage {
+    /// The image's bytes.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Running(image) => image,
+            Self::Copied(image) => image,
+        }
+    }
+}
+
+/// What a `SYS_POWER_RELOAD` call asks for, read from the caller and checked
+/// -- everything the call refuses, it refuses here, before anything is
+/// flushed or stopped: reserved arguments that are not 0, a length without
+/// its pointer or a pointer without its length, an image over
+/// [`RELOAD_IMAGE_MAX`] or a command line over [`RELOAD_CMDLINE_MAX`] or with
+/// a NUL in it, and an image that is not a kernel. Split from
+/// [`sys_power_reload`] so that the dispatch self-test can check each refusal
+/// without a caller allowed to restart the machine.
+pub(crate) fn reload_request(
+    args: &SyscallArgs,
+) -> KernelResult<(ReloadImage, alloc::vec::Vec<u8>)> {
+    if args.arg4 != 0 || args.arg5 != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let read = |ptr: u64, len: u64, max: usize| -> KernelResult<alloc::vec::Vec<u8>> {
+        let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+        if len > max {
+            return Err(KernelError::InvalidArgument);
+        }
+        crate::mm::user::read_user_vec(ptr, len, max)
+    };
+    // The image: the caller's, or with (0, 0) the running kernel's own.
+    let image = match (args.arg0, args.arg1) {
+        (0, 0) => {
+            ReloadImage::Running(crate::kexec::running_image().ok_or(KernelError::NotSupported)?)
+        }
+        (0, _) | (_, 0) => return Err(KernelError::InvalidArgument),
+        (ptr, len) => ReloadImage::Copied(read(ptr, len, RELOAD_IMAGE_MAX)?),
+    };
+    // The command line: the caller's -- empty, given a pointer and length 0 --
+    // or with (0, 0) the running kernel's, less `kexec.selftest=1`.
+    let cmdline = match (args.arg2, args.arg3) {
+        (0, 0) => {
+            crate::kexec::restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default())
+        }
+        (0, _) => return Err(KernelError::InvalidArgument),
+        (_, 0) => alloc::vec::Vec::new(),
+        (ptr, len) => {
+            let line = read(ptr, len, RELOAD_CMDLINE_MAX)?;
+            if line.contains(&0) {
+                return Err(KernelError::InvalidArgument);
+            }
+            line
+        }
+    };
+    crate::kexec::parse_kernel_elf(image.bytes())
+        .map_err(crate::kexec::KexecError::as_kernel_error)?;
+    Ok((image, cmdline))
+}
+
+/// `SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)` --
+/// restart SlateOS without the firmware (kexec). See
+/// [`SYS_POWER_RELOAD`](crate::syscall::number::SYS_POWER_RELOAD).
+///
+/// Gates on [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL)
+/// before anything else -- the caller chooses the image, a larger trust
+/// question than a reboot -- then reads and checks what it asks for
+/// ([`reload_request`]). Past that it does not return when the restart
+/// happens ([`crate::power::reload`]).
+pub fn sys_power_reload(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_power_reload_right() {
+        return SyscallResult::err(e);
+    }
+    let (image, cmdline) = match reload_request(args) {
+        Ok(request) => request,
+        Err(e) => return SyscallResult::err(e),
+    };
+    note_power_request("restart without the firmware");
+    SyscallResult::err(crate::power::reload(image.bytes(), &cmdline))
+}
+
+/// `SYS_MEMORY_ADVISE(addr, len, advice)` (1140): `madvise(2)` for native
+/// programs -- the Linux ABI's own implementation, with Linux's `MADV_*`
+/// values and `-errno` answers, which lane D's C library passes through
+/// unchanged (the device door's convention). The caller's own memory only,
+/// so no capability.
+pub fn sys_memory_advise(args: &SyscallArgs) -> SyscallResult {
+    super::linux::sys_madvise(args)
+}
+
+/// `SYS_POSIX_TIMER(op, a, b, c, d)` (1141): the POSIX per-process timers for
+/// native programs -- the Linux ABI's `timer_*` bodies, answering Linux's
+/// errnos as `-errno` (the device door's convention). `timer_create` answers
+/// the new id rather than writing it through a pointer. See
+/// [`SYS_POSIX_TIMER`](super::number::SYS_POSIX_TIMER).
+pub fn sys_posix_timer(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{self, errno, linux_err};
+    use super::number::{
+        POSIX_TIMER_CREATE, POSIX_TIMER_DELETE, POSIX_TIMER_GETOVERRUN, POSIX_TIMER_GETTIME,
+        POSIX_TIMER_SETTIME,
+    };
+    let answer = match args.arg0 {
+        POSIX_TIMER_CREATE => linux::timer_create_common(args.arg1, args.arg2, None).map(i64::from),
+        POSIX_TIMER_SETTIME => {
+            linux::timer_settime_common(args.arg1, args.arg2, args.arg3, args.arg4).map(|()| 0)
+        }
+        POSIX_TIMER_GETTIME => linux::timer_gettime_common(args.arg1, args.arg2).map(|()| 0),
+        POSIX_TIMER_GETOVERRUN => linux::timer_getoverrun_common(args.arg1).map(i64::from),
+        POSIX_TIMER_DELETE => linux::timer_delete_common(args.arg1).map(|()| 0),
+        _ => Err(errno::EINVAL),
+    };
+    match answer {
+        Ok(v) => SyscallResult::ok(v),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SYS_CPU_CLOCK(op, clockid)` (1156): read a CPU-time clock, or its
+/// resolution, for a native program -- the Linux ABI's decoding
+/// (`linux::cpu_clock`) and reading, so a clock id means the same through
+/// both doors. Linux errnos as `-errno`. See
+/// [`SYS_CPU_CLOCK`](super::number::SYS_CPU_CLOCK).
+pub fn sys_cpu_clock(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{self, errno, linux_err};
+    use super::number::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME, CPU_CLOCK_NANOSLEEP};
+    let op = args.arg0;
+    // clockid_t is an int: the register's low half.
+    #[allow(clippy::cast_possible_truncation)]
+    let clockid = args.arg1 as i32;
+    if op == CPU_CLOCK_NANOSLEEP {
+        return linux::cpu_nanosleep_native(clockid, args.arg2, args.arg3, args.arg4);
+    }
+    if op != CPU_CLOCK_GETTIME && op != CPU_CLOCK_GETRES {
+        return linux_err(errno::EINVAL);
+    }
+    let clock = match linux::cpu_clock(
+        clockid,
+        caller_pid(),
+        sched::current_task_id(),
+        op == CPU_CLOCK_GETTIME,
+    ) {
+        Ok(Some(clock)) => clock,
+        // Not a CPU-time clock: the other clocks have calls of their own.
+        Ok(None) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
+    };
+    let ns = if op == CPU_CLOCK_GETTIME {
+        match linux::read_cpu_clock(clock) {
+            Ok(ns) => ns,
+            Err(e) => return linux_err(e),
+        }
+    } else {
+        linux::cpu_clock_res(clock)
+    };
+    // Nanoseconds of CPU time fit an i64 for 292 years.
+    SyscallResult::ok(i64::try_from(ns).unwrap_or(i64::MAX))
+}
+
+/// `SYS_PROCESS_DUMPABLE(op, value)` (1142): read or set the caller's
+/// dumpable flag -- the one `prctl(PR_SET_DUMPABLE)` sets for Linux programs,
+/// so the two ABIs share it. Setting takes 0 or 1 only, `-EINVAL` otherwise,
+/// as Linux's `prctl` answers; Linux errnos as `-errno`. See
+/// [`SYS_PROCESS_DUMPABLE`](super::number::SYS_PROCESS_DUMPABLE).
+pub fn sys_process_dumpable(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{errno, linux_err};
+    use super::number::{DUMPABLE_GET, DUMPABLE_SET};
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        // The kernel has no flag of its own.
+        return linux_err(errno::EINVAL);
+    };
+    match args.arg0 {
+        DUMPABLE_GET => match crate::proc::pcb::get_dumpable(pid) {
+            Some(v) => SyscallResult::ok(i64::from(v)),
+            None => linux_err(errno::ESRCH),
+        },
+        DUMPABLE_SET => {
+            // SUID_DUMP_DISABLE (0) and SUID_DUMP_USER (1); SUID_DUMP_ROOT
+            // (2) is the kernel's to set, not a process's.
+            let Ok(value @ (0 | 1)) = u32::try_from(args.arg1) else {
+                return linux_err(errno::EINVAL);
+            };
+            match crate::proc::pcb::set_dumpable(pid, value) {
+                Some(_) => SyscallResult::ok(0),
+                None => linux_err(errno::ESRCH),
+            }
+        }
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// Copy a `len`-byte argument of at most `max` bytes out of user memory.
+fn read_bounded_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
+    let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+    if len > max {
+        return Err(KernelError::InvalidArgument);
+    }
+    if len == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    crate::mm::user::read_user_vec(ptr, len, max)
+}
+
+/// A text argument: an identifier or a hex digest, never a path, so UTF-8 is
+/// required and anything else refused -- not replaced.
+fn read_text_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::string::String, KernelError> {
+    alloc::string::String::from_utf8(read_bounded_arg(ptr, len, max)?)
+        .map_err(|_| KernelError::InvalidArgument)
+}
+
+/// `SYS_SECUREBOOT_ENROLL` — enrol a Secure Boot entry. See
+/// [`SYS_SECUREBOOT_ENROLL`](crate::syscall::number::SYS_SECUREBOOT_ENROLL).
+pub fn sys_secureboot_enroll(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::secureboot;
+
+    if let Err(e) = require_secureboot_right() {
+        return SyscallResult::err(e);
+    }
+    let Some(key_type) = secureboot::KeyType::from_code(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let subject = match read_text_arg(args.arg1, args.arg2, secureboot::MAX_SUBJECT) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let fingerprint = match read_text_arg(args.arg3, args.arg4, secureboot::MAX_HASH_ARG) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    secureboot::init_defaults();
+    match secureboot::enroll_key(key_type, &subject, &fingerprint) {
+        Ok(id) => SyscallResult::ok(i64::from(id)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SECUREBOOT_REMOVE` — remove a Secure Boot entry by id. See
+/// [`SYS_SECUREBOOT_REMOVE`](crate::syscall::number::SYS_SECUREBOOT_REMOVE).
+pub fn sys_secureboot_remove(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_secureboot_right() {
+        return SyscallResult::err(e);
+    }
+    let Ok(id) = u32::try_from(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    crate::fs::secureboot::init_defaults();
+    match crate::fs::secureboot::remove_key(id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SECUREBOOT_VERIFY` — may an image with this hash run? See
+/// [`SYS_SECUREBOOT_VERIFY`](crate::syscall::number::SYS_SECUREBOOT_VERIFY)
+/// for the 16-byte answer.
+pub fn sys_secureboot_verify(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::secureboot;
+
+    // Bytes, not text: the name may be a path.
+    let name = match read_bounded_arg(args.arg0, args.arg1, secureboot::MAX_IMAGE_NAME) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let hash = match read_text_arg(args.arg2, args.arg3, secureboot::MAX_HASH_ARG) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg4 == 0 {
+        return SyscallResult::err(KernelError::InvalidAddress);
+    }
+    // The output is checked writable before anything is recorded, so a bad
+    // pointer does not leave a verification record for an answer nobody got.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg4, 16) {
+        return SyscallResult::err(e);
+    }
+    secureboot::init_defaults();
+    let verdict = match secureboot::verify_image(&name, &hash) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let out: [u32; 4] = [
+        verdict.listing.code(),
+        verdict.listing.key_id().unwrap_or(0),
+        u32::from(verdict.enforced),
+        u32::from(verdict.allowed),
+    ];
+    match crate::mm::user::write_user_value(args.arg4, out) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.
 ///
-/// `arg0`: target PID. `arg1`: signal number (1..=NSIG).
+/// `arg0`: target PID. `arg1`: signal number (1..=NSIG; 0 checks and posts
+/// nothing).
 ///
 /// Authority matches `SYS_PROCESS_KILL`: the caller must be the target's
 /// parent, PID 0, the target itself (self-signal), or hold a Process
-/// capability with DELETE rights for the target.
+/// capability with DELETE rights for the target ([`check_signal_target`]).
 pub fn sys_signal_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     // Default sender class for a process-directed `kill(2)`.
     sys_signal_send_with_code(args, crate::proc::signal::si_code::SI_USER)
@@ -7447,8 +8891,31 @@ pub fn sys_signal_send_with_info(
     si_code: i32,
     value: u64,
 ) -> super::dispatch::SyscallResult {
+    signal_send_to(args, si_code, value, None)
+}
+
+/// [`sys_signal_send_with_info`] for a signal to thread `thread` of the
+/// target alone -- the Linux ABI's `tkill`, `tgkill` and
+/// `rt_tgsigqueueinfo`, whose callers have checked that the thread is the
+/// target's: pending on that thread's queue, taken by it alone.
+pub fn sys_signal_send_to_thread(
+    args: &super::dispatch::SyscallArgs,
+    si_code: i32,
+    value: u64,
+    thread: crate::sched::task::TaskId,
+) -> super::dispatch::SyscallResult {
+    signal_send_to(args, si_code, value, Some(thread))
+}
+
+/// The body of [`sys_signal_send_with_info`] and [`sys_signal_send_to_thread`].
+fn signal_send_to(
+    args: &super::dispatch::SyscallArgs,
+    si_code: i32,
+    value: u64,
+    to_thread: Option<crate::sched::task::TaskId>,
+) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use crate::proc::{pcb, signal, thread};
+    use crate::proc::thread;
 
     // `arg0` is a signed PID (see SYS_SIGNAL_SEND's docs): the non-positive
     // forms address a process *group*, not a process. Route them to the
@@ -7462,90 +8929,281 @@ pub fn sys_signal_send_with_info(
         return signal_send_to_group(target_signed, sig_signed, si_code, value);
     }
 
-    let target = args.arg0;
-    #[allow(clippy::cast_possible_truncation)]
-    let sig = args.arg1 as u32;
-
-    if !signal::is_valid_signal(sig) {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
     let task_id = sched::current_task_id();
     let caller = thread::owner_process(task_id).unwrap_or(0);
+    let target = args.arg0;
+    let sig = match check_signal_target(caller, target, args.arg1) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if sig == 0 {
+        // The probe: everything a send checks has been checked.
+        return SyscallResult::ok(0);
+    }
+    // The record says who sent it -- the caller's real identity, which it
+    // cannot forge -- so an SA_SIGINFO handler on the target sees a faithful
+    // siginfo_t. `value` is the queued `si_value` (0 for kill/tkill/tgkill).
+    let info = sender_info(caller, si_code, value);
+    match post_signal(
+        target,
+        to_thread,
+        sig,
+        info,
+        (target == caller).then_some(task_id),
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
 
-    // Existence + authority. A self-signal is always permitted.
-    if target != caller {
-        let target_parent = match pcb::parent(target) {
-            Some(p) => p,
-            None => return SyscallResult::err(KernelError::NoSuchProcess),
-        };
-        let has_parent_auth = caller == 0 || caller == target_parent;
-        let has_cap_auth = pcb::has_capability_for(
+/// The checks a process's signal to one process passes, in Linux's order
+/// (`kill_pid_info` then `check_kill_permission`), written once for every
+/// native send and the Linux shim's existence probe:
+///
+/// 1. the target is a live process -- else `NoSuchProcess`, or
+///    `ProcessExited` for a zombie;
+/// 2. the signal is a number in `0..=NSIG` -- else `InvalidArgument`;
+/// 3. the caller may signal it: it is the caller itself, the caller's child,
+///    any process when the caller is a kernel task (pid 0), or one the caller
+///    holds a Process capability with DELETE rights for -- else
+///    `PermissionDenied`.
+///
+/// Answers the signal number. 0 is the probe (`kill(pid, 0)`): answered in
+/// full here, with nothing to post.
+///
+/// A signal the kernel raises -- a terminal's, a timer's -- does not come
+/// through here; see [`post_kernel_signal`].
+pub(crate) fn check_signal_target(
+    caller: crate::proc::pcb::ProcessId,
+    target: crate::proc::pcb::ProcessId,
+    sig: u64,
+) -> Result<u32, KernelError> {
+    use crate::proc::{pcb, signal};
+
+    match pcb::state(target) {
+        None => return Err(KernelError::NoSuchProcess),
+        Some(pcb::ProcessState::Zombie) => return Err(KernelError::ProcessExited),
+        Some(_) => {}
+    }
+    let sig = u32::try_from(sig)
+        .ok()
+        .filter(|&s| s == 0 || signal::is_valid_signal(s))
+        .ok_or(KernelError::InvalidArgument)?;
+    if target != caller && caller != 0 {
+        let is_parent = pcb::parent(target) == Some(caller);
+        let holds_cap = pcb::has_capability_for(
             caller,
             crate::cap::ResourceType::Process,
             target,
             crate::cap::Rights::DELETE,
         );
-        if !has_parent_auth && !has_cap_auth {
-            return SyscallResult::err(KernelError::PermissionDenied);
+        // A debugger may stop and interrupt what it debugs -- GDB stops each
+        // thread with tgkill(SIGSTOP), and passes on the user's ^C -- whether
+        // or not it is the parent (an auto-attached child's tracer is its
+        // grandparent): `DEBUG` (design-decisions 1547).
+        let debugs = pcb::has_capability_for(
+            caller,
+            crate::cap::ResourceType::Process,
+            target,
+            crate::cap::Rights::DEBUG,
+        );
+        if !is_parent && !holds_cap && !debugs {
+            return Err(KernelError::PermissionDenied);
         }
     }
+    Ok(sig)
+}
 
-    // Reject signals to a dead/unknown process.
-    match pcb::state(target) {
-        Some(pcb::ProcessState::Zombie) => {
-            return SyscallResult::err(KernelError::ProcessExited);
-        }
-        None => return SyscallResult::err(KernelError::NoSuchProcess),
-        _ => {}
-    }
-
-    // Record the sender identity (caller pid + real uid) so an SA_SIGINFO
-    // handler on the target sees a faithful siginfo_t. `value` is the queued
-    // `si_value` payload (0 for the plain kill/tkill/tgkill path).
+/// The record of a signal process `caller` sends: the sender class, the
+/// caller's pid and real uid, and the value.
+fn sender_info(
+    caller: crate::proc::pcb::ProcessId,
+    code: i32,
+    value: u64,
+) -> crate::proc::signal::SigInfo {
+    // Process ids are allocated far below 2^32; the record's field is u32.
     #[allow(clippy::cast_possible_truncation)]
-    let info = signal::SigInfo {
-        code: si_code,
-        sender_pid: caller as u32,
-        sender_uid: pcb::process_uid(caller).unwrap_or(0),
+    let sender_pid = caller as u32;
+    crate::proc::signal::SigInfo {
+        code,
+        sender_pid,
+        sender_uid: crate::proc::pcb::process_uid(caller).unwrap_or(0),
         value,
+    }
+}
+
+/// Post `sig` to `target` with `info` as its record, and carry out what the
+/// kernel decides for it ([`classify_post_info`]): leave it pending for the
+/// target's handler, or terminate, stop or continue the target. With
+/// `thread`, the signal is for that thread of `target` alone
+/// ([`classify_post_thread_info`]): pending on its queue, blocked when it
+/// blocks it; terminate, stop and continue still act on the whole process.
+///
+/// `self_task` is the posting thread when it belongs to `target`: a stop then
+/// parks it last, after its siblings (`stop_process_for_signal`), and this
+/// returns only once the process is continued.
+///
+/// No gate: a process's send has passed [`check_signal_target`] first, and a
+/// signal the kernel raises needs none ([`post_kernel_signal`]).
+///
+/// [`classify_post_info`]: crate::proc::signal::classify_post_info
+/// [`classify_post_thread_info`]: crate::proc::signal::classify_post_thread_info
+fn post_signal(
+    target: crate::proc::pcb::ProcessId,
+    thread_target: Option<crate::sched::task::TaskId>,
+    sig: u32,
+    info: crate::proc::signal::SigInfo,
+    self_task: Option<crate::sched::task::TaskId>,
+) -> KernelResult<()> {
+    use crate::proc::{pcb, signal, thread};
+
+    let decision = match thread_target {
+        Some(tid) => signal::classify_post_thread_info(target, tid, sig, info),
+        None => signal::classify_post_info(target, sig, info),
     };
-    match signal::classify_post_info(target, sig, info) {
-        signal::PostDecision::Deliver | signal::PostDecision::Drop => SyscallResult::ok(0),
-        signal::PostDecision::Terminate(code) => {
-            // No userspace handler (or SIGKILL): terminate like kill().
-            if let Err(e) = pcb::set_exit_code(target, code) {
-                return SyscallResult::err(e);
+    match decision {
+        signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
+        signal::PostDecision::Terminate(fatal)
+            if fatal != signal::SIGKILL && pcb::is_stopped(target) =>
+        {
+            // A stopped process takes nothing but SIGKILL until it is
+            // continued (POSIX; Linux's `wants_signal` passes a stopped
+            // thread over): the signal waits, pending, and the delivery
+            // checkpoint carries out its default action after a SIGCONT.
+            // Until 2026-10-08 a `kill -TERM` ended a stopped program with no
+            // handlers on the spot.
+            match thread_target {
+                Some(tid) => {
+                    signal::set_thread_pending_info(target, tid, sig, info);
+                }
+                None => {
+                    signal::set_pending_info(target, sig, info);
+                }
             }
+        }
+        signal::PostDecision::Terminate(fatal) => {
+            // No userspace handler (or SIGKILL): terminate, recorded as a
+            // death by the signal (never as a bare exit code: 128 to 255 is
+            // an exit too).
+            pcb::set_killed_by_signal(target, u8::try_from(fatal).unwrap_or(u8::MAX))?;
             thread::kill_process_threads(target);
-            serial_println!(
-                "[signal] Process {} terminated by signal {} (from {})",
-                target,
-                sig,
-                caller
-            );
-            SyscallResult::ok(0)
+            if info.code == signal::si_code::SI_KERNEL {
+                serial_println!(
+                    "[signal] Process {} terminated by kernel signal {}",
+                    target,
+                    sig
+                );
+            } else {
+                serial_println!(
+                    "[signal] Process {} terminated by signal {} (from {})",
+                    target,
+                    sig,
+                    info.sender_pid
+                );
+            }
         }
         signal::PostDecision::Stop(s) => {
-            // Suspend the target's threads for job control. If the caller is
-            // signalling itself, this is a self-stop: pass the current task
-            // so `stop_process_for_signal` parks it last (it yields and only
-            // returns on a later SIGCONT).
-            let self_task = if target == caller {
-                Some(task_id)
-            } else {
-                None
-            };
+            // Suspend the target's threads for job control; a self-stop parks
+            // the current thread last and returns on a later SIGCONT.
             stop_process_for_signal(target, s, self_task);
-            SyscallResult::ok(0)
         }
         signal::PostDecision::Continue => {
             // Resume the target's threads. A pending SIGCONT handler (set by
             // classify_post when a trampoline is registered) runs on the
             // target's next return to userspace.
             continue_process(target);
-            SyscallResult::ok(0)
         }
+    }
+    Ok(())
+}
+
+/// `SYS_SIGNAL_QUEUE` (1086) -- `sigqueue(pid, sig, value)`: post `sig` to
+/// process `pid` with `SI_QUEUE` and `value` as its `si_value`.
+///
+/// One process, never a group: `sigqueue` has none, and Linux's
+/// `rt_sigqueueinfo` answers `ESRCH` for any pid it cannot find, 0 and the
+/// negatives included. Then [`check_signal_target`]'s checks, in its order;
+/// signal 0 checks and posts nothing. See
+/// [`SYS_SIGNAL_QUEUE`](super::number::SYS_SIGNAL_QUEUE).
+pub fn sys_signal_queue(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{signal, thread};
+
+    // `arg0` is a pid_t widened to 64 bits: anything not above zero names no
+    // single process.
+    #[allow(clippy::cast_possible_wrap)]
+    let pid_signed = args.arg0 as i64;
+    if pid_signed <= 0 {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let task_id = sched::current_task_id();
+    let caller = thread::owner_process(task_id).unwrap_or(0);
+    let target = args.arg0;
+    let sig = match check_signal_target(caller, target, args.arg1) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if sig == 0 {
+        return SyscallResult::ok(0);
+    }
+    let info = sender_info(caller, signal::si_code::SI_QUEUE, args.arg2);
+    match post_signal(
+        target,
+        None,
+        sig,
+        info,
+        (target == caller).then_some(task_id),
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SIGNAL_TGKILL` (1087) -- `tgkill(tgid, tid, sig)`: post `sig` to
+/// process `tgid`, provided thread `tid` is one of its threads, with
+/// `SI_TKILL`.
+///
+/// The thread check and the post are one step, so a thread id given since to
+/// another process cannot carry the signal there, and the check needs no
+/// capability (libc's, through `/proc/<tgid>/task/<tid>`, needed a File
+/// capability). The signal is for that thread alone: pending on its queue,
+/// taken by it, blocked when it blocks it (until 2026-10-07 it went to the
+/// process, as every signal did).
+/// Errors in Linux's order (`do_send_specific`): `InvalidArgument` for an id
+/// not above zero, `NoSuchProcess` for a thread that is not `tgid`'s, then
+/// [`check_signal_target`]'s. See
+/// [`SYS_SIGNAL_TGKILL`](super::number::SYS_SIGNAL_TGKILL).
+pub fn sys_signal_tgkill(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{signal, thread};
+
+    // Both ids are pid_t widened to 64 bits.
+    #[allow(clippy::cast_possible_wrap)]
+    let (tgid_signed, tid_signed) = (args.arg0 as i64, args.arg1 as i64);
+    if tgid_signed <= 0 || tid_signed <= 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let tgid = args.arg0;
+    if thread::owner_process(args.arg1) != Some(tgid) {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let task_id = sched::current_task_id();
+    let caller = thread::owner_process(task_id).unwrap_or(0);
+    let sig = match check_signal_target(caller, tgid, args.arg2) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if sig == 0 {
+        return SyscallResult::ok(0);
+    }
+    let info = sender_info(caller, signal::si_code::SI_TKILL, 0);
+    match post_signal(
+        tgid,
+        Some(args.arg1),
+        sig,
+        info,
+        (tgid == caller).then_some(task_id),
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
     }
 }
 
@@ -7627,11 +9285,19 @@ pub fn signal_send_to_group(
     // path, so the per-target authority check (parent / self / Process
     // capability with DELETE) applies to every member individually — a
     // group send grants no authority the caller did not already have.
+    //
+    // The caller, if it is a member, goes last: a stop signal stops it by
+    // parking this thread until a SIGCONT, and in list order every member
+    // after it would wait for that SIGCONT too (as in
+    // `post_kernel_signal_to_members`).
     #[allow(clippy::cast_sign_loss)]
     let sig_u = sig as u64;
+    let caller = thread::owner_process(sched::current_task_id());
+    let (own, others): (alloc::vec::Vec<_>, alloc::vec::Vec<_>) =
+        members.into_iter().partition(|&m| Some(m) == caller);
     let mut any_ok = false;
     let mut last_err = SyscallResult::err(KernelError::NoSuchProcess);
-    for target in members {
+    for target in others.into_iter().chain(own) {
         let send_args = SyscallArgs {
             arg0: target,
             arg1: sig_u,
@@ -7654,7 +9320,7 @@ pub fn signal_send_to_group(
     }
 }
 
-/// `SYS_SIGNAL_MASK` — set the calling process's blocked-signal mask.
+/// `SYS_SIGNAL_MASK` — set the calling thread's blocked-signal mask.
 ///
 /// `arg0`: new blocked mask. `arg1`: out-pointer for the old mask (0 to
 /// discard).
@@ -7682,6 +9348,830 @@ pub fn sys_signal_mask(args: &super::dispatch::SyscallArgs) -> super::dispatch::
         }
     }
     SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_SET_IGNORED` (1098) — report the calling process's ignored set
+/// and `SIGCHLD`'s `SA_NOCLDWAIT` ([`crate::proc::signal::set_ignored`]). See
+/// [`SYS_SIGNAL_SET_IGNORED`](super::number::SYS_SIGNAL_SET_IGNORED).
+///
+/// Everything that can refuse is checked before anything changes: a call
+/// that fails leaves the set as it was, so libc can report the failure
+/// without a disposition it no longer knows the kernel's view of.
+pub fn sys_signal_set_ignored(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::SIGNAL_IGNORED_NOCLDWAIT;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg2 & !SIGNAL_IGNORED_NOCLDWAIT != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, core::mem::size_of::<u64>())
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    let nocldwait = args.arg2 & SIGNAL_IGNORED_NOCLDWAIT != 0;
+    let old = match crate::proc::signal::set_ignored(pid, args.arg0, nocldwait) {
+        Ok(old) => old,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 != 0 {
+        // Validated above; this store re-checks at the moment it happens,
+        // which is the check that guards it.
+        if let Err(e) = crate::mm::user::write_user_value::<u64>(args.arg1, old) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_GET_IGNORED` (1099) — read the calling process's ignored set.
+/// See [`SYS_SIGNAL_GET_IGNORED`](super::number::SYS_SIGNAL_GET_IGNORED).
+pub fn sys_signal_get_ignored(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let ignored = crate::proc::signal::ignored(pid);
+    match crate::mm::user::write_user_value::<u64>(args.arg0, ignored) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Whether the process at the other end of `handle` -- a connection made to
+/// a service -- holds that service's key: a `(Service, key_id, READ)`
+/// capability for the name the channel was made to
+/// ([`crate::ipc::service::key_id`]), while it still holds its end of the
+/// channel. Shared by `SYS_CHANNEL_PEER_HAS_KEY` and the Linux ABI's
+/// `slate_channel_peer_has_key`.
+///
+/// # Errors
+///
+/// `NotFound`: the channel was not made by connecting to a service, or its
+/// peer has no recorded identity.
+pub(crate) fn peer_holds_key(handle: crate::ipc::channel::ChannelHandle) -> KernelResult<bool> {
+    use crate::ipc::channel;
+    let key = channel::service_key(handle).ok_or(KernelError::NotFound)?;
+    let peer = channel::peer_cred(handle).ok_or(KernelError::NotFound)?;
+    // The recorded process must still hold its end: one that exited, and
+    // whose pid another process has taken since, holds no end of this
+    // channel and answers nothing.
+    let holds_end = pcb::owns_ipc_handle(peer.pid, ResourceType::Channel, handle.peer_end().raw());
+    Ok(holds_end
+        && pcb::has_capability_for(
+            peer.pid,
+            ResourceType::Service,
+            key,
+            crate::cap::Rights::READ,
+        ))
+}
+
+/// `SYS_CHANNEL_PEER_HAS_KEY` (1103) — whether a service connection's peer
+/// holds the service's key. See
+/// [`SYS_CHANNEL_PEER_HAS_KEY`](super::number::SYS_CHANNEL_PEER_HAS_KEY).
+pub fn sys_channel_peer_has_key(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let handle = crate::ipc::channel::ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    match peer_holds_key(handle) {
+        Ok(holds) => SyscallResult::ok(i64::from(holds)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unix-domain sockets by name (SYS_UNIX_*, 1104-1118)
+//
+// The native door to `ipc::unix_socket`; see the block in `number.rs` for the
+// ABI. Every call on a handle checks the caller holds it.
+// ---------------------------------------------------------------------------
+
+/// The most one stream send or receive moves, as `stream_socket` allows.
+const UNIX_STREAM_CALL_MAX: usize = crate::ipc::stream_socket::MAX_TRANSFER;
+
+/// A socket handle the caller holds, or the refusal.
+fn unix_held(raw: u64) -> Result<crate::ipc::unix_socket::UnixHandle, KernelError> {
+    require_ipc_handle(ResourceType::UnixSocket, raw)?;
+    Ok(crate::ipc::unix_socket::UnixHandle::from_raw(raw))
+}
+
+/// Record `h` as the caller's -- closed at exit, duplicated at fork -- and
+/// return it, or close it again for a caller with no process.
+fn unix_hand_out(h: crate::ipc::unix_socket::UnixHandle) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let Some(pid) = caller_pid() else {
+        crate::ipc::unix_socket::close(h);
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    pcb::register_ipc_handle(pid, ResourceType::UnixSocket, h.raw());
+    SyscallResult::ok(i64::try_from(h.raw()).unwrap_or(i64::MAX))
+}
+
+/// The socket kind a native `kind` argument names.
+fn unix_kind(kind: u64) -> Result<crate::ipc::unix_socket::Kind, KernelError> {
+    match kind {
+        1 => Ok(crate::ipc::unix_socket::Kind::Stream),
+        2 => Ok(crate::ipc::unix_socket::Kind::Dgram),
+        5 => Ok(crate::ipc::unix_socket::Kind::SeqPacket),
+        _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+/// A name argument: an abstract name with `UNIX_NAME_ABSTRACT`, else an
+/// absolute path (both at most 108 bytes, as `sun_path` holds).
+enum UnixNameArg {
+    Path(crate::fs::path::PathBuf),
+    Abstract(alloc::vec::Vec<u8>),
+}
+
+/// Read a name argument.
+fn unix_name_arg(ptr: u64, len: u64, flags: u64) -> Result<UnixNameArg, KernelError> {
+    use super::number::UNIX_NAME_ABSTRACT;
+    let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+    if len == 0 || len > 108 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let bytes = crate::mm::user::read_user_vec(ptr, len, len)?;
+    if flags & UNIX_NAME_ABSTRACT != 0 {
+        return Ok(UnixNameArg::Abstract(bytes));
+    }
+    if bytes.first() != Some(&b'/') {
+        // A relative path is the library's to resolve against its own
+        // working directory; the kernel has no ambient one to use.
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(UnixNameArg::Path(crate::fs::path::PathBuf::from(bytes)))
+}
+
+/// What a name argument leads to, for connect and send.
+fn unix_target_of(arg: &UnixNameArg) -> Result<crate::ipc::unix_socket::Name, KernelError> {
+    match arg {
+        UnixNameArg::Abstract(name) => Ok(crate::ipc::unix_socket::Name::Abstract(name.clone())),
+        UnixNameArg::Path(path) => crate::ipc::unix_socket::name_at(path),
+    }
+}
+
+/// An address as the [`UNIX_ADDR_LEN`](super::number::UNIX_ADDR_LEN)-byte
+/// record `SYS_UNIX_NAME` and `SYS_UNIX_RECV` write.
+fn unix_addr_record(addr: &crate::ipc::unix_socket::Address) -> [u8; super::number::UNIX_ADDR_LEN] {
+    use crate::ipc::unix_socket::Address;
+    let mut out = [0u8; super::number::UNIX_ADDR_LEN];
+    let (kind, bytes): (u32, &[u8]) = match addr {
+        Address::Unnamed => (0, &[]),
+        Address::Path(p) => (1, p),
+        Address::Abstract(n) => (2, n),
+    };
+    let n = bytes.len().min(108);
+    out[..4].copy_from_slice(&kind.to_le_bytes());
+    out[4..8].copy_from_slice(&u32::try_from(n).unwrap_or(0).to_le_bytes());
+    if let (Some(dst), Some(src)) = (
+        out.get_mut(8..).and_then(|o| o.get_mut(..n)),
+        bytes.get(..n),
+    ) {
+        dst.copy_from_slice(src);
+    }
+    out
+}
+
+/// `SYS_UNIX_SOCKET` (1104).
+pub fn sys_unix_socket(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    match unix_kind(args.arg0).and_then(crate::ipc::unix_socket::create) {
+        Ok(h) => unix_hand_out(h),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_PAIR` (1105).
+pub fn sys_unix_pair(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let (a, b) = match unix_kind(args.arg0).and_then(crate::ipc::unix_socket::pair) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Some(pid) = caller_pid() else {
+        crate::ipc::unix_socket::close(a);
+        crate::ipc::unix_socket::close(b);
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    pcb::register_ipc_handle(pid, ResourceType::UnixSocket, a.raw());
+    pcb::register_ipc_handle(pid, ResourceType::UnixSocket, b.raw());
+    SyscallResult::ok2(
+        i64::try_from(a.raw()).unwrap_or(i64::MAX),
+        i64::try_from(b.raw()).unwrap_or(i64::MAX),
+    )
+}
+
+/// `SYS_UNIX_BIND` (1106).
+pub fn sys_unix_bind(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        match unix_name_arg(args.arg1, args.arg2, args.arg4)? {
+            UnixNameArg::Abstract(name) => crate::ipc::unix_socket::bind_abstract(h, &name),
+            UnixNameArg::Path(path) => {
+                // A node in the filesystem, so file write authority, as
+                // making or removing any other node needs.
+                require_cap_type(ResourceType::File, crate::cap::Rights::WRITE)?;
+                let mode = u16::try_from(args.arg3 & 0o7777).unwrap_or(0);
+                let reported = path.as_bytes().to_vec();
+                crate::ipc::unix_socket::bind_path(h, &path, reported, mode)
+            }
+        }
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_LISTEN` (1107).
+pub fn sys_unix_listen(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let backlog = usize::try_from(args.arg1).unwrap_or(crate::ipc::unix_socket::MAX_BACKLOG);
+    match unix_held(args.arg0).and_then(|h| crate::ipc::unix_socket::listen(h, backlog)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_ACCEPT` (1108).
+pub fn sys_unix_accept(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let nonblocking = args.arg1 & super::number::UNIX_NONBLOCK != 0;
+    match unix_held(args.arg0).and_then(|h| crate::ipc::unix_socket::accept(h, nonblocking)) {
+        Ok(accepted) => unix_hand_out(accepted.handle),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_CONNECT` (1109).
+pub fn sys_unix_connect(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        let name = unix_target_of(&unix_name_arg(args.arg1, args.arg2, args.arg3)?)?;
+        let nonblocking = args.arg3 & super::number::UNIX_NONBLOCK != 0;
+        crate::ipc::unix_socket::connect(h, &name, nonblocking)
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SEND` (1110).
+pub fn sys_unix_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let sent = (|| {
+        let h = unix_held(args.arg0)?;
+        let len = usize::try_from(args.arg2).unwrap_or(usize::MAX);
+        let call_max = match unix_socket::kind(h) {
+            Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
+            Some(Kind::Dgram | Kind::SeqPacket) if len > MAX_DGRAM => {
+                return Err(KernelError::MsgSize);
+            }
+            Some(Kind::Dgram | Kind::SeqPacket) => len,
+            None => return Err(KernelError::InvalidHandle),
+        };
+        if args.arg1 == 0 && len > 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let data = read_call_buffer(args.arg1, len, call_max)?;
+        let nonblocking = args.arg5 & super::number::UNIX_NONBLOCK != 0;
+        if args.arg3 == 0 {
+            unix_socket::send(h, &data, nonblocking)
+        } else {
+            let name = unix_target_of(&unix_name_arg(args.arg3, args.arg4, args.arg5)?)?;
+            unix_socket::send_to(h, &data, &name, nonblocking)
+        }
+    })();
+    match sent {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_RECV` (1111).
+pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::{UNIX_ADDR_LEN, UNIX_NONBLOCK, UNIX_PEEK, UNIX_RECV_INFO_LEN};
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let got = (|| {
+        let h = unix_held(args.arg0)?;
+        let call_max = match unix_socket::kind(h) {
+            Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
+            Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
+            None => return Err(KernelError::InvalidHandle),
+        };
+        let cap = usize::try_from(args.arg2).unwrap_or(usize::MAX);
+        if args.arg1 == 0 && cap > 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        if args.arg3 != 0 {
+            // Checked before anything is taken, so a bad pointer loses no
+            // datagram.
+            crate::mm::user::validate_user_write(args.arg3, UNIX_RECV_INFO_LEN)?;
+        }
+        let nonblocking = args.arg4 & UNIX_NONBLOCK != 0;
+        let peek = args.arg4 & UNIX_PEEK != 0;
+        let mut info = None;
+        let n = with_call_out_buf(args.arg1, cap, call_max, |buf| {
+            let r = unix_socket::recv(h, buf, nonblocking, peek)?;
+            let len = r.len;
+            info = Some(r);
+            Ok(len)
+        })?;
+        // A native receive cannot take descriptors yet (known-issues
+        // A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS): released, as a Linux
+        // receive without room for them releases them.
+        if let Some(r) = info.as_mut()
+            && r.rights.take().is_some()
+        {
+            crate::ipc::passed::drain();
+        }
+        if args.arg3 != 0
+            && let Some(r) = info
+        {
+            let mut rec = [0u8; UNIX_RECV_INFO_LEN];
+            rec[..8].copy_from_slice(&u64::try_from(r.full_len).unwrap_or(u64::MAX).to_le_bytes());
+            if let Some(c) = r.cred {
+                rec[8..16].copy_from_slice(&c.pid.to_le_bytes());
+                rec[16..20].copy_from_slice(&c.uid.to_le_bytes());
+                rec[20..24].copy_from_slice(&c.gid.to_le_bytes());
+                rec[24..28].copy_from_slice(&1u32.to_le_bytes());
+            }
+            rec[28..28 + UNIX_ADDR_LEN].copy_from_slice(&unix_addr_record(&r.from));
+            // SAFETY: `rec` is UNIX_RECV_INFO_LEN initialised bytes; the
+            // destination was validated above and copy_to_user re-checks.
+            unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg3, UNIX_RECV_INFO_LEN) }?;
+        }
+        Ok(n)
+    })();
+    match got {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_NAME` (1112).
+pub fn sys_unix_name(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::UNIX_ADDR_LEN;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        let addr = match args.arg1 {
+            0 => crate::ipc::unix_socket::local_address(h)?,
+            1 => crate::ipc::unix_socket::peer_address(h)?,
+            _ => return Err(KernelError::InvalidArgument),
+        };
+        let rec = unix_addr_record(&addr);
+        // SAFETY: UNIX_ADDR_LEN initialised bytes; copy_to_user validates the
+        // destination.
+        unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, UNIX_ADDR_LEN) }
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_PEER_CRED` (1113).
+pub fn sys_unix_peer_cred(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let done = (|| {
+        let h = unix_held(args.arg0)?;
+        let cred = crate::ipc::unix_socket::peer_cred(h)?.ok_or(KernelError::NoAddress)?;
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&cred.pid.to_le_bytes());
+        out[8..12].copy_from_slice(&cred.uid.to_le_bytes());
+        out[12..].copy_from_slice(&cred.gid.to_le_bytes());
+        // SAFETY: sixteen initialised bytes; copy_to_user validates the
+        // destination.
+        unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, 16) }
+    })();
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SHUTDOWN` (1114).
+pub fn sys_unix_shutdown(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let how = u32::try_from(args.arg1).unwrap_or(u32::MAX);
+    match unix_held(args.arg0).and_then(|h| crate::ipc::unix_socket::shutdown(h, how)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_CLOSE` (1115).
+pub fn sys_unix_close(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let h = match unix_held(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::UnixSocket, h.raw());
+    }
+    crate::ipc::unix_socket::close(h);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_UNIX_POLL` (1116).
+pub fn sys_unix_poll(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    match unix_held(args.arg0) {
+        Ok(h) => SyscallResult::ok(i64::from(crate::ipc::unix_socket::poll_status(h))),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_SET_OPTION` (1117).
+pub fn sys_unix_set_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::{UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use crate::ipc::unix_socket::{self, Direction};
+    let done = unix_held(args.arg0).and_then(|h| match args.arg1 {
+        UNIX_OPT_PASSCRED => {
+            // Strictly 0 or 1, unlike Linux's "any nonzero": a value with
+            // more bits keeps them free for a later meaning.
+            let on = match args.arg2 {
+                0 => false,
+                1 => true,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            unix_socket::set_passcred(h, on)
+        }
+        UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
+            let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            // Nanoseconds; 0 is no limit, as Linux's {0, 0}.
+            let limit = (args.arg2 != 0).then_some(args.arg2);
+            unix_socket::set_timeout(h, dir, limit)
+        }
+        _ => Err(KernelError::NotSupported),
+    });
+    match done {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UNIX_GET_OPTION` (1118).
+pub fn sys_unix_get_option(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::{UNIX_OPT_INQ, UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO};
+    use crate::ipc::unix_socket::{self, Direction};
+    let got = unix_held(args.arg0).and_then(|h| match args.arg1 {
+        UNIX_OPT_PASSCRED => Ok(i64::from(unix_socket::passcred(h))),
+        UNIX_OPT_INQ => {
+            unix_socket::readable_bytes(h).map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+        }
+        UNIX_OPT_RCVTIMEO | UNIX_OPT_SNDTIMEO => {
+            let dir = if args.arg1 == UNIX_OPT_RCVTIMEO {
+                Direction::Receive
+            } else {
+                Direction::Send
+            };
+            unix_socket::timeout(h, dir)
+                .map(|limit| i64::try_from(limit.unwrap_or(0)).unwrap_or(i64::MAX))
+        }
+        _ => Err(KernelError::NotSupported),
+    });
+    match got {
+        Ok(v) => SyscallResult::ok(v),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The device door (SYS_DEVICE_*, 1119-1123)
+//
+// The Linux device ABI, reached natively; see the block in `number.rs`. The
+// answers are Linux errnos, from the same handlers a Linux `ioctl`, `read` and
+// `write` reach.
+// ---------------------------------------------------------------------------
+
+/// A device the caller may drive through the door.
+enum DoorDevice {
+    /// A PCM substream the caller holds.
+    Pcm(crate::ipc::alsa_pcm::AlsaPcmHandle),
+    /// The card's control device.
+    Control,
+}
+
+/// The device a `(kind, handle)` pair names, if the caller may use it:
+/// `EBADF` otherwise -- a PCM handle it does not hold, an unknown kind, a
+/// control handle other than [`DEVICE_CONTROL_HANDLE`].
+///
+/// [`DEVICE_CONTROL_HANDLE`]: super::number::DEVICE_CONTROL_HANDLE
+fn door_device(kind: u64, handle: u64) -> Result<DoorDevice, super::dispatch::SyscallResult> {
+    use super::linux::{errno, linux_err};
+    use super::number::{DEVICE_CONTROL_HANDLE, DEVICE_KIND_CONTROL, DEVICE_KIND_PCM};
+    match kind {
+        DEVICE_KIND_PCM => {
+            require_ipc_handle(ResourceType::AlsaPcm, handle)
+                .map_err(|_| linux_err(errno::EBADF))?;
+            Ok(DoorDevice::Pcm(
+                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(handle),
+            ))
+        }
+        DEVICE_KIND_CONTROL if handle == DEVICE_CONTROL_HANDLE => Ok(DoorDevice::Control),
+        _ => Err(linux_err(errno::EBADF)),
+    }
+}
+
+/// `SYS_DEVICE_OPEN` (1119).
+pub fn sys_device_open(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::linux::{errno, linux_err};
+    use super::number::{DEVICE_CONTROL_HANDLE, DEVICE_KIND_CONTROL, DEVICE_KIND_PCM};
+    /// Linux's `PATH_MAX`.
+    const PATH_MAX: usize = 4096;
+    let len = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    if len == 0 {
+        return linux_err(errno::ENOENT);
+    }
+    if len > PATH_MAX {
+        return linux_err(errno::ENAMETOOLONG);
+    }
+    let path = match crate::mm::user::read_user_vec(args.arg0, len, len) {
+        Ok(p) => p,
+        Err(_) => return linux_err(errno::EFAULT),
+    };
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    let capture = match path.as_slice() {
+        b"/dev/snd/pcmC0D0p" => false,
+        b"/dev/snd/pcmC0D0c" => true,
+        b"/dev/snd/controlC0" => {
+            if !crate::audio_out::has_sink() {
+                return linux_err(errno::ENODEV);
+            }
+            return SyscallResult::ok2(
+                i64::try_from(DEVICE_CONTROL_HANDLE).unwrap_or(i64::MAX),
+                i64::try_from(DEVICE_KIND_CONTROL).unwrap_or(i64::MAX),
+            );
+        }
+        _ => return linux_err(errno::ENOENT),
+    };
+    // No card to play through: as the Linux open of the node answers.
+    if !crate::audio_out::has_sink() {
+        return linux_err(errno::ENODEV);
+    }
+    let h = crate::ipc::alsa_pcm::create(capture);
+    pcb::register_ipc_handle(pid, ResourceType::AlsaPcm, h.raw());
+    SyscallResult::ok2(
+        i64::try_from(h.raw()).unwrap_or(i64::MAX),
+        i64::try_from(DEVICE_KIND_PCM).unwrap_or(i64::MAX),
+    )
+}
+
+/// `SYS_DEVICE_IOCTL` (1120).
+pub fn sys_device_ioctl(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::number::DEVICE_NONBLOCK;
+    // Linux's `ioctl` reads its command as an `unsigned int`.
+    #[allow(clippy::cast_possible_truncation)]
+    let request = args.arg2 as u32;
+    let nonblocking = args.arg4 & DEVICE_NONBLOCK != 0;
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => {
+            super::linux::alsa_pcm_ioctl_on(h, nonblocking, request, args.arg3)
+        }
+        Ok(DoorDevice::Control) => super::linux::alsa_control_ioctl_on(request, args.arg3),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_DEVICE_READ` (1121).
+pub fn sys_device_read(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::linux::{errno, linux_err};
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => super::linux::alsa_pcm_read_bytes(h, args.arg2, args.arg3),
+        // The control device is ioctl-only, as its Linux `read` answers.
+        Ok(DoorDevice::Control) => linux_err(errno::EINVAL),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_DEVICE_WRITE` (1122).
+pub fn sys_device_write(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::linux::{errno, linux_err};
+    use super::number::DEVICE_NONBLOCK;
+    let nonblocking = args.arg4 & DEVICE_NONBLOCK != 0;
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => {
+            super::linux::alsa_pcm_write_bytes(h, nonblocking, args.arg2, args.arg3)
+        }
+        Ok(DoorDevice::Control) => linux_err(errno::EINVAL),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_DEVICE_CLOSE` (1123).
+pub fn sys_device_close(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    match door_device(args.arg0, args.arg1) {
+        Ok(DoorDevice::Pcm(h)) => {
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(pid, ResourceType::AlsaPcm, h.raw());
+            }
+            crate::ipc::alsa_pcm::close(h);
+            SyscallResult::ok(0)
+        }
+        Ok(DoorDevice::Control) => SyscallResult::ok(0),
+        Err(r) => r,
+    }
+}
+
+/// `SYS_PROCESS_GET_PHDR` (1102) — where the caller's main image's program
+/// headers are. See
+/// [`SYS_PROCESS_GET_PHDR`](super::number::SYS_PROCESS_GET_PHDR).
+pub fn sys_process_get_phdr(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let Some(phdr) = pcb::main_phdr(pid) else {
+        return SyscallResult::err(KernelError::NotFound);
+    };
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&phdr.vaddr.to_le_bytes());
+    out[8..10].copy_from_slice(&phdr.phnum.to_le_bytes());
+    out[10..12].copy_from_slice(&phdr.phentsize.to_le_bytes());
+    match crate::mm::user::write_user_value::<[u8; 16]>(args.arg0, out) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// The threads an affinity call acts on, for its target and flags
+/// ([`SYS_SCHED_SET_AFFINITY`](super::number::SYS_SCHED_SET_AFFINITY)): one
+/// thread, or every thread of a process with its main thread first.
+/// `for_set` adds the permission check a change needs; reading needs none.
+///
+/// Shared with the Linux ABI's `sched_setaffinity`, whose thread form this
+/// is, so that the two ABIs answer to one rule.
+///
+/// # Errors
+///
+/// `InvalidArgument` for an unknown flag, `NoSuchProcess` for no such thread
+/// or process (or a process with no threads left), `PermissionDenied` for a
+/// change the caller may not make: see [`may_change_affinity`].
+pub(crate) fn affinity_targets(
+    target: u64,
+    flags: u64,
+    for_set: bool,
+) -> Result<alloc::vec::Vec<crate::sched::task::TaskId>, KernelError> {
+    use super::number::SCHED_AFFINITY_THREAD;
+    use crate::proc::pcb;
+
+    if flags & !SCHED_AFFINITY_THREAD != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let caller = caller_pid().filter(|&p| p != 0);
+    let (owner, tasks) = if flags & SCHED_AFFINITY_THREAD != 0 {
+        let tid = if target == 0 {
+            sched::current_task_id()
+        } else {
+            target
+        };
+        if sched::get_cpu_affinity(tid).is_none() {
+            return Err(KernelError::NoSuchProcess);
+        }
+        let owner = crate::proc::thread::owner_process(tid).filter(|&p| p != 0);
+        (owner, alloc::vec![tid])
+    } else {
+        let pid = if target == 0 {
+            caller.ok_or(KernelError::NoSuchProcess)?
+        } else {
+            target
+        };
+        let mut threads = pcb::get_threads(pid).ok_or(KernelError::NoSuchProcess)?;
+        if threads.is_empty() {
+            return Err(KernelError::NoSuchProcess);
+        }
+        // The main thread first: a process reads as it, as on Linux.
+        if let Some(main) = threads.iter().position(|&t| t == pid) {
+            threads.swap(0, main);
+        }
+        (Some(pid), threads)
+    };
+    if for_set && !may_change_affinity(caller, owner) {
+        return Err(KernelError::PermissionDenied);
+    }
+    Ok(tasks)
+}
+
+/// Whether `caller` (`None`: a kernel task) may change the affinity of a
+/// thread of `owner` (`None`: a kernel task, which belongs to no process).
+///
+/// The rule for signalling, which lane E's request asked for and which the
+/// kernel already applies there ([`check_signal_target`]): the process
+/// itself, its parent, or a holder of a `Process` capability for it with
+/// `DELETE` rights. The kernel may move anything; no process may move a
+/// kernel task.
+pub(crate) fn may_change_affinity(
+    caller: Option<crate::proc::pcb::ProcessId>,
+    owner: Option<crate::proc::pcb::ProcessId>,
+) -> bool {
+    use crate::proc::pcb;
+    match (caller, owner) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(c), Some(o)) => {
+            c == o
+                || pcb::parent(o) == Some(c)
+                || pcb::has_capability_for(
+                    c,
+                    crate::cap::ResourceType::Process,
+                    o,
+                    crate::cap::Rights::DELETE,
+                )
+        }
+    }
+}
+
+/// `SYS_SCHED_SET_AFFINITY` (1100) — restrict a process's threads, or one
+/// thread, to some CPUs. See
+/// [`SYS_SCHED_SET_AFFINITY`](super::number::SYS_SCHED_SET_AFFINITY).
+pub fn sys_sched_set_affinity(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let tasks = match affinity_targets(args.arg0, args.arg2, true) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Checked once, before any thread changes, so a mask that fails leaves a
+    // process as it was rather than half moved.
+    let mask = args.arg1;
+    let online = crate::cpu_hotplug::online_mask();
+    if mask == 0 || (online != 0 && mask & online == 0) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    for tid in tasks {
+        match sched::set_affinity(tid, mask) {
+            // A thread that exited since the list was taken has nothing left
+            // to move.
+            Ok(_) | Err(KernelError::NotFound) => {}
+            Err(e) => return SyscallResult::err(e),
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SCHED_GET_AFFINITY` (1101) — read the CPUs a process or a thread may
+/// run on now. See
+/// [`SYS_SCHED_GET_AFFINITY`](super::number::SYS_SCHED_GET_AFFINITY).
+pub fn sys_sched_get_affinity(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let tasks = match affinity_targets(args.arg0, args.arg2, false) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // The main thread, or the only one asked about; one that exited since
+    // the list was taken reads as gone.
+    let Some(mask) = tasks.first().and_then(|&tid| sched::affinity_of(tid)) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    match crate::mm::user::write_user_value::<u64>(args.arg1, mask) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_SIGNAL_PENDING` — query the calling process's pending set.
@@ -7749,6 +10239,82 @@ pub fn sys_signal_stop_self(args: &super::dispatch::SyscallArgs) -> super::dispa
     SyscallResult::ok(0)
 }
 
+/// `SYS_SIGNAL_EXIT_SELF` (1136) — end the calling process as killed by
+/// `sig`: what a signal's default "terminate" action does, carried out for a
+/// process whose own dispatcher made that decision (libc's
+/// `apply_default_action`, `abort`). The parent's `wait` then reports
+/// `WIFSIGNALED` with `WTERMSIG == sig`, which `_exit (128 + sig)` cannot
+/// say -- an exit of 128 to 255 is an exit
+/// (requests/b-ad-an-exit-status-of-128-to-255-is-reported-as-a-signal-death.md).
+///
+/// Only a signal whose default action terminates may be named: anything else
+/// would record a death the parent's `wait` could not have seen on Linux.
+/// Self-only, so it needs no authority, like `SYS_SIGNAL_STOP_SELF`. Does
+/// not return.
+pub fn sys_signal_exit_self(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use crate::proc::signal::{self, DefaultAction};
+
+    let sig = match u32::try_from(args.arg0) {
+        Ok(s)
+            if signal::is_valid_signal(s)
+                && signal::default_action(s) == DefaultAction::Terminate =>
+        {
+            s
+        }
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let task_id = sched::current_task_id();
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    terminate_current_process_for_signal(pid, task_id, sig);
+    // `terminate_current_process_for_signal` ends this thread with the
+    // process; reaching here would mean `task_exit` returned.
+    SyscallResult::err(KernelError::InternalError)
+}
+
+/// `SYS_PIDFD_OPEN` (1137) -- a handle on process `arg0` that is ready
+/// (`POLLIN`, `SYS_WAIT_MULTIPLE` kind `ResourceType::Process`) once the
+/// process has exited. See the number's doc.
+pub fn sys_pidfd_open(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    // No flags yet: PIDFD_NONBLOCK is a descriptor flag, the library's.
+    if args.arg1 != 0 || args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let target: pcb::ProcessId = args.arg0;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // A zombie still exists and may be watched -- it is ready at once; a
+    // reaped (or never-made) process may not.
+    if pcb::state(target).is_none() {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let Ok(value) = i64::try_from(target) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    pcb::register_ipc_handle(pid, ResourceType::Process, target);
+    SyscallResult::ok(value)
+}
+
+/// `SYS_PIDFD_CLOSE` (1138) -- give back a handle `SYS_PIDFD_OPEN` made.
+pub fn sys_pidfd_close(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !pcb::owns_ipc_handle(pid, ResourceType::Process, args.arg0) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    pcb::deregister_ipc_handle(pid, ResourceType::Process, args.arg0);
+    SyscallResult::ok(0)
+}
+
 /// `SYS_SIGNAL_RETURN` — resume from a signal handler (sigreturn).
 ///
 /// `arg0`: pointer to the `SignalContext` on the user stack.
@@ -7775,6 +10341,48 @@ pub fn sys_signal_return_with_frame(frame: &mut super::entry::SyscallFrame) -> i
         return KernelError::InvalidAddress.code() as i64;
     }
 
+    // The kernel's extension above the context (and the siginfo tail, for a
+    // trampoline that takes one): RCX, R11 and the FPU image every frame
+    // since 2026-10-07 carries. Read in full before anything changes, so a
+    // bad one leaves the frame as it was. A context without one -- the magic
+    // missing -- is restored as before, from the context alone.
+    let caller = crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    let ext_offset = if crate::proc::signal::extended_frame(caller) {
+        crate::proc::signal::SIGNAL_FRAME_EXTENDED_SIZE
+    } else {
+        crate::proc::signal::SIGNAL_CONTEXT_SIZE
+    };
+    let ext_addr = frame.arg0.wrapping_add(ext_offset as u64);
+    let ext =
+        match crate::mm::user::read_user_value::<crate::proc::signal::SignalFrameExt>(ext_addr) {
+            Ok(v) if v.magic == crate::proc::signal::SIGNAL_FRAME_EXT_MAGIC => Some(v),
+            Ok(_) => None,
+            Err(e) => return e.code() as i64,
+        };
+    let fpu_image = match ext {
+        Some(e) if e.fpu_len != 0 => {
+            let max = crate::sched::fpu::signal_image_size();
+            let len = usize::try_from(e.fpu_len).unwrap_or(usize::MAX);
+            if len > max {
+                return KernelError::InvalidArgument.code() as i64;
+            }
+            let at = ext_addr.wrapping_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64);
+            match crate::mm::user::read_user_vec(at, len, max) {
+                Ok(v) => Some(v),
+                Err(e) => return e.code() as i64,
+            }
+        }
+        _ => None,
+    };
+    if let Some(e) = ext {
+        // The FPU state the handler interrupted, and RCX/R11 through the
+        // IRETQ exit: the context may have been interrupted anywhere.
+        crate::sched::fpu::restore_signal_image(fpu_image.as_deref());
+        frame.rcx = e.rcx;
+        frame.r11 = e.r11;
+        frame.exit_full = 1;
+    }
+
     // Restore the interrupted SYSRET frame.
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
@@ -7797,6 +10405,17 @@ pub fn sys_signal_return_with_frame(frame: &mut super::entry::SyscallFrame) -> i
     {
         ctx.rax as i64
     }
+}
+
+/// End the current process -- thread `current_task` of `pid` -- as killed by
+/// `sig`: a trap's signal no handler can take (`idt`'s `int3` and single
+/// step, as Linux's `force_sig` ends the program). Never returns.
+pub(crate) fn kill_current_for_signal(
+    pid: crate::proc::pcb::ProcessId,
+    current_task: crate::sched::task::TaskId,
+    sig: u32,
+) {
+    terminate_current_process_for_signal(pid, current_task, sig);
 }
 
 /// Terminate the current process because a fatal signal was posted and no
@@ -7822,10 +10441,11 @@ fn terminate_current_process_for_signal(
 ) {
     use crate::proc::{pcb, thread};
 
-    // 128 + sig is the conventional wait-status for "terminated by signal".
-    #[allow(clippy::cast_possible_wrap)]
-    let exit_code = 128i32.wrapping_add(sig as i32);
-    let _ = pcb::set_exit_code(pid, exit_code);
+    // A death by the signal, which the parent's `wait` reports as
+    // `WIFSIGNALED` -- not an exit code of 128 + sig, which reads as an exit.
+    // The process is ours and alive (we are running in it), so the record
+    // cannot be missing.
+    let _ = pcb::set_killed_by_signal(pid, u8::try_from(sig).unwrap_or(u8::MAX));
 
     // Tear down sibling threads first. `kill_thread` refuses the *current*
     // task (it must self-terminate via `task_exit`), so we only kill the
@@ -7853,6 +10473,18 @@ fn terminate_current_process_for_signal(
     thread::on_thread_exit(current_task);
     sched::task_exit();
 }
+
+/// One job-control change at a time: a stop's suspending of the threads and
+/// its record, against a continue's resuming and its record. Without it a
+/// `SIGSTOP` and a `SIGCONT` from two senders could interleave -- the stop
+/// suspends, the continue resumes and finds nothing stopped to record, the
+/// stop records -- and leave a running process marked stopped, its parent
+/// told of a stop that is not; with it the process ends in the state of
+/// whichever came second, as Linux's `siglock` orders them. Held only across
+/// work that never blocks or yields (a self-stop parks after releasing it);
+/// taken before the process table, the scheduler and the signal state, never
+/// while holding any of them.
+static JOB_CONTROL: crate::sync::Mutex<()> = crate::sync::Mutex::named((), b"jobctl");
 
 /// Wake the parent-side observers of a job-control transition.
 ///
@@ -7916,6 +10548,8 @@ fn stop_process_for_signal(
 ) {
     use crate::proc::pcb;
 
+    let jc = JOB_CONTROL.lock();
+
     // Suspend every thread except the current one (if this is a self-stop).
     let mut self_thread: Option<crate::sched::task::TaskId> = None;
     if let Some(threads) = pcb::get_threads(pid) {
@@ -7961,13 +10595,25 @@ fn stop_process_for_signal(
         sched::suspend_pending(t);
     }
 
-    // Mark stopped and wake parent observers. If the process vanished
-    // between the signal check and here, there is nothing to record.
-    if let Ok(waiters) = pcb::record_jc_stopped(pid, sig) {
-        wake_jc_waiters(waiters);
-    }
+    // Mark stopped, wake parent observers and send the parent its
+    // `SIGCHLD` -- unless the process was stopped already, when this is no
+    // stop: no second report and no second `SIGCHLD` (Linux leaves such a
+    // stop signal pending, and the `SIGCONT` discards it). A self-stop's
+    // thread parks all the same. If the process vanished between the signal
+    // check and here, there is nothing to record.
+    let stopped_now = match pcb::record_jc_stopped(pid, sig) {
+        Ok(Some(waiters)) => {
+            wake_jc_waiters(waiters);
+            notify_parent_of_job_control(pid, pcb::JobControlEvent::Stopped(sig));
+            true
+        }
+        Ok(None) | Err(_) => false,
+    };
+    drop(jc);
 
-    serial_println!("[signal] Process {} stopped by signal {}", pid, sig);
+    if stopped_now {
+        serial_println!("[signal] Process {} stopped by signal {}", pid, sig);
+    }
 
     // Phase 2: actually park, unless a SIGCONT already resumed us in the
     // window above — in which case this returns immediately and the thread
@@ -7988,77 +10634,284 @@ fn stop_process_for_signal(
     }
 }
 
-/// Continue a stopped process: resume all its suspended threads and record
-/// the continue so the parent's `wait4`/`waitid` can observe it (WCONTINUED).
+/// Continue a stopped process: resume all its suspended threads, record the
+/// continue so the parent's `wait4`/`waitid` can observe it (WCONTINUED), and
+/// send the parent its `SIGCHLD`.
 ///
 /// `sched::resume` is a no-op for threads that are not Suspended, so calling
-/// this on a process that is not actually stopped is harmless.
+/// this on a process that is not actually stopped is harmless -- and is no
+/// continue: nothing is recorded and the parent is told nothing, as Linux's
+/// `prepare_signal` reports a continue only for a process that was stopped.
+/// Until 2026-10-08 every `SIGCONT` left one, so a shell's `waitpid(-1,
+/// WCONTINUED)` reported a job continued that had never stopped.
 fn continue_process(pid: crate::proc::pcb::ProcessId) {
     use crate::proc::pcb;
 
+    let jc = JOB_CONTROL.lock();
     if let Some(threads) = pcb::get_threads(pid) {
         for t in threads {
-            sched::resume(t);
+            // A thread in a ptrace-stop is its tracer's to resume, not
+            // SIGCONT's (Linux's TASK_TRACED).
+            if !crate::proc::ptrace::is_trace_stopped(t) {
+                sched::resume(t);
+            }
         }
     }
 
-    if let Ok(waiters) = pcb::record_jc_continued(pid) {
-        wake_jc_waiters(waiters);
-    }
+    let continued = match pcb::record_jc_continued(pid) {
+        Ok(Some(waiters)) => {
+            wake_jc_waiters(waiters);
+            notify_parent_of_job_control(pid, pcb::JobControlEvent::Continued);
+            true
+        }
+        Ok(None) | Err(_) => false,
+    };
+    drop(jc);
 
-    serial_println!("[signal] Process {} continued", pid);
+    if continued {
+        serial_println!("[signal] Process {} continued", pid);
+    }
 }
 
-/// Post a kernel-originated signal to `pid` and carry out its default action.
+/// Send process `pid`'s parent the `SIGCHLD` of its job-control change `ev`,
+/// as Linux's `do_notify_parent_cldstop` sends it: `CLD_STOPPED` and the stop
+/// signal, or `CLD_CONTINUED` and `SIGCONT`, from the child -- unless the
+/// parent's `SIGCHLD` is ignored or has `SA_NOCLDSTOP`. Until 2026-10-08 a
+/// parent was told only of exits, so one that learns of its children from its
+/// `SIGCHLD` handler -- a shell's job control -- did not see a job stop with
+/// `^Z` until it next waited.
 ///
-/// This is the authority-free sibling of [`sys_signal_send_with_info`]: there
-/// is no caller, so no parent/capability check is performed. It is used for
-/// signals the kernel itself raises against a process it is not "calling" from
-/// — currently the orphaned-process-group `SIGHUP`/`SIGCONT` on session-leader
-/// exit. Zombie/unknown targets are skipped silently (the process raced us to
-/// exit, which is exactly the orphan case we are handling).
+/// For a Linux-ABI parent, whose `SIGCHLD` flags the kernel keeps. A native
+/// parent's `SA_NOCLDSTOP` lives in its C library, which can keep the signal
+/// back only once it reads `si_code` from the signal frame; whether the kernel
+/// should post to it and leave that to the library is lane D's to answer
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`, item 3),
+/// and until then a native parent is not sent it
+/// (`known-issues/A-SIGCHLD-IS-NOT-POSTED-WHEN-A-CHILD-STOPS-OR-CONTINUES.md`).
+fn notify_parent_of_job_control(
+    pid: crate::proc::pcb::ProcessId,
+    ev: crate::proc::pcb::JobControlEvent,
+) {
+    use crate::proc::pcb;
+    let Some(parent) = pcb::parent(pid).filter(|&p| p != 0 && p != pid) else {
+        return;
+    };
+    if pcb::get_abi_mode(parent) != Some(pcb::AbiMode::Linux)
+        || !super::linux::linux_wants_cldstop(parent)
+    {
+        return;
+    }
+    // The child's real uid, as Linux's `do_notify_parent_cldstop` gives it.
+    let uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
+    let info = crate::proc::signal::SigInfo::child(
+        u32::try_from(pid).unwrap_or(u32::MAX),
+        uid,
+        ev.sigchld_code_and_status(),
+    );
+    // Dropped as it is sent if SIGCHLD is at its default, which ignores it,
+    // and nothing blocks it -- as Linux sends it.
+    super::linux::post_linux_sigchld(parent, info);
+}
+
+/// Carry out, now, what `SIGCONT` or `SIGKILL` -- just queued on process
+/// `pid` by a timer -- does to `pid` if it is *stopped*: `SIGCONT` continues
+/// it (pending stop signals discarded, as Linux's `prepare_signal` flushes
+/// them), even ignored or blocked; `SIGKILL` ends it. The two signals a
+/// stopped process takes (POSIX); anything else waits, pending, until it is
+/// continued. A process that is not stopped is left alone: its delivery
+/// checkpoint acts on the signal as it returns to user mode.
 ///
-/// The signal is classified with [`signal::classify_post_info`] and acted on
-/// identically to the user-`kill` path: a userspace handler simply leaves the
-/// signal pending (`Deliver`); the default action terminates, stops, or
-/// continues the process. There is never a self-stop here (the caller is the
-/// exiting thread, not a member of the target group), so `stop_process_for_signal`
-/// is always called with `None`.
-pub fn deliver_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) {
+/// A `kill`'s reach the stopped process through [`post_signal`]; a timer's
+/// are queued in the timer interrupt, which can do no more, and come here
+/// through the work queue ([`defer_act_on_stopped`]). Until 2026-10-08 a
+/// timer's `SIGCONT` or `SIGKILL` waited until something else continued the
+/// process
+/// (`known-issues/A-A-TIMER-SIGNAL-CANNOT-CONTINUE-OR-KILL-A-STOPPED-PROCESS.md`).
+pub fn act_on_stopped(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    use crate::proc::{pcb, signal, thread};
+    if !pcb::is_stopped(pid) {
+        return;
+    }
+    if sig == signal::SIGCONT {
+        signal::discard_pending_stops(pid);
+        continue_process(pid);
+    } else if sig == signal::SIGKILL {
+        if pcb::set_killed_by_signal(pid, u8::try_from(sig).unwrap_or(u8::MAX)).is_err() {
+            return; // gone meanwhile: nothing left to end
+        }
+        thread::kill_process_threads(pid);
+        serial_println!(
+            "[signal] Stopped process {} ended by a timer's SIGKILL",
+            pid
+        );
+    }
+}
+
+/// The `(pid, signal)` pairs the timer interrupt queued for
+/// [`act_on_stopped`], which takes locks an interrupt may not wait for:
+/// drained by the work queue ([`drain_stopped_acts`]). Fixed room, filled
+/// without allocating; a pair already waiting is not added twice.
+struct StoppedActs {
+    /// The pairs, `len` of them, oldest first.
+    items: [(u64, u32); STOPPED_ACTS_ROOM],
+    /// How many of `items` are in use.
+    len: usize,
+}
+
+/// Room in [`StoppedActs`]: a pair waits only until the work queue runs, and
+/// a periodic timer refills a dropped one at its next expiry.
+const STOPPED_ACTS_ROOM: usize = 32;
+
+/// The waiting pairs. Taken with interrupts off: the timer interrupt fills it.
+static STOPPED_ACTS: crate::sync::PreemptSpinMutex<StoppedActs> =
+    crate::sync::PreemptSpinMutex::new(StoppedActs {
+        items: [(0, 0); STOPPED_ACTS_ROOM],
+        len: 0,
+    });
+
+/// Whether a drain is already submitted to the work queue.
+static STOPPED_ACTS_SCHEDULED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Pairs dropped because the room was full -- for a diagnosis.
+static STOPPED_ACTS_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// From the timer interrupt: a timer has just sent `sig` to `pid` (queued,
+/// or dropped as ignored). If `sig` is one a stopped process takes --
+/// `SIGCONT` or `SIGKILL` -- the work queue looks at `pid`
+/// ([`act_on_stopped`]). Never blocks, never allocates.
+pub fn defer_act_on_stopped(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    use crate::proc::signal;
+    use core::sync::atomic::Ordering;
+    if sig != signal::SIGCONT && sig != signal::SIGKILL {
+        return;
+    }
+    let queued = {
+        let mut acts = STOPPED_ACTS.lock_irqsave();
+        let len = acts.len;
+        if acts
+            .items
+            .get(..len)
+            .is_some_and(|w| w.contains(&(pid, sig)))
+        {
+            true
+        } else if let Some(slot) = acts.items.get_mut(len) {
+            *slot = (pid, sig);
+            acts.len = len.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    };
+    if !queued {
+        STOPPED_ACTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if !STOPPED_ACTS_SCHEDULED.swap(true, Ordering::AcqRel)
+        && !crate::workqueue::submit(drain_stopped_acts, 0)
+    {
+        // The work queue is full: the next timer's post submits again.
+        STOPPED_ACTS_SCHEDULED.store(false, Ordering::Release);
+    }
+}
+
+/// The work queue's item: act on every waiting pair. The flag is cleared
+/// first, so a pair added while this runs submits another drain rather than
+/// being left behind.
+fn drain_stopped_acts(_arg: u64) {
+    use core::sync::atomic::Ordering;
+    STOPPED_ACTS_SCHEDULED.store(false, Ordering::Release);
+    loop {
+        let next = {
+            let mut acts = STOPPED_ACTS.lock_irqsave();
+            if acts.len == 0 {
+                None
+            } else {
+                let first = acts.items.first().copied();
+                acts.items.copy_within(1.., 0);
+                acts.len = acts.len.saturating_sub(1);
+                first
+            }
+        };
+        let Some((pid, sig)) = next else {
+            break;
+        };
+        act_on_stopped(pid, sig);
+    }
+}
+
+/// Post a signal the kernel raises -- a terminal's `^C`/`^Z`/`SIGWINCH`, the
+/// `SIGTTIN`/`SIGTTOU` of a background job touching its terminal, the
+/// orphaned group's `SIGHUP`/`SIGCONT` -- and carry out its default action.
+///
+/// The record names the kernel as the sender (`SI_KERNEL`, pid 0), and no
+/// authority is checked: no process is sending it (Linux's `SEND_SIG_PRIV`).
+/// The thread it is raised on is only the one the kernel happened to be
+/// running -- a terminal writing a pty's input, a job reading its terminal --
+/// and until 2026-10-01 the terminal paths asked whether *that* process may
+/// signal each target, so a `^C` typed into a terminal reached only the
+/// foreground processes that were the terminal's own children.
+///
+/// When the target is the current thread's own process, the current thread
+/// is the self-stop thread (parked last on a stop; see [`post_signal`]).
+///
+/// Fails, posting nothing, for a signal number that is not one
+/// (`InvalidArgument`) or a target that is gone (`NoSuchProcess`) or a zombie
+/// (`ProcessExited`).
+pub fn post_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) -> KernelResult<()> {
     use crate::proc::{pcb, signal, thread};
 
     if !signal::is_valid_signal(sig) {
-        return;
+        return Err(KernelError::InvalidArgument);
     }
-    // Skip dead/unknown targets: a zombie cannot be signalled and an absent
-    // pid has nothing to receive.
     match pcb::state(pid) {
-        Some(pcb::ProcessState::Zombie) | None => return,
-        _ => {}
+        None => return Err(KernelError::NoSuchProcess),
+        Some(pcb::ProcessState::Zombie) => return Err(KernelError::ProcessExited),
+        Some(_) => {}
     }
-
-    match signal::classify_post_info(pid, sig, signal::SigInfo::kernel()) {
-        signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
-        signal::PostDecision::Terminate(code) => {
-            if pcb::set_exit_code(pid, code).is_ok() {
-                thread::kill_process_threads(pid);
-                serial_println!(
-                    "[signal] Process {} terminated by kernel signal {}",
-                    pid,
-                    sig
-                );
-            }
-        }
-        signal::PostDecision::Stop(s) => {
-            stop_process_for_signal(pid, s, None);
-        }
-        signal::PostDecision::Continue => {
-            continue_process(pid);
-        }
-    }
+    let current = sched::current_task_id();
+    let self_task = (thread::owner_process(current) == Some(pid)).then_some(current);
+    post_signal(pid, None, sig, signal::SigInfo::kernel(), self_task)
 }
 
-/// POSIX orphaned-process-group hangup: if `pgid` is now an orphaned process
+/// [`post_kernel_signal`] for a caller with nothing to do about a failure:
+/// the orphaned-process-group hangup, whose targets may be exiting at the
+/// same moment -- which is the very case it handles.
+pub fn deliver_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    // A target that exited first has nothing left to hang up or continue, and
+    // the signal numbers the callers pass are constants; neither failure
+    // leaves anything undone.
+    let _ = post_kernel_signal(pid, sig);
+}
+
+/// [`post_kernel_signal`] to each of `members` -- a process group the kernel
+/// is signalling -- with the current thread's own process last, if it is one
+/// of them. Answers how many posts succeeded and how many failed.
+///
+/// Last, because a stop signal stops the current process by parking the
+/// current thread until a `SIGCONT`: posted in list order, every member after
+/// it would get its `^Z` or `SIGTTIN` only once the job was continued, if
+/// ever -- a job half stopped, with the stopped half waiting on the half that
+/// was not.
+pub fn post_kernel_signal_to_members(
+    members: &[crate::proc::pcb::ProcessId],
+    sig: u32,
+) -> (usize, usize) {
+    let own = crate::proc::thread::owner_process(sched::current_task_id());
+    let (mut delivered, mut failed) = (0usize, 0usize);
+    let others = members.iter().filter(|&&m| Some(m) != own);
+    let itself = members.iter().filter(|&&m| Some(m) == own);
+    for &member in others.chain(itself) {
+        if post_kernel_signal(member, sig).is_ok() {
+            delivered = delivered.saturating_add(1);
+        } else {
+            failed = failed.saturating_add(1);
+        }
+    }
+    (delivered, failed)
+}
+
+// POSIX orphaned-process-group hangup: if `pgid` is now an orphaned process
 /// group (no live member has a parent in a different group of the same
 /// session) that still contains a **stopped** member, send `SIGHUP` followed
 /// by `SIGCONT` to every member.
@@ -8094,58 +10947,355 @@ pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
     }
 }
 
+/// Where an interrupted thread was when a signal is delivered to it: on its
+/// way out of system call `nr`, about to return `ret` (possibly a restart
+/// sentinel). A signal delivered on an interrupt's return to user mode has no
+/// such call -- the thread was anywhere -- and passes `None`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SyscallExit {
+    /// The system call's number.
+    pub nr: u64,
+    /// What it is about to return.
+    pub ret: i64,
+}
+
+/// The whole user register state at a system call's exit: the frame's saved
+/// registers, `rax` the value being returned, and `rcx`/`r11` what the
+/// `syscall` instruction left there -- the return address and RFLAGS --
+/// unless a signal return restored real ones into the frame (`exit_full`).
+pub(crate) fn regs_from_syscall_frame(
+    frame: &super::entry::SyscallFrame,
+    ret_val: i64,
+) -> super::linux::LinuxTrapRegs {
+    let (rcx, r11) = if frame.exit_full != 0 {
+        (frame.rcx, frame.r11)
+    } else {
+        (frame.user_rip, frame.user_rflags)
+    };
+    // The value travels as the register's bits.
+    #[allow(clippy::cast_sign_loss)]
+    let rax = ret_val as u64;
+    super::linux::LinuxTrapRegs {
+        rax,
+        rbx: frame.rbx,
+        rcx,
+        rdx: frame.arg2,
+        rsi: frame.arg1,
+        rdi: frame.arg0,
+        rbp: frame.rbp,
+        r8: frame.arg4,
+        r9: frame.arg5,
+        r10: frame.arg3,
+        r11,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        rip: frame.user_rip,
+        rsp: frame.user_rsp,
+        rflags: frame.user_rflags,
+    }
+}
+
+/// After a successful exec by the current thread -- its frame already the
+/// new program's first state -- its exec stop, if it is traced
+/// (`crate::proc::ptrace::after_exec`), at the exit of call `nr`. Returns
+/// what the call returns: 0, or the `rax` of a tracer that changed the new
+/// program's first registers, which are then in the frame, restored whole.
+pub(crate) fn exec_stop(frame: &mut super::entry::SyscallFrame, nr: u64) -> i64 {
+    let task_id = sched::current_task_id();
+    let Some(pid) = crate::proc::thread::owner_process(task_id).filter(|&p| p != 0) else {
+        return 0;
+    };
+    let mut regs = regs_from_syscall_frame(frame, 0);
+    if !crate::proc::ptrace::after_exec(pid, task_id, &mut regs, nr) {
+        return 0;
+    }
+    regs_into_syscall_frame(frame, &regs);
+    frame.exit_full = 1;
+    // The register's bits, as the call's return value.
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        regs.rax as i64
+    }
+}
+
+/// Make `regs` -- a signal handler's entry state -- what the system call
+/// returns to. (`rax` is the call's return value, which the caller sets.)
+pub(crate) fn regs_into_syscall_frame(
+    frame: &mut super::entry::SyscallFrame,
+    regs: &super::linux::LinuxTrapRegs,
+) {
+    frame.user_rip = regs.rip;
+    frame.user_rsp = regs.rsp;
+    frame.user_rflags = regs.rflags;
+    frame.arg0 = regs.rdi;
+    frame.arg1 = regs.rsi;
+    frame.arg2 = regs.rdx;
+    frame.arg3 = regs.r10;
+    frame.arg4 = regs.r8;
+    frame.arg5 = regs.r9;
+    frame.rbx = regs.rbx;
+    frame.rbp = regs.rbp;
+    frame.r12 = regs.r12;
+    frame.r13 = regs.r13;
+    frame.r14 = regs.r14;
+    frame.r15 = regs.r15;
+    frame.rcx = regs.rcx;
+    frame.r11 = regs.r11;
+}
+
 /// Deliver a pending signal to the current process on the way back to
-/// userspace, if one is deliverable.
+/// userspace from a system call, if one is deliverable.
 ///
-/// If the process has a handler trampoline registered, this mirrors the
-/// SEH-style exception delivery (`idt::try_dispatch_user_exception`): build a
-/// [`SignalContext`](crate::proc::signal::SignalContext) on the user stack
-/// capturing the interrupted state (including the syscall's return value in
-/// RAX), then rewrite the syscall frame so the SYSRET path jumps to the
-/// trampoline with `rdi = signum` and `rsi = &ctx`.
-///
-/// If the process has **no** trampoline, the kernel default action applies
-/// instead: a terminating signal kills the process (exit `128 + sig`, via
+/// If the process has a handler, a signal frame goes on the user stack
+/// recording the interrupted state -- every register, the syscall's return
+/// value in RAX, and the FPU state -- and the frame is rewritten so the return
+/// enters the handler (see [`deliver_signal_to_regs`]). If the process has
+/// **no** handler, the kernel default action applies instead: a terminating
+/// signal kills the process (exit `128 + sig`, via
 /// [`terminate_current_process_for_signal`] — this call does not return),
-/// while ignore/stop/continue defaults are consumed and dropped.
+/// while ignore/stop/continue defaults are consumed.
 ///
-/// `ret_val` is the value the interrupted syscall was about to return in
-/// RAX; it is saved into the context and restored on `SYS_SIGNAL_RETURN`.
+/// `ret_val` is the value the interrupted syscall was about to return in RAX;
+/// it is saved into the frame and restored by the signal return. A tracer
+/// that stopped the thread (`crate::proc::ptrace`) may change it, and every
+/// other register: they are back in `ret_val` and the frame -- restored whole
+/// on the way out, `rcx` and `r11` too (`exit_full`) -- whatever is
+/// delivered.
 ///
 /// Returns `true` if a signal was delivered to a handler (the frame was
-/// rewritten), `false` otherwise (the normal return value should be used).
+/// rewritten), `false` otherwise (`*ret_val` should be returned).
 /// Note that a fatal no-handler signal does not return at all.
 ///
-/// If the user stack cannot hold the context (e.g. it would cross into an
-/// unmapped guard page), delivery is skipped and the signal stays pending
-/// — it will be retried on the next return to userspace. This avoids
-/// corrupting memory; a proper alternate signal stack (`sigaltstack`) is
-/// a documented future enhancement.
-pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
-    use crate::proc::signal::{self, SIGNAL_CONTEXT_SIZE, SignalContext};
-
+/// If the user stack cannot hold the frame (e.g. it would cross into an
+/// unmapped guard page), delivery is skipped and the signal stays pending —
+/// it will be retried on the next return to userspace. This avoids
+/// corrupting memory.
+pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: &mut i64) -> bool {
     // Fast path: nothing pending anywhere.
-    if !signal::any_pending() {
+    if !crate::proc::signal::any_pending() {
         return false;
     }
-
     let task_id = sched::current_task_id();
     let pid = match crate::proc::thread::owner_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return false,
     };
-
-    // Linux-ABI processes get a byte-exact Linux `rt_sigframe` so an
-    // unmodified glibc/WINE handler sees correct siginfo/ucontext and
-    // returns via its own `sa_restorer` → `rt_sigreturn`. The native
-    // SEH-style `SignalContext` trampoline path below is for native
-    // POSIX-shim processes only.
-    if crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux) {
-        return deliver_linux_signal(frame, ret_val, pid, task_id);
+    let mut regs = regs_from_syscall_frame(frame, *ret_val);
+    let before = regs;
+    let exit = SyscallExit {
+        nr: frame.syscall_nr,
+        ret: *ret_val,
+    };
+    if deliver_signal_to_regs(pid, task_id, &mut regs, Some(exit)) {
+        regs_into_syscall_frame(frame, &regs);
+        return true;
     }
+    if regs != before {
+        // A tracer changed them at a stop, and no handler runs: the call
+        // returns to them, every one.
+        regs_into_syscall_frame(frame, &regs);
+        frame.exit_full = 1;
+        // The register's bits, as the call's return value.
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            *ret_val = regs.rax as i64;
+        }
+    }
+    false
+}
 
-    let trampoline = match signal::trampoline(pid) {
-        Some(addr) => addr,
+/// Deliver a pending signal to the current thread on an interrupt's or an
+/// exception's return to user mode -- the other half of Linux's "check on
+/// every return to user mode", without which a thread that makes no system
+/// calls (a computation in a loop) never runs its handler for `^C` or a timer.
+/// Called from the interrupt and exception exits (`crate::idt`) with the
+/// interrupted registers ([`crate::idt::SavedRegisters`]), which it rewrites
+/// to enter the handler.
+///
+/// Like Linux's exit-to-user work it runs with interrupts enabled: writing the
+/// frame may fault in the user stack, and a default action may stop or end the
+/// thread. That is safe here because the interrupted code is in ring 3, so it
+/// holds no kernel lock, and this runs on the thread's own kernel stack after
+/// the interrupt or exception has been handled. Called with interrupts off,
+/// and they are off again on return, for the stub's register restore and
+/// `iretq`.
+pub fn deliver_pending_signal_on_interrupt_exit(
+    gprs: &mut crate::idt::SavedRegisters,
+    iret: &mut crate::idt::InterruptStackFrame,
+) {
+    use crate::proc::signal;
+    let task_id = sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return,
+    };
+    // Cheap enough to ask before enabling interrupts: anything this thread
+    // could take now?
+    if !signal::has_pending_in_mask(pid, !signal::blocked(pid)) {
+        return;
+    }
+    let mut regs = super::linux::LinuxTrapRegs {
+        rax: gprs.rax,
+        rbx: gprs.rbx,
+        rcx: gprs.rcx,
+        rdx: gprs.rdx,
+        rsi: gprs.rsi,
+        rdi: gprs.rdi,
+        rbp: gprs.rbp,
+        r8: gprs.r8,
+        r9: gprs.r9,
+        r10: gprs.r10,
+        r11: gprs.r11,
+        r12: gprs.r12,
+        r13: gprs.r13,
+        r14: gprs.r14,
+        r15: gprs.r15,
+        rip: iret.rip,
+        rsp: iret.rsp,
+        rflags: iret.rflags,
+    };
+    crate::cpu::irqoff_tracker::record_enable();
+    // SAFETY: the interrupt has been handled and acknowledged, and this is the
+    // outermost one, on the interrupted thread's kernel stack (the caller's
+    // contract); the interrupted code was in ring 3, so no kernel lock is held
+    // by it. A nested interrupt here pushes its frame below ours and returns.
+    unsafe {
+        crate::cpu::sti();
+    }
+    let before = regs;
+    let delivered = deliver_signal_to_regs(pid, task_id, &mut regs, None);
+    // SAFETY: disabling interrupts is always sound; the stub restores the
+    // registers and `iretq`s with the interrupted RFLAGS.
+    unsafe {
+        crate::cpu::cli();
+    }
+    crate::cpu::irqoff_tracker::record_disable();
+    // A handler's entry state -- or registers a tracer changed at a stop.
+    if delivered || regs != before {
+        gprs.rax = regs.rax;
+        gprs.rbx = regs.rbx;
+        gprs.rcx = regs.rcx;
+        gprs.rdx = regs.rdx;
+        gprs.rsi = regs.rsi;
+        gprs.rdi = regs.rdi;
+        gprs.rbp = regs.rbp;
+        gprs.r8 = regs.r8;
+        gprs.r9 = regs.r9;
+        gprs.r10 = regs.r10;
+        gprs.r11 = regs.r11;
+        gprs.r12 = regs.r12;
+        gprs.r13 = regs.r13;
+        gprs.r14 = regs.r14;
+        gprs.r15 = regs.r15;
+        iret.rip = regs.rip;
+        iret.rsp = regs.rsp;
+        iret.rflags = regs.rflags;
+    }
+}
+
+/// Deliver at most one pending signal to the current thread of `pid`, whose
+/// interrupted user state is `regs`, and on a handler's entry make `regs` the
+/// handler's entry state and answer `true`. `exit` says whether the thread is
+/// at a system call's exit (whose restart sentinel a handler resolves) or was
+/// interrupted anywhere.
+///
+/// Linux-ABI processes get a byte-exact Linux `rt_sigframe`
+/// ([`deliver_linux_signal`]); native ones the native frame
+/// ([`deliver_native_signal`]).
+fn deliver_signal_to_regs(
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+    regs: &mut super::linux::LinuxTrapRegs,
+    exit: Option<SyscallExit>,
+) -> bool {
+    if crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux) {
+        return deliver_linux_signal(regs, exit, pid, task_id);
+    }
+    deliver_native_signal(regs, exit, pid, task_id)
+}
+
+/// A signal taken for delivery to the current thread `task_id` of `pid`,
+/// after its tracer -- if it is traced -- has had its say
+/// ([`crate::proc::ptrace::signal_stop`]): the signal to deliver now, its
+/// record, and a `siginfo_t` of the tracer's to deliver it with; `None` when
+/// nothing is to be delivered for it (look for the next).
+///
+/// The tracer's word on an interrupted call goes into `exit`: an `orig_rax`
+/// of -1 means it is not restarted, and `rax` is what it returns.
+fn traced_signal(
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+    sig: u32,
+    info: crate::proc::signal::SigInfo,
+    regs: &mut super::linux::LinuxTrapRegs,
+    exit: &mut Option<SyscallExit>,
+) -> Option<(
+    u32,
+    crate::proc::signal::SigInfo,
+    Option<crate::proc::linux_sigframe::LinuxSiginfo>,
+)> {
+    use crate::proc::linux_sigframe::LinuxSiginfo;
+    let orig_rax = exit.map_or(u64::MAX, |e| e.nr);
+    let siginfo = LinuxSiginfo::from_record(i32::try_from(sig).unwrap_or(0), &info);
+    let Some(out) = crate::proc::ptrace::signal_stop(pid, task_id, sig, siginfo, regs, orig_rax)
+    else {
+        return Some((sig, info, None));
+    };
+    if exit.is_some() && out.orig_rax == u64::MAX {
+        // Not to be restarted: a restart value still in `rax` is the raw
+        // `-ERESTART*` Linux leaves there, not this kernel's sentinel.
+        regs.rax = crate::proc::ptrace::raw_rax(regs.rax);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let ret = regs.rax as i64;
+    *exit = exit
+        .filter(|_| out.orig_rax != u64::MAX)
+        .map(|_| SyscallExit {
+            nr: out.orig_rax,
+            ret,
+        });
+    // Ignored after all: dropped now, as Linux's `get_signal` drops it after
+    // `ptrace_signal`.
+    if out.sig == 0 || crate::proc::signal::is_ignored(pid, out.sig) {
+        return None;
+    }
+    Some((
+        out.sig,
+        crate::proc::signal::SigInfo::from_linux(&out.siginfo),
+        Some(out.siginfo),
+    ))
+}
+
+/// The native half of [`deliver_signal_to_regs`].
+///
+/// If the process has a handler trampoline registered, this mirrors the
+/// SEH-style exception delivery (`idt::try_dispatch_user_exception`): build a
+/// [`SignalContext`](crate::proc::signal::SignalContext) on the user stack
+/// capturing the interrupted state (including RAX), then point the registers
+/// at the trampoline with `rdi = signum` and `rsi = &ctx`. A trampoline
+/// registered with `SIGNAL_FRAME_SIGINFO` also gets the signal's record --
+/// code, sender, value -- right after the context
+/// ([`SignalInfoTail`](crate::proc::signal::SignalInfoTail)). Above both goes
+/// what the context has no room for: `rcx`, `r11` and the FPU state
+/// ([`SignalFrameExt`](crate::proc::signal::SignalFrameExt)), which
+/// `SYS_SIGNAL_RETURN` puts back. The handler starts from the initial FPU
+/// state.
+fn deliver_native_signal(
+    regs: &mut super::linux::LinuxTrapRegs,
+    mut exit: Option<SyscallExit>,
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+) -> bool {
+    use crate::proc::signal::{
+        self, SIGNAL_CONTEXT_SIZE, SIGNAL_FRAME_EXT_MAGIC, SIGNAL_FRAME_EXT_SIZE,
+        SIGNAL_FRAME_EXTENDED_SIZE, SignalContext, SignalFrameExt, SignalInfoTail,
+    };
+
+    // The trampoline and the frame it reads, together (see `trampoline_frame`).
+    let (trampoline, extended) = match signal::trampoline_frame(pid) {
+        Some(registered) => registered,
         None => {
             // No userspace handler trampoline: apply the kernel default
             // action to each deliverable signal. A terminating default kills
@@ -8153,7 +11303,12 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
             // defaults are consumed and dropped. This closes the gap where an
             // async-posted fatal signal (e.g. ITIMER_REAL's SIGALRM) to a
             // process with no handler would sit pending forever.
-            while let Some(sig) = signal::take_deliverable(pid) {
+            while let Some((sig, info)) = signal::take_deliverable_info(pid) {
+                // A traced thread's tracer decides first.
+                let Some((sig, _, _)) = traced_signal(pid, task_id, sig, info, regs, &mut exit)
+                else {
+                    continue;
+                };
                 match signal::default_action(sig) {
                     signal::DefaultAction::Terminate => {
                         terminate_current_process_for_signal(pid, task_id, sig);
@@ -8179,42 +11334,93 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
         }
     };
 
-    let sig = match signal::take_deliverable(pid) {
-        Some(s) => s,
-        None => return false,
+    // The signal and its record -- sender, code, value -- which the extended
+    // frame hands on and every re-arm below puts back, so a retried delivery
+    // still says who sent it.
+    //
+    // SIGKILL and SIGSTOP never reach a handler. A send of either is acted on
+    // when it is posted (`classify_post_info`), so neither is normally ever
+    // pending -- but a POSIX timer may name either, and its expiry, in the
+    // timer interrupt, can only queue it (`posix_timer`). Here is where that
+    // queued one takes effect, as Linux's `get_signal` does for both.
+    let (sig, info) = loop {
+        let (sig, info) = match signal::take_deliverable_info(pid) {
+            Some((signal::SIGKILL, _)) => {
+                terminate_current_process_for_signal(pid, task_id, signal::SIGKILL);
+                // Unreachable: task_exit never returns.
+                return false;
+            }
+            Some(taken) => taken,
+            None => return false,
+        };
+        // A traced thread's tracer decides first -- SIGSTOP's fate too.
+        let Some((sig, info, _)) = traced_signal(pid, task_id, sig, info, regs, &mut exit) else {
+            continue;
+        };
+        if sig == signal::SIGSTOP {
+            signal::discard_pending_cont(pid);
+            stop_process_for_signal(pid, signal::SIGSTOP, Some(task_id));
+            // Continued: look for the next one.
+            continue;
+        }
+        break (sig, info);
     };
 
-    // Compute the placement of the SignalContext on the user stack.
+    // An rseq critical section the thread is in is aborted first, so the frame
+    // records -- and the handler returns to -- its abort address, as the Linux
+    // frame's builder does (`crate::rseq::on_signal_delivery`; a native
+    // program registers its area with `SYS_RSEQ`). A malformed rseq area ends
+    // the program with SIGSEGV, where Linux's `force_sigsegv` leads.
+    if !crate::rseq::on_signal_delivery(&mut regs.rip) {
+        const SIGSEGV: u32 = 11;
+        terminate_current_process_for_signal(pid, task_id, SIGSEGV);
+        // Unreachable: task_exit never returns.
+        return false;
+    }
+
+    // The thread's FPU state, for the frame.
+    let fpu_image = crate::sched::fpu::capture_signal_image();
+
+    // Compute the placement of the frame on the user stack.
     //
-    //   sp = user_rsp
-    //   sp -= ctx_size; sp &= !0xF;   (16-byte aligned context)
+    //   sp = base; sp -= frame_size; sp &= !0xF;  (16-byte aligned context)
     //   ctx_addr = sp
     //   sp -= 8;                       (fake return slot — null)
     //   new_rsp = sp                   (RSP%16 == 8 at handler entry,
     //                                   matching the SysV call convention)
-    let ctx_size = SIGNAL_CONTEXT_SIZE as u64;
+    //
+    // The frame is the SignalContext, then -- for a trampoline registered
+    // with SIGNAL_FRAME_SIGINFO -- the signal's siginfo tail at ctx + 136,
+    // then the kernel's extension (rcx, r11, the FPU image). Each part sits
+    // above the one before, so the context and the return slot keep their
+    // places relative to each other in every form.
+    let ext_offset = if extended {
+        SIGNAL_FRAME_EXTENDED_SIZE
+    } else {
+        SIGNAL_CONTEXT_SIZE
+    };
+    let frame_size = ext_offset
+        .saturating_add(SIGNAL_FRAME_EXT_SIZE)
+        .saturating_add(fpu_image.len());
     // Where the frame grows down from. Normally the interrupted stack -- but if
     // this signal's handler asked for SA_ONSTACK, the top of the alternate stack
     // instead, because the case that feature exists to serve is the interrupted
-    // stack having just overflowed. Writing the context there is the store that
-    // faults, inside the kernel, before the trampoline exists to run and long
-    // before any libc code could switch away: that is the whole gap lane B
-    // reported in
-    // requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md.
+    // stack having just overflowed (lane B's
+    // requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md).
     //
-    // Everything after this line is unchanged, including the alignment contract
-    // and the validate_user_write below, which now checks the alternate stack
-    // when that is where the frame is going.
-    let frame_base = signal::altstack_top_for(pid, sig, frame.user_rsp).unwrap_or(frame.user_rsp);
-    let ctx_addr = (frame_base.wrapping_sub(ctx_size)) & !0xFu64;
-    let new_rsp = ctx_addr.wrapping_sub(8);
+    // On the interrupted stack the frame goes below the 128-byte red zone,
+    // which the interrupted code may be using (Linux's `get_sigframe`); the
+    // alternate stack's top has nothing live above it.
+    let frame_base = signal::altstack_top_for(pid, sig, regs.rsp)
+        .unwrap_or(regs.rsp.wrapping_sub(crate::proc::linux_sigframe::RED_ZONE));
+    let (ctx_addr, new_rsp) = signal::frame_placement(frame_base, frame_size as u64);
 
-    // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a
+    // Validate the whole region [new_rsp, ctx_addr + frame_size) is a
     // writable user mapping before touching it.
-    let region_len = (ctx_addr.wrapping_add(ctx_size)).wrapping_sub(new_rsp);
+    let region_len = (ctx_addr.wrapping_add(frame_size as u64)).wrapping_sub(new_rsp);
     if crate::mm::user::validate_user_write(new_rsp, region_len as usize).is_err() {
         // Cannot place the frame; re-arm the signal and skip delivery.
-        signal::set_pending(pid, sig);
+        signal::set_pending_info(pid, sig, info);
         return false;
     }
 
@@ -8236,31 +11442,45 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // `KernelError` code, where -4 is `WouldBlock`/`EAGAIN`. Using it here
     // would report "try again" for "interrupted by a signal" — the two
     // errnos a program most needs to tell apart around a blocking read.
-    let ret_val = if crate::syscall::linux::restart::is_sentinel(ret_val) {
-        i64::from(KernelError::Interrupted.code())
-    } else {
-        ret_val
+    //
+    // Only at a system call's exit: after an interrupt RAX is a register like
+    // any other, whatever its value.
+    let rax = match exit {
+        Some(e) if crate::syscall::linux::restart::is_sentinel(e.ret) => {
+            #[allow(clippy::cast_sign_loss)]
+            let code = i64::from(KernelError::Interrupted.code()) as u64;
+            code
+        }
+        _ => regs.rax,
     };
 
     let ctx = SignalContext {
         signum: u64::from(sig),
-        rax: ret_val as u64,
-        rdi: frame.arg0,
-        rsi: frame.arg1,
-        rdx: frame.arg2,
-        r10: frame.arg3,
-        r8: frame.arg4,
-        r9: frame.arg5,
-        rbx: frame.rbx,
-        rbp: frame.rbp,
-        r12: frame.r12,
-        r13: frame.r13,
-        r14: frame.r14,
-        r15: frame.r15,
-        rip: frame.user_rip,
-        rsp: frame.user_rsp,
-        rflags: frame.user_rflags,
+        rax,
+        rdi: regs.rdi,
+        rsi: regs.rsi,
+        rdx: regs.rdx,
+        r10: regs.r10,
+        r8: regs.r8,
+        r9: regs.r9,
+        rbx: regs.rbx,
+        rbp: regs.rbp,
+        r12: regs.r12,
+        r13: regs.r13,
+        r14: regs.r14,
+        r15: regs.r15,
+        rip: regs.rip,
+        rsp: regs.rsp,
+        rflags: regs.rflags,
     };
+    let ext = SignalFrameExt {
+        magic: SIGNAL_FRAME_EXT_MAGIC,
+        rcx: regs.rcx,
+        r11: regs.r11,
+        fpu_len: fpu_image.len() as u64,
+    };
+    let ext_addr = ctx_addr.wrapping_add(ext_offset as u64);
+    let fpu_addr = ext_addr.wrapping_add(SIGNAL_FRAME_EXT_SIZE as u64);
 
     // Stored through the bounce rather than by a typed write to the user
     // stack: the store has to be bracketed by STAC/CLAC once SMAP is on, and
@@ -8268,29 +11488,49 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // dereference the address.  A failure here re-arms the signal for the same
     // reason the validation failure above does — better to retry delivery than
     // to enter the trampoline with a half-written context.
-    if crate::mm::user::write_user_value::<SignalContext>(ctx_addr, ctx).is_err()
+    //
+    // The tail goes at ctx + 136 only for a trampoline that asked for it: the
+    // short frame's caller owns the bytes above its context.
+    let tail_written = !extended
+        || crate::mm::user::write_user_value::<SignalInfoTail>(
+            ctx_addr.wrapping_add(SIGNAL_CONTEXT_SIZE as u64),
+            SignalInfoTail::from_info(&info),
+        )
+        .is_ok();
+    // SAFETY: `fpu_image` is a live kernel buffer of the length passed;
+    // `copy_to_user` validates the destination itself.
+    let fpu_written =
+        unsafe { crate::mm::user::copy_to_user(fpu_image.as_ptr(), fpu_addr, fpu_image.len()) }
+            .is_ok();
+    if !tail_written
+        || !fpu_written
+        || crate::mm::user::write_user_value::<SignalFrameExt>(ext_addr, ext).is_err()
+        || crate::mm::user::write_user_value::<SignalContext>(ctx_addr, ctx).is_err()
         || crate::mm::user::write_user_value::<u64>(new_rsp, 0u64).is_err()
     {
-        signal::set_pending(pid, sig);
+        signal::set_pending_info(pid, sig, info);
         return false;
     }
 
-    // Rewrite the frame so SYSRET jumps to the trampoline.
-    frame.user_rip = trampoline;
-    frame.user_rsp = new_rsp;
-    frame.arg0 = u64::from(sig); // rdi = signum
-    frame.arg1 = ctx_addr; // rsi = &SignalContext
-    // Clear other argument registers for cleanliness.
-    frame.arg2 = 0;
-    frame.arg3 = 0;
-    frame.arg4 = 0;
-    frame.arg5 = 0;
+    // The handler starts from the initial FPU state (Linux's
+    // `fpu__clear_user_states`); the signal return loads the saved one.
+    crate::sched::fpu::reset_to_initial();
 
+    // Enter the trampoline: rdi = signum, rsi = &SignalContext; the other
+    // argument registers cleared for cleanliness.
+    regs.rip = trampoline;
+    regs.rsp = new_rsp;
+    regs.rdi = u64::from(sig);
+    regs.rsi = ctx_addr;
+    regs.rdx = 0;
+    regs.r10 = 0;
+    regs.r8 = 0;
+    regs.r9 = 0;
     true
 }
 
-/// Deliver pending signals to a **Linux-ABI** process at the
-/// syscall-return checkpoint.
+/// Deliver pending signals to a **Linux-ABI** process whose interrupted
+/// registers are `regs`.
 ///
 /// Unlike the native path (one trampoline pointer per process), a Linux
 /// process has a per-signal `struct sigaction` disposition. This loop
@@ -8300,25 +11540,29 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
 ///     ([`crate::syscall::linux::build_linux_rt_frame`]) and enter the
 ///     handler. One handler per return-to-user (matching the native
 ///     path and Linux's "handle one, re-check on `rt_sigreturn`" model),
-///     so we stop and return `true` once a frame is built. If the stack
-///     cannot hold the frame the signal is re-armed and we return
-///     `false`.
+///     so we stop and return `true` once a frame is built. If the frame
+///     cannot be built -- the stack cannot hold it, or it does not fit the
+///     alternate stack it belongs on -- the signal is lost and `SIGSEGV`
+///     is sent in its place, as Linux's `force_sigsegv` does
+///     ([`crate::syscall::linux::force_sigsegv`]), and the loop goes on to
+///     deliver that; when it was `SIGSEGV`'s own frame, the process ends.
 ///   * **Ignore** (`SIG_IGN`) — drop and continue to the next signal.
 ///   * **Default** (`SIG_DFL`) — apply the kernel default action
 ///     (terminate / stop / ignore / continue), reusing the same helpers
 ///     as the native no-handler path. A terminating default never
 ///     returns.
 ///
-/// Returns `true` if a handler frame was built (frame rewritten),
+/// Returns `true` if a handler frame was built (`regs` rewritten),
 /// `false` if nothing was delivered to a handler.
 fn deliver_linux_signal(
-    frame: &mut super::entry::SyscallFrame,
-    ret_val: i64,
+    regs: &mut super::linux::LinuxTrapRegs,
+    mut exit: Option<SyscallExit>,
     pid: crate::proc::pcb::ProcessId,
     task_id: crate::sched::task::TaskId,
 ) -> bool {
     use crate::proc::signal;
     use crate::syscall::linux::{self, LinuxDisposition};
+    const SIGSEGV: u32 = 11;
 
     loop {
         let (sig, info) = match signal::take_deliverable_info(pid) {
@@ -8336,14 +11580,29 @@ fn deliver_linux_signal(
                 return false;
             }
         };
+        // A traced thread's tracer decides first.
+        let Some((sig, info, siginfo)) = traced_signal(pid, task_id, sig, info, regs, &mut exit)
+        else {
+            continue;
+        };
 
         match linux::linux_disposition(pid, sig) {
             LinuxDisposition::Handler(act) => {
                 // Build a Linux rt_sigframe and enter the handler, passing the
-                // recorded source metadata so the siginfo_t is sender-faithful.
-                // On a stack-placement failure the signal is re-armed (with its
-                // info) inside build_linux_rt_frame and we fall through to false.
-                return linux::build_linux_rt_frame(frame, ret_val, pid, sig, &act, info);
+                // recorded source metadata so the siginfo_t is sender-faithful
+                // -- or the tracer's, when it gave one.
+                if linux::build_linux_rt_frame(regs, exit, pid, sig, &act, info, siginfo) {
+                    return true;
+                }
+                // The interrupted call's restart has been resolved into
+                // `regs` (Linux changes `regs->ax` in the same way, so its
+                // next handler sees no sentinel); resolving it again would
+                // rewind the call twice.
+                exit = None;
+                if !linux::force_sigsegv(pid, sig) {
+                    terminate_current_process_for_signal(pid, task_id, SIGSEGV);
+                    // Unreachable: task_exit never returns.
+                }
             }
             LinuxDisposition::Ignore => {
                 // Explicit SIG_IGN: drop and check the next signal.
@@ -8669,7 +11928,9 @@ fn sys_process_exec_with_frame_inner(frame: &mut super::entry::SyscallFrame) -> 
                 pid,
                 result.entry_rip
             );
-            0 // Success (returned in RAX).
+            // A traced thread stops before the new program's first
+            // instruction; what the call returns is its tracer's to change.
+            exec_stop(frame, super::number::SYS_PROCESS_EXEC)
         }
         Err(e) => {
             serial_println!(
@@ -8797,6 +12058,8 @@ pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     // The realtime clock was discontinuously stepped: wake any timerfd reader
     // parked on a TFD_TIMER_CANCEL_ON_SET timer so it returns ECANCELED.
     crate::ipc::timerfd::clock_was_set();
+    // And re-program the POSIX timers armed for a wall-clock time.
+    crate::proc::posix_timer::clock_was_set();
 
     SyscallResult::ok(0)
 }
@@ -8836,6 +12099,8 @@ pub fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
     // A relative step (ADJ_SETOFFSET) is a clock discontinuity too: notify
     // timerfd so CANCEL_ON_SET readers are woken to return ECANCELED.
     crate::ipc::timerfd::clock_was_set();
+    // And re-program the POSIX timers armed for a wall-clock time.
+    crate::proc::posix_timer::clock_was_set();
 
     SyscallResult::ok(0)
 }
@@ -8909,6 +12174,9 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
     if handle == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
+    if let Err(e) = require_ipc_handle(ResourceType::Timer, handle) {
+        return SyscallResult::err(e);
+    }
 
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Timer, handle);
@@ -8960,7 +12228,10 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
 /// very nearly two copies, and a `TOSTOP` rule added to only one of them is the
 /// same mistake `tty_set_termios_from_user` was factored out to prevent.
 fn tty_write_from_user(tty: crate::tty::TtyId, ptr: u64, len: usize) -> SyscallResult {
-    if ptr == 0 || len == 0 {
+    // Nothing to write is 0. A NULL buffer with a length is `InvalidAddress`
+    // from the copy below, as Linux's `iterate_tty_write` faults at its copy;
+    // until 2026-10-07 it was 0, as though written.
+    if len == 0 {
         return SyscallResult::ok(0);
     }
 
@@ -9334,19 +12605,30 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // A whole-file write is unbounded by design, so there is no length cap —
-    // but the bounce is not an amplification vector either: `read_user_vec`
-    // validates the source range, which requires the process to have already
-    // committed `data_len` bytes of its own memory.  The kernel copy is
-    // proportional to that, and fails as `OutOfMemory` rather than panicking.
-    // It has to be a copy: `Vfs::write_file` reaches the block layer and
-    // blocks, and a user slice must not be live across that.
-    let data = match crate::mm::user::read_user_vec(args.arg2, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match crate::fs::Vfs::write_file(&path, &data) {
+    // A whole-file write is unbounded by design, so there is no length cap; it
+    // is streamed instead (`stream_user_chunks`). The first chunk replaces
+    // the file -- creating or truncating it, as `Vfs::write_file` does -- and
+    // each later one is written after it. The data has to be copied: the VFS
+    // reaches the block layer and blocks, and a user slice must not be live
+    // across that. Before 2026-09-26 the whole request was copied at once, so
+    // a file over the vmalloc region's 1 GiB could not be written at all.
+    //
+    // Not atomic for readers past the first chunk: a reader can see the file
+    // partly written. Replace a file atomically by writing a temporary one and
+    // renaming it over the original.
+    let mut first = true;
+    let mut offset: u64 = 0;
+    match stream_user_chunks(args.arg2, data_len, |chunk| {
+        if first {
+            // Creates or truncates, even for an empty file.
+            crate::fs::Vfs::write_file(&path, chunk)?;
+            first = false;
+        } else {
+            crate::fs::Vfs::write_at(&path, offset, chunk)?;
+        }
+        offset = offset.saturating_add(chunk.len() as u64);
+        Ok(())
+    }) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -9425,16 +12707,12 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
 
         // A volume label is metadata, not a directory entry, and must not
         // consume a record.  `Vfs::readdir` now drops them, so this `continue`
-        // is unreachable; it stays because it is the only arm that would be
-        // *wrong* to write as a type byte, and leaving it costs nothing.
-        let type_byte = match entry.entry_type {
-            crate::fs::EntryType::File => 0u8,
-            crate::fs::EntryType::Directory => 1u8,
-            crate::fs::EntryType::Symlink => 3u8,
-            crate::fs::EntryType::VolumeLabel => continue,
-            crate::fs::EntryType::CharDevice => 4u8,
-            crate::fs::EntryType::BlockDevice => 5u8,
-        };
+        // is unreachable; it stays because a label is the only type that would
+        // be *wrong* to write as a record, and leaving it costs nothing.
+        if entry.entry_type == crate::fs::EntryType::VolumeLabel {
+            continue;
+        }
+        let type_byte = entry.entry_type.type_byte();
 
         let base = packed.len();
         if packed.try_reserve(FS_DIR_ENTRY_SIZE).is_err() {
@@ -9603,7 +12881,9 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
 /// ```text
 ///   [0..8]   size         (u64)
 ///   [8]      entry_type   (u8: 0=file 1=dir 2=volume-label 3=symlink)
-///   [9..12]  reserved     (zero)
+///   [9..12]  dev          (u24: the filesystem's device number, `st_dev`'s
+///                          minor under major 0; 0 = unknown. Reserved, and
+///                          zero, until 2026-10-01: an older reader ignores it)
 ///   [12..16] nlinks       (u32)
 ///   [16..20] permissions  (u32, Unix mode bits; 0 = unknown, synthesize)
 ///   [20..24] uid          (u32)
@@ -9628,17 +12908,7 @@ pub const FS_STAT_RESULT_LEN: usize = 80;
 /// pages outside a copy primitive.
 fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN] {
     let mut out = [0u8; FS_STAT_RESULT_LEN];
-    let type_byte = match meta.entry_type {
-        crate::fs::EntryType::File => 0u8,
-        crate::fs::EntryType::Directory => 1u8,
-        crate::fs::EntryType::VolumeLabel => 2u8,
-        crate::fs::EntryType::Symlink => 3u8,
-        crate::fs::EntryType::CharDevice => 4u8,
-        // 5 is new with block device nodes. It is appended rather than
-        // inserted because these bytes are ABI: an older binary that does not
-        // know 5 must still read 0..=4 as it always did.
-        crate::fs::EntryType::BlockDevice => 5u8,
-    };
+    let type_byte = meta.entry_type.type_byte();
 
     // Each field is written through `get_mut`, so a future change to
     // FS_STAT_RESULT_LEN that no longer covers the layout drops fields rather
@@ -9650,6 +12920,10 @@ fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN]
     };
     put(0, &meta.size.to_le_bytes());
     put(8, &[type_byte]);
+    // Three bytes: the device numbers are dense (`vfs::dev_of`), as many as
+    // filesystems mounted at once, so they fit.
+    let [d0, d1, d2, _] = meta.dev.to_le_bytes();
+    put(9, &[d0, d1, d2]);
     put(12, &meta.nlinks.to_le_bytes());
     put(16, &u32::from(meta.permissions).to_le_bytes());
     put(20, &meta.uid.to_le_bytes());
@@ -9719,10 +12993,11 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 // Handle-based filesystem handlers (610–699)
 // ---------------------------------------------------------------------------
 
-/// `SYS_FS_OPEN` — open a file, return a handle.
-/// Open an already-resolved **absolute kernel path** with the given
-/// native [`OpenFlags`](crate::fs::handle::OpenFlags) bits, returning the raw
-/// open-file handle as the syscall value.
+/// Open an already-resolved **absolute kernel path** with the given native
+/// [`OpenFlags`](crate::fs::handle::OpenFlags) bits, returning the raw
+/// open-file handle as the syscall value; a file it creates gets
+/// `create_mode`, the Linux `open` family's `mode` already less the caller's
+/// umask.
 ///
 /// This is the shared core of file opening that works from a kernel-owned
 /// path rather than a userspace pointer.  The Linux ABI's
@@ -9734,20 +13009,21 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Performs the same File-READ capability check and per-process handle
 /// registration `sys_fs_open` does, so the returned handle is closed on
-/// process exit and refcount-shared across `fork`.
-pub fn fs_open_kernel_path(
+/// process exit and refcount-shared across `fork`. Its twin without a mode,
+/// `fs_open_kernel_path`, lost its last caller when the Linux layer began
+/// passing the mode (2026-10-01) and is gone.
+pub fn fs_open_kernel_path_mode(
     path: impl AsRef<crate::fs::path::Path>,
     flags_raw: u32,
+    create_mode: u16,
 ) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
         return SyscallResult::err(e);
     }
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
-    match crate::fs::handle::open(path, flags) {
+    match crate::fs::handle::open_with_mode(path, flags, create_mode) {
         Ok(handle) => {
-            if let Some(pid) = caller_pid() {
-                pcb::register_ipc_handle(pid, ResourceType::File, handle);
-            }
+            register_for_caller(ResourceType::File, handle);
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
         }
@@ -9755,6 +13031,155 @@ pub fn fs_open_kernel_path(
     }
 }
 
+/// What [`fs_open_node_kernel_path_mode`] came to.
+pub enum NodeOpen {
+    /// The open's answer: a file's handle, registered to the caller, or its
+    /// error -- what [`fs_open_kernel_path_mode`] answers.
+    Done(SyscallResult),
+    /// The path names a named pipe's node, at this resolved path, and every
+    /// check an open makes passed: the caller opens its pipe
+    /// (`ipc::fifo::open`).
+    Fifo(crate::fs::path::PathBuf),
+}
+
+/// [`fs_open_kernel_path_mode`], answering a named pipe's node with
+/// [`NodeOpen::Fifo`] rather than refusing it: the Linux `open`, which gives
+/// the opener the pipe.
+pub fn fs_open_node_kernel_path_mode(
+    path: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> NodeOpen {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return NodeOpen::Done(SyscallResult::err(e));
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_node_with_mode(path, flags, create_mode) {
+        Ok(crate::fs::handle::Opened::File(handle)) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            NodeOpen::Done(SyscallResult::ok(handle as i64))
+        }
+        Ok(crate::fs::handle::Opened::Fifo(node)) => NodeOpen::Fifo(node),
+        Err(e) => NodeOpen::Done(SyscallResult::err(e)),
+    }
+}
+
+/// `SYS_FS_MKFIFO` -- make a named pipe's node (`mkfifo`). See
+/// [`SYS_FS_MKFIFO`](super::number::SYS_FS_MKFIFO).
+pub fn sys_fs_mkfifo(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::CREATE) {
+        return SyscallResult::err(e);
+    }
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Twelve bits, as a file's create takes them (`SYS_FS_OPEN_MODE`).
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = (args.arg2 as u16) & 0o7777;
+    match crate::fs::Vfs::mknod_fifo(&path, mode) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FIFO_OPEN` -- open a named pipe, for a pipe handle. See
+/// [`SYS_FIFO_OPEN`](super::number::SYS_FIFO_OPEN).
+pub fn sys_fifo_open(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::handle::{OpenFlags, Opened};
+    use crate::ipc::pipe::FifoAccess;
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let given = OpenFlags::from_bits(args.arg2 as u32);
+    // The access mode and the walk's flags; a FIFO is never made by an open.
+    let kept = [
+        OpenFlags::READ,
+        OpenFlags::WRITE,
+        OpenFlags::NOFOLLOW,
+        OpenFlags::NO_SYMLINKS,
+    ]
+    .into_iter()
+    .filter(|&f| given.contains(f))
+    .fold(OpenFlags::NONE, OpenFlags::union);
+    let access = match (kept.is_readable(), kept.is_writable()) {
+        (true, false) => FifoAccess::Read,
+        (false, true) => FifoAccess::Write,
+        (true, true) => FifoAccess::Both,
+        (false, false) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let node = match crate::fs::handle::open_node_with_mode(&path, kept, 0) {
+        Ok(Opened::Fifo(node)) => node,
+        Ok(Opened::File(handle)) => {
+            // Something else opened: not a FIFO, so the open the caller
+            // asked first answers as it did. Nothing was read through it.
+            let _ = crate::fs::handle::close(handle);
+            return SyscallResult::err(KernelError::NoSuchDeviceOrAddress);
+        }
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = match crate::ipc::fifo::open(&node, access, args.arg3 & 1 != 0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // One reference per process per pipe end, as `SYS_PIPE_CREATE`'s ends
+    // are held: an end the caller holds already is the one it gets.
+    if let Some(pid) = caller_pid() {
+        if pcb::owns_ipc_handle(pid, ResourceType::Pipe, handle.raw()) {
+            crate::ipc::pipe::close(handle);
+        } else {
+            pcb::register_ipc_handle(pid, ResourceType::Pipe, handle.raw());
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(handle.raw() as i64)
+}
+
+/// A file with no name in directory `dir` (`fs::handle::open_tmpfile`), its
+/// handle registered to the caller: the Linux `O_TMPFILE` and the native
+/// `SYS_FS_TMPFILE`. Making a file asks for the File capability with WRITE,
+/// as the other creating calls do.
+pub fn fs_open_tmpfile_kernel_path(
+    dir: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_tmpfile(dir, flags, create_mode) {
+        Ok(handle) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_OPEN` — open a file, return a handle.
+///
+/// `arg0`: path pointer.  `arg1`: path length.  `arg2`: native
+/// [`OpenFlags`](crate::fs::handle::OpenFlags) bits.
+///
+/// A file it creates gets the 0o644 default; [`sys_fs_open_mode`] takes the
+/// mode. The handle is registered to the caller, closed at its exit and
+/// shared with a `fork` child.
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are
@@ -10525,14 +13950,7 @@ pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
                 // drops volume labels, and it drops them before `needed` is
                 // folded above, so the byte requirement this call reports
                 // counts exactly the records it will write.
-                let type_byte = match entry.entry_type {
-                    crate::fs::EntryType::File => 0u8,
-                    crate::fs::EntryType::Directory => 1,
-                    crate::fs::EntryType::VolumeLabel => 2,
-                    crate::fs::EntryType::Symlink => 3,
-                    crate::fs::EntryType::CharDevice => 4,
-                    crate::fs::EntryType::BlockDevice => 5,
-                };
+                let type_byte = entry.entry_type.type_byte();
                 // The `break` above proves the room exists, but a bounds-
                 // checked write that drops an entry beats a panic if the two
                 // ever disagree.
@@ -10579,6 +13997,12 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
+    // POSIX: closing a descriptor releases the process's record locks on the
+    // file, whichever descriptor took them. Before the close, while the
+    // handle still names its file.
+    if let Some(pid) = caller_pid() {
+        super::record_lock::release_on_close(pid, super::record_lock::Target::File(handle));
+    }
     match crate::fs::handle::close(handle) {
         Ok(()) => {
             // Drop the per-process ownership record so the handle is not
@@ -10594,42 +14018,202 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// The most file data one read or write bounces through the kernel at a
+/// time. The request is streamed: a bounce buffer of at most this many bytes
+/// is filled, handed on and refilled, so the kernel holds no copy
+/// proportional to the request (known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`, class 3). 1 MiB keeps the
+/// per-call VFS overhead negligible next to the data while bounding the
+/// kernel's share.
+pub(crate) const FILE_CALL_CHUNK: usize = 1024 * 1024;
+
+/// A fallibly allocated bounce buffer of `min(len, FILE_CALL_CHUNK)` bytes.
+fn file_bounce(len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    let size = len.min(FILE_CALL_CHUNK);
+    let mut buf = alloc::vec::Vec::new();
+    buf.try_reserve_exact(size)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    buf.resize(size, 0);
+    Ok(buf)
+}
+
+/// What a partly completed transfer reports: its count if any bytes moved,
+/// the error if none did -- Linux's rule for a read or write that fails
+/// part-way.
+fn partial_or(total: usize, e: KernelError) -> KernelResult<usize> {
+    if total > 0 { Ok(total) } else { Err(e) }
+}
+
+/// Read up to `len` bytes into user memory at `dst` from `source`, streamed
+/// through one [`FILE_CALL_CHUNK`]-sized bounce buffer. `source` fills the
+/// slice it is given and reports how much it filled, as a file or memfd read
+/// does. Shared by `SYS_FS_READ` and Linux `read(2)` on a memfd.
+///
+/// The caller's whole claim is span-checked first (`check_user_span`), and
+/// each chunk's destination is validated **before** that chunk is read from
+/// the source, so data is never consumed and then lost to a bad address (a
+/// file's offset advances only by what was delivered). Stops at a short read
+/// -- end of file, or all a special file has now -- and returns what was
+/// read.
+pub(crate) fn stream_user_read(
+    dst: u64,
+    len: usize,
+    mut source: impl FnMut(&mut [u8]) -> KernelResult<usize>,
+) -> KernelResult<usize> {
+    crate::mm::user::check_user_span(dst, len)?;
+    let mut buf = file_bounce(len)?;
+    let mut total: usize = 0;
+    while total < len {
+        let want = len.saturating_sub(total).min(FILE_CALL_CHUNK);
+        let at = dst.saturating_add(total as u64);
+        if let Err(e) = crate::mm::user::validate_user_write(at, want) {
+            return partial_or(total, e);
+        }
+        let Some(chunk) = buf.get_mut(..want) else {
+            return partial_or(total, KernelError::InternalError);
+        };
+        let n = match source(chunk) {
+            Ok(n) => n.min(want),
+            Err(e) => return partial_or(total, e),
+        };
+        if n > 0 {
+            // SAFETY: `buf` is a live kernel allocation of at least `want >= n`
+            // bytes, so the source range is valid; `copy_to_user` validates
+            // the destination itself.
+            if let Err(e) = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), at, n) } {
+                return partial_or(total, e);
+            }
+            total = total.saturating_add(n);
+        }
+        if n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Write `len` bytes from user memory at `src` into `sink`, streamed through
+/// one [`FILE_CALL_CHUNK`]-sized bounce buffer. `sink` takes a slice and
+/// reports how much it took, as a file or memfd write does. Shared by
+/// `SYS_FS_WRITE` and Linux `write(2)` on a memfd.
+///
+/// A fault or a failure part-way returns the count already written, as
+/// Linux does. For a file, chunks land one after another at the handle's
+/// offset (or its end, for `APPEND`), which `fs::handle::write` updates after
+/// each: no guarantee is lost that existed, since that path was never atomic
+/// across handles or threads -- its own comment says so.
+pub(crate) fn stream_user_write(
+    src: u64,
+    len: usize,
+    mut sink: impl FnMut(&[u8]) -> KernelResult<usize>,
+) -> KernelResult<usize> {
+    crate::mm::user::check_user_span(src, len)?;
+    let mut buf = file_bounce(len)?;
+    let mut total: usize = 0;
+    while total < len {
+        let want = len.saturating_sub(total).min(FILE_CALL_CHUNK);
+        let at = src.saturating_add(total as u64);
+        let Some(chunk) = buf.get_mut(..want) else {
+            return partial_or(total, KernelError::InternalError);
+        };
+        // SAFETY: `chunk` is a live kernel buffer of exactly `want` bytes;
+        // `copy_from_user` validates the source itself.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(at, chunk.as_mut_ptr(), want) } {
+            return partial_or(total, e);
+        }
+        let n = match sink(chunk) {
+            Ok(n) => n.min(want),
+            Err(e) => return partial_or(total, e),
+        };
+        total = total.saturating_add(n);
+        if n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Apply `step` to `len` bytes of user memory at `src`, one bounce-buffer
+/// chunk at a time, for the whole-file calls that report no byte count.
+///
+/// Those calls cannot express a short write, so the whole source is
+/// validated before the first byte goes anywhere (a page walk, no
+/// allocation): a bad pointer fails the call with nothing written, as it did
+/// when the whole request was bounced at once. A failure after that -- a
+/// sibling thread unmapping the buffer mid-call, a full disk -- leaves what
+/// was already written, which a full disk part-way through a single bounce
+/// did too.
+fn stream_user_chunks(
+    src: u64,
+    len: usize,
+    mut step: impl FnMut(&[u8]) -> KernelResult<()>,
+) -> KernelResult<()> {
+    crate::mm::user::validate_user_read(src, len)?;
+    let mut buf = file_bounce(len)?;
+    let mut done: usize = 0;
+    loop {
+        let want = len.saturating_sub(done).min(FILE_CALL_CHUNK);
+        let at = src.saturating_add(done as u64);
+        let chunk = buf.get_mut(..want).ok_or(KernelError::InternalError)?;
+        if want > 0 {
+            // SAFETY: `chunk` is a live kernel buffer of exactly `want` bytes;
+            // `copy_from_user` validates the source itself.
+            unsafe { crate::mm::user::copy_from_user(at, chunk.as_mut_ptr(), want)? };
+        }
+        step(chunk)?;
+        done = done.saturating_add(want);
+        if done >= len {
+            return Ok(());
+        }
+    }
+}
+
 /// `SYS_FS_READ` — read from a file handle at the current offset.
 pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    let buf_cap = args.arg2 as usize;
+    fs_read_common(handle, None, args.arg1, args.arg2 as usize)
+}
 
-    // POSIX/Linux: a zero-length read returns 0 with no other effect.  It does
-    // not touch the buffer (so the pointer is *not* validated — `read(fd, NULL,
-    // 0)` is legal and returns 0) and does not advance the file offset.  We must
-    // return 0 here rather than EINVAL: tcc's `full_read` reads exactly `count`
-    // bytes and then issues a *terminal* `read(fd, buf, 0)`, expecting 0 to
-    // signal completion.  Returning EINVAL made that terminal read look like a
-    // failure, so `tcc_object_type` saw a short ehdr read and rejected every
-    // relocatable object as "unrecognized file type" (Path-Z hosted compile).
-    if buf_cap == 0 {
+/// The body of `SYS_FS_READ` (`at` none: the handle's offset, which moves)
+/// and `SYS_FS_PREAD` (`at`: that offset, the handle's untouched).
+///
+/// Linux's `vfs_read`, in its order: the handle's own checks -- a directory
+/// is `IsADirectory`, a handle not open for reading `InvalidHandle`
+/// (`EBADF`), whatever the count -- then a range past user space,
+/// `InvalidAddress`; then a read of nothing is 0. A buffer that cannot take
+/// the bytes is answered by the file: 0 at or past its end (or for
+/// `/dev/null`), else `InvalidAddress`, the offset unmoved
+/// ([`crate::fs::handle::read_precheck`]).
+///
+/// A zero-length read is 0 with no other effect once the handle has passed
+/// its checks: it does not touch the buffer (`read(fd, NULL, 0)` is legal)
+/// and does not move the offset. tcc's `full_read` ends with exactly such a
+/// read and takes 0 as completion; when this returned `EINVAL` it rejected
+/// every relocatable object as "unrecognized file type" (Path-Z hosted
+/// compile).
+fn fs_read_common(handle: u64, at: Option<u64>, buf: u64, len: usize) -> SyscallResult {
+    if let Err(e) = crate::fs::handle::read_precheck(handle, at, 0) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
+    }
+    if len == 0 {
         return SyscallResult::ok(0);
     }
-    if args.arg1 == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+    if !out_buffer_usable(buf, len, FILE_CALL_CHUNK) {
+        return unusable_read_answer(crate::fs::handle::read_precheck(handle, at, len));
     }
-
-    // Read into a kernel buffer, then copy out.  Besides keeping raw user
-    // pointers out of the VFS, this makes the staging allocation fallible —
-    // `vec![0u8; buf_cap]` would abort the kernel on a large failed read.
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        crate::fs::handle::read(handle, buf)
-    }) {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
+    // Read through a bounded kernel bounce buffer, then copy out: raw user
+    // pointers stay out of the VFS, and the kernel's copy is at most
+    // `FILE_CALL_CHUNK` however large the request (`stream_user_read`).
+    count_or_err(match at {
+        None => stream_user_read(buf, len, |chunk| crate::fs::handle::read(handle, chunk)),
+        Some(offset) => fs_pread(handle, offset, buf, len),
+    })
 }
 
 /// `SYS_FS_WRITE` — write to a file handle at the current offset.
@@ -10638,27 +14222,102 @@ pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
-    let data_len = args.arg2 as usize;
+    fs_write_common(handle, None, args.arg1, args.arg2 as usize)
+}
 
-    if args.arg1 == 0 && data_len > 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
+/// The body of `SYS_FS_WRITE` (`at` none: at the handle's offset, or its
+/// end for `APPEND`) and `SYS_FS_PWRITE` (`at`: there, the handle's offset
+/// untouched).
+///
+/// Linux's `vfs_write`, in its order: the handle's checks -- a directory,
+/// or a handle not open for writing (`InvalidHandle`, `EBADF`) -- then a
+/// range past user space, `InvalidAddress`. A zero-length write still asks
+/// the handle, so an unwritable or wrong one says so (Linux's
+/// `write(fd, buf, 0)` on a read-only descriptor is `EBADF`, not 0). A
+/// buffer that cannot be read is answered by the file: a sink that never
+/// reads what it is given takes the count (`/dev/null`, `/dev/zero`) or
+/// refuses (`/dev/full`), any other file is `InvalidAddress`, unchanged
+/// ([`crate::fs::handle::write_precheck`]).
+///
+/// The VFS write path takes locks and can sleep on the block layer, so the
+/// payload is copied in first (see `pipe_write_common`) -- a bounded chunk at
+/// a time (`stream_user_write`).
+fn fs_write_common(handle: u64, at: Option<u64>, buf: u64, len: usize) -> SyscallResult {
+    if len == 0 {
+        return count_or_err(match at {
+            None => crate::fs::handle::write(handle, &[]),
+            Some(offset) => crate::fs::handle::write_at(handle, offset, &[]),
+        });
     }
-
-    // The VFS write path takes locks and can sleep on the block layer, so the
-    // payload is copied in first (see `sys_pipe_write`).
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
-        Ok(d) => d,
+    let sink = match crate::fs::handle::write_precheck(handle, len) {
+        Ok(s) => s,
         Err(e) => return SyscallResult::err(e),
     };
-
-    match crate::fs::handle::write(handle, &data) {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => SyscallResult::err(e),
+    if let Err(e) = crate::mm::user::check_user_span(buf, len) {
+        return SyscallResult::err(e);
     }
+    if !in_buffer_usable(buf, len, FILE_CALL_CHUNK) {
+        return match sink {
+            Some(n) => count_or_err(Ok(n)),
+            None => SyscallResult::err(KernelError::InvalidAddress),
+        };
+    }
+    count_or_err(match at {
+        None => stream_user_write(buf, len, |chunk| crate::fs::handle::write(handle, chunk)),
+        Some(offset) => fs_pwrite(handle, offset, buf, len),
+    })
+}
+
+/// `SYS_FS_PREAD` — read from a file handle at an explicit offset; the
+/// handle's position is neither read nor moved. See the number's doc.
+pub fn sys_fs_pread(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // A negative offset first, as Linux's `ksys_pread64`.
+    if i64::try_from(args.arg3).is_err() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    fs_read_common(handle, Some(args.arg3), args.arg1, args.arg2 as usize)
+}
+
+/// `SYS_FS_PWRITE` — write to a file handle at an explicit offset; the
+/// handle's position is neither read nor moved. See the number's doc.
+pub fn sys_fs_pwrite(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // A negative offset first, as Linux's `ksys_pwrite64`.
+    if i64::try_from(args.arg3).is_err() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    fs_write_common(handle, Some(args.arg3), args.arg1, args.arg2 as usize)
+}
+
+/// Read `len` bytes of file `handle` from `offset` into user memory at
+/// `dst`, streamed ([`stream_user_read`]), the handle's position untouched.
+/// Shared by `SYS_FS_PREAD` and Linux `pread64`/`preadv*`.
+pub(crate) fn fs_pread(handle: u64, offset: u64, dst: u64, len: usize) -> KernelResult<usize> {
+    let mut at = offset;
+    stream_user_read(dst, len, |chunk| {
+        let n = crate::fs::handle::read_at(handle, at, chunk)?;
+        at = at.saturating_add(n as u64);
+        Ok(n)
+    })
+}
+
+/// Write `len` bytes from user memory at `src` to file `handle` at
+/// `offset`, streamed ([`stream_user_write`]), the handle's position
+/// untouched. Shared by `SYS_FS_PWRITE` and Linux `pwrite64`/`pwritev*`.
+pub(crate) fn fs_pwrite(handle: u64, offset: u64, src: u64, len: usize) -> KernelResult<usize> {
+    let mut at = offset;
+    stream_user_write(src, len, |chunk| {
+        let n = crate::fs::handle::write_at(handle, at, chunk)?;
+        at = at.saturating_add(n as u64);
+        Ok(n)
+    })
 }
 
 /// `SYS_FS_SEEK` — seek to a new position in a file.
@@ -10883,29 +14542,10 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let result = match fstype {
-        "ext4" => crate::fs::ext4::mount(source, target),
-        "tmpfs" | "memfs" | "ramfs" => crate::fs::memfs::mount(target),
-        "iso9660" | "iso" | "cd9660" => crate::fs::iso9660::mount(source, target),
-        // Both are read-only drivers, so a caller that passes MS_RDONLY gets
-        // what it asked for and one that does not gets it anyway; the mount
-        // succeeds either way and writes fail per-operation.
-        "ntfs" | "ntfs3" => crate::fs::ntfs::mount(source, target),
-        "btrfs" => crate::fs::btrfs::mount(source, target),
-        "f2fs" => crate::fs::f2fs::mount(source, target),
-        "zfs" => crate::fs::zfs::mount(source, target),
-        "devfs" | "dev" => crate::fs::devfs::mount(target),
-        "proc" | "procfs" => crate::fs::procfs::mount(target),
-        "sysfs" | "sys" => crate::fs::sysfs::mount(target),
-        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => {
-            match crate::fs::fat::FatFs::mount(source) {
-                Ok(fs) => crate::fs::Vfs::mount(target, alloc::boxed::Box::new(fs)),
-                Err(e) => Err(e),
-            }
-        }
-        // Unknown filesystem type.
-        _ => Err(KernelError::NotSupported),
-    };
+    // The types and their drivers are `fs::new_filesystem`'s, shared with
+    // the Linux `mount(2)`; an unknown type is `NotSupported`.
+    let result =
+        crate::fs::new_filesystem(fstype, source).and_then(|fs| crate::fs::Vfs::mount(target, fs));
 
     match result {
         Ok(()) => SyscallResult::ok(0),
@@ -11326,6 +14966,98 @@ pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// Bytes before the names in a [`SYS_FS_WATCH_READ_RECORDS`] record.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) const WATCH_RECORD_HEADER: usize = 24;
+
+/// The length of `event`'s [`SYS_FS_WATCH_READ_RECORDS`] record: the header,
+/// each path with its NUL, padded to a multiple of 8 so the next header is
+/// aligned.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) fn watch_record_len(event: &crate::fs::notify::FsEvent) -> usize {
+    let new_path = event.new_path.as_ref().map_or(0, |p| p.as_bytes().len());
+    let names = event
+        .path
+        .as_bytes()
+        .len()
+        .saturating_add(1)
+        .saturating_add(new_path)
+        .saturating_add(1);
+    WATCH_RECORD_HEADER.saturating_add(names).saturating_add(7) & !7
+}
+
+/// Append `event`'s record to `out`, in the layout
+/// [`SYS_FS_WATCH_READ_RECORDS`] documents: exactly
+/// [`watch_record_len`] bytes.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) fn encode_watch_record(
+    event: &crate::fs::notify::FsEvent,
+    out: &mut alloc::vec::Vec<u8>,
+) {
+    let start = out.len();
+    let path = event.path.as_bytes();
+    let new_path = event.new_path.as_ref().map_or(&[][..], |p| p.as_bytes());
+    // Path lengths beyond u32 cannot occur (paths are bounded far below);
+    // saturating keeps the header honest about a cut it would never make.
+    let len32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    out.extend_from_slice(&event.watch_id.to_le_bytes());
+    out.extend_from_slice(&(event.event_type as u32).to_le_bytes());
+    out.push(u8::from(event.is_dir));
+    out.extend_from_slice(&[0u8; 3]);
+    out.extend_from_slice(&len32(path.len()).to_le_bytes());
+    out.extend_from_slice(&len32(new_path.len()).to_le_bytes());
+    out.extend_from_slice(path);
+    out.push(0);
+    out.extend_from_slice(new_path);
+    out.push(0);
+    out.resize(start.saturating_add(watch_record_len(event)), 0);
+}
+
+/// `SYS_FS_WATCH_READ_RECORDS` (1091) -- read pending events as
+/// variable-length records, so a path of any length arrives whole.
+///
+/// `arg0`: watch ID. `arg1`: output buffer. `arg2`: its length in bytes.
+/// Returns the bytes written: as many whole records as fit, in order, the
+/// rest left queued. 0 when nothing is pending. `BufferTooSmall` when the
+/// first pending record does not fit, which stays queued. See
+/// [`SYS_FS_WATCH_READ_RECORDS`](crate::syscall::number::SYS_FS_WATCH_READ_RECORDS)
+/// for the layout.
+pub fn sys_fs_watch_read_records(args: &SyscallArgs) -> SyscallResult {
+    let watch_id = args.arg0;
+    let Ok(budget) = usize::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if watch_id == 0 || args.arg1 == 0 || budget == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Fail fast on an unusable destination before dequeuing, as
+    // `sys_fs_watch_read` does: the events would otherwise be lost with it.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, budget) {
+        return SyscallResult::err(e);
+    }
+    let events = match crate::fs::notify::read_events_within(watch_id, budget, watch_record_len) {
+        Ok(events) => events,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut out = alloc::vec::Vec::new();
+    for event in &events {
+        encode_watch_record(event, &mut out);
+    }
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel buffer of `out.len()` bytes, no more
+        // than `budget` (each record was admitted against it); copy_to_user
+        // re-validates the destination and brackets the store with STAC/CLAC.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(i64::try_from(out.len()).unwrap_or(i64::MAX))
+}
+
 /// `SYS_FS_WATCH_READ` — read pending filesystem change events.
 ///
 /// `arg0`: watch ID.
@@ -11597,17 +15329,7 @@ fn pack_fs_meta_to_user(meta: &crate::fs::FileMeta, dst: u64) -> KernelResult<()
             }
         };
         put(0, &meta.size.to_le_bytes());
-        put(
-            8,
-            &[match meta.entry_type {
-                crate::fs::EntryType::File => 0u8,
-                crate::fs::EntryType::Directory => 1,
-                crate::fs::EntryType::VolumeLabel => 2,
-                crate::fs::EntryType::Symlink => 3,
-                crate::fs::EntryType::CharDevice => 4,
-                crate::fs::EntryType::BlockDevice => 5,
-            }],
-        );
+        put(8, &[meta.entry_type.type_byte()]);
         // [9..16] and [62..64] stay zero: the array starts zeroed.
         put(16, &meta.created_ns.to_le_bytes());
         put(24, &meta.modified_ns.to_le_bytes());
@@ -11704,7 +15426,8 @@ pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_SET_TIMES` — set timestamps.
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
-/// `arg2`: accessed_ns (0 = unchanged).  `arg3`: modified_ns (0 = unchanged).
+/// `arg2`: accessed_ns (0 = unchanged, `u64::MAX` = now).  `arg3`:
+/// modified_ns, likewise — `fs::vfs::TIME_NOW`, which the VFS resolves.
 /// `arg4`: flags (bit 0 = `NO_FOLLOW`, i.e. `lutimes` /
 /// `utimensat(AT_SYMLINK_NOFOLLOW)` — stamp the link inode itself).
 pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
@@ -11734,6 +15457,10 @@ pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: key pointer (null-terminated).  `arg3`: output buffer pointer.
 /// `arg4`: buffer capacity.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
 /// `lgetxattr` — read the link inode's own xattrs).
+///
+/// Returns the value's length. The value is written only when it all fits
+/// in `arg4` bytes; a capacity of 0 asks the length alone. Which names a file
+/// may carry and who may read them is `fs::xattr_policy`'s.
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
@@ -11750,15 +15477,14 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 
     let capacity = args.arg4 as usize;
     // capacity == 0 is a valid "size query" (POSIX getxattr): the caller
-    // wants the attribute length without copying, so don't require a buffer.
-    // Only validate the output buffer when one is actually provided.
-    if capacity > 0 {
-        if args.arg3 == 0 {
-            return SyscallResult::err(KernelError::InvalidArgument);
-        }
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, capacity) {
-            return SyscallResult::err(e);
-        }
+    // wants the attribute length without copying, so no buffer is needed.
+    // The buffer is not checked here: Linux answers from the lookup --
+    // `ENODATA` for a missing attribute, 0 for an empty one -- and touches the
+    // buffer only to copy, and `copy_to_user` checks what it copies to. It
+    // was checked here, before the lookup, until 2026-10-01 (lane D's
+    // `d-a-xattr-answers-only-the-filesystem-can-give`, item 2).
+    if capacity > 0 && args.arg3 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
     }
 
     // arg5 bit 0 = NO_FOLLOW (lgetxattr: read the link inode's own xattrs).
@@ -11769,17 +15495,20 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
     };
     match xattr_res {
         Ok(val) => {
-            // Copy as much as fits, but always report the TRUE length so the
-            // caller can perform a size query or detect truncation (ERANGE).
-            let copy_len = val.len().min(capacity);
-            if copy_len > 0 {
-                // SAFETY: `val` is a live kernel-owned buffer of at least
-                // `copy_len` bytes.  `copy_to_user` re-validates the
-                // destination — the lookup above can block on the underlying
-                // filesystem, so the check made before it is not the one that
-                // matters — and brackets the store with STAC/CLAC.
+            // The value is copied only when all of it fits, and the TRUE
+            // length is returned either way: the caller's size query, or its
+            // `ERANGE` (the libc's, for a length over the capacity) with its
+            // buffer as it was, as Linux leaves it. Until 2026-10-01 as much
+            // as fitted was copied first (lane D's item 1), so a caller
+            // keeping a fallback in the buffer found it overwritten.
+            if capacity > 0 && val.len() <= capacity && !val.is_empty() {
+                // SAFETY: `val` is a live kernel-owned buffer of `val.len()`
+                // bytes. `copy_to_user` validates the destination -- the
+                // lookup above can block on the underlying filesystem, so no
+                // check made before it would be the one that matters -- and
+                // brackets the store with STAC/CLAC.
                 if let Err(e) =
-                    unsafe { crate::mm::user::copy_to_user(val.as_ptr(), args.arg3, copy_len) }
+                    unsafe { crate::mm::user::copy_to_user(val.as_ptr(), args.arg3, val.len()) }
                 {
                     return SyscallResult::err(e);
                 }
@@ -11902,15 +15631,11 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     };
     let capacity = args.arg3 as usize;
     // capacity == 0 is a valid "size query" (POSIX listxattr): return the
-    // total bytes needed without writing.  Validate the buffer only when one
-    // is provided.
-    if capacity > 0 {
-        if args.arg2 == 0 {
-            return SyscallResult::err(KernelError::InvalidArgument);
-        }
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
-            return SyscallResult::err(e);
-        }
+    // total bytes needed without writing. The buffer is not checked here, as
+    // in `sys_fs_get_xattr`: `copy_to_user` checks what it copies to, and only
+    // a list that fits is copied.
+    if capacity > 0 && args.arg2 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
     }
 
     // arg4 bit 0 = NO_FOLLOW (llistxattr: list the link inode's own xattrs).
@@ -12098,12 +15823,14 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_FS_FLOCK` — acquire an advisory file lock.
+/// `SYS_FS_FLOCK` — take a `flock` lock by path, for the calling process,
+/// without waiting. See the number's doc.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
 /// `arg2`: lock type (0 = shared, 1 = exclusive).
-/// `arg3`: owner ID.
+/// `arg3`: ignored. It was the owner, taken as given, so any process could
+/// lock in another's name.
 pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
@@ -12120,7 +15847,8 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
         _ => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    let owner = args.arg3;
+    // The caller's own: never a value the caller chose.
+    let owner = crate::fs::vfs::flock_process_owner(caller_pid().unwrap_or(0));
 
     match crate::fs::Vfs::flock(&path, owner, lock_type) {
         Ok(()) => SyscallResult::ok(0),
@@ -12128,23 +15856,121 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_FS_FUNLOCK` — release an advisory file lock.
+/// `SYS_FS_FUNLOCK` — release the calling process's `flock` lock on a path.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
-/// `arg2`: owner ID.
+/// `arg2`: ignored. It was the owner, taken as given, so any process could
+/// release any lock.
 pub fn sys_fs_funlock(args: &SyscallArgs) -> SyscallResult {
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
 
-    let owner = args.arg2;
+    // The caller's own lock: a process releases nothing but what it holds.
+    let owner = crate::fs::vfs::flock_process_owner(caller_pid().unwrap_or(0));
 
     match crate::fs::Vfs::funlock(&path, owner) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_FS_FLOCK_HANDLE` — BSD `flock(2)` on an open file: a whole-file lock
+/// that belongs to the open file description, waiting unless `FLOCK_NB`.
+/// See the number's doc.
+pub fn sys_fs_flock_handle(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{FLOCK_EX, FLOCK_NB, FLOCK_SH, FLOCK_UN};
+    use crate::fs::LockType;
+
+    let handle = args.arg0;
+    let op = args.arg1;
+    // The op before the handle, as Linux's `flock` checks them.
+    if op & !(FLOCK_SH | FLOCK_EX | FLOCK_NB | FLOCK_UN) != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let lock_type = match op & !FLOCK_NB {
+        FLOCK_SH => Some(LockType::Shared),
+        FLOCK_EX => Some(LockType::Exclusive),
+        FLOCK_UN => None,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // Keyed on the file the handle holds, not on what its name names now
+    // (`fs::handle::lock_key`).
+    let (path, id) = match crate::fs::handle::lock_key(handle) {
+        Ok(k) => k,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let owner = crate::fs::vfs::flock_description_owner(handle);
+    let result = match lock_type {
+        None => {
+            crate::fs::Vfs::funlock_key(&path, id, owner);
+            Ok(())
+        }
+        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_key(&path, id, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_key(&path, id, owner, lt),
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        // Restartable, as Linux's `flock` is: the signal-delivery checkpoint
+        // restarts it under `SA_RESTART` and otherwise answers `Interrupted`.
+        Err(KernelError::Interrupted) => crate::syscall::linux::restart::restart_result(
+            crate::syscall::linux::restart::ERESTARTSYS,
+        ),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_RECORD_LOCK` -- a POSIX record lock on an open file: `fcntl`'s
+/// `F_GETLK`, `F_SETLK` and `F_SETLKW` for a native program. See the
+/// number's doc. The work is [`super::record_lock::apply`], which the Linux
+/// `fcntl` shares, so the two ABIs cannot describe one lock differently.
+pub fn sys_fs_record_lock(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{RECORD_LOCK_GET, RECORD_LOCK_SET, RECORD_LOCK_SET_WAIT};
+    use super::record_lock::{self, Flock, Op, Owner, Target};
+
+    let handle = args.arg0;
+    let op = match args.arg1 {
+        RECORD_LOCK_GET => Op::Get,
+        RECORD_LOCK_SET => Op::Set,
+        RECORD_LOCK_SET_WAIT => Op::SetWait,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let mut flock = match Flock::read_user(args.arg2) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let pid = caller_pid();
+    // Still the caller's once the lock is taken? A lock taken while another
+    // thread closed the handle is dropped again: the close's release has
+    // already run (`record_lock::apply`).
+    let still_held = || pid.is_none_or(|p| pcb::owns_ipc_handle(p, ResourceType::File, handle));
+    let owner = Owner::Process(pid.unwrap_or(0));
+    match record_lock::apply(Target::File(handle), owner, op, &mut flock, still_held) {
+        Ok(()) => {}
+        // A wait a signal ended is restartable, as Linux's `F_SETLKW` is: the
+        // signal-delivery checkpoint restarts it under `SA_RESTART` and
+        // otherwise answers `Interrupted`.
+        Err(KernelError::Interrupted) => {
+            return crate::syscall::linux::restart::restart_result(
+                crate::syscall::linux::restart::ERESTARTSYS,
+            );
+        }
+        Err(e) => return SyscallResult::err(e),
+    }
+    if op == Op::Get {
+        if let Err(e) = flock.write_user(args.arg2) {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(0)
 }
 
 /// `SYS_FS_SYNC` — flush all filesystems to stable storage.
@@ -12330,14 +16156,14 @@ pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
     // prefix of it and told the caller everything was fine.  This syscall
     // reports no byte count, so it cannot express a short write; the only
     // correct options are to append all of it or fail, and it appends all of
-    // it.  See `sys_fs_write_file` for why the unbounded copy is not an
-    // amplification vector.
-    let data = match crate::mm::user::read_user_vec(args.arg2, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match crate::fs::Vfs::append(&path, &data) {
+    // it -- streamed a bounded chunk at a time (`stream_user_chunks`).
+    //
+    // Each chunk is one atomic `Vfs::append`, so a record up to
+    // `FILE_CALL_CHUNK` never interleaves with another appender's; a longer
+    // one may, at chunk boundaries.
+    match stream_user_chunks(args.arg2, data_len, |chunk| {
+        crate::fs::Vfs::append(&path, chunk)
+    }) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -12416,7 +16242,9 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path = match crate::fs::handle::handle_path(handle) {
+    // The name the handle was opened under, for the caller to show; not
+    // checked to name its file still (`fs::handle::handle_name`).
+    let path = match crate::fs::handle::handle_name(handle) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
@@ -12477,6 +16305,11 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 /// Returns: packed `(total_entries << 32) | entries_written`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
+    // The File capability, as `SYS_FS_LIST_DIR` asks it: the two list the
+    // same directories, and only one of them was gated.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
     // Validate path pointer.
     let path_len = args.arg1 as usize;
     if path_len == 0 {
@@ -12553,14 +16386,7 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 // packed; that argument was always for a location, never for
                 // passing labels through.
                 if let Some(b) = out_slice.get_mut(pos) {
-                    *b = match entry.entry_type {
-                        crate::fs::vfs::EntryType::File => 0,
-                        crate::fs::vfs::EntryType::Directory => 1,
-                        crate::fs::vfs::EntryType::VolumeLabel => 2,
-                        crate::fs::vfs::EntryType::Symlink => 3,
-                        crate::fs::vfs::EntryType::CharDevice => 4,
-                        crate::fs::vfs::EntryType::BlockDevice => 5,
-                    };
+                    *b = entry.entry_type.type_byte();
                 }
                 pos = pos.saturating_add(1);
 
@@ -12612,49 +16438,310 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(result as i64)
 }
 
-/// `SYS_FS_TMPFILE` — create a temporary file with no directory entry.
+/// `SYS_FS_TMPFILE` — a regular file with no name in a directory, as
+/// Linux's `O_TMPFILE` opens one (`fs::handle::open_tmpfile`): it exists only
+/// through the handle returned, and goes at its last close unless
+/// `SYS_FS_LINK_HANDLE` names it first.
 ///
-/// `arg0`: pointer to directory path string.
-/// `arg1`: path length (bytes).
-/// `arg2`: open flags.
+/// `arg0`/`arg1`: the directory's path and its length. `arg2`: native open
+/// flags: the access mode, which must allow writing; `APPEND`; `EXCL`, which
+/// forbids naming it. The file's mode is 0600: the call has no mode
+/// argument, and a file no one else can name has no one else to share with.
 ///
-/// Returns: file handle on success.
-#[allow(clippy::cast_possible_wrap)]
+/// Until 2026-10-01 this made a *named* file that nothing deleted and
+/// returned a handle its caller could not use; it then refused
+/// (`NotSupported`) until handles held files rather than names
+/// (design-decisions §1508). It still refuses on a filesystem that cannot
+/// hold a file with no name (FAT, the pseudo filesystems).
 pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
+    // The gate first, as every other creating door has it: a caller without
+    // the right learns only that, not which of its arguments were good.
+    // `fs_open_tmpfile_kernel_path` asks again, for the Linux door's sake.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
     let path_len = args.arg1 as usize;
-    if path_len == 0 || path_len > 4096 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    let dir_path = match read_user_path(args.arg0, path_len) {
+    let dir = match read_user_path(args.arg0, path_len) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    fs_open_tmpfile_kernel_path(&dir, flags, 0o600)
+}
 
-    // Generate a unique temporary filename using the TSC for entropy.
-    // SAFETY: _rdtsc is always available on x86_64; no side-effects.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // Joined as a path component rather than formatted into a string, so a
-    // non-UTF-8 directory name survives verbatim.
-    let tmp_name = dir_path.join(alloc::format!(".tmp_{tsc:016x}"));
-
-    // Create the file.
-    if let Err(e) = crate::fs::Vfs::write_file(&tmp_name, &[]) {
+/// `SYS_FS_LINK_HANDLE` — give the file a handle holds a name: Linux's
+/// `linkat(fd, "", .., AT_EMPTY_PATH)`. See the number's doc.
+pub fn sys_fs_link_handle(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let path_len = args.arg2 as usize;
+    if let Err(e) = require_file_handle_owner(handle) {
         return SyscallResult::err(e);
     }
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    if args.arg1 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg1, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::handle::link_handle(handle, &path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
 
-    // Open it as a handle.
-    let flags = args.arg2 as u32;
-    match crate::fs::handle::open(&tmp_name, crate::fs::handle::OpenFlags::from_bits(flags)) {
-        Ok(handle) => SyscallResult::ok(handle as i64),
-        Err(e) => {
-            // Clean up the file if we can't open it.
-            let _ = crate::fs::Vfs::remove(&tmp_name);
-            SyscallResult::err(e)
+// Seals on a file (SYS_FS_ADD_SEALS / SYS_FS_GET_SEALS, 1124-1125)
+
+/// Linux's `F_SEAL_*` bits, which the door speaks, as `fs::sealing`'s flags:
+/// `None` for a bit the door does not take.
+fn seals_from_linux(bits: u64) -> Option<crate::fs::sealing::SealFlags> {
+    use crate::fs::sealing::SealFlags;
+    const KNOWN: u64 = 0x01 | 0x02 | 0x04 | 0x08 | 0x20;
+    if bits & !KNOWN != 0 {
+        return None;
+    }
+    let mut flags = SealFlags::NONE;
+    for (bit, seal) in [
+        (0x01, SealFlags::SEAL),
+        (0x02, SealFlags::SHRINK),
+        (0x04, SealFlags::GROW),
+        (0x08, SealFlags::WRITE),
+        (0x20, SealFlags::EXEC),
+    ] {
+        if bits & bit != 0 {
+            flags = flags.union(seal);
         }
     }
-    // Note: the file is NOT auto-deleted on close in this implementation.
-    // True tmpfile (unlinked at creation) requires filesystem support
-    // (ext4 O_TMPFILE).  For now, callers should delete after use.
+    Some(flags)
+}
+
+/// `fs::sealing`'s flags as Linux's `F_SEAL_*` bits.
+fn seals_to_linux(flags: crate::fs::sealing::SealFlags) -> u64 {
+    use crate::fs::sealing::SealFlags;
+    [
+        (0x01, SealFlags::SEAL),
+        (0x02, SealFlags::SHRINK),
+        (0x04, SealFlags::GROW),
+        (0x08, SealFlags::WRITE),
+        (0x20, SealFlags::EXEC),
+    ]
+    .into_iter()
+    .filter(|&(_, seal)| flags.contains(seal))
+    .fold(0, |bits, (bit, _)| bits | bit)
+}
+
+/// `SYS_FS_ADD_SEALS(handle, seals)` (1124). See the number's doc.
+pub fn sys_fs_add_seals(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let Some(seals) = seals_from_linux(args.arg1).filter(|s| !s.is_empty()) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // Open for writing, as Linux's `memfd_add_seals` requires `FMODE_WRITE`:
+    // whoever may write the file may restrict how it is written, and a reader
+    // may not restrict the writers. `EPERM`, Linux's answer, not `EBADF`.
+    let file = match crate::fs::handle::HandleFile::writable(handle) {
+        Ok(f) => f,
+        Err(KernelError::PermissionDenied) => {
+            return SyscallResult::err(KernelError::NotPermitted);
+        }
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (id, path) = match file.identity() {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::sealing::add_seals_to(id, &path, seals) {
+        Ok(all) => SyscallResult::ok(i64::try_from(seals_to_linux(all)).unwrap_or(0)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_GET_SEALS(handle)` (1125). See the number's doc.
+pub fn sys_fs_get_seals(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let file = match crate::fs::handle::HandleFile::of(handle) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match file.identity() {
+        Ok((id, path)) => {
+            let seals = crate::fs::sealing::seals_of(id, &path);
+            SyscallResult::ok(i64::try_from(seals_to_linux(seals)).unwrap_or(0))
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deferred filesystem operations (1126-1128): `fs::deferred_ops`,
+// design-decisions 1529.
+// ---------------------------------------------------------------------------
+
+/// Largest `SYS_FS_DEFER_LIST` buffer honoured: the listing is built in the
+/// kernel before it is copied out, so this bounds what one call can make the
+/// kernel hold. Every entry a volume may have fits several times over.
+const DEFER_LIST_MAX: usize = 16 * 1024 * 1024;
+
+/// The caller as a deferred operation's requester: who it is checked as when
+/// queued and again when it runs. A kernel caller is root.
+fn defer_requester() -> Result<crate::fs::deferred_ops::Requester, KernelError> {
+    use crate::fs::deferred_ops::Requester;
+    let Some(pid) = caller_pid().filter(|&p| p != 0) else {
+        return Ok(Requester {
+            uid: 0,
+            gid: 0,
+            groups: alloc::vec::Vec::new(),
+        });
+    };
+    let creds = crate::proc::pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    // File access is the filesystem ids' (`fs::vfs`), deferred or not.
+    Ok(Requester {
+        uid: creds.fsuid,
+        gid: creds.fsgid,
+        groups: creds.groups,
+    })
+}
+
+/// A `(pointer, length)` path argument, which may not be empty.
+fn defer_path_arg(ptr: u64, len: u64) -> Result<crate::fs::path::PathBuf, KernelError> {
+    let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+    if ptr == 0 || len == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    read_user_path(ptr, len)
+}
+
+/// `SYS_FS_DEFER` -- queue a delete or rename that cannot happen now, to run
+/// when its volume can take it. See the number's doc.
+pub fn sys_fs_defer(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::deferred_ops::{self, DeferredOpKind, DeferredReason};
+    let (Some(op), Some(reason)) = (
+        DeferredOpKind::from_code(args.arg0),
+        DeferredReason::from_code(args.arg5),
+    ) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    // What the operation itself would need: `SYS_FS_DELETE`'s right for a
+    // delete, `SYS_FS_RENAME`'s for a rename.
+    let rights = match op {
+        DeferredOpKind::Delete => crate::cap::Rights::DELETE,
+        DeferredOpKind::Rename => crate::cap::Rights::WRITE,
+    };
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, rights) {
+        return SyscallResult::err(e);
+    }
+    let path = match defer_path_arg(args.arg1, args.arg2) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dest = match op {
+        DeferredOpKind::Rename => match defer_path_arg(args.arg3, args.arg4) {
+            Ok(p) => Some(p),
+            Err(e) => return SyscallResult::err(e),
+        },
+        DeferredOpKind::Delete if args.arg3 != 0 || args.arg4 != 0 => {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        DeferredOpKind::Delete => None,
+    };
+    let who = match defer_requester() {
+        Ok(w) => w,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let now = crate::timekeeping::clock_realtime() / 1_000_000_000;
+    match deferred_ops::queue(&path, op, dest.as_deref(), reason, &who, now) {
+        Ok(id) => match i64::try_from(id) {
+            Ok(id) => SyscallResult::ok(id),
+            Err(_) => SyscallResult::err(KernelError::ResourceExhausted),
+        },
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_DEFER_LIST` -- the queued operations of the volume a path is on
+/// that the caller may see. See the number's doc.
+pub fn sys_fs_defer_list(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let path = match defer_path_arg(args.arg0, args.arg1) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(cap) = usize::try_from(args.arg3) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let who = match defer_requester() {
+        Ok(w) => w,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let text = match crate::fs::deferred_ops::listing(&path, who.uid, cap.min(DEFER_LIST_MAX)) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !text.is_empty()
+        && let Err(e) = crate::mm::user::write_user_items(args.arg2, &text)
+    {
+        return SyscallResult::err(e);
+    }
+    match i64::try_from(text.len()) {
+        Ok(n) => SyscallResult::ok(n),
+        Err(_) => SyscallResult::err(KernelError::BufferTooSmall),
+    }
+}
+
+/// `SYS_FS_DEFER_CANCEL` -- cancel a queued operation, for whoever queued it
+/// or root. See the number's doc.
+pub fn sys_fs_defer_cancel(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::DELETE) {
+        return SyscallResult::err(e);
+    }
+    let path = match defer_path_arg(args.arg0, args.arg1) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let who = match defer_requester() {
+        Ok(w) => w,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::deferred_ops::cancel(&path, args.arg2, who.uid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SET_STATUS_FLAGS` — set an open description's status flags, as
+/// Linux's `fcntl(F_SETFL)` does. See the number's doc.
+pub fn sys_fs_set_status_flags(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::handle::OpenFlags;
+    /// Bits 0-8 are the native open flags; anything above names nothing.
+    const KNOWN: u64 = 0x1FF;
+    let handle = args.arg0;
+    if args.arg1 & !KNOWN != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = OpenFlags::from_bits(args.arg1 as u32);
+    match crate::fs::handle::set_status_flags(handle, flags) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_FS_FALLOCATE` — pre-allocate disk space.
@@ -12663,6 +16750,11 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: path length (bytes).
 /// `arg2`: size in bytes to pre-allocate.
 pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
+    // The File capability with WRITE, as `SYS_FS_TRUNCATE` asks it: both
+    // change a file's size by path.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
     let path_len = args.arg1 as usize;
     if path_len == 0 || path_len > 4096 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -12687,6 +16779,12 @@ pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     let offset = args.arg1;
+    // Possession, as `SYS_FS_SEEK` checks it: a seek moves the description's
+    // offset, which another process sharing nothing must not be able to do
+    // by counting handle numbers (`require_file_handle_owner`).
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Data(offset)) {
         Ok(pos) => SyscallResult::ok(pos as i64),
@@ -12702,6 +16800,10 @@ pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     let offset = args.arg1;
+    // Possession: see `sys_fs_seek_data`.
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Hole(offset)) {
         Ok(pos) => SyscallResult::ok(pos as i64),
@@ -12712,6 +16814,54 @@ pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
+
+use crate::net::native_socket::{Ending as NativeEnding, Kind as NativeKind};
+
+/// The slot a native socket handle names, pinned for the call: the caller
+/// must hold the handle (`require_ipc_handle`), and it must be a `kind`
+/// handle whose object is still in its slot (`net::native_socket`).
+/// `InvalidHandle` otherwise, the answer for any handle a process does not
+/// hold.
+///
+/// Until 2026-10-02 these calls took the slot index itself, so any process
+/// with the `Socket` capability could use any socket by counting
+/// (`known-issues` `A-TCP-AND-UDP-SOCKETS-ARE-NOT-COUNTED-PER-PROCESS`).
+fn native_socket_slot(
+    handle: u64,
+    kind: NativeKind,
+) -> Result<crate::net::native_socket::SlotPin, KernelError> {
+    require_ipc_handle(ResourceType::NativeSocket, handle)?;
+    crate::net::native_socket::resolve(handle, kind).ok_or(KernelError::InvalidHandle)
+}
+
+/// Issue a native socket handle for the object a `*_tagged` create call
+/// made, held by the calling process, as the call's result.
+fn issue_native_socket(kind: NativeKind, slot: usize, generation: u32) -> SyscallResult {
+    let handle = crate::net::native_socket::issue(kind, slot, generation);
+    register_for_caller(ResourceType::NativeSocket, handle);
+    #[allow(clippy::cast_possible_wrap)] // a counter from 1; nowhere near 2^63
+    SyscallResult::ok(handle as i64)
+}
+
+/// The calling process lets go of a native socket handle of `kind`: it
+/// stops holding it, and the last holder's release ends the socket as
+/// `ending` says. Another process's handle, or one of another kind, is
+/// `InvalidHandle`.
+fn close_native_socket(handle: u64, kind: NativeKind, ending: NativeEnding) -> SyscallResult {
+    if let Err(e) = require_ipc_handle(ResourceType::NativeSocket, handle) {
+        return SyscallResult::err(e);
+    }
+    if crate::net::native_socket::kind_of(handle) != Some(kind) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::NativeSocket, handle);
+    }
+    match crate::net::native_socket::release(handle, ending) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
 
 /// `SYS_TCP_CONNECT` — open a TCP connection.
 ///
@@ -12745,20 +16895,16 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     if (flags & CONNECT_NONBLOCK) != 0 {
         // Non-blocking connect: return handle immediately in SYN_SENT.
         match crate::net::tcp::connect_start(ns, ip.into(), port) {
-            Ok(handle) =>
-            {
-                #[allow(clippy::cast_possible_wrap)]
-                SyscallResult::ok(handle as i64)
+            Ok((slot, generation)) => {
+                issue_native_socket(NativeKind::TcpConnection, slot, generation)
             }
             Err(e) => SyscallResult::err(e),
         }
     } else {
         // Blocking connect (original behavior).
-        match crate::net::tcp::connect(ns, ip.into(), port) {
-            Ok(handle) =>
-            {
-                #[allow(clippy::cast_possible_wrap)]
-                SyscallResult::ok(handle as i64)
+        match crate::net::tcp::connect_tagged(ns, ip.into(), port) {
+            Ok((slot, generation)) => {
+                issue_native_socket(NativeKind::TcpConnection, slot, generation)
             }
             Err(e) => SyscallResult::err(e),
         }
@@ -12776,7 +16922,12 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -12785,8 +16936,12 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
 
     // `tcp::send` queues into the socket's transmit buffer and can block on a
     // full window, so the payload has to be kernel-owned before it is handed
-    // over.  See `sys_fs_write_file` on why the unbounded copy is safe.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    // over. At most `MAX_TX_BUFFER` of it: that is all the stack keeps for
+    // retransmission, so a send past it could put bytes in flight that a loss
+    // would make unrecoverable, and a short count is a stream send's right.
+    // Before 2026-09-26 the whole request was copied, up to 1 GiB (known-issues.md
+    // `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`, class 2c).
+    let data = match read_call_buffer(args.arg1, len, crate::net::tcp::MAX_TX_BUFFER) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -12816,7 +16971,12 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let buf_cap = args.arg2 as usize;
     let flags = args.arg3 as u32;
 
@@ -12897,12 +17057,7 @@ pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
-
-    match crate::net::tcp::close(handle) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
-    }
+    close_native_socket(args.arg0, NativeKind::TcpConnection, NativeEnding::Close)
 }
 
 /// `SYS_TCP_ABORT` — abort a TCP connection by sending RST.
@@ -12914,12 +17069,9 @@ pub fn sys_tcp_abort(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
-
-    match crate::net::tcp::abort(handle) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
-    }
+    // A reset when this is the socket's last holder; another holder keeps
+    // the connection, as `close(2)` with `SO_LINGER` of zero would.
+    close_native_socket(args.arg0, NativeKind::TcpConnection, NativeEnding::Abort)
 }
 
 /// `SYS_TCP_PEER_ADDR` — get the remote peer address of a TCP connection.
@@ -12932,7 +17084,12 @@ pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
 
     if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -12990,12 +17147,8 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
     }
 
     let ns = crate::sched::current_task_net_ns();
-    match crate::net::tcp::bind(ns, port) {
-        Ok(handle) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(handle as i64)
-        }
+    match crate::net::tcp::bind_tagged(ns, port) {
+        Ok((slot, generation)) => issue_native_socket(NativeKind::TcpListener, slot, generation),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -13011,22 +17164,24 @@ pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let listener_handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpListener) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let listener_handle = pin.slot();
     let flags = args.arg1 as u32;
     const ACCEPT_NONBLOCK: u32 = 1;
 
     let result = if (flags & ACCEPT_NONBLOCK) != 0 {
-        crate::net::tcp::try_accept(listener_handle)
+        crate::net::tcp::try_accept_tagged(listener_handle)
     } else {
-        crate::net::tcp::accept(listener_handle)
+        crate::net::tcp::accept_tagged(listener_handle)
     };
+    drop(pin);
 
     match result {
-        Ok(conn_handle) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(conn_handle as i64)
-        }
+        Ok((slot, generation)) => issue_native_socket(NativeKind::TcpConnection, slot, generation),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -13040,12 +17195,7 @@ pub fn sys_tcp_close_listener(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let listener_handle = args.arg0 as usize;
-
-    match crate::net::tcp::close_listener(listener_handle) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
-    }
+    close_native_socket(args.arg0, NativeKind::TcpListener, NativeEnding::Close)
 }
 
 /// `SYS_UDP_BIND` — bind a UDP socket to a local port.
@@ -13065,12 +17215,8 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
     }
 
     let ns = crate::sched::current_task_net_ns();
-    match crate::net::udp::bind(ns, port) {
-        Ok(handle) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(handle as i64)
-        }
+    match crate::net::udp::bind_tagged(ns, port) {
+        Ok((slot, generation)) => issue_native_socket(NativeKind::Udp, slot, generation),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -13090,8 +17236,12 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
 
     use crate::net::interface::Ipv4Addr;
 
-    #[allow(clippy::cast_possible_truncation)]
-    let _handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     #[allow(clippy::cast_possible_truncation)]
     let dst_ip = Ipv4Addr::from_u32(args.arg1 as u32);
     #[allow(clippy::cast_possible_truncation)]
@@ -13108,22 +17258,221 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
     // Copied before the handle lookup below, so the datagram the driver
     // eventually DMAs is the one that was validated — a peer thread cannot
     // rewrite it between here and the NIC.
-    let data = match crate::mm::user::read_user_vec(args.arg3, data_len, usize::MAX) {
+    let data =
+        match crate::mm::user::read_user_vec(args.arg3, data_len, crate::net::udp::MAX_PAYLOAD) {
+            Ok(d) => d,
+            Err(e) => return SyscallResult::err(e),
+        };
+
+    // From the socket: its port, its namespace, and for a group its
+    // multicast TTL and loop (`udp::send_from`). Until 2026-10-02 this sent
+    // from the root namespace at TTL 64 whatever the socket asked.
+    match crate::net::udp::send_from(handle, dst_ip, dst_port, &data) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Read the 16-byte IPv6 address at user pointer `ptr`.
+fn read_user_ipv6(ptr: u64) -> Result<crate::net::ipv6::Ipv6Addr, KernelError> {
+    if ptr == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut raw = [0u8; 16];
+    // SAFETY: sixteen bytes into a sixteen-byte kernel buffer;
+    // `copy_from_user` validates the user range and brackets the load with
+    // STAC/CLAC.
+    unsafe { crate::mm::user::copy_from_user(ptr, raw.as_mut_ptr(), raw.len()) }?;
+    Ok(crate::net::ipv6::Ipv6Addr(raw))
+}
+
+/// `SYS_UDP_SEND6` -- send a datagram from a UDP socket to an IPv6 address.
+///
+/// `arg0`: socket handle. `arg1`: pointer to the 16-byte destination address.
+/// `arg2`: destination port. `arg3`/`arg4`: the data.
+pub fn sys_udp_send6(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dst_ip = match read_user_ipv6(args.arg1) {
+        Ok(a) => a,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dst_port = match u16::try_from(args.arg2) {
+        Ok(p) if p != 0 => p,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let Ok(len) = usize::try_from(args.arg4) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if args.arg3 == 0 && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Copied first: what reaches the wire is what was checked.
+    let data = match crate::mm::user::read_user_vec(args.arg3, len, crate::net::udp::MAX_PAYLOAD) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
-
-    // Look up the actual bound port from the socket handle.
-    let src_port: u16 = match crate::net::udp::local_port(_handle) {
-        Some(port) => port,
-        None => {
-            // Invalid or inactive handle — cannot send.
-            return SyscallResult::err(KernelError::InvalidHandle);
-        }
-    };
-
-    match crate::net::udp::send(src_port, dst_ip, dst_port, &data) {
+    match crate::net::udp::send_v6_from(pin.slot(), dst_ip, dst_port, &data) {
         Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_RECV6` -- receive one of a UDP socket's IPv6 datagrams
+/// (non-blocking).
+///
+/// `arg0`: socket handle. `arg1`/`arg2`: the buffer and its capacity.
+/// `arg3`: pointer to 18 bytes for the source (address, then port, LE), or
+/// null. `arg4`: `MSG_PEEK` (0x02), `MSG_TRUNC` (0x20).
+pub fn sys_udp_recv6(args: &SyscallArgs) -> SyscallResult {
+    const MSG_PEEK: u64 = 0x02;
+    const MSG_TRUNC: u64 = 0x20;
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(cap) = usize::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if args.arg1 == 0 && cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Both destinations are checked before the dequeue, so a bad pointer
+    // costs an error rather than a datagram with nowhere to go.
+    if cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, cap) {
+            return SyscallResult::err(e);
+        }
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 18) {
+            return SyscallResult::err(e);
+        }
+    }
+    let datagram = if args.arg4 & MSG_PEEK != 0 {
+        crate::net::udp::peek_v6(pin.slot())
+    } else {
+        crate::net::udp::recv_v6(pin.slot())
+    };
+    let Some(datagram) = datagram else {
+        return SyscallResult::err(KernelError::WouldBlock);
+    };
+    let copy_len = datagram.data.len().min(cap);
+    if copy_len > 0 {
+        // SAFETY: `datagram.data` is a live kernel `Vec` of at least
+        // `copy_len` bytes; `copy_to_user` re-validates the destination and
+        // brackets the store with STAC/CLAC.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(datagram.data.as_ptr(), args.arg1, copy_len) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    if args.arg3 != 0 {
+        let mut src = [0u8; 18];
+        if let Some(addr) = src.get_mut(..16) {
+            addr.copy_from_slice(&datagram.src_ip.0);
+        }
+        if let Some(port) = src.get_mut(16..) {
+            port.copy_from_slice(&datagram.src_port.to_le_bytes());
+        }
+        // SAFETY: `src` is a live 18-byte kernel array; `copy_to_user`
+        // validates the destination and brackets the store with STAC/CLAC.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), args.arg3, src.len()) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    // MSG_TRUNC: the datagram's real size, even when it did not fit.
+    let returned = if args.arg4 & MSG_TRUNC != 0 {
+        datagram.data.len()
+    } else {
+        copy_len
+    };
+    #[allow(clippy::cast_possible_wrap)] // at most a datagram's 65,535 bytes
+    SyscallResult::ok(returned as i64)
+}
+
+/// `SYS_UDP_MCAST_JOIN6` and `SYS_UDP_MCAST_LEAVE6`: `join` says which.
+fn udp_mcast6(args: &SyscallArgs, join: bool) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let group = match read_user_ipv6(args.arg1) {
+        Ok(g) => g,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let result = if join {
+        crate::net::udp::join_group_v6(pin.slot(), group)
+    } else {
+        crate::net::udp::leave_group_v6(pin.slot(), group)
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_MCAST_JOIN6` -- join an IPv6 multicast group on a UDP socket.
+///
+/// `arg0`: socket handle. `arg1`: pointer to the 16-byte group address.
+pub fn sys_udp_mcast_join6(args: &SyscallArgs) -> SyscallResult {
+    udp_mcast6(args, true)
+}
+
+/// `SYS_UDP_MCAST_LEAVE6` -- leave an IPv6 multicast group.
+///
+/// `arg0`: socket handle. `arg1`: pointer to the 16-byte group address.
+pub fn sys_udp_mcast_leave6(args: &SyscallArgs) -> SyscallResult {
+    udp_mcast6(args, false)
+}
+
+/// `SYS_UDP_SET_OPTION` -- set a UDP socket's multicast option.
+///
+/// `arg0`: socket handle. `arg1`: option (`udp::McastOption`). `arg2`: value.
+pub fn sys_udp_set_option(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Some(option) = crate::net::udp::McastOption::from_raw(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    match crate::net::udp::set_option(pin.slot(), option, args.arg2) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_GET_OPTION` -- read a UDP socket's multicast option.
+///
+/// `arg0`: socket handle. `arg1`: option (`udp::McastOption`).
+pub fn sys_udp_get_option(args: &SyscallArgs) -> SyscallResult {
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Some(option) = crate::net::udp::McastOption::from_raw(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    match crate::net::udp::get_option(pin.slot(), option) {
+        #[allow(clippy::cast_possible_wrap)] // at most 255
+        Ok(value) => SyscallResult::ok(value as i64),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -13140,7 +17489,12 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let buf_cap = args.arg2 as usize;
     // arg4: flags —
     //   bit 1 (0x02) = MSG_PEEK (peek without consuming)
@@ -13230,9 +17584,7 @@ pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
-    crate::net::udp::close(handle);
-    SyscallResult::ok(0)
+    close_native_socket(args.arg0, NativeKind::Udp, NativeEnding::Close)
 }
 
 /// `SYS_UDP_CONNECT` — set connected peer filter for a UDP socket.
@@ -13247,7 +17599,12 @@ pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let ip_nbo = args.arg1 as u32;
     let port = args.arg2 as u16;
 
@@ -13260,7 +17617,12 @@ pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_UDP_LOCAL_PORT` — query the local port of a UDP socket.
 pub fn sys_udp_local_port(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     match crate::net::udp::local_port(handle) {
         Some(port) => SyscallResult::ok(port as i64),
         None => SyscallResult::err(KernelError::InvalidArgument),
@@ -13277,7 +17639,12 @@ pub fn sys_udp_mcast_join(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let group = crate::net::interface::Ipv4Addr::from_u32(args.arg1 as u32);
     match crate::net::udp::join_group(handle, group) {
         Ok(()) => SyscallResult::ok(0),
@@ -13295,7 +17662,12 @@ pub fn sys_udp_mcast_leave(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let group = crate::net::interface::Ipv4Addr::from_u32(args.arg1 as u32);
     match crate::net::udp::leave_group(handle, group) {
         Ok(()) => SyscallResult::ok(0),
@@ -13311,7 +17683,11 @@ pub fn sys_udp_mcast_leave(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: entry point address (ring 3 RIP).
 /// `arg1`: stack pointer (ring 3 RSP).
-/// `arg2`: priority (0–31, or `u64::MAX` for default).
+/// `arg2`: priority (0–31), or `u64::MAX` for the creating thread's
+///         scheduling: its policy, real-time priority and level, as a thread
+///         made by `clone` takes them (`sched::inheritance_from`) -- what
+///         `pthread_create`'s default `PTHREAD_INHERIT_SCHED` asks. An
+///         explicit level makes an ordinary (`SCHED_OTHER`) thread there.
 ///
 /// Returns: new thread's task ID.
 pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
@@ -13322,8 +17698,17 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
     let user_rsp = args.arg1;
     let raw_priority = args.arg2;
 
-    // Resolve priority: u64::MAX means default.
-    let priority = if raw_priority == u64::MAX {
+    // Resolve priority: u64::MAX means the creator's. Until 2026-10-07 it
+    // meant the default level, so a thread of a process at nice 10 ran at
+    // nice 0, and one made by a real-time thread was ordinary.
+    let inheritance = if raw_priority == u64::MAX {
+        sched::inheritance_from(sched::current_task_id())
+    } else {
+        None
+    };
+    let priority = if let Some(inheritance) = inheritance {
+        inheritance.level()
+    } else if raw_priority == u64::MAX {
         DEFAULT_PRIORITY
     } else if raw_priority > 31 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -13348,8 +17733,12 @@ pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
     };
 
     match thread::spawn_user(pid, b"user-thread", priority, entry_rip, user_rsp) {
-        Ok(new_task_id) =>
-        {
+        Ok(new_task_id) => {
+            // Spawned at the inherited level already; the policy follows at
+            // once, so at most the first dispatch's slice is an ordinary one.
+            if let Some(inheritance) = inheritance {
+                sched::inherit_scheduling(new_task_id, inheritance);
+            }
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(new_task_id as i64)
         }
@@ -13395,14 +17784,26 @@ pub fn sys_thread_exit(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_thread_join(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::thread;
 
-    let target_task = args.arg0;
-    let out_ptr = args.arg1;
+    match thread::join(args.arg0) {
+        Ok(v) => deliver_join_value(v, args.arg1),
+        Err(e) => SyscallResult::err(e),
+    }
+}
 
-    let exit_value = match thread::join(target_task) {
-        Ok(v) => v,
-        Err(e) => return SyscallResult::err(e),
-    };
+/// `SYS_THREAD_JOIN_TIMEOUT` — [`sys_thread_join`] waiting at most `arg2`
+/// nanoseconds (0 at once, `u64::MAX` for ever). See
+/// [`SYS_THREAD_JOIN_TIMEOUT`](crate::syscall::number::SYS_THREAD_JOIN_TIMEOUT).
+pub fn sys_thread_join_timeout(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
 
+    match thread::join_timeout(args.arg0, args.arg2) {
+        Ok(v) => deliver_join_value(v, args.arg1),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Write a joined thread's exit value to `out_ptr` (if non-zero) and answer 0.
+fn deliver_join_value(exit_value: i64, out_ptr: u64) -> SyscallResult {
     if out_ptr != 0 {
         let bytes = exit_value.to_ne_bytes();
         // SAFETY: `copy_to_user` validates that the destination range lies
@@ -13619,10 +18020,14 @@ pub fn sys_io_ring_setup(args: &SyscallArgs) -> SyscallResult {
 
     // The ring is shared data, never code: no execute, and no reason for the
     // kernel to reach it through this mapping (it uses the HHDM view).
+    // SHARED: the kernel reads and writes these frames too, so a fork must
+    // not turn them copy-on-write -- the parent's next submission would land
+    // in a private copy the kernel never sees.
     let page_flags = PageFlags::PRESENT
         | PageFlags::USER_ACCESSIBLE
         | PageFlags::WRITABLE
-        | PageFlags::NO_EXECUTE;
+        | PageFlags::NO_EXECUTE
+        | PageFlags::SHARED;
 
     #[allow(clippy::arithmetic_side_effects)]
     let frame_size = FRAME_SIZE as u64;
@@ -13757,6 +18162,8 @@ pub fn sys_sem_create(args: &SyscallArgs) -> SyscallResult {
     let max_count = args.arg1;
 
     let handle = semaphore::create(initial, max_count);
+    // The caller's alone, and closed when it dies.
+    register_for_caller(ResourceType::Semaphore, handle.raw());
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(handle.raw() as i64)
@@ -13770,6 +18177,9 @@ pub fn sys_sem_signal(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let count = args.arg1;
 
     match semaphore::signal(handle, count) {
@@ -13785,6 +18195,9 @@ pub fn sys_sem_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match semaphore::wait(handle) {
         Ok(()) => SyscallResult::ok(0),
@@ -13799,6 +18212,9 @@ pub fn sys_sem_try_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match semaphore::try_wait(handle) {
         Ok(()) => SyscallResult::ok(0),
@@ -13813,6 +18229,12 @@ pub fn sys_sem_close(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Semaphore, handle.raw());
+    }
     semaphore::close(handle);
     SyscallResult::ok(0)
 }
@@ -13827,6 +18249,9 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match semaphore::wait_timeout(handle, timeout_ns) {
@@ -13867,8 +18292,11 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::register(&name) {
-        Ok(listener) =>
-        {
+        Ok(listener) => {
+            // The listener is the caller's, and its death unregisters the
+            // name -- before this, a service that died kept its name for ever
+            // and its restart got `AlreadyExists`.
+            register_for_caller(ResourceType::Service, listener.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(listener.raw() as i64)
         }
@@ -13897,8 +18325,11 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::connect(&name) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            // The client's end: usable by the client alone, and closed when
+            // it dies, so the service sees `ChannelClosed` instead of holding
+            // the connection's state for ever.
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -13913,10 +18344,13 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle.
 pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::accept(listener) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -13931,10 +18365,13 @@ pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle, or `WouldBlock`.
 pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::try_accept(listener) {
-        Ok(Some(handle)) =>
-        {
+        Ok(Some(handle)) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -13951,11 +18388,14 @@ pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle, or `TimedOut`.
 pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match service::accept_timeout(listener, timeout_ns) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -13970,9 +18410,17 @@ pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::unregister(listener) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(pid, ResourceType::Service, listener.raw());
+            }
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -14000,6 +18448,9 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 ///
 /// # Errors
 ///
+/// - `InvalidHandle` — the caller does not hold `arg0`. A process can ask who
+///   is on the other end of its own channels only: before 2026-10-01 any
+///   process could ask about any channel, and learn who was talking to whom.
 /// - `NotFound` — `arg0` names no live channel, or no process was ever
 ///   recorded for the peer side.  Both are *unknown*, not *nobody*, and a
 ///   service must treat either as a refusal rather than as a credential.
@@ -14010,6 +18461,9 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 /// - `Fault` — the output buffer is not writable.
 pub fn sys_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(cred) = channel::peer_cred(handle) else {
         // "No such channel" and "no record for the peer" are deliberately
@@ -14201,6 +18655,105 @@ pub fn sys_ns_query(args: &SyscallArgs) -> SyscallResult {
 
     let ns_id = crate::ipc::namespace::query(pid);
     SyscallResult::ok(ns_id as i64)
+}
+
+/// `SYS_DNS_RESOLVE2` — every address of a name, its canonical name, and why
+/// there is none. See the number's doc.
+pub fn sys_dns_resolve2(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::dns::{Address, Family};
+    /// `AF_UNSPEC`, `AF_INET`, `AF_INET6`, Linux's values, as the C library
+    /// passes them.
+    const AF_UNSPEC: u64 = 0;
+    const AF_INET: u64 = 2;
+    const AF_INET6: u64 = 10;
+    /// The same two families, as a record's `u16`.
+    const RECORD_V4: u16 = 2;
+    const RECORD_V6: u16 = 10;
+    /// The header: the record count and the canonical name's length.
+    const HEADER: usize = 4;
+    /// A record: its family (a `u16`) and 16 address bytes.
+    const RECORD: usize = 18;
+    /// At most this many records are given.
+    const MAX_RECORDS: usize = 64;
+
+    // DNS is a network operation, as for SYS_DNS_RESOLVE.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let name_len = args.arg1 as usize;
+    let out_len = args.arg4 as usize;
+    if args.arg0 == 0 || name_len == 0 || args.arg3 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let family = match args.arg2 {
+        AF_UNSPEC => Family::Any,
+        AF_INET => Family::V4,
+        AF_INET6 => Family::V6,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    // Checked before any query is sent, as SYS_DNS_RESOLVE checks its output.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, out_len) {
+        return SyscallResult::err(e);
+    }
+    // 253: the longest DNS name in presentation form (RFC 1035 §2.3.4); a
+    // longer one is refused, not cut, which would resolve another host.
+    let name_bytes = match crate::mm::user::read_user_vec(args.arg0, name_len, 253) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(name) = core::str::from_utf8(&name_bytes) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let found = match crate::net::dns::lookup(name, family) {
+        Ok(found) => found,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let records = found
+        .addrs
+        .get(..found.addrs.len().min(MAX_RECORDS))
+        .unwrap_or(&[]);
+    let canonical = found.canonical.as_bytes();
+    let (Ok(count), Ok(canonical_len)) =
+        (u16::try_from(records.len()), u16::try_from(canonical.len()))
+    else {
+        return SyscallResult::err(KernelError::InternalError);
+    };
+    let needed = records
+        .len()
+        .checked_mul(RECORD)
+        .and_then(|r| r.checked_add(HEADER))
+        .and_then(|n| n.checked_add(canonical.len()))
+        .and_then(|n| n.checked_add(1));
+    let Some(needed) = needed.filter(|&n| n <= out_len) else {
+        return SyscallResult::err(KernelError::BufferTooSmall);
+    };
+    let mut out = alloc::vec::Vec::with_capacity(needed);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&canonical_len.to_le_bytes());
+    out.extend_from_slice(canonical);
+    out.push(0);
+    for addr in records {
+        match addr {
+            Address::V4(ip) => {
+                out.extend_from_slice(&RECORD_V4.to_le_bytes());
+                out.extend_from_slice(&ip.0);
+                out.extend_from_slice(&[0u8; 12]);
+            }
+            Address::V6(ip) => {
+                out.extend_from_slice(&RECORD_V6.to_le_bytes());
+                out.extend_from_slice(&ip.0);
+            }
+        }
+    }
+    // SAFETY: `validate_user_write(args.arg3, out_len)` passed above and
+    // `out.len() == needed <= out_len`; `copy_to_user` checks the range
+    // again, with SMAP, so a mapping changed while the query slept fails
+    // instead of faulting.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg3, out.len()) } {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(i64::from(count))
 }
 
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
@@ -14561,6 +19114,42 @@ pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_NET_RAW_MCAST` — set the multicast addresses the network cards pass.
+///
+/// `arg0`: pointer to `arg1` six-byte Ethernet group addresses.  Caller must
+/// own the raw claim; see `net::mcast_filter`.
+pub fn sys_net_raw_mcast(args: &SyscallArgs) -> SyscallResult {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    if crate::net::raw::owner() != Some(pid) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    let Ok(count) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if count > crate::net::mcast_filter::MAX_ADDRS {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let max_bytes = crate::net::mcast_filter::MAX_ADDRS.saturating_mul(6);
+    // Copied before it is looked at, so the list cannot change between
+    // validation and the cards' programming. An empty list reads nothing.
+    let bytes = match crate::mm::user::read_user_vec(args.arg0, count.saturating_mul(6), max_bytes)
+    {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let addrs: alloc::vec::Vec<[u8; 6]> = bytes
+        .chunks_exact(6)
+        .filter_map(|c| <[u8; 6]>::try_from(c).ok())
+        .collect();
+    match crate::net::mcast_filter::set_raw(&addrs) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_NET_RAW_CLOSE` — release the caller's raw NIC claim.  Idempotent.
 pub fn sys_net_raw_close(_args: &SyscallArgs) -> SyscallResult {
     if let Some(pid) = caller_pid() {
@@ -14657,6 +19246,29 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
         }
         None => SyscallResult::err(KernelError::InvalidArgument),
     }
+}
+
+/// The CPU the caller is running on and its NUMA node, as `getcpu(2)`
+/// reports them; one answer for both ABIs. The node is 0: there is no NUMA
+/// topology yet (Linux's `cpu_to_node` on a single-node machine), and this
+/// is the one place to change when there is.
+#[must_use]
+pub(crate) fn current_cpu_and_node() -> (u32, u32) {
+    let cpu = u32::try_from(crate::smp::current_cpu_index()).unwrap_or(u32::MAX);
+    (cpu, 0)
+}
+
+/// `SYS_CPU_CURRENT` (1092) -- the CPU the calling thread is running on, and
+/// its node: `cpu | node << 32`. No pointers, so it cannot fault, and it is
+/// one call for `sched_getcpu()`/`getcpu()`, which per-CPU code makes on hot
+/// paths (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`). The answer
+/// can be stale the moment it is returned -- the thread may migrate -- as on
+/// Linux.
+pub fn sys_cpu_current(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let (cpu, node) = current_cpu_and_node();
+    let packed = u64::from(cpu) | (u64::from(node) << 32);
+    SyscallResult::ok(i64::try_from(packed).unwrap_or(i64::MAX))
 }
 
 /// `SYS_CPU_COUNT` — get the number of online CPUs.
@@ -15657,7 +20269,12 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: readiness bitmask (POLLIN=1, POLLOUT=4, POLLERR=8, POLLHUP=16)
 pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let status = crate::net::tcp::poll_status(handle);
     SyscallResult::ok(status as i64)
 }
@@ -15668,7 +20285,12 @@ pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: error code (0=none, 1=refused, 2=reset, 3=timedout).
 pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let clear = args.arg1 != 0;
     let err = if clear {
         crate::net::tcp::take_last_error(handle)
@@ -15686,8 +20308,17 @@ pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
 /// Returns the local port number (positive u16 range) on success,
 /// or InvalidArgument if the handle is invalid or not active.
 pub fn sys_tcp_local_port(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
     let is_listener = args.arg1 != 0;
+    let kind = if is_listener {
+        NativeKind::TcpListener
+    } else {
+        NativeKind::TcpConnection
+    };
+    let pin = match native_socket_slot(args.arg0, kind) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let port = if is_listener {
         crate::net::tcp::listener_local_port(handle)
     } else {
@@ -15705,7 +20336,12 @@ pub fn sys_tcp_local_port(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: 1 if pending connections available, 0 otherwise.
 pub fn sys_tcp_listener_ready(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpListener) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let ready = crate::net::tcp::listener_has_pending(handle);
     SyscallResult::ok(if ready { 1 } else { 0 })
 }
@@ -15716,7 +20352,12 @@ pub fn sys_tcp_listener_ready(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of queued datagrams (≥0).
 pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let count = crate::net::udp::rx_ready(handle);
     SyscallResult::ok(count as i64)
 }
@@ -15727,7 +20368,12 @@ pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Used for FIONREAD on UDP sockets.
 pub fn sys_udp_rx_front_bytes(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let bytes = crate::net::udp::rx_front_bytes(handle);
     SyscallResult::ok(bytes as i64)
 }
@@ -15740,7 +20386,12 @@ pub fn sys_udp_rx_front_bytes(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success, writes 48-byte packed info struct.
 pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let out_ptr = args.arg1 as usize;
     let buf_len = args.arg2 as usize;
 
@@ -15842,7 +20493,12 @@ pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_tcp_shutdown(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let how = args.arg1 as u32;
     if how > 2 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -15864,7 +20520,12 @@ pub fn sys_tcp_set_nodelay(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let nodelay = args.arg1 != 0;
     match crate::net::tcp::set_nodelay(handle, nodelay) {
         Ok(()) => SyscallResult::ok(0),
@@ -15883,7 +20544,12 @@ pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let enabled = args.arg1 != 0;
     match crate::net::tcp::set_keepalive(handle, enabled) {
         Ok(()) => SyscallResult::ok(0),
@@ -15904,7 +20570,12 @@ pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     // Convert seconds to nanoseconds (0 means "use default").
     let idle_secs = args.arg1;
     let interval_secs = args.arg2;
@@ -15973,6 +20644,12 @@ enum WaitTest {
     StreamSocket,
     /// A pty end. Native-only, and the one ownership-checked handle space.
     Pty,
+    /// A channel end: readable when a message is waiting or the peer has
+    /// closed. Native-only.
+    Channel,
+    /// A service listener: readable when a connection is waiting to be
+    /// accepted. Native-only.
+    Listener,
 }
 
 /// An item that resolved to something waitable.
@@ -16006,6 +20683,10 @@ fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
         ResourceType::NetSocket => WaitTest::Handle(HandleKind::Socket),
         ResourceType::StreamSocket => WaitTest::StreamSocket,
         ResourceType::Pty => WaitTest::Pty,
+        ResourceType::Channel => WaitTest::Channel,
+        ResourceType::Service => WaitTest::Listener,
+        // A pidfd (`SYS_PIDFD_OPEN`): ready once its process has exited.
+        ResourceType::Process => WaitTest::Handle(HandleKind::PidFd),
         _ => return None,
     })
 }
@@ -16054,6 +20735,28 @@ fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
                 poll_bits::POLLHUP
             }
         }
+        WaitTest::Channel => {
+            let h = crate::ipc::channel::ChannelHandle::from_raw(raw);
+            let mut r = 0u16;
+            if crate::ipc::channel::has_pending(h) {
+                r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            // A closed peer (or a channel gone) is POLLHUP, as a socket
+            // whose peer has gone: a receive answers ChannelClosed.
+            if crate::ipc::channel::readable(h) && r == 0 {
+                r |= poll_bits::POLLHUP;
+            }
+            r
+        }
+        WaitTest::Listener => {
+            if crate::ipc::service::readable(crate::ipc::service::ServiceListenerHandle::from_raw(
+                raw,
+            )) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
     };
 
     bits & (events | always)
@@ -16074,6 +20777,8 @@ fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarge
         WaitTest::Handle(kind) => super::linux::wait_target_for_handle(kind, raw),
         WaitTest::StreamSocket => WaitTarget::StreamSocket(raw),
         WaitTest::Pty => WaitTarget::Pty(raw),
+        WaitTest::Channel => WaitTarget::Channel(raw),
+        WaitTest::Listener => WaitTarget::Listener(raw),
     }
 }
 
@@ -16135,14 +20840,15 @@ pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
             continue;
         };
 
-        // Authorise exactly as this kind's own read/write syscalls do. Only the
-        // pty handle space is enumerable — `(tty_id << 1) | end` — so it is the
-        // only one whose value is not self-authorising; see `owned_pty_handle`.
-        // Waiting must not confer authority that operating would not: without
-        // this, `kind = Pty, handle = 2` would be a readiness oracle over every
-        // pty on the machine *and* would splice the caller's task into a
-        // stranger's waiter set.
-        if matches!(test, WaitTest::Pty) && owned_pty_handle(item.handle).is_err() {
+        // Authorise exactly as this kind's own syscalls do: the caller must
+        // hold the handle. This used to be checked for ptys alone, on the
+        // reading that only the pty handle space -- `(tty_id << 1) | end` -- was
+        // enumerable. Every space here is: pipes, eventfds and socket pairs
+        // are counters too (A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS).
+        // Waiting must not confer authority that operating would not: an
+        // unheld handle would be a readiness oracle over a stranger's object
+        // *and* would splice the caller's task into its waiter set.
+        if !pcb::owns_ipc_handle(pid, kind, item.handle) {
             item.revents = u32::from(poll_bits::POLLNVAL);
             continue;
         }
@@ -16272,10 +20978,141 @@ pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
     creds.groups = new_groups;
-    match pcb::set_credentials(pid, creds) {
+    match pcb::change_credentials(pid, creds).map(|_| ()) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_PROCESS_GETGROUPS` (1143) — the calling process's supplementary
+/// groups, with Linux's `getgroups(2)` contract.
+///
+/// # Arguments
+///
+/// - `arg0` — `count: u64` — room at `list_ptr`, in gids; 0 asks how many.
+/// - `arg1` — `list_ptr: u64` — user-space `&mut [u32; count]` (unread when
+///   `count == 0`).
+///
+/// Returns the number of groups -- written, unless `count` was 0.
+///
+/// # Errors
+///
+/// `NoSuchProcess` (a kernel task), `InvalidArgument` (`count` short of the
+/// list), `PageFault` (`list_ptr` cannot take them). See
+/// [`SYS_PROCESS_GETGROUPS`](super::number::SYS_PROCESS_GETGROUPS).
+pub fn sys_process_getgroups(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let count = args.arg0;
+    let Some(pid) = thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(creds) = pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let n = creds.groups.len();
+    let n_i64 = i64::try_from(n).unwrap_or(i64::MAX);
+    if count == 0 {
+        return SyscallResult::ok(n_i64);
+    }
+    if usize::try_from(count).unwrap_or(usize::MAX) < n {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // An empty list writes nothing (`write_user_items` touches no memory).
+    if let Err(e) = crate::mm::user::write_user_items(args.arg1, &creds.groups) {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(n_i64)
+}
+
+/// `SYS_MMAP_FILE` (1144) — map part of a file the caller holds open, with
+/// Linux's `mmap(2)` values and errnos. `arg4` is the file handle; the rest
+/// are `mmap`'s (`addr`, `length`, `prot`, `flags`, then `offset` in `arg5`).
+/// A handle the caller does not hold is `EBADF`. See
+/// [`SYS_MMAP_FILE`](super::number::SYS_MMAP_FILE).
+pub fn sys_mmap_file(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{errno, linux_err};
+    let handle = args.arg4;
+    if require_file_handle_owner(handle).is_err() {
+        return linux_err(errno::EBADF);
+    }
+    let pid = crate::proc::thread::owner_process(sched::current_task_id());
+    let result = super::linux::native_file_mmap(handle, args);
+    // `MAP_LOCKED`, or under `MCL_FUTURE` (`SYS_MEMORY_LOCK`): locked, and
+    // faulted in. The limit was asked inside, as the Linux arm asks it.
+    if result.value > 0
+        && let Some(pid) = pid
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let start = result.value as u64;
+        let end = start.saturating_add(args.arg1.saturating_add(4095) & !4095);
+        let map_locked = args.arg3 & super::linux::MAP_LOCKED != 0;
+        crate::mm::mlock::after_new_mapping(pid, start, end, map_locked);
+    }
+    result
+}
+
+/// `SYS_MMAP` as a native program calls it: [`sys_mmap`], and under
+/// `mlockall(MCL_FUTURE)` (`SYS_MEMORY_LOCK`) refused past `RLIMIT_MEMLOCK`
+/// with `ResourceExhausted`, or locked and faulted in. (The Linux arm calls
+/// [`sys_mmap`] itself, and asks and populates on its own terms.)
+pub fn sys_mmap_native(args: &SyscallArgs) -> SyscallResult {
+    let pid = crate::proc::thread::owner_process(sched::current_task_id());
+    if let Some(pid) = pid
+        && crate::mm::mlock::new_mapping_allowed(pid, args.arg1, false).is_err()
+    {
+        return SyscallResult::err(KernelError::ResourceExhausted);
+    }
+    let result = sys_mmap(args);
+    if result.value > 0
+        && let Some(pid) = pid
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let start = result.value as u64;
+        let end = start.saturating_add(args.arg1.saturating_add(4095) & !4095);
+        crate::mm::mlock::after_new_mapping(pid, start, end, false);
+    }
+    result
+}
+
+/// `SYS_MEMORY_LOCK` (1145) — Linux's `mlock` family behind one number, with
+/// its arguments and errnos. See
+/// [`SYS_MEMORY_LOCK`](super::number::SYS_MEMORY_LOCK).
+pub fn sys_memory_lock(args: &SyscallArgs) -> SyscallResult {
+    super::linux::native_memory_lock(args.arg0, args.arg1, args.arg2, args.arg3)
+}
+
+/// `SYS_THREAD_SCHEDULER` (1146) — a thread's scheduling policy: Linux's
+/// `sched_setscheduler` family for one thread, with its errnos. See
+/// [`SYS_THREAD_SCHEDULER`](super::number::SYS_THREAD_SCHEDULER).
+pub fn sys_thread_scheduler(args: &SyscallArgs) -> SyscallResult {
+    super::linux::native_thread_scheduler(args.arg0, args.arg1, args.arg2, args.arg3)
+}
+
+/// `SYS_MEMBARRIER` (1147) — Linux's `membarrier`, its commands and errnos.
+/// See [`SYS_MEMBARRIER`](super::number::SYS_MEMBARRIER).
+pub fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
+    crate::membarrier::membarrier(args.arg0, args.arg1, args.arg2)
+}
+
+/// `SYS_PTRACE` (1149) -- Linux's `ptrace`, its requests, arguments and
+/// errnos (as `-errno`): `crate::proc::ptrace::ptrace` is both ABIs' call.
+/// See [`SYS_PTRACE`](super::number::SYS_PTRACE).
+pub fn sys_ptrace(args: &SyscallArgs) -> SyscallResult {
+    let task_id = sched::current_task_id();
+    let caller = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    match crate::proc::ptrace::ptrace(caller, task_id, args.arg0, args.arg1, args.arg2, args.arg3) {
+        // A request's answer is 0, or a small count: it fits.
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(v) => SyscallResult::ok(v as i64),
+        Err(e) => super::linux::linux_err(e.linux_errno()),
+    }
+}
+
+/// `SYS_RSEQ` (1148) -- Linux's `rseq`, its arguments and errnos. See
+/// [`SYS_RSEQ`](super::number::SYS_RSEQ).
+pub fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
+    crate::rseq::rseq(args.arg0, args.arg1, args.arg2, args.arg3)
 }
 
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem
@@ -16357,7 +21194,9 @@ pub fn sys_process_chroot(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// The only interval timer this kernel keeps. Matches Linux's `ITIMER_REAL`.
+/// The wall-clock interval timer. Matches Linux's `ITIMER_REAL`; the CPU-time
+/// ones, `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2), are
+/// [`crate::proc::cputimer`]'s.
 const ITIMER_REAL: u64 = 0;
 
 /// Saturating `u64` nanoseconds → the `i64` a syscall returns in a register.
@@ -16371,16 +21210,16 @@ fn itimer_ns_to_reg(ns: u64) -> i64 {
     i64::try_from(ns).unwrap_or(i64::MAX)
 }
 
-/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm the calling process's real
-/// interval timer, reporting what it held before.
+/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm one of the calling
+/// process's interval timers, reporting what it held before.
 ///
 /// See [`crate::syscall::number::SYS_ITIMER_SET`] for the contract, and
 /// `design-decisions.md` §925 for why both previous values come back in
 /// registers rather than through a caller-supplied buffer.
 pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{cputimer, thread};
 
-    if args.arg0 != ITIMER_REAL {
+    if args.arg0 > u64::from(cputimer::ITIMER_PROF) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -16389,8 +21228,16 @@ pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    let (prev_value_ns, prev_interval_ns) =
-        crate::proc::itimer::set_real(pid, args.arg1, args.arg2);
+    let (prev_value_ns, prev_interval_ns) = if args.arg0 == ITIMER_REAL {
+        crate::proc::itimer::set_real(pid, args.arg1, args.arg2)
+    } else {
+        // ITIMER_VIRTUAL or ITIMER_PROF: below 3, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        match cputimer::set_itimer(pid, args.arg0 as u32, args.arg1, args.arg2) {
+            Ok(prev) => prev,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
 
     SyscallResult::ok2(
         itimer_ns_to_reg(prev_value_ns),
@@ -16398,14 +21245,14 @@ pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
     )
 }
 
-/// `SYS_ITIMER_GET` (1070) — report the calling process's real interval timer
-/// as `(remaining_ns, interval_ns)`, without disturbing it.
+/// `SYS_ITIMER_GET` (1070) — report one of the calling process's interval
+/// timers as `(remaining_ns, interval_ns)`, without disturbing it.
 ///
 /// See [`crate::syscall::number::SYS_ITIMER_GET`].
 pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{cputimer, thread};
 
-    if args.arg0 != ITIMER_REAL {
+    if args.arg0 > u64::from(cputimer::ITIMER_PROF) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -16414,6 +21261,15 @@ pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
 
-    let (value_ns, interval_ns) = crate::proc::itimer::get_real(pid);
+    let (value_ns, interval_ns) = if args.arg0 == ITIMER_REAL {
+        crate::proc::itimer::get_real(pid)
+    } else {
+        // ITIMER_VIRTUAL or ITIMER_PROF: below 3, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        match cputimer::get_itimer(pid, args.arg0 as u32) {
+            Ok(cur) => cur,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
     SyscallResult::ok2(itimer_ns_to_reg(value_ns), itimer_ns_to_reg(interval_ns))
 }

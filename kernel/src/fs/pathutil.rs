@@ -14,7 +14,7 @@
 //! double-slash paths (`/protected//x`).  Real children never match,
 //! which made deny handlers fail open (see `fs::intercept`) and made
 //! "missing file" / column-discovery logic silently no-op (see
-//! `fs::integrity`, `fs::findex`).
+//! `fs::integrity`, and the since-removed `fs::findex`).
 //!
 //! The boundary rule itself now lives in [`Path::starts_with`], which
 //! compares *components* rather than bytes and so cannot be fooled by a

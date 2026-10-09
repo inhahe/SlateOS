@@ -63,6 +63,83 @@ static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
     Mutex::named(BTreeMap::new(), b"THRDOWN");
 
 // ---------------------------------------------------------------------------
+// Acting with the kernel's own authority
+// ---------------------------------------------------------------------------
+
+/// The tasks inside [`as_kernel`] now, each with how deeply it is nested.
+///
+/// A leaf lock: nothing is called while it is held.
+static KERNEL_ACTING: Mutex<BTreeMap<TaskId, u32>> = Mutex::named(BTreeMap::new(), b"KACTING");
+
+/// How many tasks are inside [`as_kernel`] now, so [`acting_process`] answers
+/// without the lock in the common case of none: it is asked on every path
+/// operation.
+static KERNEL_ACTING_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// The process a permission decision should treat `task` as acting for: the
+/// one it belongs to ([`owner_process`]), or none -- the kernel -- while it is
+/// inside [`as_kernel`].
+///
+/// What the VFS asks wherever it judges a caller (its permission gate, who a
+/// new file belongs to, whose namespace a path is resolved in, which xattr
+/// names it may touch). Everything else that wants a task's process --
+/// joining it, signalling it, accounting for it -- asks `owner_process`, which
+/// `as_kernel` leaves alone.
+#[must_use]
+pub(crate) fn acting_process(task: TaskId) -> Option<ProcessId> {
+    if KERNEL_ACTING_COUNT.load(core::sync::atomic::Ordering::Acquire) != 0
+        && KERNEL_ACTING.lock().contains_key(&task)
+    {
+        return None;
+    }
+    owner_process(task)
+}
+
+/// Run `body` with the calling task acting with the kernel's own authority,
+/// as Linux's `override_creds(prepare_kernel_cred(..))` does: for the length
+/// of `body` the VFS treats the task as a kernel task -- no permission gate,
+/// no namespace, new files root's -- although it is still the process's thread
+/// in every other respect (it can be joined, signalled and accounted for as
+/// before).
+///
+/// For a kernel subsystem keeping its own state in files during a system call
+/// made on behalf of a process -- the deferred-operation queue (`fs::deferred_ops`),
+/// whose entries no process may write but the kernel writes for any of them.
+/// Never with a path or contents the caller chose without the subsystem having
+/// checked them first: inside, the caller's rights are not consulted at all.
+///
+/// Nests: an inner call ends only its own part.
+pub(crate) fn as_kernel<R>(body: impl FnOnce() -> R) -> R {
+    use core::sync::atomic::Ordering;
+    let task = sched::current_task_id();
+    {
+        let mut acting = KERNEL_ACTING.lock();
+        let depth = acting.entry(task).or_insert(0);
+        if *depth == 0 {
+            KERNEL_ACTING_COUNT.fetch_add(1, Ordering::AcqRel);
+        }
+        *depth = depth.saturating_add(1);
+    }
+    let result = body();
+    {
+        let mut acting = KERNEL_ACTING.lock();
+        let ended = match acting.get_mut(&task) {
+            Some(depth) => {
+                *depth = depth.saturating_sub(1);
+                *depth == 0
+            }
+            None => false,
+        };
+        if ended {
+            acting.remove(&task);
+            KERNEL_ACTING_COUNT.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Thread exit values and join waiters
 // ---------------------------------------------------------------------------
 
@@ -257,7 +334,20 @@ pub fn spawn_suspended_with_tls(
     // container self-test's yield budget and firing its fatal assert.  We
     // now register all process/thread ownership *before* admitting the task,
     // which is also SMP-correct (another CPU cannot pick it up early).
-    let task_id = sched::spawn_suspended(name, priority, entry, arg, pml4)?;
+    //
+    // The process's first thread is given the process's own id, so that a
+    // process's id is its main thread's task id, as on Linux
+    // (`pcb::claim_leader_id`); every later thread takes a fresh one.
+    let requested_id = pcb::claim_leader_id(pid).then_some(pid);
+    // The creating thread's CPU affinity, as Linux's clone, fork and
+    // posix_spawn all keep it: a process pinned to some CPUs stays there
+    // through the threads and children it starts. A kernel task creating a
+    // process (the boot's init, the kernel's services) has every CPU -- the
+    // boot included, pinned to the BSP only as its idle task
+    // (`sched::inheritable_affinity`).
+    let affinity = sched::inheritable_affinity(sched::current_task_id());
+    let task_id =
+        sched::spawn_suspended_with_id(name, priority, entry, arg, pml4, requested_id, affinity)?;
 
     // Register the thread with the process.
     if let Err(e) = pcb::add_thread(pid, task_id) {
@@ -282,6 +372,10 @@ pub fn spawn_suspended_with_tls(
         let mut owners = THREAD_OWNERS.lock();
         owners.insert(task_id, pid);
     }
+
+    // The thread's own signal state -- its creator's blocked mask, nothing
+    // pending -- in place before it can run and ask for it.
+    crate::proc::signal::on_thread_start(pid, task_id);
 
     // Transition process from Creating to Running on first thread.
     if proc_state == ProcessState::Creating {
@@ -329,29 +423,44 @@ pub fn admit(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     // scheduled.  Only after this point can the child run (and possibly
     // exit), guaranteeing `THREAD_OWNERS`/`add_thread` are already in place.
     if !sched::admit(task_id) {
-        // The task should be exactly Blocked here (we just created it
-        // suspended and nothing else touched it).  If admit failed it means
-        // the task was concurrently killed; surface it as an internal error
-        // after unwinding the registration we just did.
+        // The task is awaiting admission here (we created it suspended, and
+        // only `admit` starts such a task). If admit failed it means the task
+        // was concurrently killed; surface it as an internal error after
+        // unwinding the registration we just did.
         serial_println!(
             "[thread] Failed to admit task {} in process {}",
             task_id,
             pid
         );
-        {
-            let mut owners = THREAD_OWNERS.lock();
-            owners.remove(&task_id);
-        }
-        // Detach the thread we just registered.  The task never ran, so it
-        // accrued no CPU time / faults — zero accounting is exact.  Ignore
-        // the return: on this unwinding path there are no join waiters to
-        // wake (the child was never observable).
-        let _ = pcb::remove_thread(pid, task_id, pcb::ThreadExitAccounting::default());
-        sched::kill_task(task_id);
+        abandon(pid, task_id);
         return Err(KernelError::InternalError);
     }
 
     Ok(())
+}
+
+/// Undo [`spawn_suspended_with_tls`] for a thread that is never to be
+/// admitted: unregister it from its process and kill it, as if it had never
+/// been created. Its creator's error path, when something it had to do
+/// between the two phases failed -- and [`admit`]'s, when the thread was
+/// killed first.
+///
+/// Nothing of an exit runs: the thread never ran, so there is nothing to
+/// account, no joiner can be waiting, and no parent is told. Harmless on a
+/// thread already unregistered or dead, so a caller need not know whether
+/// `admit` got as far as calling it.
+pub fn abandon(pid: ProcessId, task_id: TaskId) {
+    {
+        let mut owners = THREAD_OWNERS.lock();
+        owners.remove(&task_id);
+    }
+    crate::proc::signal::on_thread_exit(pid, task_id);
+    // Detach the thread.  The task never ran, so it accrued no CPU time /
+    // faults — zero accounting is exact.  Ignore the return: there are no
+    // join waiters to wake (the thread was never observable), and a thread
+    // already detached is what this was asked to leave.
+    let _ = pcb::remove_thread(pid, task_id, pcb::ThreadExitAccounting::default());
+    sched::kill_task(task_id);
 }
 
 /// Spawn a new **userspace** thread within an existing process.
@@ -408,9 +517,34 @@ pub fn spawn_user(
     let info_ptr = Box::into_raw(info) as u64;
 
     // Reuse the existing kernel-mode spawn path with the ring 3
-    // trampoline.  The trampoline does IRETQ to the user entry point.
-    match spawn(pid, name, priority, userspace_entry_trampoline, info_ptr) {
+    // trampoline.  The trampoline does IRETQ to the user entry point. In two
+    // phases: a traced creator's thread is traced too
+    // (`PTRACE_O_TRACECLONE`), before it can run, so its first instruction is
+    // its first stop (`ptrace::attach_new`).
+    match spawn_suspended_with_tls(
+        pid,
+        name,
+        priority,
+        userspace_entry_trampoline,
+        info_ptr,
+        0,
+        0,
+    ) {
         Ok(task_id) => {
+            crate::proc::ptrace::attach_new(
+                sched::current_task_id(),
+                pid,
+                task_id,
+                crate::proc::ptrace::Creation::THREAD,
+                crate::syscall::number::SYS_THREAD_CREATE,
+            );
+            if let Err(e) = admit(pid, task_id) {
+                crate::proc::ptrace::forget_new(task_id);
+                // SAFETY: the task never ran, so the trampoline never took
+                // `info_ptr`, which `Box::into_raw` made above.
+                drop(unsafe { Box::from_raw(info_ptr as *mut UserEntryInfo) });
+                return Err(e);
+            }
             serial_println!(
                 "[thread] Spawned user thread (task {}) in process {}: rip={:#x}, rsp={:#x}",
                 task_id,
@@ -511,6 +645,50 @@ pub fn thread_exit_with_value(exit_value: i64, detached: bool) -> ! {
 /// - [`KernelError::WouldBlock`] if another thread is already joining
 ///   on the target.
 pub fn join(target_task: TaskId) -> KernelResult<i64> {
+    join_until(target_task, None)
+}
+
+/// [`join`] with a time limit: wait at most `timeout_ns` of the monotonic
+/// clock. 0 answers at once (glibc's `pthread_tryjoin_np`); `u64::MAX` waits
+/// for ever, exactly as [`join`] does.
+///
+/// Until this existed, libc's `pthread_tryjoin_np` and `pthread_timedjoin_np`
+/// had to guess from a flag the thread sets on its way out, which a thread
+/// killed by a fault never sets -- so to them it looked alive for ever
+/// (`requests/d-a-a-thread-join-that-does-not-wait.md`).
+///
+/// # Errors
+///
+/// As [`join`], and [`KernelError::TimedOut`] when the thread is still
+/// running when the time is up. That is deliberately not `WouldBlock`, which
+/// here as in [`join`] means another thread is already joining the target.
+pub fn join_timeout(target_task: TaskId, timeout_ns: u64) -> KernelResult<i64> {
+    if timeout_ns == u64::MAX {
+        return join(target_task);
+    }
+    join_until(
+        target_task,
+        Some(crate::hrtimer::now_ns().saturating_add(timeout_ns)),
+    )
+}
+
+/// Wakes a joiner whose time limit has passed. Same any-context idiom as the
+/// other hrtimer wakes: a direct wake, or a deferred one if the joiner has not
+/// parked yet.
+fn join_timeout_wake(task: u64) {
+    JOIN_TIMEOUT_WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    JOIN_TIMEOUT_WAKE_LAST_NS.store(
+        crate::hrtimer::now_ns(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    if !sched::try_wake(task) {
+        sched::defer_wake(task);
+    }
+}
+
+/// The body of [`join`] and [`join_timeout`]: `deadline` is an absolute
+/// monotonic time, or `None` to wait for ever.
+fn join_until(target_task: TaskId, deadline: Option<u64>) -> KernelResult<i64> {
     let caller_task = sched::current_task_id();
 
     // Can't join on yourself — that's a deadlock.
@@ -545,6 +723,13 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
                 return Err(KernelError::PermissionDenied);
             }
         }
+    }
+
+    // A time limit already spent -- `tryjoin` -- answers here: the target is
+    // alive (its outcome was not there to take above), and waiting is not
+    // asked for.
+    if deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d) {
+        return Err(KernelError::TimedOut);
     }
 
     // Register as the waiter for the target thread.
@@ -611,8 +796,23 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
     // registration.  `on_thread_exit` removes it under the
     // `THREAD_JOIN_WAITERS` lock immediately before waking us, so while
     // the entry is still ours nothing has happened and we park again.
+    //
+    // With a deadline, an hrtimer wakes us at it; a wake after the deadline
+    // with the registration still ours is the time running out, and the
+    // registration is withdrawn -- unless the exit took it first, in which
+    // case the outcome is ours after all.
+    let timer = deadline.map(|d| {
+        crate::hrtimer::schedule_ns(
+            d.saturating_sub(crate::hrtimer::now_ns()).max(1),
+            join_timeout_wake,
+            caller_task,
+        )
+    });
     loop {
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Join,
+            target_task,
+        ));
         let released = {
             let waiters = THREAD_JOIN_WAITERS.lock();
             waiters.get(&target_task) != Some(&caller_task)
@@ -620,6 +820,27 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         if released {
             break;
         }
+        if deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d) {
+            let withdrawn = {
+                let mut waiters = THREAD_JOIN_WAITERS.lock();
+                if waiters.get(&target_task) == Some(&caller_task) {
+                    waiters.remove(&target_task);
+                    true
+                } else {
+                    false
+                }
+            };
+            if withdrawn {
+                if let Some(t) = timer {
+                    crate::hrtimer::cancel(t);
+                }
+                return Err(KernelError::TimedOut);
+            }
+            break;
+        }
+    }
+    if let Some(t) = timer {
+        crate::hrtimer::cancel(t);
     }
 
     // Woken up — retrieve the outcome.
@@ -675,6 +896,25 @@ fn outcome_to_result(task_id: TaskId, outcome: ThreadOutcome) -> KernelResult<i6
 /// thread was not registered (e.g., a bare kernel task not owned by any
 /// process).
 pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
+    // One run of this per thread, by whoever owns the exit: the thread ending
+    // itself, or the killer that marked it dead -- never both, and never a
+    // killer that switched the thread out half-way through its own run
+    // (`sched::claim_thread_exit`). A thread whose exit is someone else's
+    // just goes (`task_exit`, its caller's next step).
+    if !sched::claim_thread_exit(task_id, task_id == sched::current_task_id()) {
+        return None;
+    }
+
+    // A thread killed from elsewhere (`kill_process_threads`, `kill_thread`)
+    // has only been *marked* dead: a CPU that was running it runs it on, on
+    // its process's page tables, until that CPU next switches. Asked now,
+    // before anything below can publish the process as reapable, so that its
+    // teardown knows to wait for that switch before freeing those tables
+    // (`pcb::free_address_space_when_unused`). The current task is the one
+    // case that needs no wait: it moves itself off them just below.
+    let killed_while_running =
+        task_id != sched::current_task_id() && sched::task_is_on_cpu(task_id);
+
     // Linux CLONE_CHILD_CLEARTID hook: if this task was created via
     // clone(CLONE_CHILD_CLEARTID, ...) and registered a `ctid`
     // address, zero it in user space and wake one futex waiter so
@@ -728,26 +968,29 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         owners.remove(&task_id)?
     };
 
+    // Its signal state, and the signals sent to it alone.
+    crate::proc::signal::on_thread_exit(pid, task_id);
+
     // Clean up any IRQ registrations owned by this task.
     // This prevents dangling registrations when a driver process crashes.
     crate::ioapic::release_irqs_for_task(task_id);
 
-    // Capture the exiting thread's accumulated counters while its Task is
-    // still alive in the scheduler — `remove_thread` folds them into the
-    // owning process's accumulators so they survive the Task's destruction.
-    // (Lock ordering: read SCHED here, before taking PROCESS_TABLE inside
-    // remove_thread, to avoid nesting the two locks.)
-    let (exit_user, exit_sys) = sched::cpu_ticks(task_id).unwrap_or((0, 0));
-    let (exit_min, exit_maj) = sched::fault_counts(task_id).unwrap_or((0, 0));
-    let (exit_nv, exit_niv) = sched::ctxsw_counts(task_id).unwrap_or((0, 0));
-    let acct = pcb::ThreadExitAccounting {
-        user_ticks: exit_user,
-        sys_ticks: exit_sys,
-        min_flt: exit_min,
-        maj_flt: exit_maj,
-        nvcsw: exit_nv,
-        nivcsw: exit_niv,
-    };
+    // Before `remove_thread` can make the process reapable (see the top).
+    if killed_while_running {
+        pcb::note_killed_on_cpu(pid, task_id);
+    }
+
+    // The first thread -- the one whose id is the process's -- leaves its last
+    // snapshot with the process: the scheduler frees its task at the next reap
+    // pass, but `/proc/<pid>` goes on describing it until the process itself
+    // is reaped, as Linux's zombie group leader does. Taken before
+    // `remove_exiting_thread`, which reads the thread's counters from the
+    // scheduler itself, under PROCESS_TABLE (`pcb::process_counters`).
+    if task_id == pid
+        && let Some(leader) = sched::task_info(task_id)
+    {
+        pcb::record_exited_leader(pid, leader);
+    }
 
     // POSIX orphaned-process-group hangup: capture the process groups this
     // process currently *guards* (children in a different group of the same
@@ -758,10 +1001,20 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     let guarded_pgrps = pcb::guarded_child_pgrps(pid);
 
     // Remove from the process's thread list.
-    match pcb::remove_thread(pid, task_id, acct) {
-        Ok((is_zombie, wake_task, any_waiter)) => {
-            if is_zombie {
+    match pcb::remove_exiting_thread(pid, task_id) {
+        Ok(removed) => {
+            if removed.zombie {
                 serial_println!("[thread] Process {} has no threads left — now zombie", pid);
+
+                // The threads it traced are let go -- or ended, under
+                // PTRACE_O_EXITKILL (Linux's `exit_ptrace`).
+                crate::proc::ptrace::on_process_exit(pid);
+
+                // Its capability requests are cancelled, the handler told; if
+                // it answered them, nobody does now, and what was pending is
+                // refused (`cap::request`). Before its handles close, so the
+                // kernel lets go of the handler's channel first.
+                crate::cap::request::on_process_exit(pid);
 
                 // Close all fd-bearing kernel resources NOW, at process
                 // exit — matching Linux's `exit_files()` in `do_exit`.
@@ -773,51 +1026,28 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // that can never come.  See `pcb::exit_close_fds`.
                 pcb::exit_close_fds(pid);
 
+                // And its memory -- Linux's `exit_mm`, which runs before the
+                // process is a zombie anyone can wait for. After the fds, so a
+                // handle whose close unmaps from these tables finds them;
+                // freed once no CPU and no cross-process reader's pin is on
+                // them (`pcb::release_address_space`).
+                pcb::release_address_space(pid);
+
                 // Release namespace reference so the namespace can be cleaned up.
                 crate::ipc::namespace::detach(pid);
 
-                // Wake a task blocked in `waitpid(pid)` for this process.
-                if let Some(waiter) = wake_task {
-                    crate::sched::wake(waiter);
-                }
-                // Wake a parent blocked in `waitpid(-1)` (wait for any
-                // child) so it can re-scan and reap this newly-zombied
-                // child.
-                if let Some(waiter) = any_waiter {
-                    crate::sched::wake(waiter);
-                }
-
-                // Post SIGCHLD to the parent. This is distinct from the
-                // wait4() wakeups above (which target a thread parked in
-                // wait4()): SIGCHLD drives the *signal* path, used by a
-                // parent running a SIGCHLD handler or parked in
-                // sigsuspend()/pause() — e.g. dash's job-control `wait`
-                // builtin, which arms a SIGCHLD handler then sigsuspends,
-                // reaping with waitpid(WNOHANG) only after the signal wakes
-                // it.  Without this the parent livelocks in sigsuspend.
-                if let Some(parent) = pcb::parent(pid) {
-                    if parent != 0 {
-                        let info =
-                            crate::proc::signal::SigInfo::child(u32::try_from(pid).unwrap_or(0), 0);
-                        // Linux-ABI parents deliver SIGCHLD via their
-                        // per-signal rt_sigaction disposition
-                        // (deliver_linux_signal consults linux_disposition),
-                        // so mark it pending directly. Native parents go
-                        // through classify_post so a registered trampoline
-                        // handler runs and a no-handler parent correctly
-                        // drops it (SIGCHLD default action = ignore).
-                        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
-                            crate::proc::signal::set_pending_info(parent, 17, info);
-                        } else {
-                            // Discarding the PostDecision is intentional:
-                            // SIGCHLD's default is ignore, so a no-handler
-                            // native parent yields Drop with no side effect;
-                            // a handler yields Deliver (already marked
-                            // pending). There is no Terminate case for 17.
-                            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
-                        }
-                    }
-                }
+                // Its parent is told of its end -- unless a tracer that is not
+                // the parent holds it, which is told first (`ptrace`); the
+                // parent's turn comes when that tracer has waited for it
+                // (`release_traced_exit`). Whether it was held was decided in
+                // the same step that made it a zombie, so exactly one of the
+                // two tells the parent.
+                crate::proc::ptrace::on_process_zombie(pid, removed.held);
+                let notice = if removed.held {
+                    None
+                } else {
+                    Some(tell_parent_of_end(pid, removed.wake, removed.any_waiter))
+                };
 
                 // Now that this process is a zombie and its children have
                 // been reparented to init, any group it used to guard may be
@@ -825,6 +1055,11 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // and holds stopped jobs (POSIX "Orphaned Process Group").
                 for pgrp in &guarded_pgrps {
                     crate::syscall::handlers::kill_orphaned_pgrp(*pgrp);
+                }
+
+                // Last, once everything above that reads its record is done.
+                if let Some(notice) = notice {
+                    release_if_unwanted(pid, notice);
                 }
             }
         }
@@ -841,6 +1076,96 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     Some(pid)
 }
 
+/// Tell zombie `pid`'s parent of its end: wake the parent's task waiting for
+/// it (`wake`) or for any child (`any_waiter`), and send the parent `SIGCHLD`
+/// as its disposition says. Returns the zombie's [`pcb::ExitNotice`], for
+/// [`release_if_unwanted`].
+///
+/// `SIGCHLD` is distinct from the wakeups (which target a thread parked in
+/// `wait4`): it drives the *signal* path, used by a parent running a
+/// `SIGCHLD` handler or parked in `sigsuspend`/`pause` -- e.g. dash's
+/// job-control `wait` builtin, which arms a handler, then sigsuspends, and
+/// reaps with `waitpid(WNOHANG)` only after the signal wakes it. Without it
+/// the parent livelocks in `sigsuspend`.
+fn tell_parent_of_end(
+    pid: ProcessId,
+    wake: Option<TaskId>,
+    any_waiter: Option<TaskId>,
+) -> pcb::ExitNotice {
+    for waiter in [wake, any_waiter].into_iter().flatten() {
+        sched::wake(waiter);
+    }
+    // Whether the parent will collect this zombie, decided from its `SIGCHLD`
+    // disposition by `pcb`: a parent that ignores `SIGCHLD` is sent nothing
+    // and the process is released; one with `SA_NOCLDWAIT` is still sent it.
+    let notice = pcb::exit_notice(pid).unwrap_or(pcb::ExitNotice::Zombie);
+    if let Some(parent) = pcb::parent(pid)
+        && parent != 0
+        && notice != pcb::ExitNotice::ReapSilently
+    {
+        // How the child ended, and who it was: `si_status` and `si_uid` were
+        // 0 until 2026-10-01, so a handler could not tell an exit from a kill
+        // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
+        let ended = pcb::exit_info(pid).unwrap_or_else(|| pcb::ExitInfo::exited(0));
+        // The child's real uid, as Linux's `do_notify_parent` reports it.
+        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.ruid);
+        let info = crate::proc::signal::SigInfo::child(
+            u32::try_from(pid).unwrap_or(0),
+            child_uid,
+            ended.sigchld_code_and_status(),
+        );
+        // Linux-ABI parents: their per-signal rt_sigaction disposition
+        // decides -- dropped as it is sent when it ignores SIGCHLD and nothing
+        // blocks it, else pending for deliver_linux_signal. Native parents go
+        // through classify_post so a registered trampoline handler runs and a
+        // no-handler parent correctly drops it (SIGCHLD default action =
+        // ignore).
+        if pcb::get_abi_mode(parent) == Some(pcb::AbiMode::Linux) {
+            crate::syscall::linux::post_linux_sigchld(parent, info);
+        } else {
+            // Discarding the PostDecision is intentional: SIGCHLD's default
+            // is ignore, so a no-handler native parent yields Drop with no
+            // side effect; a handler yields Deliver (already marked pending).
+            // There is no Terminate case for 17.
+            let _ = crate::proc::signal::classify_post_info(parent, 17, info);
+        }
+    }
+    notice
+}
+
+/// Release zombie `pid` now if its parent asked never to be left one
+/// (`notice` not [`pcb::ExitNotice::Zombie`]), once everything that reads its
+/// record is done. No `wait` could have taken it first: every one treats it
+/// as already gone. Its address space is freed now too, or -- if a thread of
+/// it was killed while a CPU still ran it -- as soon as that CPU has switched
+/// away.
+fn release_if_unwanted(pid: ProcessId, notice: pcb::ExitNotice) {
+    if notice != pcb::ExitNotice::Zombie && pcb::release_autoreaped(pid) {
+        serial_println!(
+            "[thread] Process {} released at exit: its parent does not wait for its children",
+            pid
+        );
+    }
+}
+
+/// Hand zombie `pid`, whose end a tracer held (`pcb::Process::exit_held`), to
+/// its parent: the tracer has waited for it, or has exited. The parent is
+/// told now, as at any other process's end -- woken, sent `SIGCHLD` -- and the
+/// process released at once if the parent does not wait for its children:
+/// Linux's `do_notify_parent` from `wait_task_zombie`'s `EXIT_TRACE` case, or
+/// from `__ptrace_detach` for a tracer's exit. A no-op for a process whose end
+/// was not held, or was handed over already.
+///
+/// Holding no lock: it takes the process table's, the scheduler's and the
+/// signal registry's.
+pub fn release_traced_exit(pid: ProcessId) {
+    let Some((wake, any_waiter)) = pcb::release_exit_hold(pid) else {
+        return;
+    };
+    let notice = tell_parent_of_end(pid, wake, any_waiter);
+    release_if_unwanted(pid, notice);
+}
+
 /// Get the process ID that owns a given thread.
 ///
 /// Returns `None` if the task is not registered as a thread (bare
@@ -851,42 +1176,120 @@ pub fn owner_process(task_id: TaskId) -> Option<ProcessId> {
     owners.get(&task_id).copied()
 }
 
+/// Run `body` with the calling kernel task counted as a thread of `pid`, for
+/// a boot self-test that has to meet the syscall layer as a process does.
+///
+/// A bare kernel task passes every possession check by design (it holds
+/// handles nothing registered against a pid), so a test of those checks made
+/// from one would pass whatever they did. This lends the task a process's
+/// identity for the length of `body`, and nothing else:
+/// - only the owner lookup changes. The task is not on the process's thread
+///   list, is never scheduled as it, and keeps the kernel's address space, so
+///   a syscall under it that copies user memory answers `InvalidAddress`;
+/// - whatever mapping the task had before is put back on return.
+///
+/// For self-tests only. Nothing in a running system may make a task act for a
+/// process it does not belong to.
+pub(crate) fn self_test_as_process<R>(pid: ProcessId, body: impl FnOnce() -> R) -> R {
+    let task = sched::current_task_id();
+    let previous = THREAD_OWNERS.lock().insert(task, pid);
+    let result = body();
+    let mut owners = THREAD_OWNERS.lock();
+    match previous {
+        Some(earlier) => {
+            owners.insert(task, earlier);
+        }
+        None => {
+            owners.remove(&task);
+        }
+    }
+    result
+}
+
+/// [`self_test_as_process`] with `pid`'s page tables loaded as well, for a
+/// self-test that makes a syscall which reads or writes the caller's memory:
+/// a user pointer is checked and copied through the loaded page tables
+/// (`mm::user::validate_user_range` walks CR3's), and the boot task's are the
+/// kernel's, which map no process memory -- so under `self_test_as_process`
+/// alone every such pointer is `InvalidAddress`. The record-lock door's test
+/// met exactly that on its first boot (rq33, 2026-10-02).
+///
+/// Interrupts are off throughout, as in `mm::vmalloc`'s test that loads a
+/// process's tables: nothing can switch tasks while another process's page
+/// tables are loaded. `body` must therefore not block.
+///
+/// `None` if `pid` has no address space. For self-tests only.
+pub(crate) fn self_test_in_process<R>(pid: ProcessId, body: impl FnOnce() -> R) -> Option<R> {
+    let pml4 = pcb::get_pml4(pid).filter(|&p| p != 0)?;
+    Some(self_test_as_process(pid, || {
+        crate::cpu::without_interrupts(|| {
+            let saved = crate::mm::page_table::read_cr3();
+            // SAFETY: a process's PML4 carries the kernel half of the
+            // kernel's own (`page_table::alloc_pml4`), so it maps this code,
+            // this stack and every kernel structure; CR3 is restored below,
+            // before interrupts come back.
+            unsafe { crate::mm::page_table::write_cr3(pml4) };
+            let result = body();
+            // SAFETY: restoring the value read above.
+            unsafe { crate::mm::page_table::write_cr3(saved) };
+            result
+        })
+    }))
+}
+
+/// Run `body` with task id `tid` counted as a thread of `pid`, as
+/// [`self_test_as_process`] counts the calling task: for a self-test that
+/// must name one of a process's threads. The calling task cannot always be
+/// that thread: the syscall self-tests run on the boot task, whose id is 0,
+/// which no thread may have -- `tgkill` refuses it, as Linux does.
+///
+/// For self-tests only, with an id no task has.
+pub(crate) fn self_test_with_thread<R>(tid: TaskId, pid: ProcessId, body: impl FnOnce() -> R) -> R {
+    let previous = THREAD_OWNERS.lock().insert(tid, pid);
+    let result = body();
+    let mut owners = THREAD_OWNERS.lock();
+    match previous {
+        Some(earlier) => {
+            owners.insert(tid, earlier);
+        }
+        None => {
+            owners.remove(&tid);
+        }
+    }
+    result
+}
+
 /// Sum the `(user_ticks, sys_ticks)` CPU time of a process across both
 /// its **live** threads and its **already-exited** threads.
 ///
 /// Each thread's CPU time is charged tick-by-tick by the scheduler
-/// (Linux tick-sampling model).  When a thread exits, `on_thread_exit`
+/// (Linux tick-sampling model).  When a thread exits, `remove_exiting_thread`
 /// folds its ticks into the per-process accumulator
 /// (`Process::acct_user_ticks`/`acct_sys_ticks`) before the scheduler
 /// destroys the Task, so the total here is
-/// `accumulator + Σ(live thread ticks)`.  Returns `(0, 0)` if the process
-/// is unknown.  Ticks are at `USER_HZ` (100 Hz).
+/// `accumulator + Σ(live thread ticks)`, read as one snapshot
+/// ([`pcb::process_counters`]).  Returns `(0, 0)` if the process is
+/// unknown.  Ticks are at `USER_HZ` (100 Hz).
 ///
 /// This makes the result exact for multi-threaded processes even after
 /// worker threads have exited — not just single-threaded ones.
 ///
-/// Sourced by the Linux-ABI `getrusage(RUSAGE_SELF)` `ru_utime`/
-/// `ru_stime`, `times` `tms_utime`/`tms_stime`, and `/proc/<pid>/stat`
-/// utime/stime surfaces.  Children-time (`cutime`/`cstime`,
-/// `RUSAGE_CHILDREN`) is tracked separately — see
-/// [`crate::proc::pcb::process_child_ticks`].
+/// The sampled measure the PROF and VIRT clocks read. What `getrusage`,
+/// `times`, the wait family and `/proc` report is the precise run time split
+/// in these ticks' proportion -- [`crate::proc::pcb::process_times`].
 #[must_use]
 pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
-    // Exited-thread accumulator (also serves as the existence check:
-    // `None` means the process is unknown).
-    let Some((mut user, mut sys)) = pcb::process_acct_ticks(pid) else {
-        return (0, 0);
-    };
-    // Add live threads' in-flight ticks.
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((u, s)) = sched::cpu_ticks(tid) {
-                user = user.saturating_add(u);
-                sys = sys.saturating_add(s);
-            }
-        }
-    }
-    (user, sys)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.cpu.user_ticks, c.cpu.sys_ticks))
+}
+
+/// The processor time process `pid` has used -- its live threads' and its
+/// exited ones', precise cycles and sampled ticks ([`sched::CpuSample`]) --
+/// or `None` if the process is unknown. What its CPU-time clocks read
+/// (`CLOCK_PROCESS_CPUTIME_ID` and the per-process `CPUCLOCK_*` ids); a
+/// zombie's is its final total.
+#[must_use]
+pub fn process_cpu_sample(pid: ProcessId) -> Option<sched::CpuSample> {
+    pcb::process_counters(pid).map(|c| c.cpu)
 }
 
 /// Sum the `(min_flt, maj_flt)` page-fault counts of a process across both
@@ -903,18 +1306,7 @@ pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
 /// [`crate::proc::pcb::process_child_faults`].
 #[must_use]
 pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
-    let Some((mut min_flt, mut maj_flt)) = pcb::process_acct_faults(pid) else {
-        return (0, 0);
-    };
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((mn, mj)) = sched::fault_counts(tid) {
-                min_flt = min_flt.saturating_add(mn);
-                maj_flt = maj_flt.saturating_add(mj);
-            }
-        }
-    }
-    (min_flt, maj_flt)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.min_flt, c.maj_flt))
 }
 
 /// Sum the `(nvcsw, nivcsw)` context-switch counts of a process across both
@@ -928,18 +1320,7 @@ pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
 /// separately — see [`crate::proc::pcb::process_child_ctxsw`].
 #[must_use]
 pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
-    let Some((mut nvcsw, mut nivcsw)) = pcb::process_acct_ctxsw(pid) else {
-        return (0, 0);
-    };
-    if let Some(task_ids) = pcb::get_threads(pid) {
-        for tid in task_ids {
-            if let Some((nv, niv)) = sched::ctxsw_counts(tid) {
-                nvcsw = nvcsw.saturating_add(nv);
-                nivcsw = nivcsw.saturating_add(niv);
-            }
-        }
-    }
-    (nvcsw, nivcsw)
+    pcb::process_counters(pid).map_or((0, 0), |c| (c.nvcsw, c.nivcsw))
 }
 
 /// Everything the wait family reports about one process's resource use.
@@ -950,10 +1331,12 @@ pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
 /// the same child differently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessUsage {
-    /// User-mode CPU time in `USER_HZ` (100 Hz) ticks.
-    pub user_ticks: u64,
-    /// Kernel-mode CPU time in `USER_HZ` ticks.
-    pub sys_ticks: u64,
+    /// User-mode CPU time, in nanoseconds: the precise run time split by the
+    /// tick ratio (`pcb::process_times`, Linux's
+    /// `thread_group_cputime_adjusted`).
+    pub utime_ns: u64,
+    /// Kernel-mode CPU time, in nanoseconds, split likewise.
+    pub stime_ns: u64,
     /// Minor page faults (no I/O required).
     pub min_flt: u64,
     /// Major page faults (backing store read).
@@ -983,19 +1366,18 @@ pub struct ProcessUsage {
 /// degradation the `getrusage` surfaces already take.
 #[must_use]
 pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
-    let (user, sys) = process_cpu_ticks(pid);
-    let (cuser, csys) = pcb::process_child_ticks(pid);
-    let (min_flt, maj_flt) = process_fault_counts(pid);
+    let own = pcb::process_counters(pid).unwrap_or_default();
+    let (utime, stime) = pcb::process_times(pid).unwrap_or((0, 0));
+    let (cuser, csys) = pcb::process_child_times(pid);
     let (cmin, cmaj) = pcb::process_child_faults(pid);
-    let (nvcsw, nivcsw) = process_ctxsw_counts(pid);
     let (cnv, cniv) = pcb::process_child_ctxsw(pid);
     ProcessUsage {
-        user_ticks: user.saturating_add(cuser),
-        sys_ticks: sys.saturating_add(csys),
-        min_flt: min_flt.saturating_add(cmin),
-        maj_flt: maj_flt.saturating_add(cmaj),
-        nvcsw: nvcsw.saturating_add(cnv),
-        nivcsw: nivcsw.saturating_add(cniv),
+        utime_ns: utime.saturating_add(cuser),
+        stime_ns: stime.saturating_add(csys),
+        min_flt: own.min_flt.saturating_add(cmin),
+        maj_flt: own.maj_flt.saturating_add(cmaj),
+        nvcsw: own.nvcsw.saturating_add(cnv),
+        nivcsw: own.nivcsw.saturating_add(cniv),
     }
 }
 
@@ -1003,23 +1385,35 @@ pub fn process_usage_both(pid: ProcessId) -> ProcessUsage {
 ///
 /// Nice ranges `-20..=19` (lower = more favourable / higher priority);
 /// our scheduler priority ranges `0..=31` (0 = highest, 31 = lowest, see
-/// [`crate::sched::task::NUM_PRIORITIES`]). The mapping is linear and
-/// monotonic (higher nice ⇒ higher priority number ⇒ lower scheduling
-/// priority), pinned so nice `0` lands on the default priority level:
+/// [`crate::sched::task::NUM_PRIORITIES`]), of which `0..8` are the
+/// real-time band ([`crate::sched::task::RT_LEVELS`]) that nice never
+/// reaches. The mapping is monotonic (higher nice ⇒ higher priority number
+/// ⇒ lower scheduling priority) and pinned so nice `0` lands on the default
+/// priority level:
 ///
-/// `priority = round((nice + 20) * 31 / 39)`
+/// - nice `0..=19`: `round((nice + 20) * 31 / 39)`, levels 16..=31;
+/// - nice `-20..=-1`: `8 + round((nice + 20) * 7 / 19)`, levels 8..=15;
 ///
-/// which yields `nice -20 → 0`, `nice 0 → 16` (== [`task::DEFAULT_PRIORITY`]),
-/// and `nice 19 → 31`. Inputs are clamped to the valid nice range first.
+/// which yields `nice -20 → 8`, `nice 0 → 16` (==
+/// [`crate::sched::task::DEFAULT_PRIORITY`]), and `nice 19 → 31`. Inputs are
+/// clamped to
+/// the valid nice range first.
 #[must_use]
 pub fn nice_to_priority(nice: i32) -> u8 {
-    // Clamp to the POSIX nice range, then bias to 0..=39 so the scaling is a
-    // non-negative integer computation.
-    let biased = nice.clamp(-20, 19) + 20; // 0..=39
-    // round(biased * 31 / 39): add half the denominator before the floor.
-    // biased*31 <= 39*31 = 1209, +19 = 1228, well within i32 — no overflow.
+    let nice = nice.clamp(-20, 19);
+    // Nice 0..=19: round((nice + 20) * 31 / 39), 16..=31 -- the mapping nice
+    // has always had (biased*31 <= 1209, +19, well within i32).
+    // Nice -20..=-1: the eight levels above that, 8..=15 --
+    // 8 + round((nice + 20) * 7 / 19) -- so that even nice -20 stays below
+    // the real-time band (`sched::task::RT_LEVELS`), which only a real-time
+    // policy reaches. Until 2026-10-07 nice -20 was level 0, above every
+    // real-time level there was to be.
     #[allow(clippy::arithmetic_side_effects)]
-    let prio = (biased * 31 + 19) / 39; // 0..=31
+    let prio = if nice >= 0 {
+        ((nice + 20) * 31 + 19) / 39 // 16..=31
+    } else {
+        8 + ((nice + 20) * 7 + 9) / 19 // 8..=15
+    };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         prio.clamp(0, 31) as u8
@@ -1056,6 +1450,63 @@ pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
     Some(old)
 }
 
+/// End the calling thread's whole process with exit status `code`: every
+/// other thread of it killed, then this one -- Linux's `exit_group` and
+/// `do_group_exit`, and the native `SYS_EXIT`, which a program's `exit` and
+/// `_exit` call. Never returns.
+///
+/// Only the first group exit of a process decides its status and ends the
+/// other threads ([`pcb::begin_group_exit`]): a second -- another thread's
+/// racing it, or one made after a fatal signal began ending the process --
+/// ends only its own thread, which the first is ending anyway. Until
+/// 2026-10-08 a group exit ended the calling thread alone: a program whose
+/// other threads were alive at its `exit` -- a worker blocked on a queue, a
+/// pool waiting for work -- never ended.
+///
+/// `stop`: the caller's registers and system call, for its tracer's
+/// `PTRACE_EVENT_EXIT` stop, made once the other threads are gone and before
+/// this one goes -- its message the process's status (Linux's
+/// `do_group_exit` and `do_exit`). `None` from a path with no registers to
+/// show.
+pub fn exit_group_current(
+    code: i32,
+    stop: Option<(crate::syscall::linux::LinuxTrapRegs, u64)>,
+) -> ! {
+    let task_id = sched::current_task_id();
+    if let Some(pid) = owner_process(task_id) {
+        if pcb::begin_group_exit(pid, code) {
+            kill_other_threads(pid, task_id);
+        }
+        if let Some((regs, nr)) = stop {
+            // The status the process ends with: this exit's, or an earlier
+            // group exit's or fatal signal's, which stands.
+            #[allow(clippy::cast_sign_loss)]
+            let status =
+                pcb::group_exit_wstatus(pid).map_or(((code & 0xff) << 8) as u64, |w| w as u64);
+            crate::proc::ptrace::exit_stop(regs, nr, status);
+        }
+    }
+    // A thread with no process is a kernel task: it just ends.
+    on_thread_exit(task_id);
+    sched::task_exit()
+}
+
+/// Kill every thread of process `pid` but `keep` -- the group exit's own
+/// thread, which ends itself after -- as [`kill_process_threads`] kills them
+/// all: every one marked dead and off its CPU before any exit is run, so none
+/// runs on in user mode after its process is declared dead. A thread already
+/// ending itself is left to finish (`sched::claim_thread_exit`). Returns the
+/// number killed.
+pub fn kill_other_threads(pid: ProcessId, keep: TaskId) -> usize {
+    let others: alloc::vec::Vec<TaskId> = pcb::get_threads(pid)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&t| t != keep)
+        .collect();
+    kill_threads(pid, &others)
+}
+
+/// Force-kill all threads in a process.
 /// Force-kill all threads in a process.
 ///
 /// For each thread belonging to the process:
@@ -1069,23 +1520,59 @@ pub fn set_process_nice(pid: ProcessId, nice: i32) -> Option<i32> {
 /// Returns the number of threads killed.
 pub fn kill_process_threads(pid: ProcessId) -> usize {
     let task_ids = pcb::get_threads(pid).unwrap_or_default();
-    let mut killed: usize = 0;
+    kill_threads(pid, &task_ids)
+}
 
-    for &task_id in &task_ids {
-        // Record the involuntary death *before* `on_thread_exit`, which
-        // releases any parked joiner — see `record_killed`.
+/// The body of [`kill_process_threads`] and [`kill_other_threads`]: kill
+/// threads `task_ids` of process `pid`.
+fn kill_threads(pid: ProcessId, task_ids: &[TaskId]) -> usize {
+    // Kill every thread first, and only then run their exit paths, the last
+    // of which publishes the process as dead -- with every thread another CPU
+    // was running gone from that CPU in between. Killing and exiting one
+    // thread at a time let a thread on another CPU go on running its program,
+    // in user mode, for up to a timer tick after its process was declared
+    // dead, its handles closed and its parent told
+    // (A-KILLED-THREAD-RUNS-ON-UNTIL-ITS-CPU-SWITCHES).
+    let mut running_elsewhere = alloc::vec::Vec::new();
+    let mut to_exit = alloc::vec::Vec::with_capacity(task_ids.len());
+    for &task_id in task_ids {
+        // Mark the scheduler task Dead and dequeue it; a running one's CPU is
+        // asked to switch away from it at once.
+        let prior = sched::kill_task_from(task_id);
+        if prior.is_none() && sched::is_exiting(task_id) {
+            // Ending itself: its exit is its own to finish, and so is its
+            // outcome (`sched::claim_thread_exit`).
+            continue;
+        }
+        // The involuntary death, recorded before `on_thread_exit` releases
+        // any parked joiner (see `record_killed`). Nothing else runs this
+        // thread's exit now: it is dead, or was dead before.
         record_killed(task_id);
-
-        // Mark the scheduler task as Dead and dequeue it.
-        sched::kill_task(task_id);
-
-        // Remove the thread→process mapping and update the PCB.
-        // This may trigger the zombie transition for the last thread.
-        on_thread_exit(task_id);
-
-        killed = killed.saturating_add(1);
+        if prior == Some(sched::task::TaskState::Running) {
+            running_elsewhere.push(task_id);
+        }
+        to_exit.push(task_id);
+    }
+    let stuck = sched::wait_off_cpu(&running_elsewhere);
+    if stuck != 0 {
+        // Not fatal: the address space waits for them anyway
+        // (`pcb::free_address_space_when_unused`). What is lost is only the
+        // promise that nothing of the process runs once it is dead.
+        serial_println!(
+            "[thread] WARNING: {} killed thread(s) of process {} still on a CPU after the wait",
+            stuck,
+            pid
+        );
     }
 
+    let mut killed: usize = 0;
+    for task_id in to_exit {
+        // Remove the thread→process mapping and update the PCB.
+        // This may trigger the zombie transition for the last thread.
+        if on_thread_exit(task_id).is_some() {
+            killed = killed.saturating_add(1);
+        }
+    }
     killed
 }
 
@@ -1105,8 +1592,17 @@ pub fn kill_process_threads(pid: ProcessId) -> usize {
 /// dead.
 pub fn kill_thread(task_id: TaskId) -> bool {
     record_killed(task_id);
-    let accepted = sched::kill_task(task_id);
+    let prior = sched::kill_task_from(task_id);
+    let accepted = prior.is_some();
     if accepted {
+        // As in `kill_process_threads`: a thread another CPU was running
+        // leaves it before its exit path runs and its joiners are told.
+        if prior == Some(sched::task::TaskState::Running) && sched::wait_off_cpu(&[task_id]) != 0 {
+            serial_println!(
+                "[thread] WARNING: killed thread {} still on a CPU after the wait",
+                task_id
+            );
+        }
         on_thread_exit(task_id);
     } else {
         // Nothing died, so do not leave a phantom `Killed` marker behind
@@ -1144,11 +1640,14 @@ extern "C" fn test_thread_entry(arg: u64) {
 /// Run thread management self-tests.
 pub fn self_test() -> KernelResult<()> {
     test_spawn_thread()?;
+    test_leader_takes_the_process_id()?;
     test_thread_exit_zombies_process()?;
     test_spawn_into_zombie_fails()?;
     test_thread_exit_with_value()?;
     test_thread_join()?;
     test_blocking_join()?;
+    // Not `test_join_timeout`: its limit is an hrtimer, and this runs before
+    // the timers do -- see [`self_test_join_timeout`].
     test_join_self_fails()?;
     test_detached_exit_not_retained()?;
     test_killed_thread_does_not_join_normally()?;
@@ -1523,6 +2022,66 @@ fn test_spawn_thread() -> KernelResult<()> {
     Ok(())
 }
 
+/// A process's first thread is given the process's own id, and every later
+/// thread a fresh one from the same counter (`pcb::claim_leader_id`), so
+/// `/proc/<pid>` -- keyed by task id -- is the process, `gettid() ==
+/// getpid()` in its main thread, and no thread's id is some other process's
+/// id (known-issues A-PROC-DIRECTORIES-ARE-TASK-IDS-AND-EVERYTHING-ELSE-IS-PIDS).
+fn test_leader_takes_the_process_id() -> KernelResult<()> {
+    use core::sync::atomic::AtomicU64;
+
+    // Static, not on this stack: the threads may still be running when this
+    // function returns.
+    static RAN: AtomicU64 = AtomicU64::new(0);
+    let pid = pcb::create("thread-leader-id", 0);
+    let arg = &RAN as *const AtomicU64 as u64;
+    let prio = sched::task::DEFAULT_PRIORITY;
+    let first = spawn(pid, b"leader", prio, test_thread_entry, arg);
+    let second = spawn(pid, b"second", prio, test_thread_entry, arg);
+    let verdict = match (first, second) {
+        (Ok(first), Ok(second)) => {
+            let fresh_id_names_no_process = pcb::state(second).is_none();
+            let ok = first == pid
+                && second != pid
+                && fresh_id_names_no_process
+                && !pcb::claim_leader_id(pid)
+                && pcb::peek_next_pid() == sched::task::peek_next_id();
+            if !ok {
+                serial_println!(
+                    "[thread]   FAIL: process {} got threads {} and {} (want {} then a fresh id                      naming no process; one counter)",
+                    pid,
+                    first,
+                    second,
+                    pid
+                );
+            }
+            // Let both run, then retire them as the other tests do.
+            sched::yield_now();
+            sched::yield_now();
+            on_thread_exit(first);
+            on_thread_exit(second);
+            ok
+        }
+        (first, second) => {
+            serial_println!(
+                "[thread]   FAIL: could not spawn the leader-id threads: {:?} / {:?}",
+                first,
+                second
+            );
+            for t in [first, second].into_iter().flatten() {
+                on_thread_exit(t);
+            }
+            false
+        }
+    };
+    pcb::destroy(pid);
+    if !verdict {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[thread]   a process's first thread takes its id: OK");
+    Ok(())
+}
+
 /// Test 2: Thread exit causes process to become zombie.
 fn test_thread_exit_zombies_process() -> KernelResult<()> {
     use core::sync::atomic::AtomicU64;
@@ -1840,6 +2399,191 @@ extern "C" fn bj_joiner_entry(target: u64) {
         }
     }
     BJ_DONE.store(1, SeqCst);
+}
+
+/// `join_timeout` fixture state: the target exits once `JT_RELEASE` is set;
+/// the joiner publishes its three answers (error discriminant, 0 for Ok) and
+/// the value of the last, then sets `JT_DONE`.
+static JT_RELEASE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static JT_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static JT_ERRS: [core::sync::atomic::AtomicI32; 3] = [
+    core::sync::atomic::AtomicI32::new(i32::MIN),
+    core::sync::atomic::AtomicI32::new(i32::MIN),
+    core::sync::atomic::AtomicI32::new(i32::MIN),
+];
+static JT_VALUE: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(i64::MIN);
+/// When each of the joiner's three calls returned (`hrtimer::now_ns`), and
+/// when the second began -- what tells a deadline timer that never woke the
+/// joiner from a joiner that was woken and not run (rq28 failed here with the
+/// 20 ms call waiting out the target's ten seconds).
+static JT_T: [core::sync::atomic::AtomicU64; 4] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+/// How many times [`join_timeout_wake`] has run, and when it last did -- the
+/// deadline timer's side of the same question.
+static JOIN_TIMEOUT_WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static JOIN_TIMEOUT_WAKE_LAST_NS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Target: stays alive until released (or ten seconds, so a broken joiner
+/// cannot keep it for ever), then exits with 9.
+extern "C" fn jt_target_entry(_arg: u64) {
+    use core::sync::atomic::Ordering::SeqCst;
+    let task_id = sched::current_task_id();
+    let give_up = crate::hrtimer::now_ns().saturating_add(10_000_000_000);
+    while JT_RELEASE.load(SeqCst) == 0 && crate::hrtimer::now_ns() < give_up {
+        sched::yield_now();
+    }
+    record_exit_value(task_id, 9, false);
+    on_thread_exit(task_id);
+}
+
+/// Joiner: tries at once, then for 20 ms, while the target lives; releases it;
+/// then waits up to five seconds for it.
+extern "C" fn jt_joiner_entry(target: u64) {
+    use core::sync::atomic::Ordering::SeqCst;
+    let code = |r: &KernelResult<i64>| match r {
+        Ok(_) => 0,
+        Err(e) => *e as i32,
+    };
+    let now = join_timeout(target, 0);
+    JT_ERRS[0].store(code(&now), SeqCst);
+    JT_T[0].store(crate::hrtimer::now_ns(), SeqCst);
+    let brief = join_timeout(target, 20_000_000);
+    JT_T[1].store(crate::hrtimer::now_ns(), SeqCst);
+    JT_ERRS[1].store(code(&brief), SeqCst);
+    JT_RELEASE.store(1, SeqCst);
+    let last = join_timeout(target, 5_000_000_000);
+    JT_T[2].store(crate::hrtimer::now_ns(), SeqCst);
+    JT_ERRS[2].store(code(&last), SeqCst);
+    if let Ok(v) = last {
+        JT_VALUE.store(v, SeqCst);
+    }
+    JT_DONE.store(1, SeqCst);
+}
+
+/// `join_timeout` (`requests/d-a-a-thread-join-that-does-not-wait.md`): a
+/// zero limit and a 20 ms limit both answer `TimedOut` while the target
+/// lives, and a long one returns the value once it exits.
+///
+/// Its own entry point, dispatched once interrupts are on, rather than a step
+/// of [`self_test`]: the 20 ms limit is an hrtimer, which fires from the APIC
+/// timer's interrupt, and `self_test` runs in "Process management", before
+/// `hrtimer::init` and the APIC timer. There the timer was armed and never
+/// fired, and the call waited 10 s for the target to exit by itself
+/// (rq33, 2026-10-02 -- the first boot to reach it).
+///
+/// # Errors
+///
+/// `InternalError`, naming what answered wrongly; the spawns'.
+pub fn self_test_join_timeout() -> KernelResult<()> {
+    test_join_timeout()
+}
+
+fn test_join_timeout() -> KernelResult<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+    JT_RELEASE.store(0, SeqCst);
+    JT_DONE.store(0, SeqCst);
+    for e in &JT_ERRS {
+        e.store(i32::MIN, SeqCst);
+    }
+    JT_VALUE.store(i64::MIN, SeqCst);
+
+    let pid = pcb::create("thread-test-join-timeout", 0);
+    let target = spawn(
+        pid,
+        b"jt-target",
+        sched::task::DEFAULT_PRIORITY,
+        jt_target_entry,
+        0,
+    )?;
+    let joiner = spawn(
+        pid,
+        b"jt-joiner",
+        sched::task::DEFAULT_PRIORITY,
+        jt_joiner_entry,
+        target,
+    )?;
+    let started = crate::hrtimer::now_ns();
+    let give_up = started.saturating_add(15_000_000_000);
+    let wakes_before = JOIN_TIMEOUT_WAKES.load(SeqCst);
+    // A look at both threads 100 ms in, after the 20 ms limit should have
+    // ended the second call: state and priority, as the scheduler has them.
+    let mut sampled: Option<(Option<sched::TaskInfo>, Option<sched::TaskInfo>)> = None;
+    while JT_DONE.load(SeqCst) == 0 && crate::hrtimer::now_ns() < give_up {
+        if sampled.is_none() && crate::hrtimer::now_ns() >= started.saturating_add(100_000_000) {
+            sampled = Some((sched::task_info(joiner), sched::task_info(target)));
+        }
+        sched::yield_now();
+    }
+    let errs = [
+        JT_ERRS[0].load(SeqCst),
+        JT_ERRS[1].load(SeqCst),
+        JT_ERRS[2].load(SeqCst),
+    ];
+    let value = JT_VALUE.load(SeqCst);
+    JT_RELEASE.store(1, SeqCst);
+    let timed_out = KernelError::TimedOut as i32;
+    let ok = JT_DONE.load(SeqCst) != 0 && errs == [timed_out, timed_out, 0] && value == 9;
+    // Both threads have run on_thread_exit on every path but a hung one;
+    // the second call is the cleanup the other tests do.
+    on_thread_exit(target);
+    on_thread_exit(joiner);
+    pcb::destroy(pid);
+    if !ok {
+        serial_println!(
+            "[thread]   FAIL: join_timeout answered {:?} (value {}), expected [TimedOut, TimedOut, Ok] and 9",
+            errs,
+            value
+        );
+        let ms = |a: u64, b: u64| b.saturating_sub(a) / 1_000_000;
+        let t = [
+            JT_T[0].load(SeqCst),
+            JT_T[1].load(SeqCst),
+            JT_T[2].load(SeqCst),
+        ];
+        serial_println!(
+            "[thread]     the 20 ms call took {} ms; the deadline timer ran {} time(s), the last \
+             {} ms after the call began",
+            ms(t[0], t[1]),
+            JOIN_TIMEOUT_WAKES.load(SeqCst).saturating_sub(wakes_before),
+            ms(t[0], JOIN_TIMEOUT_WAKE_LAST_NS.load(SeqCst)),
+        );
+        // A timer refused at the hard ceiling never fires: the one way the
+        // joiner could sleep through its deadline with nothing else wrong.
+        serial_println!(
+            "[thread]     hrtimer: {} refused since boot, {} pending on this CPU, {} fired",
+            crate::hrtimer::refused_count(),
+            crate::hrtimer::pending_count(),
+            crate::hrtimer::fired_count(),
+        );
+        let describe = |info: &Option<sched::TaskInfo>| match info {
+            Some(i) => alloc::format!(
+                "{:?} priority {} cpu {} waited {} ticks",
+                i.state,
+                i.priority,
+                i.last_cpu,
+                i.total_wait_ticks
+            ),
+            None => alloc::string::String::from("gone"),
+        };
+        if let Some((j, tg)) = &sampled {
+            serial_println!(
+                "[thread]     100 ms in: joiner {}; target {}",
+                describe(j),
+                describe(tg)
+            );
+        }
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[thread]   join with a time limit: at once and after 20 ms TimedOut while alive, the value once it exits: OK"
+    );
+    Ok(())
 }
 
 /// Which task, if any, is currently registered as joining on `target`?

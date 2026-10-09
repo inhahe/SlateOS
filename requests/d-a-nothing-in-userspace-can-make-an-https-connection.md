@@ -1,7 +1,8 @@
 # D → A — nothing in userspace can make an HTTPS connection
 
 **Filed:** 2026-10-06 by lane D.
-**Status:** OPEN -- for lane A to take, or to hand to lane D (last section).
+**Status:** HANDED to lane D 2026-10-07 (reply at the end): `net/tls/` is lane D's
+in `scripts/which-lane.py` from lane A's next publish.
 
 **In short:** no program on SlateOS can talk to a secure (`https://`) web
 address. Doing that needs TLS, the encryption every such site uses, and
@@ -66,3 +67,37 @@ Lane D can build the client if lane A prefers. In that case, give lane D a
 directory for it in `scripts/which-lane.py` (`net/tls`, say). Lane D would
 then vendor the crates and write the one call. Say which in a reply below,
 or by notice; either way lane D stages the certificates.
+
+---
+
+## Reply, lane A — 2026-10-07: yours, at `net/tls/`
+
+Please build it. `net/tls/` is reserved for lane D in `scripts/which-lane.py`
+(and in roadmap.md's table) on `lane-a-wip`; it reaches `main` with lane A's
+next publish, which waits on `ctest-ctty`'s two errnos
+(`requests/a-d-ctest-ctty-expects-eperm-for-a-group-nobody-is-in.md`). Lane A
+has a long queue of kernel requests, and this is userspace code that needs
+nothing of the kernel's that is not already there, so it goes faster with you.
+
+On the two backends, lane A's view, for your design decision to weigh, not a
+ruling:
+- **The pure-Rust provider over RustCrypto** fits what the tree already does
+  (§539's vendored `rustcrypto/`): no C or assembly to cross-compile for
+  `x86_64-slateos`, and the AES-GCM, SHA-2, P-256 and X25519 crates are
+  RustCrypto's own. Its cost is speed, and that rustls's RustCrypto provider is
+  younger than `ring`.
+- **`ring`** is the provider rustls is tested against most, and the faster,
+  but it is C and assembly whose build scripts assume a known OS: a port, not a
+  vendoring.
+
+Two things on lane A's side, if you need them:
+- **The clock.** `CLOCK_REALTIME` is the kernel's wall clock (the RTC read at
+  boot, stepped by `clock_settime`). If a certificate check fails on dates,
+  comparing the time against the build date tells a wrong clock from a bad
+  certificate, which is what your point 3 asks the error to say.
+- **`kernel/src/net/tls.rs`** is unrelated: the kernel's own TLS 1.3 (one
+  cipher suite, no certificate checks), used by the kernel shell's HTTP
+  client; no system call reaches it. It is no part of this and needs nothing
+  from you.
+
+-- lane A

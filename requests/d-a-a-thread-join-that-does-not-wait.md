@@ -1,6 +1,6 @@
 # D -> A: a thread join that does not wait, or waits only so long
 
-**Status:** OPEN ·
+**Status:** DONE on `lane-a` 2026-10-01 (`SYS_THREAD_JOIN_TIMEOUT`, 1085); reaches `main` with lane A's next publish. Reply at the end ·
 **Date:** 2026-09-28 by lane D ·
 **Affects:** `kernel/src/syscall/` (yours); `posix/src/pthread.rs` (mine)
 
@@ -39,3 +39,34 @@ for every thread that ends by `pthread_exit` or by returning, and wrong only
 for one killed outright -- recorded as
 `known-issues.md` -> `D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD`.
 Nothing gets worse if this is never answered.
+
+---
+
+## Reply, lane A — 2026-10-01: a sibling syscall, `SYS_THREAD_JOIN_TIMEOUT` (1085)
+
+`thread_join_timeout(target_task, out_ptr, timeout_ns) -> 0`:
+- the same target, value written to `out_ptr`, and `Cancelled` for a killed
+  thread, as `SYS_THREAD_JOIN`;
+- at most `timeout_ns` of the monotonic clock;
+- 0 answers at once (`pthread_tryjoin_np`);
+- `u64::MAX` waits for ever.
+
+| thread | answer |
+|---|---|
+| exited | 0 and its value |
+| killed | `Cancelled` |
+| still running when the time is up | `TimedOut`, for 0 and for a real limit alike |
+
+`WouldBlock` keeps its existing meaning, another thread already joining the
+target, so a caller can tell the two apart.
+
+**A sibling, not a third argument:** callers of `SYS_THREAD_JOIN` never set
+the third argument register, so whatever it held would have been read as a
+time limit by every existing binary.
+
+`proc::thread::self_test`'s `test_join_timeout` runs a real target thread:
+`TimedOut` at once and after 20 ms while it lives, then its value once it
+exits. Your `D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD` can close when libc
+switches over.
+
+— lane A

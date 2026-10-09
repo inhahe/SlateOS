@@ -60,13 +60,14 @@ const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 // Per-CPU kernel data
 // ---------------------------------------------------------------------------
 
-/// Storage for kernel/user RSP during SWAPGS-based stack switching.
+/// Storage for kernel/user RSP during SWAPGS-based stack switching: one per
+/// CPU, each CPU's `IA32_KERNEL_GS_BASE` pointing at its own ([`PER_CPU`]).
 ///
 /// On SYSCALL entry, `swapgs` makes this accessible via the GS segment.
 /// `[gs:0]` = kernel RSP, `[gs:8]` = scratch for saving user RSP.
 ///
-/// For SMP, this would be one instance per CPU.  For now, single CPU.
-#[repr(C, align(16))]
+/// A cache line each, so two CPUs' records never share one.
+#[repr(C, align(64))]
 pub struct PerCpuData {
     /// Kernel stack pointer (set by scheduler on context switch).
     pub kernel_rsp: u64,
@@ -74,11 +75,24 @@ pub struct PerCpuData {
     pub user_rsp: u64,
 }
 
-/// Single-CPU per-CPU data.
-static mut PER_CPU: PerCpuData = PerCpuData {
-    kernel_rsp: 0,
-    user_rsp: 0,
-};
+/// Every CPU's [`PerCpuData`], by CPU index (`smp::current_cpu_index`).
+///
+/// Until 2026-10-08 there was one record for every CPU, and only the boot
+/// CPU's MSRs were set up ([`init`]): an application processor had no
+/// `IA32_KERNEL_GS_BASE`, `LSTAR`, `FMASK` or `EFER.SCE` of its own. A thread
+/// that entered a system call on the boot CPU, blocked, and was resumed on
+/// another ran the exit path's `swapgs` against a zero GS base and wrote the
+/// user RSP to address 8 -- the first self-reload tried on four CPUs died so
+/// in its first kernel -- and a first system call on such a CPU would have been
+/// `#UD`. With every CPU's MSRs set ([`init_ap`]) one shared record would still
+/// be wrong: two CPUs in system calls at once would each overwrite the other's
+/// kernel and user stack pointers.
+static mut PER_CPU: [PerCpuData; crate::smp::MAX_CPUS] = [const {
+    PerCpuData {
+        kernel_rsp: 0,
+        user_rsp: 0,
+    }
+}; crate::smp::MAX_CPUS];
 
 // ---------------------------------------------------------------------------
 // SYSCALL entry assembly
@@ -144,6 +158,12 @@ global_asm!(
     "push r9",     // arg5
     "push rax",    // syscall number
     "push gs:[8]", // user RSP (from per-CPU scratch)
+    // RCX and R11 to restore, and the flag asking for it: zero, so the exit
+    // below is SYSRETQ unless a signal return sets the flag (see
+    // `SyscallFrame::exit_full`).
+    "push 0", // r11
+    "push 0", // rcx
+    "push 0", // exit_full
     // Swap GS back to user's GS base (so kernel code sees normal GS).
     "swapgs",
     // --- Phase 3: Call Rust handler ---
@@ -160,14 +180,19 @@ global_asm!(
     // Disable interrupts for the SYSRET sequence (we'll manipulate
     // the stack and per-CPU data).
     "cli",
+    // A signal return that restored a context with live RCX and R11 asked
+    // for IRETQ, which can put them back; SYSRETQ overwrites both.
+    "cmp qword ptr [rsp], 0",
+    "jne 2f",
     // Swap to kernel GS for per-CPU data access.
     "swapgs",
     // Save user RSP from the frame into per-CPU scratch.
-    // [rsp + 0] = user RSP.
-    "mov rdi, [rsp]",
+    // [rsp + 24] = user RSP (after exit_full, rcx, r11).
+    "mov rdi, [rsp + 24]",
     "mov gs:[8], rdi",
-    // Skip user_rsp and syscall_nr (rax already has the return value).
-    "add rsp, 16",
+    // Skip exit_full, rcx, r11, user_rsp and syscall_nr (rax already has
+    // the return value).
+    "add rsp, 40",
     // Restore all registers in reverse order.
     "pop r9",
     "pop r8",
@@ -192,6 +217,39 @@ global_asm!(
     //          CS = STAR[63:48]+16 (0x20 | 3 = user CS),
     //          SS = STAR[63:48]+8  (0x18 | 3 = user DS).
     "sysretq",
+    // --- Phase 4, full restore: every register from the frame ---
+    //
+    // An IRETQ frame (RIP, CS, RFLAGS, RSP, SS) is built below the
+    // SyscallFrame, every general register is loaded from it -- RCX and R11
+    // from their own slots -- and IRETQ returns to ring 3. GS is still the
+    // user's (Phase 3 swapped it back), and the CPU loads no new RSP for the
+    // kernel: the next entry takes it from per-CPU data, as ever. Offsets are
+    // SyscallFrame's: exit_full 0, rcx 8, r11 16, user_rsp 24, syscall_nr 32,
+    // r9 40 ... rbp 128, user_rflags 136, user_rip 144; each push moves the
+    // frame 8 bytes further from RSP.
+    "2:",
+    "push {user_ss}",
+    "push qword ptr [rsp + 8 + 24]",
+    "push qword ptr [rsp + 16 + 136]",
+    "push {user_cs}",
+    "push qword ptr [rsp + 32 + 144]",
+    "mov rcx, [rsp + 40 + 8]",
+    "mov r11, [rsp + 40 + 16]",
+    "mov r9, [rsp + 40 + 40]",
+    "mov r8, [rsp + 40 + 48]",
+    "mov r10, [rsp + 40 + 56]",
+    "mov rdx, [rsp + 40 + 64]",
+    "mov rsi, [rsp + 40 + 72]",
+    "mov rdi, [rsp + 40 + 80]",
+    "mov r15, [rsp + 40 + 88]",
+    "mov r14, [rsp + 40 + 96]",
+    "mov r13, [rsp + 40 + 104]",
+    "mov r12, [rsp + 40 + 112]",
+    "mov rbx, [rsp + 40 + 120]",
+    "mov rbp, [rsp + 40 + 128]",
+    "iretq",
+    user_cs = const crate::gdt::USER_CS as u64,
+    user_ss = const crate::gdt::USER_DS as u64,
 );
 
 // Import the assembly symbol.
@@ -205,9 +263,22 @@ unsafe extern "C" {
 
 /// The register frame pushed by `syscall_entry`.
 ///
-/// Matches the push order in the assembly above.
+/// Matches the push order in the assembly above. The exit path reads it at
+/// fixed offsets (the full-restore path names them), so the field order is
+/// part of that assembly's contract.
 #[repr(C)]
 pub struct SyscallFrame {
+    /// Nonzero: leave through IRETQ, loading every general register from this
+    /// frame -- `rcx` and `r11` from the two fields below -- rather than
+    /// through SYSRETQ, which overwrites RCX with the return RIP and R11 with
+    /// RFLAGS. Zero at every entry; a signal return sets it, because the
+    /// context it restores may have been interrupted anywhere -- an interrupt
+    /// delivered the signal, not a system call -- with live values in both.
+    pub exit_full: u64,
+    /// RCX to restore when `exit_full` is set.
+    pub rcx: u64,
+    /// R11 to restore when `exit_full` is set.
+    pub r11: u64,
     /// User stack pointer.
     pub user_rsp: u64,
     /// Syscall number (from rax).
@@ -299,7 +370,8 @@ pub fn user_return_state_ok(rip: u64, rsp: u64) -> bool {
 /// Rust-level syscall handler called from the assembly entry stub.
 ///
 /// Receives a pointer to the saved register frame on the kernel stack.
-/// Returns the syscall result value in RAX.
+/// Returns the syscall result value in RAX, with interrupts off for the exit
+/// sequence.
 ///
 /// The frame is mutable because certain syscalls (notably `SYS_PROCESS_EXEC`)
 /// need to modify the saved user RIP and RSP so that the SYSRET path
@@ -307,20 +379,60 @@ pub fn user_return_state_ok(rip: u64, rsp: u64) -> bool {
 #[unsafe(no_mangle)]
 extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // SAFETY: frame points to valid data on the current kernel stack,
-    // pushed by our assembly stub moments ago.  No other code accesses
-    // the frame concurrently (single CPU, interrupts re-enabled after
-    // this read).
+    // pushed by our assembly stub moments ago, and nothing else refers to it
+    // until the exit sequence reads it back.
     let f = unsafe { &mut *frame };
+    let mut rax = handle_syscall(f);
+    // Last on the way out, the rseq work a dispatch left this thread owing
+    // (`crate::rseq::exit_to_user`), checked with interrupts off until none is
+    // owed -- every path through the call ends here, `execve`'s and a signal
+    // return's included. A SIGSEGV it posts for a malformed rseq area is
+    // delivered before the return, as Linux's exit loop delivers it.
+    while crate::rseq::exit_to_user(&mut f.user_rip) {
+        crate::cpu::irqoff_tracker::record_enable();
+        // SAFETY: system call context, on the thread's own kernel stack,
+        // holding no lock: the state every call's own work runs in.
+        unsafe {
+            cpu::sti();
+        }
+        if super::handlers::deliver_pending_signal(f, &mut rax) {
+            // The frame now enters the handler, as in `handle_syscall`; the
+            // value the call returned is saved in the signal frame.
+            rax = 0;
+        }
+    }
+    rax
+}
+
+/// The body of [`syscall_handler_inner`]: run the call `f` describes and
+/// deliver a signal pending on its way out. Returns the value for RAX.
+fn handle_syscall(f: &mut SyscallFrame) -> i64 {
+    // A traced thread's entry stop (`ptrace::syscall_entry`): a call its
+    // tracer says to skip returns what it left in `rax`, makes its exit stop
+    // and takes the way out any call takes.
+    if let Some(skipped) = crate::proc::ptrace::syscall_entry(f) {
+        let mut ret = skipped;
+        crate::proc::ptrace::syscall_exit(f, &mut ret);
+        if super::handlers::deliver_pending_signal(f, &mut ret) {
+            return 0;
+        }
+        return super::linux::resolve_syscall_restart(f, ret);
+    }
 
     // Check for syscalls that need to modify the frame directly
     // (they change RIP/RSP rather than just returning a value).
     if f.syscall_nr == super::number::SYS_PROCESS_EXEC {
-        return super::handlers::sys_process_exec_with_frame(f);
+        let mut ret = super::handlers::sys_process_exec_with_frame(f);
+        crate::proc::ptrace::syscall_exit(f, &mut ret);
+        return ret;
     }
     if f.syscall_nr == super::number::SYS_PROCESS_FORK {
         // fork only *reads* the parent frame to snapshot the child's
-        // resume state; the parent returns the child PID normally.
-        return super::handlers::sys_process_fork_with_frame(f);
+        // resume state; the parent returns the child PID normally -- after
+        // its tracer's fork event, when it has one (`ptrace::syscall_exit`).
+        let mut ret = super::handlers::sys_process_fork_with_frame(f);
+        crate::proc::ptrace::syscall_exit(f, &mut ret);
+        return ret;
     }
     if f.syscall_nr == super::number::SYS_EXCEPTION_RETURN {
         return super::handlers::sys_exception_return_with_frame(f);
@@ -329,8 +441,8 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
         // sigreturn restores the interrupted frame. After restoring, a
         // *different* pending signal may still need delivery, so fall
         // through to the delivery check below using the restored frame.
-        let restored_rax = super::handlers::sys_signal_return_with_frame(f);
-        if super::handlers::deliver_pending_signal(f, restored_rax) {
+        let mut restored_rax = super::handlers::sys_signal_return_with_frame(f);
+        if super::handlers::deliver_pending_signal(f, &mut restored_rax) {
             // Frame now points at the trampoline; the return value is
             // unused (trampoline gets args via the frame's registers).
             return 0;
@@ -365,15 +477,19 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
         .unwrap_or(crate::proc::pcb::AbiMode::Native);
 
     if abi_mode == crate::proc::pcb::AbiMode::Linux {
-        if let Some(rax) = super::linux::dispatch_linux_with_frame(f) {
+        if let Some(mut rax) = super::linux::dispatch_linux_with_frame(f) {
+            crate::proc::ptrace::syscall_exit(f, &mut rax);
             // Same signal-delivery hook as the regular return path —
             // ensures pending signals can interrupt around an execve
             // boundary, exactly as in native sys_process_exec_with_frame.
-            if super::handlers::deliver_pending_signal(f, rax) {
+            if super::handlers::deliver_pending_signal(f, &mut rax) {
                 return 0;
             }
             return rax;
         }
+    } else if f.syscall_nr == super::number::SYS_EXIT {
+        // The native exit, with the registers its tracer's exit stop shows.
+        super::handlers::sys_exit_with_frame(f);
     }
 
     let result = match abi_mode {
@@ -389,7 +505,10 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // restart sentinel (if any) is already resolved inside the delivery
     // path (rewind-to-restart or convert-to-EINTR baked into the saved
     // context), so we just return.
-    if super::handlers::deliver_pending_signal(f, result.value) {
+    let mut ret = result.value;
+    // A traced thread's creation event and exit stop (`ptrace::syscall_exit`).
+    crate::proc::ptrace::syscall_exit(f, &mut ret);
+    if super::handlers::deliver_pending_signal(f, &mut ret) {
         return 0;
     }
 
@@ -400,7 +519,7 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // RAX with the original syscall number — the SYSRET path below reloads the
     // original argument registers from the frame).  Any sentinel that is not
     // restarted is converted to -EINTR so it can never leak to ring 3.
-    let rax = super::linux::resolve_syscall_restart(f, result.value);
+    let rax = super::linux::resolve_syscall_restart(f, ret);
 
     // Deliver a second return value in RDX for two-value syscalls
     // (e.g. SYS_PIPE_CREATE / SYS_CHANNEL_CREATE, which return a pair of
@@ -426,20 +545,56 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Set up the SYSCALL/SYSRET MSRs.
+/// Set up the SYSCALL/SYSRET MSRs on the boot CPU, CPU index 0 -- the index
+/// `smp` gives it.
 ///
 /// Configures:
 /// - `IA32_LSTAR` — syscall entry point
 /// - `IA32_FMASK` — RFLAGS mask (clears IF, DF, TF, AC, NT, IOPL, RF, ID and
 ///   the arithmetic flags on entry)
-/// - `IA32_KERNEL_GS_BASE` — per-CPU data for SWAPGS
+/// - `IA32_KERNEL_GS_BASE` — this CPU's [`PerCpuData`], for SWAPGS
 ///
-/// `IA32_STAR` (segment selectors) is configured in `gdt::init()`.
+/// `IA32_STAR` (segment selectors) is configured in `gdt::init()`. Each
+/// application processor does the same for itself with [`init_ap`].
 ///
 /// # Safety
 ///
 /// Must be called during boot after GDT is loaded.
 pub unsafe fn init() {
+    // SAFETY: the caller's contract; the boot CPU is index 0.
+    let (entry_addr, fmask, per_cpu_addr) = unsafe { init_this_cpu(0) };
+    serial_println!(
+        "[syscall] LSTAR={:#x}, FMASK={:#x}, KERNEL_GS_BASE={:#x}, EFER.SCE=1",
+        entry_addr,
+        fmask,
+        per_cpu_addr
+    );
+}
+
+/// Set up the SYSCALL/SYSRET MSRs on application processor `cpu`: as [`init`]
+/// does on the boot CPU, its `IA32_KERNEL_GS_BASE` pointing at its own
+/// [`PerCpuData`]. Called from `smp::ap_entry` once its GDT (and so `STAR`)
+/// is loaded, before it runs any task.
+///
+/// # Safety
+///
+/// Only on CPU `cpu` itself, once, with interrupts disabled; `cpu` must be
+/// its CPU index, below `smp::MAX_CPUS`.
+pub unsafe fn init_ap(cpu: usize) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        init_this_cpu(cpu);
+    }
+}
+
+/// The MSR writes [`init`] and [`init_ap`] share, for CPU `cpu_index` -- the
+/// CPU running this. Returns the entry point, the RFLAGS mask and the address of
+/// `cpu`'s [`PerCpuData`], for the boot CPU's log line.
+///
+/// # Safety
+///
+/// As [`init_ap`].
+unsafe fn init_this_cpu(cpu_index: usize) -> (u64, u64, u64) {
     // Enable SYSCALL/SYSRET by setting IA32_EFER.SCE (bit 0).
     //
     // The bootloader sets LME (bit 8) and LMA (bit 10) for long mode,
@@ -507,33 +662,69 @@ pub unsafe fn init() {
         cpu::wrmsr(IA32_FMASK, fmask);
     }
 
-    // Set up per-CPU data for SWAPGS.
-    let per_cpu_addr = core::ptr::addr_of!(PER_CPU) as u64;
-    // SAFETY: IA32_KERNEL_GS_BASE sets the base for SWAPGS; per_cpu_addr is a valid static.
+    // This CPU's per-CPU data, for SWAPGS. An index past the table falls
+    // back to the last record rather than off its end; `smp` never hands out
+    // one (`MAX_CPUS` bounds its indices).
+    let index = cpu_index.min(crate::smp::MAX_CPUS.saturating_sub(1));
+    let per_cpu_addr = per_cpu_data_addr(index).unwrap_or(0);
+    // SAFETY: IA32_KERNEL_GS_BASE sets the base for SWAPGS; per_cpu_addr is a
+    // valid static record this CPU alone uses.
     unsafe {
         cpu::wrmsr(IA32_KERNEL_GS_BASE, per_cpu_addr);
     }
-
-    serial_println!(
-        "[syscall] LSTAR={:#x}, FMASK={:#x}, KERNEL_GS_BASE={:#x}, EFER.SCE=1",
-        entry_addr,
-        fmask,
-        per_cpu_addr
-    );
+    (entry_addr, fmask, per_cpu_addr)
 }
 
-/// Update the kernel stack pointer in the per-CPU data.
+/// The address of CPU `cpu`'s [`PerCpuData`]. `None` past the table.
+#[must_use]
+pub fn per_cpu_data_addr(cpu: usize) -> Option<u64> {
+    // Pointer arithmetic, not indexing: only the address is wanted, and
+    // `cpu` is checked against the table's length first.
+    (cpu < crate::smp::MAX_CPUS).then(|| {
+        core::ptr::addr_of!(PER_CPU)
+            .cast::<PerCpuData>()
+            .wrapping_add(cpu) as u64
+    })
+}
+
+/// Whether the running CPU, CPU `cpu`, is set up for SYSCALL: `EFER.SCE`
+/// on, `LSTAR` at the entry stub, and `IA32_KERNEL_GS_BASE` naming its own
+/// [`PerCpuData`] -- what [`init`] and [`init_ap`] write. For the self-test
+/// (`smp::self_test`) that no CPU can take a system call into another's
+/// record, or into none. Read from kernel code, where the per-CPU pointer
+/// rests in `KERNEL_GS_BASE` (the entry stub swaps it out and back).
+#[must_use]
+pub fn this_cpu_is_set_up(cpu: usize) -> bool {
+    // SAFETY: reading these MSRs has no side effect; all exist on x86-64.
+    let (efer, lstar, gs) = unsafe {
+        (
+            cpu::rdmsr(IA32_EFER),
+            cpu::rdmsr(IA32_LSTAR),
+            cpu::rdmsr(IA32_KERNEL_GS_BASE),
+        )
+    };
+    efer & 1 != 0
+        && lstar == syscall_entry as *const () as u64
+        && per_cpu_data_addr(cpu) == Some(gs)
+}
+
+/// Update the kernel stack pointer in the running CPU's per-CPU data.
 ///
 /// Called by the scheduler on context switch so that SYSCALL entry
 /// uses the correct kernel stack for the new task.
 ///
 /// # Safety
 ///
-/// Must be called with interrupts disabled (during context switch).
+/// Must be called with interrupts disabled (during context switch), so the
+/// running CPU cannot change under it.
 pub unsafe fn set_kernel_stack(stack_top: u64) {
-    // SAFETY: Single-CPU, called during context switch with interrupts
-    // disabled.  No concurrent access.
+    let cpu = crate::smp::current_cpu_index();
+    // SAFETY: interrupts are off, so no other code runs on this CPU, and no
+    // other CPU touches this CPU's record (each CPU writes only its own).
+    // `get_mut` refuses an index past the table rather than writing off it.
     unsafe {
-        (*core::ptr::addr_of_mut!(PER_CPU)).kernel_rsp = stack_top;
+        if let Some(record) = (*core::ptr::addr_of_mut!(PER_CPU)).get_mut(cpu) {
+            record.kernel_rsp = stack_top;
+        }
     }
 }

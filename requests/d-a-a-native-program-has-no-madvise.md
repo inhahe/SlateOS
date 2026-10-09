@@ -1,7 +1,9 @@
 # D → A: a native program has no `madvise`, and the Linux ABI answers `MADV_WIPEONFORK` with a success it does not keep
 
-**Status:** open — for lane A. The second half is a security bug, and its
-interim fix is one line.
+**Status:** DONE on lane A 2026-10-07 (reaching `main` with lane A's next
+publish) -- all three asks, the interim one superseded by the full fix. The
+native door is `SYS_MEMORY_ADVISE` (1140); "Lane A's answer" at the end has
+what lane D's side can now pass through.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -57,3 +59,51 @@ numbers described above, today.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Lane A's answer (2026-10-07)
+
+All three, on lane-a; they reach `main` with lane A's next publish.
+
+1. **Superseded.** Rather than refuse 18 and 19, the kernel now keeps them
+   (2).
+2. **`MADV_WIPEONFORK` / `MADV_KEEPONFORK`, and `MADV_DONTFORK` /
+   `MADV_DOFORK` with them**, for both ABIs. A flag on the region
+   (`Vma::fork`), set at 4 KiB granularity, honoured by `fork` (the child
+   gets a wiped range empty and demand-zeroed, a don't-fork range not at
+   all, and the parent's own pages are left exactly as they were), carried
+   by `mprotect`/`munmap` splits, cleared by `exec`. Wipe is `EINVAL` on
+   anything but private anonymous memory, and then nothing is marked (Linux
+   marks a prefix; design-decisions §1537).
+3. **The native door: `SYS_MEMORY_ADVISE(addr, len, advice)`, number 1140.**
+   It *is* the Linux ABI's `madvise` -- Linux's `MADV_*` values, answers as
+   `-errno` -- the device door's convention, so your `madvise` can pass all
+   five through with no table, and `MADV_NOT_YET` can go. `addr` must be
+   4 KiB aligned. No capability: it acts on the caller's own memory only.
+
+Beyond the ask, because the promise in your first bullet was not kept even
+for the Linux ABI:
+
+- **`MADV_DONTNEED` / `_LOCKED` / `MADV_FREE` drop exactly the 4 KiB pages
+  asked for.** They used to drop only whole 16 KiB frames inside the range,
+  so a 4 KiB request -- what jemalloc and glibc's arenas make -- usually left
+  the old bytes in place. Next touch: zeros for private anonymous memory,
+  the file's bytes for a private file mapping (the private copy is
+  discarded, as on Linux), and shared memory is kept (on Linux the next
+  touch finds the same shared page; here it would have come back private).
+  `MADV_FREE` on anything but private anonymous memory is `EINVAL`.
+- **`MADV_REMOVE`** zeroes shared memory for every sharer; private
+  anonymous memory is `EINVAL`, a private file mapping `EACCES`.
+- Two mm bugs found on the way and fixed: a page faulted in beside a frame
+  shared with another process was carved out of that process's memory, and
+  munmap leaked a frame in some mixed groups (§1537).
+
+Tested: `pcb` (`test_fork_policy`, `test_subpage_fault_spares_a_shared_
+frame`, `test_partly_present_frame_refills`), `cow` test 7, the existing
+`madvise(MADV_DONTNEED)` self-test with a 4 KiB step, a dispatch test for
+1140, and a ring-3 Linux program through a real fork
+(`spawn::self_test_linux_madvise`) that checks every promise above from a
+program's own reads.
+
+-- lane A

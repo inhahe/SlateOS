@@ -93,6 +93,9 @@ pub struct ForkCloneTid {
     /// `CLONE_CHILD_SETTID` / `CLONE_CHILD_CLEARTID` target in the
     /// child's address space.
     pub child_tid_ptr: u64,
+    /// How the child was made, for a traced parent's tracer: a fork (the
+    /// default), a vfork, or a clone (`crate::proc::ptrace::attach_new`).
+    pub trace: crate::proc::ptrace::Creation,
 }
 
 /// Heap-boxed image handed to [`fork_child_trampoline`] via
@@ -106,8 +109,8 @@ struct ForkChildImage {
     settid_ptr: u64,
 }
 
-// Byte offsets into the register image, used by the inline-asm
-// trampoline.  Keep these in sync with `build_reg_image`.
+// The register image's slots, which the trampoline takes apart in this
+// order. Keep these in sync with `build_reg_image`.
 //
 // [0]  RIP      [1]  CS       [2]  RFLAGS   [3]  RSP      [4]  SS
 // [5]  RDI      [6]  RSI      [7]  RDX      [8]  R10      [9]  R8
@@ -118,9 +121,9 @@ struct ForkChildImage {
 ///
 /// The child resumes at the same user RIP/RSP/RFLAGS as the parent,
 /// with all general-purpose registers identical *except* RAX, which the
-/// trampoline forces to 0.  RCX and R11 are intentionally omitted: the
-/// `SYSCALL`/`SYSRET` ABI clobbers them, so userspace never relies on
-/// their values after a syscall returns.
+/// trampoline forces to 0.  RCX and R11 are not kept: the
+/// `SYSCALL`/`SYSRET` ABI clobbers them, and the trampoline gives them what a
+/// `SYSRET` from the call leaves -- the return address and the flags.
 ///
 /// `rsp_override` is `None` for a plain `fork()` (the child keeps the
 /// parent's stack pointer in its CoW copy of the stack) and `Some(sp)`
@@ -154,8 +157,8 @@ fn build_reg_image(frame: &SyscallFrame, rsp_override: Option<u64>) -> [u64; REG
 /// `image_raw` is a `Box<[u64; REG_IMAGE_LEN]>` (built by
 /// [`fork_process`]) leaked via [`Box::into_raw`].  The trampoline
 /// reclaims and frees the box, copies the register image onto its own
-/// kernel stack, then builds an `IRETQ` frame and transitions to ring 3
-/// with `RAX = 0`.
+/// kernel stack, gives a traced child its first stop, and enters ring 3 with
+/// `RAX = 0` (`crate::proc::user_entry`).
 ///
 /// This runs on the child thread's freshly allocated kernel stack the
 /// first time the scheduler dispatches it.
@@ -195,47 +198,71 @@ extern "C" fn fork_child_trampoline(image_raw: u64) {
         };
     }
 
-    let ptr = regs.as_ptr();
+    // The child's whole register set: the parent's at its call, with the
+    // call's 0 in RAX, and RCX and R11 as a SYSRET from the call leaves them
+    // (the return address and the flags) -- never the kernel's own values,
+    // which this trampoline used to hand ring 3 in them
+    // (`crate::proc::user_entry`).
+    let [
+        rip,
+        _cs,
+        rflags,
+        rsp,
+        _ss,
+        rdi,
+        rsi,
+        rdx,
+        r10,
+        r8,
+        r9,
+        rbx,
+        rbp,
+        r12,
+        r13,
+        r14,
+        r15,
+    ] = regs;
+    let mut entry = crate::proc::user_entry::UserEntry {
+        rip,
+        rsp,
+        rflags,
+        rax: 0,
+        rbx,
+        rcx: rip,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        r8,
+        r9,
+        r10,
+        r11: rflags,
+        r12,
+        r13,
+        r14,
+        r15,
+    };
 
-    // Build the IRETQ frame and transition to ring 3.
-    //
-    // SAFETY: The child's copy-on-write address space is active (the
-    // scheduler switched CR3 to the child's PML4 before dispatching
-    // this thread).  Every byte read here comes from `regs`, a live
-    // stack array; `ptr` is kept in RCX, which is *not* among the
-    // restored registers, so the memory reads complete before any
-    // restore clobbers state.  The IRETQ frame is pushed in the
-    // canonical order (SS, RSP, RFLAGS, CS, RIP) and matches the
-    // selectors loaded into CS/SS.  RAX is zeroed so the child's
-    // userspace observes a `fork()` return value of 0.
-    unsafe {
-        core::arch::asm!(
-            // Push the IRETQ frame (stack grows down → reverse order).
-            "mov rax, [rcx + 32]", "push rax", // SS
-            "mov rax, [rcx + 24]", "push rax", // RSP
-            "mov rax, [rcx + 16]", "push rax", // RFLAGS
-            "mov rax, [rcx + 8]",  "push rax", // CS
-            "mov rax, [rcx + 0]",  "push rax", // RIP
-            // Restore general-purpose registers from the image.
-            "mov rdi, [rcx + 40]",
-            "mov rsi, [rcx + 48]",
-            "mov rdx, [rcx + 56]",
-            "mov r10, [rcx + 64]",
-            "mov r8,  [rcx + 72]",
-            "mov r9,  [rcx + 80]",
-            "mov rbx, [rcx + 88]",
-            "mov rbp, [rcx + 96]",
-            "mov r12, [rcx + 104]",
-            "mov r13, [rcx + 112]",
-            "mov r14, [rcx + 120]",
-            "mov r15, [rcx + 128]",
-            // Child's fork() return value is 0.
-            "xor rax, rax",
-            "iretq",
-            in("rcx") ptr,
-            options(noreturn),
-        );
-    }
+    // A traced child's first stop, before its first instruction
+    // (`ptrace::first_entry`): its tracer may change the registers.
+    crate::proc::ptrace::first_entry(&mut entry);
+
+    // The rseq work the child's first dispatch left it owing: it inherited
+    // the forking thread's registration (`fork_process_clone_inner`), and its
+    // area still holds the parent's `cpu_id`. Last before the IRETQ, with
+    // interrupts left off (`crate::rseq::exit_to_user`). The parent was in a
+    // system call, so the child is in no critical section and `RIP` stays put.
+    // A SIGSEGV posted for a malformed area waits, like every signal pending
+    // at the child's start, for its first return from the kernel: this path
+    // delivers none.
+    let _ = crate::rseq::exit_to_user(&mut entry.rip);
+
+    // SAFETY: the child's copy-on-write address space is active (the
+    // scheduler switched CR3 to the child's PML4 before dispatching this
+    // thread); RIP, RSP and RFLAGS are the parent's own user values from its
+    // system call, or a tracer's, which `ptrace`'s register checks keep to
+    // what a user context may hold.
+    unsafe { crate::proc::user_entry::enter(&entry) }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,12 +381,59 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             crate::net::socket::dup(crate::net::socket::SocketHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Channel => {
+            // Bump the end's holder count so parent and child each own one
+            // reference to the same channel end -- same id, since the handle
+            // *is* the end. A Linux-ABI channel descriptor inherited across
+            // `fork` works as an inherited socket does: the end closes only
+            // when the last holder closes it.
+            crate::ipc::channel::dup(crate::ipc::channel::ChannelHandle::from_raw(id))?;
+            Ok(Some((rtype, id)))
+        }
+        ResourceType::Service => {
+            // A registered listener (the only `Service` entries in this list
+            // are listeners; the capability to register is in the cloned
+            // capability table). Parent and child each hold it, as an
+            // inherited listening socket, and the name stays registered until
+            // both have let it go.
+            crate::ipc::service::dup_listener(
+                crate::ipc::service::ServiceListenerHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
+        ResourceType::UnixSocket => {
+            // One more holder of the same socket -- an inherited descriptor
+            // is the same open socket, as on Linux; it ends with its last
+            // holder.
+            crate::ipc::unix_socket::dup(crate::ipc::unix_socket::UnixHandle::from_raw(id))?;
+            Ok(Some((rtype, id)))
+        }
+        ResourceType::NativeSocket => {
+            // The same for the kernel's own TCP and UDP sockets: one more
+            // holder (`net::native_socket`), so the child's close or exit
+            // leaves the parent's socket open. Until 2026-10-02 the child
+            // shared the parent's slot number and held nothing.
+            crate::net::native_socket::dup(id)?;
+            Ok(Some((rtype, id)))
+        }
+        ResourceType::Namespace => {
+            // A handle on a namespace (`crate::nsfs`; the only `Namespace`
+            // entries in this list -- the authority to make and attach
+            // namespaces is in the cloned capability table): the child's
+            // inherited descriptor holds the namespace too, as an inherited
+            // `/proc/<pid>/ns` descriptor does on Linux.
+            if crate::nsfs::retain(id) {
+                Ok(Some((rtype, id)))
+            } else {
+                Err(KernelError::InvalidHandle)
+            }
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
-        ResourceType::Channel
-        | ResourceType::SharedMemory
+        ResourceType::SharedMemory
         | ResourceType::CompletionPort
-        | ResourceType::Timer => {
+        | ResourceType::Timer
+        | ResourceType::Semaphore => {
             serial_println!(
                 "[fork] Skipping non-inheritable handle: {:?} id={}",
                 rtype,
@@ -387,13 +461,12 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::DeviceIrq
         | ResourceType::Socket
         | ResourceType::IoScheduler
-        | ResourceType::Service
         | ResourceType::NetRaw
         | ResourceType::SystemClock
         | ResourceType::PrivilegedPort
         | ResourceType::ResourceLimit
         | ResourceType::BlockDevice
-        | ResourceType::Namespace => Ok(None),
+        | ResourceType::CapBroker => Ok(None),
     }
 }
 
@@ -454,6 +527,20 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::NetSocket => {
             crate::net::socket::close(crate::net::socket::SocketHandle::from_raw(id));
         }
+        // `dup_one` dups a Unix-domain socket, so a rollback must let go of
+        // it too; until 2026-10-02 this fell to the arm below and a failed
+        // fork left the socket one holder too many.
+        ResourceType::UnixSocket => {
+            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(id));
+        }
+        ResourceType::NativeSocket => {
+            // Dropping the hold `dup_one` added, which is never the last: the
+            // parent still holds the socket, so nothing can fail to close.
+            let _ =
+                crate::net::native_socket::release(id, crate::net::native_socket::Ending::Close);
+        }
+        // The hold on a namespace `dup_one` took.
+        ResourceType::Namespace => crate::nsfs::release(id),
         // Nothing was duped for these in `dup_one`.
         _ => {}
     }
@@ -493,14 +580,17 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
     //    we do any blocking dup work).
     let parent_handles = pcb::ipc_handles_snapshot(parent_pid).ok_or(KernelError::NoSuchProcess)?;
 
-    // 3. Copy-on-write clone of the address space.
-    //
+    // 3. Copy-on-write clone of the address space, less the parent's
+    //    `madvise(MADV_WIPEONFORK / MADV_DONTFORK)` regions, whose pages
+    //    the child must not get (`fork_create` below drops the DONTFORK
+    //    regions themselves).
+    let uncopied = pcb::fork_uncopied_ranges(parent_pid).ok_or(KernelError::NoSuchProcess)?;
     // SAFETY: `parent_pml4` is a live PML4 owned by `parent_pid`,
     // obtained from the PCB above.  `clone_address_space_cow` only
     // reads the parent tables and allocates new child tables; it does
     // not mutate parent mappings except to mark shared user pages
     // read-only for CoW, which is the intended behavior.
-    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(parent_pml4) }?;
+    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(parent_pml4, &uncopied) }?;
 
     // 4. Refcount-duplicate inheritable handles for the child.
     let mut child_handles: Vec<(ResourceType, u64)> = Vec::new();
@@ -546,18 +636,19 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
     //     per-signal).
     crate::syscall::linux::linux_sigaction_on_fork(parent_pid, child_pid);
 
-    // 7. Inherit the parent's filesystem namespace (best-effort, like
-    //    spawn).  A non-root parent namespace propagates to the child.
-    let parent_ns = crate::ipc::namespace::query(parent_pid);
-    if parent_ns != crate::ipc::namespace::ROOT_NAMESPACE {
-        if let Err(e) = crate::ipc::namespace::attach(child_pid, parent_ns) {
-            serial_println!(
-                "[fork] Warning: failed to attach child {} to namespace {}: {:?}",
-                child_pid,
-                parent_ns,
-                e
-            );
-        }
+    // 7. Inherit the parent's view: its filesystem namespace, root jail,
+    //    volumes, read-only root and hostname (`namespace::inherit`). All of
+    //    it or no child: a child of a container process that ran outside the
+    //    container would be an escape, not a degraded fork.
+    if let Err(e) = crate::ipc::namespace::inherit(parent_pid, child_pid) {
+        serial_println!(
+            "[fork] Process {}: could not give child {} its view: {:?} -- fork refused",
+            parent_pid,
+            child_pid,
+            e
+        );
+        pcb::destroy(child_pid);
+        return Err(e);
     }
 
     // 8. Grant the parent a Process capability for the child so it can
@@ -680,6 +771,41 @@ fn fork_process_clone_inner(
 
     let child_pid = build_fork_child(parent_pid)?;
 
+    // CLONE_NEWNS: the child in a new mount namespace, a copy of the table
+    // it inherited (`crate::fs::mntns`); the clone call has checked the
+    // caller may. Before the child has a thread, so it never resolves a
+    // path in its parent's.
+    if (clone_tid.flags & clone_flags::CLONE_NEWNS) != 0
+        && let Err(e) = crate::fs::mntns::unshare(child_pid)
+    {
+        pcb::destroy(child_pid);
+        return Err(e);
+    }
+
+    // CLONE_NEWUTS: the child in a new UTS namespace, a copy of the one it
+    // inherited (`crate::utsns`); the clone call has checked the caller may.
+    // Before the child has a thread, so it never runs in its parent's.
+    if (clone_tid.flags & clone_flags::CLONE_NEWUTS) != 0 {
+        let from = pcb::uts_ns(child_pid).unwrap_or(crate::utsns::ROOT_UTS);
+        let moved = crate::utsns::create_from(from).and_then(|id| pcb::set_uts_ns(child_pid, id));
+        if let Err(e) = moved {
+            pcb::destroy(child_pid);
+            return Err(e);
+        }
+    }
+
+    // CLONE_CLEAR_SIGHAND: the child's caught signals go back to their
+    // default action, ignored ones staying ignored (clone(2)) -- the reset an
+    // exec makes to the Linux disposition table, applied to the copy
+    // `build_fork_child` just made. Here, before the child has a thread, so no
+    // signal can reach an inherited handler first; the mask and the alternate
+    // stack are inherited as on any clone. Plain and vfork-style clones both
+    // pass through here, and until 2026-10-01 only the vfork one honoured the
+    // flag at all, from the parent, after the child could already run.
+    if (clone_tid.flags & clone_flags::CLONE_CLEAR_SIGHAND) != 0 {
+        crate::syscall::linux::linux_sigaction_on_exec(child_pid);
+    }
+
     // CLONE_CHILD_SETTID is honoured in the child's own address space by
     // the trampoline (a CoW-safe write — see `fork_child_trampoline`), so
     // thread the target pointer through the heap image.  0 disables it.
@@ -693,10 +819,15 @@ fn fork_process_clone_inner(
     let regs = build_reg_image(frame, rsp_override);
     let image_raw = Box::into_raw(Box::new(ForkChildImage { regs, settid_ptr })) as u64;
 
-    // Inherit the parent thread's effective scheduling priority so the
-    // child runs at a comparable urgency; fall back to the default.
-    let priority = crate::sched::get_effective_priority(crate::sched::current_task_id())
-        .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
+    // The forking thread's scheduling, as Linux's `sched_fork` passes it on:
+    // policy, real-time priority and ordinary level, reset to the ordinary
+    // default under SCHED_RESET_ON_FORK (`sched::inheritance_from`). The child
+    // is spawned at that level and given the rest while still suspended.
+    // Until 2026-10-07 it was spawned at the parent's *effective* level, which
+    // made an interactive boost, or a level lent by a lock waiter, the child's
+    // own.
+    let inheritance = crate::sched::inheritance_from(crate::sched::current_task_id());
+    let priority = inheritance.map_or(crate::sched::task::DEFAULT_PRIORITY, |i| i.level());
 
     // Capture the parent thread's live %fs (TLS) base so the child can
     // inherit it.  fork() duplicates the address space, so the child's
@@ -730,6 +861,31 @@ fn fork_process_clone_inner(
         parent_gs,
     ) {
         Ok(task_id) => {
+            // The forking thread's rseq area, at the same address in the
+            // copy of its address space: Linux's `rseq_fork` gives a forked
+            // child the registration (a new thread starts without one).
+            if let Some((area, len, sig)) =
+                super::thread_clone::lookup_rseq(crate::sched::current_task_id())
+            {
+                super::thread_clone::register_rseq(task_id, area, len, sig);
+            }
+            if let Some(inheritance) = inheritance {
+                crate::sched::inherit_scheduling(task_id, inheritance);
+                // SCHED_RESET_ON_FORK resets the child process's nice too:
+                // Linux resets the child's static priority, which is its nice.
+                if inheritance.creator.reset_on_fork
+                    && let Some(nice) = pcb::get_nice(child_pid)
+                {
+                    let reset = crate::proc::priority::nice_after_reset_on_fork(
+                        inheritance.creator.policy,
+                        nice,
+                    );
+                    // The record was read just above, and the child cannot
+                    // have been reaped: it has not run yet.
+                    let _ = pcb::set_nice(child_pid, reset);
+                }
+            }
+
             // CLONE_PARENT_SETTID: write the child's TID into the
             // *parent's* memory at parent_tid_ptr.  We are still running
             // in the parent's syscall context (parent CR3 active), so the
@@ -768,8 +924,20 @@ fn fork_process_clone_inner(
                 super::thread_clone::register_clear_child_tid(task_id, clone_tid.child_tid_ptr);
             }
 
+            // A traced parent's child is traced too, when its tracer asked
+            // (`PTRACE_O_TRACEFORK`/`TRACEVFORK`, or CLONE_PTRACE): before it
+            // can run, so its first instruction is its first stop.
+            crate::proc::ptrace::attach_new(
+                crate::sched::current_task_id(),
+                child_pid,
+                task_id,
+                clone_tid.trace,
+                frame.syscall_nr,
+            );
+
             // Phase 2: all exit-path state is registered — let the child run.
             if let Err(e) = thread::admit(child_pid, task_id) {
+                crate::proc::ptrace::forget_new(task_id);
                 super::thread_clone::forget_clear_child_tid(task_id);
                 // SAFETY: `image_raw` came from `Box::into_raw` above and was
                 // not consumed — the task never ran, so the trampoline never

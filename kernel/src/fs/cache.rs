@@ -809,52 +809,66 @@ pub fn write_sector_uncached(device: &str, lba: u64, buf: &[u8; SECTOR_SIZE]) ->
     Ok(())
 }
 
-/// Flush all dirty entries for a specific device to disk.
+/// Flush all dirty entries for a specific device to disk, then the device's
+/// own write cache ([`blkdev::flush`]): what `fsync` and an ext4 journal
+/// commit mean. Written back is not yet durable -- a disk keeps what it is
+/// sent in its own memory until told to write it out, and a power cut loses
+/// that -- so the device flush is the half that makes it so, for what this
+/// cache wrote back and for what was written past it.
 pub fn flush(device: &str) -> KernelResult<()> {
-    let mut cache = CACHE.lock();
-    cache.ensure_init();
-
-    let dev_id = match cache.device_id(device) {
-        Some(id) => id,
-        None => return Ok(()), // Unknown device, nothing to flush.
-    };
-
-    // Collect indices of dirty entries for this device.
-    // We iterate by index to avoid borrow conflicts.
     let mut errors: Option<KernelError> = None;
-    for i in 0..cache.entries.len() {
-        if cache.entries[i].valid && cache.entries[i].dirty && cache.entries[i].device_id == dev_id
-        {
-            if let Err(e) = cache.writeback_entry(i) {
-                // Track the worst error but keep flushing.
-                errors = Some(e);
+    {
+        let mut cache = CACHE.lock();
+        cache.ensure_init();
+
+        // A device the cache has never seen has nothing to write back here,
+        // but may still hold writes made past the cache: its own flush runs
+        // all the same.
+        if let Some(dev_id) = cache.device_id(device) {
+            // Collect indices of dirty entries for this device.
+            // We iterate by index to avoid borrow conflicts.
+            for i in 0..cache.entries.len() {
+                let wanted = cache
+                    .entries
+                    .get(i)
+                    .is_some_and(|e| e.valid && e.dirty && e.device_id == dev_id);
+                if wanted {
+                    if let Err(e) = cache.writeback_entry(i) {
+                        // Track the worst error but keep flushing.
+                        errors = Some(e);
+                    }
+                }
             }
         }
     }
-
+    // The cache's lock is not held across the device flush, which can take a
+    // while. An unregistered device has no cache to flush.
+    let flushed = blkdev::flush(device).unwrap_or(Ok(()));
     match errors {
         Some(e) => Err(e),
-        None => Ok(()),
+        None => flushed,
     }
 }
 
-/// Flush all dirty entries for all devices to disk.
+/// Flush all dirty entries for all devices to disk, then every device's own
+/// write cache ([`blkdev::flush_all`]): `sync`, and the power switches.
 pub fn flush_all() -> KernelResult<()> {
-    let mut cache = CACHE.lock();
-    cache.ensure_init();
-
     let mut errors: Option<KernelError> = None;
-    for i in 0..cache.entries.len() {
-        if cache.entries[i].valid && cache.entries[i].dirty {
-            if let Err(e) = cache.writeback_entry(i) {
-                errors = Some(e);
+    {
+        let mut cache = CACHE.lock();
+        cache.ensure_init();
+        for i in 0..cache.entries.len() {
+            if cache.entries.get(i).is_some_and(|e| e.valid && e.dirty) {
+                if let Err(e) = cache.writeback_entry(i) {
+                    errors = Some(e);
+                }
             }
         }
     }
-
+    let flushed = blkdev::flush_all();
     match errors {
         Some(e) => Err(e),
-        None => Ok(()),
+        None => flushed,
     }
 }
 
@@ -1308,6 +1322,37 @@ fn self_test_on(device: &str) -> KernelResult<()> {
         final_stats.entries_used,
         final_stats.capacity,
         final_stats.entries_dirty,
+    );
+
+    // A flush reaches the device's own cache: written back, then flushed
+    // (`blkdev::flush`), which is what makes `fsync` mean durable. Counted in
+    // the device's statistics, as `/proc/diskstats` reports it.
+    let flushes = |dev: &str| {
+        blkdev::device_stats()
+            .into_iter()
+            .find(|(info, _)| info.name == dev)
+            .map(|(_, st)| st.flushes)
+    };
+    let before = flushes(device);
+    let mut block = [0u8; SECTOR_SIZE];
+    block.fill(0x6B);
+    write_sector(device, 300, &block)?;
+    flush(device)?;
+    let mut back = [0u8; SECTOR_SIZE];
+    let on_disk = blkdev::with_device(device, |d| d.read_sector(300, &mut back));
+    if flushes(device) != before.map(|n| n.saturating_add(1))
+        || !matches!(on_disk, Some(Ok(())))
+        || back != block
+    {
+        crate::serial_println!(
+            "[bcache]   FAIL: a flush did not write the block back and then flush the device ({:?} -> {:?})",
+            before,
+            flushes(device)
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[bcache]   Flush: written back, then the device's own cache flushed: OK"
     );
 
     Ok(())

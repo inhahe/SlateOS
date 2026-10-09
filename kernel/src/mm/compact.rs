@@ -317,6 +317,16 @@ unsafe fn migrate_page(old_phys: u64, new_phys: u64) -> bool {
         return false;
     }
 
+    // A shared-by-design page is never migrated: the other parties -- the
+    // shared-memory region, an io ring, a device -- still hold the old frame,
+    // and the rmap cannot see them.  fork gives such pages no rmap entry, so
+    // this is defence in depth, and it is checked before anything is copied.
+    if page_table::translate_flags(pml4_phys, page_table::VirtAddr::new(virt_addr))
+        .is_some_and(|f| f.contains(page_table::PageFlags::SHARED))
+    {
+        return false;
+    }
+
     PAGES_SCANNED.fetch_add(1, Ordering::Relaxed);
 
     // Step 2: Copy page contents (all 4 hardware pages = 16 KiB).

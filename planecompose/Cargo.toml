@@ -1,0 +1,18 @@
+[package]
+name = "planecompose"
+version = "0.1.0"
+edition = "2024"
+description = "Composes DRM planes -- cropped, scaled, placed and blended -- into a scanout image, for SlateOS's software display backends."
+
+[lib]
+path = "src/lib.rs"
+
+# Dependency-free and `no_std`, with no allocator: the kernel's DRM layer calls
+# it from the page-flip, atomic-commit and cursor paths. It is a crate of its
+# own so its pixel arithmetic is tested on the host (`cargo test -p
+# planecompose --target x86_64-pc-windows-gnu`), exactly, rather than only
+# through a boot.
+[dependencies]
+
+[lints]
+workspace = true

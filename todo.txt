@@ -1282,13 +1282,17 @@
 ## added (asserts 'Node 0, zone' prefix, all per-order columns parse as ints, and
 ## no stray non-zone trailing lines).  boot-test PASSED; serial shows
 ## '/buddyinfo: Linux frag_show layout OK (11 columns)'.
-## NOTE: the OTHER standard-Linux /proc files still in custom native format
-## (/proc/interrupts, /proc/diskstats) are NOT cleanly convertible: real Linux
-## /proc/interrupts needs per-IRQ-line counters and /proc/diskstats needs the 20
-## per-device IO fields (reads/writes completed, sectors, ms) — we track neither
-## (only aggregate irq_count and aggregate blkdev reads/writes).  Converting them
-## would mean emitting mostly-zero columns, which is worse than the current honest
-## custom format; defer until per-IRQ and per-device accounting exist.
+## NOTE: the OTHER standard-Linux /proc file still in custom native format
+## (/proc/interrupts) is NOT cleanly convertible: real Linux /proc/interrupts
+## needs per-IRQ-line counters, which we do not track (only aggregate
+## irq_count).  Converting it would mean emitting mostly-zero columns; defer
+## until per-IRQ accounting exists.
+## DONE (2026-10-08, lane A): /proc/diskstats is Linux 6.6's layout, from real
+## per-device accounting -- blkdev::DeviceStats, counted on the way through
+## with_device/try_with_device (requests, 512-byte sectors and ns for reads,
+## writes and discards).  Lane B's procps vmstat request showed what the
+## deferral cost: not zeros but `vmstat -d`, `-D` and `-p` refusing to start
+## on the native header line.
 ## NOTE: /proc/meminfo, /proc/cpuinfo AND /proc/vmstat
 ## are INTENTIONALLY native-format; converting THOSE to Linux layout is a
 ## separate design decision, not a bug — leave them unless the user asks.
@@ -1299,11 +1303,17 @@
 ## bytes, and (b) several of our counters (zero-pool, zram internals, kswapd
 ## cycles) have no honest Linux equivalent.  Honest native names beat misleading
 ## Linux-named numbers, so it stays native like meminfo/cpuinfo.
+## EXCEPT (2026-10-08, lane A, lane B's procps request): four Linux keys sit
+## beside the native ones because procps' vmstat reads its si/so/bi/bo columns
+## from them -- pgpgin/pgpgout (KiB to and from block devices, Linux's unit
+## despite the name) and pswpin/pswpout (pages, which vmstat converts with
+## sysconf(_SC_PAGESIZE), so our 16 KiB page is the right unit).  Nothing
+## native was renamed or removed.
 ## STATUS: the cleanly-convertible standard-Linux /proc files are now ALL done
-## (stat, uptime, loadavg, buddyinfo; <pid>/io added 2026-06-11 with real PCB
-## counters — see DONE entry below).  The remainder are either blocked on new
-## accounting infra (interrupts, diskstats, <pid>/auxv) or intentionally
-## native (meminfo, cpuinfo, vmstat).  No further small in-thread procfs work.
+## (stat, uptime, loadavg, buddyinfo, diskstats; <pid>/io added 2026-06-11 with
+## real PCB counters — see DONE entry below).  The remainder are either blocked
+## on new accounting infra (interrupts, <pid>/auxv) or intentionally native
+## (meminfo, cpuinfo, vmstat).  No further small in-thread procfs work.
 
 ## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
 ## Linux always prints `Mems_allowed:`/`Mems_allowed_list:` (the NUMA memory
@@ -2562,7 +2572,9 @@
 ##                    (correctly — it is a config/on-demand module). PROPER FIX
 ##                    DEFERRED: run_task() only SIMULATES execution (sets
 ##                    last_duration_ms=100, marks Completed) — it does not actually
-##                    invoke fstrim/findex/updatemgr/integrity-scan. Wire each
+##                    invoke fstrim/findex/updatemgr/integrity-scan (fs::findex
+##                    is removed, design-decisions 1528; indexing is
+##                    userspace/indexer's). Wire each
 ##                    TaskType to its real subsystem when those exist; until then
 ##                    run_task is a scheduler stub, not a real maintenance run.
 ##   - ipcns (2026-06-11): FIXED — classic fabrication case (a). System V IPC
@@ -3609,6 +3621,9 @@
 ##     `pkg` content-addressed store's available-package list or a package
 ##     repository index — so /proc/appstore reflects genuinely installable apps
 ##     with real (or absent, never fabricated) ratings/download metrics.
+##     MOOT 2026-10-02: fs::appstore is removed with the kernel's other program
+##     lists (design-decisions 1528). A catalogue, if one is built, belongs in
+##     userspace beside the one list of programs (gui/programs, §1425).
 ##     kernelbuild fixed 2026-06-11: case (c) counter-zeroing. init_defaults
 ##     seeds 6 real OS components (kernel/drivers/compositor/shell/init/
 ##     bootloader) with legitimate menuconfig-style build params — that part is
@@ -4523,9 +4538,11 @@
 
 ## fork() LIMITATIONS (2026-05-31, documented, not yet implemented):
 ##   (a) HANDLE INHERITANCE is limited to refcount-capable same-id types: File, Pipe, EventFd,
-##       StreamSocket (kernel/src/proc/fork.rs::dup_one). Channel, SharedMemory, CompletionPort,
-##       and Timer handles are SKIPPED (child does not inherit them) because they lack a
-##       refcounted same-id dup. A forked child that expected an inherited channel/shm/timer will
+##       StreamSocket (kernel/src/proc/fork.rs::dup_one) -- and, since 2026-10-02, Channel and
+##       Service listeners (ipc::channel::dup, ipc::service::dup_listener: per-side and per-listener
+##       holder counts, for the Linux-ABI channel descriptors). SharedMemory, CompletionPort,
+##       and Timer handles are still SKIPPED (child does not inherit them) because they lack a
+##       refcounted same-id dup. A forked child that expected an inherited shm/timer will
 ##       find it missing. FIX: add same-id refcounted dup to those subsystems (mirror pipe/eventfd),
 ##       then extend dup_one. Until then, programs needing those across fork must re-establish them
 ##       after fork (or use posix_spawn with an explicit handle map).
@@ -11147,6 +11164,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      to the already-blown stack and double-fault.  Tracked
 ##      alongside item 6 (Linux-shaped rt_sigframe delivery) — the
 ##      signal-delivery path is the same refactor.
+##      SUPERSEDED 2026-10-07 (lane A): sigaltstack is implemented in
+##      full -- the stack is kept per thread, SA_ONSTACK frames go on
+##      it, uc_stack/rt_sigreturn/SS_AUTODISARM and AT_MINSIGSTKSZ as
+##      Linux 6.6. known-issues/A-LINUX-PROGRAMS-HAVE-NO-ALTERNATE-SIGNAL-STACK.md.
 ##  15. IOCTL — DONE as ENOTTY-everywhere.  sys_ioctl returns
 ##      -ENOTTY for every (fd, request) pair, which is the
 ##      semantically correct response for ioctls on non-tty fds.
@@ -18515,110 +18536,6 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
 
-## 143. [LINUX ABI BATCH 114 - DONE] Implement membarrier(2) with the
-##      full Linux command set, replacing the prior ~3-line stub that
-##      returned 0 only for QUERY (claiming "no commands supported")
-##      and EINVAL for everything else.
-##
-##      File: kernel/src/syscall/linux.rs
-##      Function: sys_membarrier (~line 12954)
-##
-##      Linux ABI implemented (cmd values from <linux/membarrier.h>):
-##          0   = QUERY
-##          1   = GLOBAL
-##          2   = GLOBAL_EXPEDITED
-##          4   = REGISTER_GLOBAL_EXPEDITED
-##          8   = PRIVATE_EXPEDITED
-##         16   = REGISTER_PRIVATE_EXPEDITED
-##         32   = PRIVATE_EXPEDITED_SYNC_CORE
-##         64   = REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
-##        128   = PRIVATE_EXPEDITED_RSEQ
-##        256   = REGISTER_PRIVATE_EXPEDITED_RSEQ
-##        512   = GET_REGISTRATIONS  (Linux 6.3+)
-##      flags:  MEMBARRIER_CMD_FLAG_CPU = 1, legal only on the three
-##              PRIVATE_EXPEDITED variants (see Linux man-page).
-##
-##      Behaviour matrix:
-##        * QUERY -> bitmask of supported cmds = 0x3FF (all 10).  flags
-##          and cpu_id must both be 0 (EINVAL otherwise) — matches
-##          Linux's QUERY semantics.
-##        * Any unknown flag bit set -> EINVAL up front.
-##        * FLAG_CPU on a non-PRIVATE_EXPEDITED cmd -> EINVAL (Linux
-##          rejects FLAG_CPU on GLOBAL and REGISTER_*).
-##        * Barrier cmds (GLOBAL, GLOBAL_EXPEDITED, PRIVATE_EXPEDITED,
-##          PRIVATE_EXPEDITED_SYNC_CORE, PRIVATE_EXPEDITED_RSEQ) ->
-##          drain local store buffer via
-##          core::sync::atomic::fence(SeqCst) and return 0.
-##        * REGISTER_* cmds -> return 0 (no per-task state needed).
-##        * GET_REGISTRATIONS -> return 0 (no per-task registration
-##          state tracked; barriers work regardless).
-##        * Unknown cmds -> EINVAL.
-##
-##      Why "local fence + return 0" is the correct, honest answer
-##      (not a placeholder):
-##        - In this kernel a Linux fd table is per-process and no two
-##          Linux processes share an address space (no CLONE_VM across
-##          processes, no process_vm_clone).  Therefore no remote
-##          thread in the caller's MM can race with the caller —
-##          there is no remote thread.
-##        - x86_64's TSO memory model already orders the caller's
-##          prior stores ahead of any subsequent loads on any CPU
-##          once those stores retire through the store buffer.  A
-##          local mfence (atomic::fence(SeqCst)) drains the store
-##          buffer and is sufficient to make those stores globally
-##          visible.
-##        - SYNC_CORE (instruction-stream serialization) is needed on
-##          ARM for self-modifying code; on x86 IRET / CPUID / far
-##          jumps already serialize, and every interrupt return
-##          performs that, so the local fence here is sufficient.
-##        - The _RSEQ variants additionally request restart of any
-##          in-flight RSEQ critical sections.  sys_rseq currently
-##          returns ENOSYS so there are no RSEQ critical sections in
-##          flight; the barrier itself is the contract.
-##        - When cross-process CLONE_VM lands, the implementation
-##          will need to broadcast an IPI to every CPU running a
-##          thread of the caller's MM and execute a SeqCst fence
-##          there.  Mark with a TODO when that's the case.
-##
-##      Self-tests (in linux.rs self-test block):
-##        * QUERY -> 0x3FF.
-##        * QUERY flags=1 -> EINVAL.
-##        * QUERY cpu_id=1 -> EINVAL.
-##        * GLOBAL (cmd=1) -> 0.
-##        * GLOBAL_EXPEDITED (cmd=2) -> 0.
-##        * PRIVATE_EXPEDITED (cmd=8), flags=0 -> 0.
-##        * PRIVATE_EXPEDITED + FLAG_CPU -> 0 (legal here).
-##        * PRIVATE_EXPEDITED_SYNC_CORE (cmd=32) + FLAG_CPU -> 0.
-##        * PRIVATE_EXPEDITED_RSEQ (cmd=128) -> 0.
-##        * REGISTER_GLOBAL_EXPEDITED (cmd=4) -> 0.
-##        * REGISTER_PRIVATE_EXPEDITED (cmd=16) -> 0.
-##        * REGISTER_PRIVATE_EXPEDITED + FLAG_CPU -> EINVAL.
-##        * GLOBAL + FLAG_CPU -> EINVAL.
-##        * GET_REGISTRATIONS -> 0.
-##        * Unknown flag bit (0x2) -> EINVAL.
-##        * Bogus cmd (1<<10) -> EINVAL.
-##        * Huge cmd (0x20_000) -> EINVAL.
-##
-##      Known limitations / documented for follow-on work:
-##        * GET_REGISTRATIONS always reports the empty mask because
-##          we do not track per-task registration state.  When real
-##          cross-MM threads exist and the barrier path branches on
-##          "did this thread register," REGISTER_* needs to set a
-##          per-task bit and GET_REGISTRATIONS needs to read it
-##          back.  Today every barrier just executes the fence
-##          unconditionally, so the missing state is invisible.
-##        * No per-CPU targeting: cpu_id is accepted on the three
-##          PRIVATE_EXPEDITED variants (matching Linux's flag
-##          validation) but the fence is local-only.  When SMP
-##          adds cross-MM threads, the EXPEDITED path needs to
-##          IPI either the specified CPU (FLAG_CPU set) or every
-##          CPU running a thread of the caller's MM.
-##        * No RSEQ critical section restart.  Wire into sys_rseq
-##          when RSEQ lands; today sys_rseq returns ENOSYS so
-##          there is nothing to restart.
-##
-##      Build clean; boot test PASSED (BOOT_OK at 23s).
-
 ## 144. [LINUX ABI BATCH 115 - DONE] Two truth-of-the-kernel errno
 ##      upgrades that close the gap between this file's section
 ##      header comments and the actual code:
@@ -19415,29 +19332,6 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##         12. cleanup unregister -> 0 (so the RSEQ table is empty at
 ##             the end of the rseq test block; matters because the
 ##             current task carries through subsequent boot tests).
-##
-##      Known limitations / deferred work:
-##        * No per-preemption cpu_id update.  Linux's scheduler writes
-##          the current CPU back into *rseq on every context switch
-##          (and walks rseq_cs to check whether the section was
-##          crossed, rewriting RIP to abort_ip if so).  We are
-##          single-CPU today: cpu_id stays 0 forever, no abort is ever
-##          warranted, and glibc's per-CPU malloc fast path always
-##          "succeeds" against cpu 0.  When SMP scheduling lands this
-##          hook MUST be added before correctness holds — otherwise
-##          per-CPU tcache could be raced under migration.  Tracked
-##          here as a hard prerequisite for SMP enablement.
-##        * The `sig` field is stored and round-tripped but never
-##          consulted at abort time, because we never abort (see
-##          above).  When the abort hook lands it MUST verify the u32
-##          immediately preceding the abort_ip matches the stored
-##          sig — this is Linux's defence against attacker-supplied
-##          abort handlers.
-##        * The clone path does not inherit / propagate rseq across
-##          thread creation.  glibc's pthread_create registers rseq
-##          inside the child thread's own startup, so this is correct
-##          for the common case.  fork() also doesn't carry rseq, by
-##          design (Linux: rseq is per-task, child has none).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##
@@ -23802,10 +23696,6 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          SGI_CYCLE reject: OK".
 ##
 ##      Known limitations:
-##        * CLOCK_PROCESS_CPUTIME_ID(2) / CLOCK_THREAD_CPUTIME_ID(3)
-##          still return monotonic ns instead of the actual
-##          process/thread CPU usage.  Tracking CPU time per task is
-##          a real scheduler change, out of scope for this batch.
 ##        * CLOCK_REALTIME_ALARM(8) and CLOCK_BOOTTIME_ALARM(9) in
 ##          Linux differ from their non-alarm twins only when timers
 ##          armed on them fire while the system is in suspend; for
@@ -54739,7 +54629,9 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##    failing, and the restart makes the call succeed once it is continued.
 ##
 ## 1a. REMAINING GAP from item 1: the kernel cannot see a NATIVE-ABI
-##    process's SIG_IGN.
+##    process's SIG_IGN. [DONE 2026-10-01 -- design-decisions.md §1512:
+##    the kernel keeps the ignored set for both ABIs; the native libc
+##    reports it with SYS_SIGNAL_SET_IGNORED (1098). Kept for history.]
 ##    POSIX says a background access whose signal is *ignored* is treated as
 ##    if the signal had been sent and discarded — a read fails EIO, a write
 ##    proceeds. handlers::signal_ignored_or_blocked can answer that from
@@ -59252,3 +59144,175 @@ is already waiting, not whether the setter exists.
   (known-issues b-org.slateos.servicemanager-has-two-clients-and-no-provider).
   **Trigger:** `SYS_POWER_OFF` in `origin/main`'s
   `kernel/src/syscall/number.rs`.
+
+## Lane A — kexec / power.reload: the load-and-jump mechanism (2026-10-03)
+
+Fulfils `requests/c-ab-a-restart-that-keeps-the-computer-on.md` (lane C's
+"Restart OS -- keep the computer on"; lane B's `powerctl reload` waits on it)
+and is the load-and-jump half of design-decisions §1536 / roadmap §1126. The
+mechanism recreates Limine's handoff so the new kernel boots through its one
+ordinary boot path. All of it lives in `kernel/src/kexec.rs`.
+
+**Done and boot-pending (stages 1-4, each committed, clippy-green, self-tested):**
+- Stage 1 `parse_kernel_elf` + `plan_destination`: bounds-checked PT_LOAD parse;
+  first-fit contiguous destination from USABLE memory avoiding excluded ranges.
+- Stage 2 `find_request_sites`: locate the base-revision tag and the six
+  requests in a loaded image, marker-window-bounded.
+- Stage 3 `HandoffArena` + `build_{hhdm,rsdp,executable_address,memmap}_response`:
+  write the Limine responses with correct HHDM cross-references.
+- Stage 4 `build_handoff_tables` + `translate`: fresh PML4, HHDM direct map
+  (1 GiB/2 MiB huge pages at the running kernel's offset), image at linked
+  addresses (4 KiB, per-segment perms) pointing at the destination; frame
+  tracking + free-on-error.
+
+**Done since (stage 5.1-5.4, each committed, clippy-green, boot-pending):**
+- 5.1 `stage_image` + `StagedImage`/`CopyOp`: segment bytes into frames + the
+  trampoline's source->dest copy list.
+- 5.2 `adjust_memory_map`: the firmware map with dead old types -> USABLE and the
+  handoff's overlays (dest EXECUTABLE_AND_MODULES, kept regions
+  BOOTLOADER_RECLAIMABLE), merged.
+- 5.3 `patch_requests` + `ResponseAddrs`: response pointers into the image's
+  requests + base-revision word to 0.
+- 5.4 `plan_destination_high` + `prepare_handoff` + `PreparedHandoff` +
+  `boot::memory_map` + `top_of_managed_ram`: the whole preparation, with an
+  integration self-test that prepares a handoff against the real memory map and
+  frees it (parse->plan->tables->responses->patch->stage->collision check). Only
+  HHDM/memmap/executable-address/RSDP responses are built; framebuffer and
+  kernel-file are left unanswered (new kernel boots serial-only, no cmdline/
+  symbols) -- COMPLETE THESE for a full-fidelity restart.
+
+**Remaining (the irreversible jump; integration-only, needs a boot-test kexec
+mode to validate), in dependency order:**
+4. **Quiesce** (integration-only, cannot self-test -- would break the running
+   kernel): interrupts off; mask every IOAPIC redirection entry; stop the LAPIC
+   timer (`apic::stop_timer`); clear PCI Bus Master Enable on every function
+   (`pci::scan_bus0` + clear bit 2 of the command word); IOMMU translation off
+   (SlateOS does not enable it today, so likely a no-op -- confirm); send INIT to
+   every other CPU (`apic::send_init_ipi` for each `smp::cpu_apic_id`).
+4. **Quiesce** -- DONE 2026-10-03 (`kexec::quiesce`, stage 5.5a): cli, IOAPIC
+   mask-all, LAPIC timer stop, PCI bus-master clear, INIT IPIs. `#[allow(dead_code)]`
+   until `execute` calls it.
+6. **Syscall + capability** -- DONE 2026-10-03 (stage 5.6): `SYS_POWER_RELOAD`
+   (1139), `Rights::RELOAD_KERNEL`, gated like secureboot; returns `NotSupported`
+   until `execute` is wired. Dispatch self-test proves the gate.
+
+**REMAINING: the trampoline + execute + the boot-test harness** (the irreversible
+jump; needs the harness + boot-cycle iteration -- do as one focused unit).
+
+5a. **Trampoline** -- a pure-64-bit `global_asm!` blob (Intel syntax, like
+   idt.rs), `.global kexec_trampoline_start`/`_end`, reached via `extern "C"
+   { static ... : u8 }` to copy `[start,end)`. It is position-independent (all
+   data via `rdi` = params ptr; only RIP-relative within the blob) so it runs
+   from a control frame's HHDM alias -- valid in BOTH tables because both use the
+   same HHDM offset. Register convention / sequence (verified against the
+   web-fetched Limine 8.7 handoff; a long-mode->long-mode jump, no mode switch):
+     - entry: rdi=params(HHDM), old tables active, IF off (quiesce did cli).
+     - cld; r15=params; r14=hhdm; r13=copy_count; r12=copy_list.
+     - copy loop: per CopyOp{src_phys,dst_phys,len} rsi=src+hhdm, rdi=dst+hhdm,
+       rcx=len, `rep movsb`; advance r12 by 24 -- done BEFORE the CR3 switch, via
+       the OLD stack (old tables map it), so the OLD kernel stack must stay valid
+       until then (no stack use between CR3 switch and the new-rsp load).
+     - `lgdt [gdtr_ptr]`; `lidt [idtr_ptr]` (empty IDT, limit 0).
+     - reload DS/ES/FS/GS/SS = 0x30; reload CS = 0x28 via far return
+       (`lea rax,[rip+after]; push 0x28; push rax; retfq`). after-label is in the
+       control frame's HHDM, valid in the new tables too.
+     - `mov cr3, new_cr3` (new tables now active; blob keeps running via HHDM).
+     - `mov rsp, new_stack; sub rsp,8; mov qword[rsp],0` (Limine's 0 ret addr).
+     - `mov rax, new_entry`; zero rbx..r15 (rax=entry survives); `jmp rax`.
+   CR0/CR4/EFER/PAT are LEFT as the running kernel has them -- all valid
+   long-mode state the new kernel re-inits as from a Limine boot; critically
+   EFER.NXE stays set so the handoff tables' NX (bit 63) is honoured. (A future
+   refinement sets them to Limine's exact values for a non-SlateOS image.)
+   GDT = Limine's 7 entries (CS 0x28, data 0x30): null,
+   0x00009B000000FFFF, 0x000093000000FFFF, 0x00CF9B000000FFFF,
+   0x00CF93000000FFFF, 0x00209B0000000000, 0x0000930000000000; GDTR limit 0x37.
+5b. **execute** -- `PreparedHandoff::execute(self) -> KernelError` (returns only
+   on a pre-quiesce failure; on success diverges). Allocate ONE contiguous
+   control region (`frame::alloc_order`, ~order 3 / 128 KiB: holds blob + params
+   + GDT + GDTR + IDTR + a CONTIGUOUS copy_list[count*24] (~44 KB for the real
+   kernel) + a ~64 KB stack at the top). Copy the blob in; fill params (the
+   8 u64 offsets 0x00..0x38: copy_count, copy_list, hhdm, new_cr3=pml4_phys,
+   new_entry, new_stack=region top, gdtr_ptr, idtr_ptr), GDT, GDTR, IDTR,
+   copy_list (flatten staged.copy_ops). Check the control region does NOT overlap
+   dest (it is low, dest high -- fail cleanly if not). Then `quiesce()` and jmp to
+   blob_hhdm with rdi=params_hhdm (`asm!(..., options(noreturn))`). The control
+   region needs no memmap overlay: it is USABLE and free once _start switches to
+   its own stack, before frame::init. On pre-quiesce failure free the control
+   region + self.
+   Then wire `sys_power_reload` to `prepare_handoff` + `execute` (replacing the
+   NotSupported), reading the caller's image with `read_user_vec`.
+5c. **Boot-test kexec mode (the harness)** -- a `kexec.selftest=1` cmdline flag:
+   after the self-tests, main.rs calls `prepare_handoff`+`execute` on the running
+   kernel's OWN image (`boot::kernel_file_address`) instead of halting, printing
+   e.g. "KEXEC: self-reload now". The second kernel boots normally and prints its
+   banner again; `boot-test.sh` (a variant/flag) detects a SECOND banner after
+   that line -> kexec works; a timeout (triple fault/hang) -> fails. Iterate
+   here: each fix is a ~90-min boot, so expect several cycles.
+
+**Validation gap / do not ship:** the trampoline + execute are the ONLY
+unvalidated parts; everything before them (stages 1-5.4 + quiesce helpers +
+the syscall gate) is self-tested and boot-checked. Do NOT wire `powerctl reload`
+to a kexec on `main`, and do NOT leave `sys_power_reload` calling `execute` on a
+published commit, until the kexec-mode boot (5c) passes.
+
+**UPDATE 2026-10-08 (lane A): 5a and 5b are built and the self-reload WORKS in
+QEMU** -- a kernel booted with `selftest.skip=1 kexec.selftest=1` reloads
+itself, and the second kernel boots to BOOT_OK with its command line
+(lane-a-wip, fast boots kexec4/5 of that day). The plan above was wrong in
+places, each found by a boot; the code (`kernel/src/kexec.rs`) is now the
+reference, and its comments say why:
+  - The trampoline switches to the NEW tables FIRST, then clears CR4.PGE/PCIDE/
+    CET (flushing the old kernel's GLOBAL image mappings), then takes the new
+    stack, then copies -- not copy-first under the old tables (the destination
+    is not checked against the old kernel's page-table frames).
+  - Every handoff frame (tables, arena, staging, control region) is allocated
+    BELOW the destination (`handoff_frame_zeroed`, `alloc_order_constrained`):
+    the first boot was refused by the after-the-fact collision check.
+  - The old kernel's direct map is no-execute: NX is cleared on the control
+    region's path before the jump (`allow_execution_at`).
+  - `find_request_sites` takes the first marker window in a WRITABLE segment:
+    the "last start marker" was kexec.rs's own `.rodata` constants, so no
+    request was patched ("Limine did not answer the HHDM request").
+  - The new direct map covers only Limine's types (usable, bootloader-
+    reclaimable, executable-and-modules), not 0..top-of-RAM: the restarted
+    kernel could not map the APIC/IOAPIC uncached over write-back huge pages.
+  - The command line is passed (a kernel-file response with no file), minus
+    `kexec.selftest=1`.
+**Still open, in order:** (1) DONE 2026-10-08 as `python scripts/guest.py
+kexec` rather than a boot-test.sh flag (boot-test.sh refuses selftest.skip,
+on purpose): boots the last boot test's ESP with `kexec.selftest=1` and
+requires the reload, a second banner, and the restarted kernel's agent
+answering; not run by the boot test itself yet -- run it after a boot until
+`sys_power_reload` is wired, then make it automatic; (2) DONE 2026-10-08:
+the framebuffer response and its write-combining direct map (known-issues
+`A-KEXEC-RESTART-HAS-NO-FRAMEBUFFER`); (3) SMP -- validated only on one CPU;
+the APs are INIT'd and the new kernel must restart them; (4) only then wire
+`sys_power_reload` (still `NotSupported`) and answer lane C's
+`requests/c-ab-a-restart-that-keeps-the-computer-on.md`.
+**Note for (4), 2026-10-09:** `quiesce` INITs every CPU but the caller's and
+must run on the BSP (`execute`'s contract). The boot-path trigger is safe --
+the boot is task 0, pinned to the BSP since 2026-10-09 -- but
+`sys_power_reload` is called by a user thread, which on SMP may be on any CPU
+(and wakes now go to idle CPUs, design-decisions 1558). Before `execute`, pin
+the caller to the BSP (`sched::set_affinity(current, 1)`, then yield until
+`current_cpu_index() == 0`), or hand the reload to a BSP kernel task.
+**UPDATE 2026-10-09 (lane A, lane-a-wip): (4) is wired.**
+`SYS_POWER_RELOAD(image_ptr, image_len, cmdline_ptr, cmdline_len)`: (0, 0)
+for the image is the running kernel's own file, (0, 0) for the command line
+the running one's less `kexec.selftest=1`; `handlers::reload_request` refuses
+everything it refuses before anything is flushed or stopped (dispatch
+self-test). `power::reload` flushes every filesystem and disk, pins the
+caller to the BSP (`set_affinity`, which returns on it), and calls
+`kexec::reload`; the boot-path self-reload goes through `power::reload`
+too, so the kexec boot proves the call's body. For (3), `quiesce` now stops
+the other CPUs before the INITs: an NMI to all but itself, parking each in
+the NMI handler (`kexec::park_if_restarting`, interrupts off, `hlt`), and
+waits until each says so (500 ms, then the INIT regardless) -- an INIT
+alone is taken when the target next can, and a CPU still running the old
+kernel during the copy could write into the new one. **Verified
+2026-10-09:** the kexec boot (`selftest.skip=1 kexec.selftest=1`, through
+`power::reload`) on one CPU and on two under multi-threaded TCG -- AP 1
+stopped by the NMI within the wait, the second kernel brought it back up,
+BOOT_OK both times. **Left:** lane C's request answered and lane B told
+that `powerctl reload` can call 1139, once this is on main; the kexec boot
+is still run by hand, not by `boot-test.sh`.

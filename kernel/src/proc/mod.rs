@@ -34,6 +34,7 @@
 //!
 //! `THREAD_OWNERS` → `PROCESS_TABLE` → `CAP_TABLE` → `SCHED`.
 
+pub mod cputimer;
 pub mod elf;
 pub mod exception;
 pub mod fork;
@@ -42,10 +43,15 @@ pub mod linux_fd;
 pub mod linux_sigframe;
 pub mod linux_stack;
 pub mod pcb;
+pub mod posix_timer;
+pub mod priority;
+pub mod ptrace;
+pub mod setid;
 pub mod signal;
 pub mod spawn;
 pub mod thread;
 pub mod thread_clone;
+pub mod user_entry;
 
 use crate::error::KernelResult;
 use crate::serial_println;
@@ -71,6 +77,12 @@ pub fn self_test() -> KernelResult<()> {
     signal::self_test()?;
     serial_println!("[proc] Running ITIMER_REAL self-test...");
     itimer::self_test()?;
+    serial_println!("[proc] Running POSIX timer self-test...");
+    posix_timer::self_test()?;
+    cputimer::self_test()?;
+    setid::self_test()?;
+    serial_println!("[proc] Running nice-authority self-test...");
+    priority::self_test()?;
     serial_println!("[proc] Running fork self-test...");
     fork::self_test()?;
     serial_println!("[proc] Running Linux fd-table self-test...");

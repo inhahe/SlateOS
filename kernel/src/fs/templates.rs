@@ -29,7 +29,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::sync::PreemptSpinMutex;
@@ -144,7 +144,11 @@ static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 
 static TEMPLATES: PreemptSpinMutex<Vec<Template>> =
     PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
-static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
+/// Whether [`init`] has registered the defaults. Read and set only while
+/// `TEMPLATES` is held, so it is that lock's state. Until 2026-10-02 it was a
+/// lock of its own, held across `TEMPLATES` while `init` filled it -- one of
+/// the "leaf" locks with another taken under it (design-decisions §975).
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -154,8 +158,7 @@ static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"IN
 ///
 /// Call once at boot. Safe to call multiple times (no-op after first).
 pub fn init() {
-    let mut initialized = INITIALIZED.lock();
-    if *initialized {
+    if INITIALIZED.load(Ordering::Relaxed) {
         return;
     }
 
@@ -205,6 +208,11 @@ pub fn init() {
     ];
 
     let mut templates = TEMPLATES.lock();
+    // Asked again under the lock: two first callers may both have passed the
+    // unlocked look above, and only one registers the defaults.
+    if INITIALIZED.load(Ordering::Relaxed) {
+        return;
+    }
     for (name, ext, default_name, cat, content, icon, mime, prio) in defaults {
         let id = TEMPLATE_COUNTER.fetch_add(1, Ordering::Relaxed);
         templates.push(Template {
@@ -222,7 +230,7 @@ pub fn init() {
         });
     }
 
-    *initialized = true;
+    INITIALIZED.store(true, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +470,7 @@ pub fn create_folder(directory: &str) -> KernelResult<String> {
 
 /// Returns (template_count, create_count, total_bytes).
 ///
-/// Initialises first, for the reason `columnview::stats` documents: the table
+/// Initialises first, for the reason `bookmarks::stats` documents: the table
 /// is a fixed set of defaults, so a count of 0 describes no state the system is
 /// ever really in — only one nobody has looked at yet.
 pub fn stats() -> (usize, u64, u64) {

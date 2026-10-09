@@ -511,6 +511,23 @@ pub fn mask_irq(irq: u8) {
     }
 }
 
+/// Mask every IOAPIC redirection entry, so no external interrupt can be
+/// delivered. Used when quiescing the machine for a kexec handoff: the new
+/// kernel re-programs the IOAPIC from scratch, so it must start with every line
+/// silent. A no-op before the IOAPIC is initialized (`NUM_REDIR_ENTRIES` is 0).
+pub fn mask_all() {
+    let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
+    // `num` is the redirection-entry count (<= 240); each is masked in turn.
+    for irq in 0..num {
+        // SAFETY: `irq < num`, and the IOAPIC is initialized when `num > 0`.
+        #[allow(clippy::cast_possible_truncation)]
+        unsafe {
+            let entry = read_redir_entry(irq as u8);
+            write_redir_entry(irq as u8, entry | REDIR_MASKED);
+        }
+    }
+}
+
 /// Configure a redirection entry for level-triggered, active-low
 /// delivery (typical for PCI interrupts).
 ///

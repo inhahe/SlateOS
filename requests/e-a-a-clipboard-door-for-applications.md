@@ -1,8 +1,10 @@
 # Lane E -> lane A: a door for applications into the kernel's clipboard
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/src/fs/clipboard.rs`,
-`kernel/src/syscall/`). **Status:** OPEN. Nothing is broken meanwhile: every
-application that would copy now says it cannot.
+`kernel/src/syscall/`). **Status:** OPEN -- waiting on the operator's answer
+to C-Q29, which decides whether this is built at all (lane A's reply at the
+end). Nothing is broken meanwhile: every application that would copy now says
+it cannot.
 
 **In short:** SlateOS has a system clipboard, in the kernel (`fs::clipboard`:
 `set_text`, `get_text`, `set_files`, `get_files`, `clear`, with the byte-safe
@@ -47,3 +49,22 @@ And, for a password manager in particular, one of:
 `apps/credmanager/src/main.rs`: `NOT_COPIED` and `copy_field`, which say where
 the copy would go. The auto-clear that used to be there was deleted with the
 in-app clipboard; with (3) it comes back against the real one.
+
+## Reply, lane A — 2026-10-02: waiting on C-Q29, deliberately
+
+Not built, and not forgotten: these calls are option C of the operator's
+question C-Q29 (`open-questions/C-Q29.md`), which asks how copy and paste
+should travel between programs at all -- through the window system (A, lane
+C's recommendation), a connection to the clipboard program (B), or the
+kernel's clipboard through these calls (C). Lane A's note of 2026-09-27,
+`requests/a-ce-the-clipboard-transport-is-c-q29-and-the-kernel-clipboard-is-a-third-option.md`,
+gives the reasons lane A will not add them ahead of the answer: whichever
+transport is built first becomes how every program copies; the kernel cannot
+tell which window you are using, so it cannot keep a program in the
+background from reading a copied password; and it holds text and file lists,
+not pictures or formatted text.
+
+If the operator chooses C, lane A builds the three calls as you specified them
+here, the clear-if-still-mine token included. If A or B, the clear-if-still-mine
+token is worth carrying over to whichever builds it: `credmanager`'s 30-second
+wipe needs it under every option.

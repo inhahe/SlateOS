@@ -1,12 +1,27 @@
 ### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — OPEN: reopened 2026-10-05 (lane C), as this entry asks, after the 2026-08-13 change (`975114f54`, `315a7e0ca`)
 
-**Status:** OPEN -- reopened 2026-10-05 by lane C: the faulting variant
-recurred in lane C's boot of `8954a8168` (a kernel byte-identical to main
-`98877e477`; debug, TCG, a slow boot under another lane's builds, BOOT_OK at
-814 s). The first worker (task 333 of process 358) took a user `#PF` with
-`rip == addr == 0x6000066370`; the process was terminated and exited -8.
-Serial log: `os-lane-c/build/serial-failures/20261005T194714Z-8954a8168-rc1.txt`
-(lane A told by notice). The analysis below, from 2026-08-13, is as it was.
+**Status:** OPEN, the 2026-10-05 recurrence diagnosed by lane A 2026-10-07
+as a different bug, already fixed on lane-a by `0d8877dc4` (2026-10-03),
+which reaches `main` with lane A's next publish; move this entry to resolved
+once boots of that `main` have run clean. Lane C reopened the entry when the
+faulting variant recurred in its boot of `8954a8168` (a kernel byte-identical
+to main `98877e477`, which lacks `0d8877dc4`; debug, TCG, slowed by another
+lane's builds): the first worker (task 333 of process 358) took a user `#PF`
+with `rip == addr == 0x6000066370` and the process exited -8 (serial log
+`os-lane-c/build/serial-failures/20261005T194714Z-8954a8168-rc1.txt`). The
+fault dump that log carries (the August one did not have it) rules out the
+August mechanism: RIP is inside libc.so.6's text -- a file-backed VMA, at a
+plain function prologue (`endbr64; push rbp; mov rbp,rsp`), almost
+certainly `start_thread` -- and the page's PTE was *present* `Xru` by the
+time the dump was printed, although the fault was taken not-present. That is
+the demand-paging install race `0d8877dc4` closes: the first worker faulted
+on `start_thread`'s page, and its page-cache fill blocked on the disk (the
+`#PF` handler turns interrupts back on); a sibling worker then mapped the
+same page from the cache first; the first worker's `map_frame` found it
+present, and main's `resolve_file_cached` takes any `map_frame` error as an
+unresolvable fault. The siblings (tasks 334-336) ran the same page and
+exited normally, as that predicts. The analysis below, from 2026-08-13, is
+as it was.
 
 **Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
 `soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not

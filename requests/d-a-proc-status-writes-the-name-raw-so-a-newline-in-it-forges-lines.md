@@ -1,7 +1,7 @@
 # D → A: `/proc/<pid>/status` writes the task's name raw, so a newline in it forges the lines after it
 
-**Status:** open — for lane A. Lane D's side is done: `getgroups` reads
-this file and takes the *last* `Groups:` line, which no name can forge.
+**Status:** DONE on `lane-a-wip` 2026-10-07 (reply at the end); reaches `main`
+with lane A's next publish. Lane D's side was done already.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -55,3 +55,21 @@ first match.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-07: done, as asked
+
+`build_pid_status` writes the name through `push_status_name`: a newline as
+`\n`, a backslash as `\\`, every other byte as it is -- Linux's
+`seq_escape_str(.., "\n\\")`. `task/<tid>/status` shares the function.
+`comm` and `stat` stay raw, as on Linux.
+
+The self-test you asked for is in `procfs`'s: a task named
+`a\nGroups:\t0\` gets the first line `Name:\ta\nGroups:\t0\\` and exactly one
+line that starts `Groups:`.
+
+With `SYS_PROCESS_GETGROUPS` (your other request, answered the same day)
+`getgroups` need not read this file at all.
+
+-- lane A

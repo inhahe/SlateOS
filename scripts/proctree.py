@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -240,7 +241,6 @@ if IS_WINDOWS:
         return {}
 
 else:
-    import os
     import signal
 
     def create_kill_on_close_job():
@@ -320,6 +320,54 @@ def _is_wsl_launcher(path: str) -> bool:
     except OSError:
         return False
     return parent in {"system32", "syswow64", "sysnative"}
+
+
+#: The reparse tag of a Windows App Execution Alias. Spelled out as a fallback
+#: because `stat` only gained the name in Python 3.8.
+_APPEXECLINK = getattr(stat, "IO_REPARSE_TAG_APPEXECLINK", 0x8000001B)
+
+
+def is_app_execution_alias(path) -> bool:
+    """Is `path` a Windows App Execution Alias rather than an executable?
+
+    The `python3.exe` in `%LOCALAPPDATA%\\Microsoft\\WindowsApps` is one, and on
+    this project's host `shutil.which("python3")` finds it first: a reparse
+    point that asks the OS to activate a Store-packaged app. Packaged apps are
+    activated *outside* the caller's Job Object -- measured 2026-09-26 under
+    run-timeout, a sleeper started through the alias left the job counting 1
+    process of 3 -- so `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` cannot reach what
+    it starts and `Accounting` does not count it. Only `terminate_tree`'s
+    `taskkill /T`, which walks by parentage rather than by job, still found
+    the sleeper on the timeout.
+
+    Matched by the reparse tag, which is what the OS itself dispatches on,
+    rather than by directory name. False on POSIX, and for anything that
+    cannot be examined.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        return os.lstat(path).st_reparse_tag == _APPEXECLINK
+    except (OSError, AttributeError, ValueError, TypeError):
+        return False
+
+
+def alias_warning(command) -> str | None:
+    """The warning a `Tree` gives when `command` starts through an alias.
+
+    `None` for anything else, including a command that is not an argv list
+    (a string for `shell=True` names no single program to check).
+    """
+    if not IS_WINDOWS or not isinstance(command, (list, tuple)) or not command:
+        return None
+    argv0 = str(command[0])
+    resolved = shutil.which(argv0) or argv0
+    if not is_app_execution_alias(resolved):
+        return None
+    return (f"{argv0!r} is a Windows App Execution Alias ({resolved}): what it "
+            f"starts runs outside the Job Object, so kill-on-close cannot reach "
+            f"it and the cost line will not count it -- pass a real "
+            f"interpreter's path")
 
 
 def find_unix_shell() -> str | None:
@@ -427,6 +475,12 @@ class Tree:
         # `resolve_command` — on Windows a `.sh` cannot be started directly and
         # a bare `bash` silently resolves to the WSL shim.
         command = resolve_command(command)
+        # Said, not refused: an alias does run, and `taskkill /T` still reaps
+        # it on a timeout. What it loses is the job's other two guarantees,
+        # and a caller should know that before it relies on either.
+        alias = alias_warning(command)
+        if alias and warn:
+            warn(alias)
         self.job = create_kill_on_close_job()
         if IS_WINDOWS and self.job is None and warn:
             warn("could not create Job Object; relying on taskkill fallback")

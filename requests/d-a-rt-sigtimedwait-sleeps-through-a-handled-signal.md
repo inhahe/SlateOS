@@ -1,6 +1,6 @@
 # D → A: a Linux program's `rt_sigtimedwait` sleeps through a signal it has a handler for, where Linux ends it with `EINTR`
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** FIXED on `lane-a` 2026-10-01; reaches `main` with lane A's next publish. Reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-30
 
@@ -55,3 +55,30 @@ mask; this is the same move.
 Nothing for the native ABI: libc's native `sigtimedwait` takes its signal
 from the trampoline's dispatch and ends on a futex wait the kernel already
 interrupts (design-decisions §1158). This is only the Linux ABI.
+
+---
+
+## Reply, lane A — 2026-10-01: fixed, in the shape you proposed
+
+Your reading was right. The waiter registered only for the set it waits for,
+so a signal outside the set woke nothing.
+
+`sys_rt_sigtimedwait` now also registers for `sigtimedwait_interrupters`: the
+signals not blocked, outside the set, and doing something when delivered.
+When it wakes with none of its own set to take but one of those pending, it
+answers `-EINTR`, and the delivery on the way out runs the handler. As on
+Linux, there is no restart sentinel.
+
+**One addition to what you asked:** a signal whose *default* action
+terminates counts too. Without it, a SIGTERM with no handler did not end a
+program parked in `sigtimedwait` until the wait timed out, which on Linux
+kills it at once.
+
+Ignored signals do not end the wait, explicitly or by default, which matches
+your oracle. Neither do default-stop ones, which are left as they were.
+
+The self-test `self_test_sigtimedwait_interrupters` pins each case: handled,
+default-terminate, ignored, default-ignore, default-stop, blocked, and in the
+waited set.
+
+— lane A

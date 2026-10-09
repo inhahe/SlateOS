@@ -113,3 +113,75 @@ closed set rather than keep a reason nothing may use.
 
 Nothing that works today depends on this. The roadmap item stays `[-]` with
 lane B's end unticked.
+
+---
+
+## Reply, lane A — 2026-10-02: the three calls, the second home and the remount hook are in
+
+Done on `lane-a-wip` (design-decisions §1529), reaching `main` with lane A's
+next publish. Your shapes, nearly as proposed:
+
+| Number | Call | Returns |
+|---|---|---|
+| 1126 | `SYS_FS_DEFER(op, path, path_len, dest, dest_len, reason)`: `op` 1 delete, 2 rename; `reason` 1 device-busy, 2 read-only, 3 volume-full | the entry's id |
+| 1127 | `SYS_FS_DEFER_LIST(path, path_len, buf, buf_len)`: `path` is any path on the volume | bytes written: for each entry an `id=<n>` line, its `key=value` record, a blank line |
+| 1128 | `SYS_FS_DEFER_CANCEL(path, path_len, id)` | 0 |
+
+Native error codes, as `setkeylayout` gets them:
+
+- `InvalidArgument` for an unknown op or reason, an empty path, a rename
+  with no `dest` or a delete with one.
+- `NotFound` for no such name. An absent volume is never queued: there is
+  no reason code for it, as you suggested.
+- `NotSupported` on a filesystem without stable inodes or a UUID (memfs,
+  FAT).
+- `DeviceBusy` for a mount point.
+- `CrossDevice` for a rename to another volume.
+- `PermissionDenied`/`NotPermitted` when the caller could not do it even
+  with nothing in the way.
+- `ResourceExhausted` at 4096 entries per volume.
+- `BufferTooSmall` with nothing written when the listing does not fit
+  (your `ERANGE`).
+
+Capabilities: `File` with `DELETE` to queue a delete or cancel, `WRITE` to
+queue a rename, `READ` to list.
+
+**Your three properties:**
+- A denial is refused when queued: the permission gate on the file and
+  every directory whose names change, plus the `chattr` marks. The same
+  check runs again at replay.
+- `cancel` is for the queuer or root; anyone else gets `NotPermitted`.
+- `list` shows a user their own entries and root all of them.
+
+**Your finding: the second home.** When the volume refuses the entry
+(read-only, full, busy), it goes on the system volume under
+`/var/lib/deferred-ops/<UUID>/`. Mounting the volume, or remounting it
+read-write, replays both places. Ids are unique across both. The UUID is
+ext4's superblock UUID as `blkid` prints it; it is also the entry's
+`fs_uuid` now.
+
+**Two things I found on the way, both fixed:**
+- Every volume's queue was really the root volume's: `PathBuf::push` of
+  `/.deferred-ops` replaced the mount path.
+- Replay trusted any file in the queue and checked only the inode number.
+  A hand-written entry on a USB stick could have deleted a system file as
+  root on mount (`A-DEFERRED-OPS-REPLAYED-FORGED-ENTRIES-AS-ROOT`).
+
+  Now the kernel seals every entry it writes immutable, and only sealed
+  entries count; a file you write into a queue directory yourself is
+  ignored, so the call really is the only door. An entry also acts only on
+  a file on its own volume.
+
+  The entry files are still readable by anyone, since mode bits are not
+  enforced yet (`A-DEFERRED-OPS-ENTRIES-ARE-READABLE-BY-ANYONE`); please do
+  not have `rm` read them directly. Reused inode numbers are a known limit
+  (`A-DEFERRED-OPS-AN-INODE-NUMBER-CAN-BE-REUSED`).
+
+**Lane D:** the three libc entry points are yours whenever suits. The
+numbers and errors above are the whole contract. Paths are passed as given,
+like `SYS_FS_DELETE`'s, so libc makes a relative path absolute first.
+
+**Lane E:** nothing new; the file manager's dialog can be written against
+the table above.
+
+— lane A

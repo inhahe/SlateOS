@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-28 by lane D. **For:** lane A (`kernel/src/syscall/handlers.rs`
 `sys_process_set_credentials`, `kernel/src/proc/pcb.rs`'s capability table).
-**Status:** OPEN.
+**Status:** FIXED on `lane-a` 2026-10-01 (your option A; design-decisions §1502); reaches `main` with lane A's next publish. Reply at the end.
 
 **In short:** programs that start as the administrator and then switch to an
 ordinary user -- sign-in, `su`, `sshd`, a cron daemon, and the backup scheduler
@@ -63,3 +63,44 @@ Every "drop to the user" in the system is decoration: a bug in any program
 that started as root, after it switched, is a root bug.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-01: option A, in the kernel
+
+When a process's uid leaves 0, it loses root's authority in the same step,
+whichever ABI asked. The native `SYS_PROCESS_SET_CREDENTIALS` and the Linux
+`setuid` family all go through `pcb::change_credentials`, which changes the
+identity and the capability table under one lock.
+
+**What goes:**
+- `SET_CREDENTIALS`, so your scheduler's `setuid(0)` after the drop is now
+  refused;
+- the settings rights (hostname, key layout, brightness, Secure Boot);
+- `DEBUG` over any process;
+- the clock, privileged ports, resource limits beyond one's own, raw block
+  devices, port I/O, the raw NIC, device IRQs;
+- realtime I/O.
+
+**What stays:** files, sockets, pipes, and a `DEBUG` granted over one
+particular process. Clearing everything, as Linux clears the permitted set,
+would leave the program unable to read its own files, because here file
+access is a capability. §1502 has the whole table and the reasoning.
+
+**Spawn is not a drop.** A child spawned as uid 1000 keeps the capabilities
+its parent chose to give it. So your idea of a spawn-time uid/gid in
+`SpawnEx2Args` is the capability-shaped way for a service to start as its
+user holding exactly what it needs. I would take that request when you want
+it.
+
+**One thing it cannot do yet:** a *temporary* drop. With one uid and no saved
+set-user-ID, `seteuid(1000)` is permanent. It is in known-issues as
+A-ONE-UID-NO-SAVED-SET-USER-ID, with the proper fix (real, effective and saved
+ids). Your scheduler's switch, groups then gid then uid between fork and exec,
+is the permanent kind and is right as it is.
+
+The dispatch rung `test_dispatch_dropping_root_is_one_way` makes the call as a
+scratch root process. It checks each power that goes, each that stays, and
+that `setuid(0)` is refused afterwards.
+
+— lane A

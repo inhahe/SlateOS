@@ -35,20 +35,33 @@
 //!   (closed or `SHUT_WR`), reads drain remaining bytes then return 0
 //!   (EOF).  When the peer's read side is gone (closed or `SHUT_RD`),
 //!   writes fail with `ChannelClosed` (broken pipe / `EPIPE`).
+//! - **Descriptors on the bytes** (a Unix socket's `SCM_RIGHTS`): a send may
+//!   carry a [`Bundle`], which rides on the bytes that send wrote -- a
+//!   *mark* over that stretch of the ring. A receive that reaches a mark
+//!   takes its descriptors and stops at the stretch's end, as Linux's
+//!   `unix_stream_read_generic` stops after the buffer whose descriptors it
+//!   took ([`try_recv_marked`]). Only `ipc::unix_socket` attaches marks, to
+//!   pairs no process holds as a stream socket, and it reads them only
+//!   through [`try_recv_marked`]; the other receives would drop a mark they
+//!   met, as `read(2)` drops a socket's descriptors.
 //!
 //! ## Lock Ordering
 //!
 //! `PAIRS` → `SCHED` (send/recv may call `sched::wake()`), identical to
-//! the pipe subsystem.
+//! the pipe subsystem. A [`Bundle`] dropped under `PAIRS` only queues its
+//! releases (`super::passed`); the calls that can drop one drain the queue
+//! once `PAIRS` is released.
 
+use super::passed::{self, Bundle};
+pub use super::waiters::Patience;
 use super::waiters::{
-    WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
+    Deadline, WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -63,6 +76,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// order of magnitude).  With 16 KiB pages this is exactly 4 pages per
 /// direction, 8 per pair.
 const DEFAULT_BUFFER_CAPACITY: usize = 64 * 1024;
+
+/// The most one send, receive or peek can move: a direction's ring holds
+/// [`DEFAULT_BUFFER_CAPACITY`] bytes and is never resized, and every transfer
+/// is partial.  The syscall layer bounds its copies of user buffers by this
+/// (`SOCKETPAIR_CALL_MAX` in `syscall/handlers.rs`), so a resize, if one is
+/// ever added, must raise it -- or those copies silently truncate.
+pub const MAX_TRANSFER: usize = DEFAULT_BUFFER_CAPACITY;
 
 /// `shutdown(how)` — disable further receives on this endpoint.
 pub const SHUT_RD: u32 = 0;
@@ -132,11 +152,29 @@ impl StreamSocketHandle {
 // Ring buffer
 // ---------------------------------------------------------------------------
 
-/// A single-direction ring buffer (identical mechanics to the pipe ring).
+/// Descriptors riding on a stretch of a direction's bytes: the ones a Unix
+/// socket's send attached, on the bytes that send wrote. Linux puts a
+/// `sendmsg`'s descriptors on its first buffer, which is what one send here
+/// writes.
+struct Mark {
+    /// The stretch, `[at, end)`, in the direction's running count of bytes
+    /// (see [`Ring::taken`]).
+    at: u64,
+    end: u64,
+    bundle: Bundle,
+}
+
+/// A single-direction ring buffer (identical mechanics to the pipe ring),
+/// with the marks on its bytes.
 struct Ring {
     buf: Vec<u8>,
     head: usize,
     len: usize,
+    /// Bytes ever read out: the running count of the byte at `head`.
+    taken: u64,
+    /// Marked stretches no receive has reached yet, in order; each starts at
+    /// or after `taken`.
+    marks: VecDeque<Mark>,
 }
 
 impl Ring {
@@ -145,6 +183,8 @@ impl Ring {
             buf: vec![0u8; capacity],
             head: 0,
             len: 0,
+            taken: 0,
+            marks: VecDeque::new(),
         }
     }
 
@@ -178,6 +218,19 @@ impl Ring {
         to_write
     }
 
+    /// Copy bytes from the front of the ring without consuming them
+    /// (`MSG_PEEK`). Returns bytes copied (may be partial).
+    fn peek_bytes(&self, out: &mut [u8]) -> usize {
+        let to_read = out.len().min(self.len);
+        let cap = self.buf.len();
+        for (i, slot) in out.iter_mut().take(to_read).enumerate() {
+            // `head < cap` and `i < len <= cap`, so the sum is below 2 * cap.
+            let at = self.head.wrapping_add(i).checked_rem(cap).unwrap_or(0);
+            *slot = self.buf.get(at).copied().unwrap_or(0);
+        }
+        to_read
+    }
+
     /// Read bytes from the ring.  Returns bytes read (may be partial).
     #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn read_bytes(&mut self, out: &mut [u8]) -> usize {
@@ -198,7 +251,61 @@ impl Ring {
 
         self.head = (self.head + to_read) % cap;
         self.len -= to_read;
+        self.taken = self.taken.wrapping_add(to_read as u64);
         to_read
+    }
+
+    /// Write `data` with `bundle` riding on the bytes written. When none fit,
+    /// the bundle comes back.
+    fn write_marked(&mut self, data: &[u8], bundle: Bundle) -> (usize, Option<Bundle>) {
+        let at = self.taken.wrapping_add(self.len as u64);
+        let n = self.write_bytes(data);
+        if n == 0 {
+            return (0, Some(bundle));
+        }
+        self.marks.push_back(Mark {
+            at,
+            end: at.wrapping_add(n as u64),
+            bundle,
+        });
+        (n, None)
+    }
+
+    /// Read -- or, with `peek`, copy -- up to `out.len()` bytes as a Unix
+    /// socket's receive takes them: one that reaches a marked stretch takes
+    /// its descriptors (peeking, a copy of them) and stops at the stretch's
+    /// end. A read that starts inside a stretch whose descriptors were taken
+    /// already reads on past it, the mark being gone.
+    fn take(&mut self, out: &mut [u8], peek: bool) -> (usize, Option<Bundle>) {
+        // A mark no receive reached cannot be behind the bytes still here --
+        // unless a plain read went past it, which a marked pair never has.
+        // Dropped rather than kept: its stretch has been read.
+        while self.marks.front().is_some_and(|m| m.end <= self.taken) {
+            self.marks.pop_front();
+        }
+        let want = out.len().min(self.len);
+        let reach = self.taken.wrapping_add(want as u64);
+        let (n, marked) = match self.marks.front() {
+            Some(m) if m.at < reach => {
+                let stop = usize::try_from(m.end.wrapping_sub(self.taken)).unwrap_or(usize::MAX);
+                (want.min(stop), true)
+            }
+            _ => (want, false),
+        };
+        let Some(dst) = out.get_mut(..n) else {
+            return (0, None);
+        };
+        let got = if peek {
+            self.peek_bytes(dst)
+        } else {
+            self.read_bytes(dst)
+        };
+        let bundle = match (marked, peek) {
+            (false, _) => None,
+            (true, true) => self.marks.front().map(|m| m.bundle.clone()),
+            (true, false) => self.marks.pop_front().map(|m| m.bundle),
+        };
+        (got, bundle)
     }
 }
 
@@ -310,6 +417,110 @@ pub fn create() -> (StreamSocketHandle, StreamSocketHandle) {
     )
 }
 
+/// What a receive does with the bytes it finds.
+pub enum RecvInto<'a> {
+    /// Takes them into this buffer.
+    Buffer(&'a mut [u8]),
+    /// Only says whether there are any (`Ok(1)`), taking none: what a receive
+    /// whose buffer cannot take them answers before its copy. Linux's
+    /// `unix_stream_read_generic` consumes a buffer only once it is copied,
+    /// so a fault leaves the bytes for the next receive.
+    Probe,
+}
+
+/// What a send does with the room it finds.
+pub enum SendFrom<'a> {
+    /// Puts these bytes there.
+    Data(&'a [u8]),
+    /// Only says whether there is room (`Ok(1)`), writing nothing: what a
+    /// send whose buffer cannot be read answers before its copy.
+    Probe,
+}
+
+/// The one body of [`send`], [`try_send`], [`send_timeout`] and
+/// [`probe_send`]: they differ only in how long they wait for room
+/// ([`Patience`]) and in what they put there.
+///
+/// A send that can never be received (our write side shut, the peer closed
+/// or its read side shut) is `ChannelClosed` first. With room, the bytes go
+/// in -- as many as fit -- and the peer's readers are woken; without, the
+/// wait `patience` allows: `WouldBlock`, `TimedOut`, or a park that a
+/// deliverable signal ends with `Interrupted`.
+#[allow(clippy::indexing_slicing)]
+fn send_with(
+    handle: StreamSocketHandle,
+    from: &SendFrom<'_>,
+    patience: Patience,
+) -> KernelResult<usize> {
+    if let SendFrom::Data(data) = from
+        && data.is_empty()
+    {
+        return Err(KernelError::InvalidArgument);
+    }
+    let e = handle.endpoint();
+    let peer = e ^ 1;
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let mut deadline = Deadline::new();
+
+    loop {
+        {
+            let mut table = PAIRS.lock();
+            let pair = table
+                .get_mut(&handle.pair_id())
+                .ok_or(KernelError::InvalidHandle)?;
+
+            // Deregister first: neither a timer wake nor a signal wake clears
+            // the entry, and every path below either returns or re-registers.
+            // A stale entry would later "wake" whichever task had since
+            // recycled this task ID.
+            pair.ep[e].writer_waiters.remove(task);
+
+            if pair.send_broken(e) {
+                return Err(KernelError::ChannelClosed);
+            }
+
+            match from {
+                SendFrom::Data(data) => {
+                    let written = pair.ring[e].write_bytes(data);
+                    if written > 0 {
+                        let readers = pair.ep[peer].reader_waiters.take_all();
+                        drop(table);
+                        wake_all(readers);
+                        super::stats::stream_socket_write(written as u64);
+                        return Ok(written);
+                    }
+                }
+                SendFrom::Probe => {
+                    if pair.ring[e].writable() > 0 {
+                        return Ok(1);
+                    }
+                }
+            }
+
+            // Full: no wait, a timeout, or a park.
+            if let Some(err) = deadline.ends_now(patience, task) {
+                return Err(err);
+            }
+
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                return Err(KernelError::Interrupted);
+            }
+
+            pair.ep[e].writer_waiters.insert(task);
+        }
+
+        super::stats::stream_socket_write_block();
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, handle.raw()),
+        );
+    }
+}
+
 /// Send bytes on an endpoint (blocking).
 ///
 /// Writes as many bytes as possible into the endpoint's outgoing ring.
@@ -321,52 +532,9 @@ pub fn create() -> (StreamSocketHandle, StreamSocketHandle) {
 /// - `Err(ChannelClosed)` — peer's read side is gone (broken pipe).
 /// - `Err(InvalidArgument)` — `data` is empty.
 /// - `Err(InvalidHandle)` — handle does not refer to a live pair.
-#[allow(clippy::indexing_slicing)]
+/// - `Err(Interrupted)` — a deliverable signal arrived while it waited.
 pub fn send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
-    if data.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    let e = handle.endpoint();
-    let peer = e ^ 1;
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-
-    loop {
-        {
-            let mut table = PAIRS.lock();
-            let pair = table
-                .get_mut(&handle.pair_id())
-                .ok_or(KernelError::InvalidHandle)?;
-
-            // Deregister first: on any iteration after the first we may still
-            // be listed (a signal wake does not clear the entry), and every
-            // path below either returns or re-registers.
-            pair.ep[e].writer_waiters.remove(task);
-
-            if pair.send_broken(e) {
-                return Err(KernelError::ChannelClosed);
-            }
-
-            let written = pair.ring[e].write_bytes(data);
-            if written > 0 {
-                let readers = pair.ep[peer].reader_waiters.take_all();
-                drop(table);
-                wake_all(readers);
-                super::stats::stream_socket_write(written as u64);
-                return Ok(written);
-            }
-
-            // Honour a deliverable signal before parking.
-            if deliverable_signal_pending(pid) {
-                return Err(KernelError::Interrupted);
-            }
-
-            pair.ep[e].writer_waiters.insert(task);
-        }
-
-        super::stats::stream_socket_write_block();
-        park_interruptible(pid, task);
-    }
+    send_with(handle, &SendFrom::Data(data), Patience::Forever)
 }
 
 /// Send bytes on an endpoint (non-blocking).
@@ -377,36 +545,93 @@ pub fn send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
 /// - `Err(WouldBlock)` — outgoing ring is full.
 /// - `Err(ChannelClosed)` — peer's read side is gone.
 /// - `Err(InvalidArgument)` / `Err(InvalidHandle)`.
-#[allow(clippy::indexing_slicing)]
 pub fn try_send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
-    if data.is_empty() {
+    send_with(handle, &SendFrom::Data(data), Patience::Never)
+}
+
+/// The one body of [`recv`], [`try_recv`], [`recv_timeout`] and
+/// [`probe_recv`]: they differ only in how long they wait for bytes
+/// ([`Patience`]) and in what they do with them.
+///
+/// Bytes there are taken (or, probing, reported) and the peer's writers
+/// woken; none and the stream ended (our read side shut, the peer closed or
+/// its write side shut) is end of file, `Ok(0)`; none otherwise, the wait
+/// `patience` allows: `WouldBlock`, `TimedOut`, or a park that a deliverable
+/// signal ends with `Interrupted`.
+#[allow(clippy::indexing_slicing)]
+fn recv_with(
+    handle: StreamSocketHandle,
+    into: &mut RecvInto<'_>,
+    patience: Patience,
+) -> KernelResult<usize> {
+    if let RecvInto::Buffer(buf) = into
+        && buf.is_empty()
+    {
         return Err(KernelError::InvalidArgument);
     }
     let e = handle.endpoint();
     let peer = e ^ 1;
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let mut deadline = Deadline::new();
 
-    let wake_readers;
-    let written;
-    {
-        let mut table = PAIRS.lock();
-        let pair = table
-            .get_mut(&handle.pair_id())
-            .ok_or(KernelError::InvalidHandle)?;
+    loop {
+        {
+            let mut table = PAIRS.lock();
+            let pair = table
+                .get_mut(&handle.pair_id())
+                .ok_or(KernelError::InvalidHandle)?;
 
-        if pair.send_broken(e) {
-            return Err(KernelError::ChannelClosed);
+            // Deregister first: neither a timer wake nor a signal wake clears
+            // the entry, and every path below either returns or re-registers.
+            // A stale entry would later "wake" whichever task had since
+            // recycled this task ID.
+            pair.ep[e].reader_waiters.remove(task);
+
+            match into {
+                RecvInto::Buffer(buf) => {
+                    let (n, dropped) = pair.ring[peer].take(buf, false);
+                    if n > 0 {
+                        let writers = pair.ep[peer].writer_waiters.take_all();
+                        drop(table);
+                        wake_all(writers);
+                        settle(dropped);
+                        super::stats::stream_socket_read(n as u64);
+                        return Ok(n);
+                    }
+                }
+                RecvInto::Probe => {
+                    if pair.ring[peer].len > 0 {
+                        return Ok(1);
+                    }
+                }
+            }
+
+            if pair.recv_eof(e) {
+                return Ok(0);
+            }
+
+            // Empty: no wait, a timeout, or a park.
+            if let Some(err) = deadline.ends_now(patience, task) {
+                return Err(err);
+            }
+
+            // Honour a deliverable signal before parking.  A timed wait maps
+            // the interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                return Err(KernelError::Interrupted);
+            }
+
+            pair.ep[e].reader_waiters.insert(task);
         }
 
-        written = pair.ring[e].write_bytes(data);
-        if written == 0 {
-            return Err(KernelError::WouldBlock);
-        }
-        wake_readers = pair.ep[peer].reader_waiters.take_all();
+        super::stats::stream_socket_read_block();
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, handle.raw()),
+        );
     }
-
-    wake_all(wake_readers);
-    super::stats::stream_socket_write(written as u64);
-    Ok(written)
 }
 
 /// Receive bytes on an endpoint (blocking).
@@ -420,52 +645,9 @@ pub fn try_send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> 
 /// - `Ok(0)` — EOF (peer write side gone, or local read side shut).
 /// - `Err(InvalidArgument)` — `buf` is empty.
 /// - `Err(InvalidHandle)`.
-#[allow(clippy::indexing_slicing)]
+/// - `Err(Interrupted)` — a deliverable signal arrived while it waited.
 pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
-    if buf.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    let e = handle.endpoint();
-    let peer = e ^ 1;
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-
-    loop {
-        {
-            let mut table = PAIRS.lock();
-            let pair = table
-                .get_mut(&handle.pair_id())
-                .ok_or(KernelError::InvalidHandle)?;
-
-            // Deregister first: on any iteration after the first we may still
-            // be listed (a signal wake does not clear the entry), and every
-            // path below either returns or re-registers.
-            pair.ep[e].reader_waiters.remove(task);
-
-            let n = pair.ring[peer].read_bytes(buf);
-            if n > 0 {
-                let writers = pair.ep[peer].writer_waiters.take_all();
-                drop(table);
-                wake_all(writers);
-                super::stats::stream_socket_read(n as u64);
-                return Ok(n);
-            }
-
-            if pair.recv_eof(e) {
-                return Ok(0);
-            }
-
-            // Honour a deliverable signal before parking.
-            if deliverable_signal_pending(pid) {
-                return Err(KernelError::Interrupted);
-            }
-
-            pair.ep[e].reader_waiters.insert(task);
-        }
-
-        super::stats::stream_socket_read_block();
-        park_interruptible(pid, task);
-    }
+    recv_with(handle, &mut RecvInto::Buffer(buf), Patience::Forever)
 }
 
 /// Receive bytes on an endpoint (non-blocking).
@@ -476,40 +658,8 @@ pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
 /// - `Ok(0)` — EOF.
 /// - `Err(WouldBlock)` — ring is empty but the peer is still writable.
 /// - `Err(InvalidArgument)` / `Err(InvalidHandle)`.
-#[allow(clippy::indexing_slicing)]
 pub fn try_recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
-    if buf.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    let e = handle.endpoint();
-    let peer = e ^ 1;
-
-    let mut wake_writers = Vec::new();
-    let result;
-    {
-        let mut table = PAIRS.lock();
-        let pair = table
-            .get_mut(&handle.pair_id())
-            .ok_or(KernelError::InvalidHandle)?;
-
-        let n = pair.ring[peer].read_bytes(buf);
-        if n > 0 {
-            wake_writers = pair.ep[peer].writer_waiters.take_all();
-            result = Ok(n);
-        } else if pair.recv_eof(e) {
-            result = Ok(0);
-        } else {
-            result = Err(KernelError::WouldBlock);
-        }
-    }
-
-    wake_all(wake_writers);
-    if let Ok(n) = result {
-        if n > 0 {
-            super::stats::stream_socket_read(n as u64);
-        }
-    }
-    result
+    recv_with(handle, &mut RecvInto::Buffer(buf), Patience::Never)
 }
 
 /// Receive bytes with a timeout (nanoseconds).
@@ -523,101 +673,16 @@ pub fn try_recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usiz
 /// - `Ok(0)` — EOF.
 /// - `Err(TimedOut)` — no data arrived before the deadline.
 /// - `Err(InvalidArgument)` / `Err(InvalidHandle)`.
-#[allow(clippy::indexing_slicing)]
 pub fn recv_timeout(
     handle: StreamSocketHandle,
     buf: &mut [u8],
     timeout_ns: u64,
 ) -> KernelResult<usize> {
-    if buf.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    let e = handle.endpoint();
-    let peer = e ^ 1;
-
-    // Fast path.
-    {
-        let mut table = PAIRS.lock();
-        let pair = table
-            .get_mut(&handle.pair_id())
-            .ok_or(KernelError::InvalidHandle)?;
-
-        let n = pair.ring[peer].read_bytes(buf);
-        if n > 0 {
-            let writers = pair.ep[peer].writer_waiters.take_all();
-            drop(table);
-            wake_all(writers);
-            super::stats::stream_socket_read(n as u64);
-            return Ok(n);
-        }
-        if pair.recv_eof(e) {
-            return Ok(0);
-        }
-    }
-
-    if timeout_ns == 0 {
-        return Err(KernelError::TimedOut);
-    }
-
-    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
-
-    fn timeout_wake(tid: u64) {
-        if !sched::try_wake(tid) {
-            sched::defer_wake(tid);
-        }
-    }
-
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
-
-    loop {
-        {
-            let mut table = PAIRS.lock();
-            let pair = table.get_mut(&handle.pair_id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
-
-            // Deregister first: neither a timer wake nor a signal wake clears
-            // the entry, and every path below either returns or re-registers.
-            // A stale entry would later "wake" whichever task had since
-            // recycled this task ID.
-            pair.ep[e].reader_waiters.remove(task);
-
-            let n = pair.ring[peer].read_bytes(buf);
-            if n > 0 {
-                let writers = pair.ep[peer].writer_waiters.take_all();
-                crate::hrtimer::cancel(timer_handle);
-                drop(table);
-                wake_all(writers);
-                super::stats::stream_socket_read(n as u64);
-                return Ok(n);
-            }
-
-            if pair.recv_eof(e) {
-                crate::hrtimer::cancel(timer_handle);
-                return Ok(0);
-            }
-
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
-            }
-
-            // Honour a deliverable signal before parking.  A timed wait maps
-            // the interruption to EINTR (no restart) at the syscall layer.
-            if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::Interrupted);
-            }
-
-            pair.ep[e].reader_waiters.insert(task);
-        }
-
-        super::stats::stream_socket_read_block();
-        park_interruptible(pid, task);
-    }
+    recv_with(
+        handle,
+        &mut RecvInto::Buffer(buf),
+        Patience::Upto(timeout_ns),
+    )
 }
 
 /// Send bytes with a timeout (nanoseconds).
@@ -631,102 +696,36 @@ pub fn recv_timeout(
 /// - `Err(TimedOut)` — no space before the deadline.
 /// - `Err(ChannelClosed)` — peer's read side is gone.
 /// - `Err(InvalidArgument)` / `Err(InvalidHandle)`.
-#[allow(clippy::indexing_slicing)]
 pub fn send_timeout(
     handle: StreamSocketHandle,
     data: &[u8],
     timeout_ns: u64,
 ) -> KernelResult<usize> {
-    if data.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    let e = handle.endpoint();
-    let peer = e ^ 1;
+    send_with(handle, &SendFrom::Data(data), Patience::Upto(timeout_ns))
+}
 
-    // Fast path.
-    {
-        let mut table = PAIRS.lock();
-        let pair = table
-            .get_mut(&handle.pair_id())
-            .ok_or(KernelError::InvalidHandle)?;
+/// Whether a receive on the endpoint would deliver bytes, waiting for them as
+/// long as `patience` allows, taking none: what [`recv`] (`Forever`),
+/// [`try_recv`] (`Never`) and [`recv_timeout`] (`Upto`) would do, short of
+/// moving a byte. `Ok(true)`: bytes are there. `Ok(false)`: end of file.
+///
+/// # Errors
+///
+/// Theirs: `WouldBlock`, `TimedOut`, `Interrupted`, `InvalidHandle`.
+pub fn probe_recv(handle: StreamSocketHandle, patience: Patience) -> KernelResult<bool> {
+    recv_with(handle, &mut RecvInto::Probe, patience).map(|n| n > 0)
+}
 
-        if pair.send_broken(e) {
-            return Err(KernelError::ChannelClosed);
-        }
-
-        let written = pair.ring[e].write_bytes(data);
-        if written > 0 {
-            let readers = pair.ep[peer].reader_waiters.take_all();
-            drop(table);
-            wake_all(readers);
-            super::stats::stream_socket_write(written as u64);
-            return Ok(written);
-        }
-    }
-
-    if timeout_ns == 0 {
-        return Err(KernelError::TimedOut);
-    }
-
-    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
-
-    fn timeout_wake(tid: u64) {
-        if !sched::try_wake(tid) {
-            sched::defer_wake(tid);
-        }
-    }
-
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
-
-    loop {
-        {
-            let mut table = PAIRS.lock();
-            let pair = table.get_mut(&handle.pair_id()).ok_or_else(|| {
-                crate::hrtimer::cancel(timer_handle);
-                KernelError::InvalidHandle
-            })?;
-
-            // Deregister first: neither a timer wake nor a signal wake clears
-            // the entry, and every path below either returns or re-registers.
-            // A stale entry would later "wake" whichever task had since
-            // recycled this task ID.
-            pair.ep[e].writer_waiters.remove(task);
-
-            if pair.send_broken(e) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
-            }
-
-            let written = pair.ring[e].write_bytes(data);
-            if written > 0 {
-                let readers = pair.ep[peer].reader_waiters.take_all();
-                crate::hrtimer::cancel(timer_handle);
-                drop(table);
-                wake_all(readers);
-                super::stats::stream_socket_write(written as u64);
-                return Ok(written);
-            }
-
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
-            }
-
-            // Honour a deliverable signal before parking.  A timed wait maps
-            // the interruption to EINTR (no restart) at the syscall layer.
-            if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::Interrupted);
-            }
-
-            pair.ep[e].writer_waiters.insert(task);
-        }
-
-        super::stats::stream_socket_write_block();
-        park_interruptible(pid, task);
-    }
+/// Whether a send on the endpoint would find room, waiting for it as long as
+/// `patience` allows, writing nothing: what [`send`], [`try_send`] and
+/// [`send_timeout`] would do, short of moving a byte.
+///
+/// # Errors
+///
+/// Theirs: `ChannelClosed` above all (it can never be received),
+/// `WouldBlock`, `TimedOut`, `Interrupted`, `InvalidHandle`.
+pub fn probe_send(handle: StreamSocketHandle, patience: Patience) -> KernelResult<()> {
+    send_with(handle, &SendFrom::Probe, patience).map(|_| ())
 }
 
 /// Duplicate an endpoint handle reference.
@@ -770,6 +769,9 @@ pub fn close(handle: StreamSocketHandle) {
     // and broken-pipe are permanent broadcast conditions, so a task left
     // parked here would never be woken by anything else.
     let mut wakes = Vec::new();
+    // Descriptors on bytes this end will now never read: released once
+    // PAIRS is.
+    let mut unread: Vec<Mark> = Vec::new();
 
     {
         let mut table = PAIRS.lock();
@@ -779,6 +781,7 @@ pub fn close(handle: StreamSocketHandle) {
                 return;
             }
             pair.ep[e].closed = true;
+            unread.extend(pair.ring[peer].marks.drain(..));
             // Wake the peer: its readers will observe EOF, its writers a
             // broken pipe.
             wakes = pair.ep[peer].reader_waiters.take_all();
@@ -792,13 +795,21 @@ pub fn close(handle: StreamSocketHandle) {
             wakes.append(&mut pair.ep[e].writer_waiters.take_all());
 
             if pair.ep[0].closed && pair.ep[1].closed {
-                table.remove(&handle.pair_id());
+                if let Some(mut gone) = table.remove(&handle.pair_id()) {
+                    for ring in &mut gone.ring {
+                        unread.extend(ring.marks.drain(..));
+                    }
+                }
                 super::stats::stream_socket_destroyed();
             }
         }
     }
 
     wake_all(wakes);
+    if !unread.is_empty() {
+        drop(unread);
+        passed::drain();
+    }
 }
 
 /// Shut down one or both directions of an endpoint (`shutdown(2)`).
@@ -851,6 +862,135 @@ pub fn shutdown(handle: StreamSocketHandle, how: u32) -> KernelResult<()> {
 
     wake_all(wakes);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Descriptors on the bytes (a Unix socket's SCM_RIGHTS)
+// ---------------------------------------------------------------------------
+
+/// Release what a plain receive dropped: a mark it could not hand on. Call
+/// with `PAIRS` released.
+fn settle(dropped: Option<Bundle>) {
+    if dropped.is_some() {
+        drop(dropped);
+        passed::drain();
+    }
+}
+
+/// Send `data` without blocking, with `bundle` riding on the bytes this
+/// writes (see the module documentation).
+///
+/// # Errors
+///
+/// As [`try_send`] -- `WouldBlock` when the ring is full, `ChannelClosed`,
+/// `InvalidArgument` for no data, `InvalidHandle` -- with the bundle handed
+/// back, for the caller to try again or drop.
+#[allow(clippy::indexing_slicing)]
+pub fn try_send_marked(
+    handle: StreamSocketHandle,
+    data: &[u8],
+    bundle: Bundle,
+) -> Result<usize, (KernelError, Bundle)> {
+    if data.is_empty() {
+        return Err((KernelError::InvalidArgument, bundle));
+    }
+    let e = handle.endpoint();
+    let peer = e ^ 1;
+    let readers;
+    let written;
+    {
+        let mut table = PAIRS.lock();
+        let Some(pair) = table.get_mut(&handle.pair_id()) else {
+            return Err((KernelError::InvalidHandle, bundle));
+        };
+        if pair.send_broken(e) {
+            return Err((KernelError::ChannelClosed, bundle));
+        }
+        let back;
+        (written, back) = pair.ring[e].write_marked(data, bundle);
+        if let Some(bundle) = back {
+            return Err((KernelError::WouldBlock, bundle));
+        }
+        readers = pair.ep[peer].reader_waiters.take_all();
+    }
+    wake_all(readers);
+    super::stats::stream_socket_write(written as u64);
+    Ok(written)
+}
+
+/// What [`try_recv_marked`] took.
+#[derive(Debug)]
+pub struct Took {
+    /// Bytes copied out; 0 at end of file.
+    pub len: usize,
+    /// The descriptors the bytes carried, if they reached a mark: the very
+    /// ones, or -- peeking -- a copy of the mark's (`Bundle::into_passed`
+    /// then takes new references).
+    pub bundle: Option<Bundle>,
+}
+
+/// Receive up to `buf.len()` bytes without blocking -- or, with `peek`, copy
+/// them and leave them -- as a Unix socket's receive does: stopping at the
+/// end of the first marked stretch reached, and taking its descriptors.
+///
+/// # Errors
+///
+/// `WouldBlock` when nothing is waiting and more may come; `InvalidHandle`.
+/// End of file, or an empty `buf`, is `Ok` with `len` 0.
+#[allow(clippy::indexing_slicing)]
+pub fn try_recv_marked(
+    handle: StreamSocketHandle,
+    buf: &mut [u8],
+    peek: bool,
+) -> KernelResult<Took> {
+    let e = handle.endpoint();
+    let peer = e ^ 1;
+    let mut writers = Vec::new();
+    let took = {
+        let mut table = PAIRS.lock();
+        let pair = table
+            .get_mut(&handle.pair_id())
+            .ok_or(KernelError::InvalidHandle)?;
+        let (len, bundle) = pair.ring[peer].take(buf, peek);
+        if len == 0 && !buf.is_empty() && !pair.recv_eof(e) {
+            return Err(KernelError::WouldBlock);
+        }
+        if len > 0 && !peek {
+            writers = pair.ep[peer].writer_waiters.take_all();
+        }
+        Took { len, bundle }
+    };
+    wake_all(writers);
+    if took.len > 0 && !peek {
+        super::stats::stream_socket_read(took.len as u64);
+    }
+    Ok(took)
+}
+
+/// Visit each bundle waiting to be received at `handle`'s end, in order --
+/// what `unix_socket`'s garbage collection follows.
+#[allow(clippy::indexing_slicing)]
+pub fn bundles_toward(handle: StreamSocketHandle, visit: &mut dyn FnMut(&Bundle)) {
+    let peer = handle.endpoint() ^ 1;
+    let table = PAIRS.lock();
+    if let Some(pair) = table.get(&handle.pair_id()) {
+        for m in &pair.ring[peer].marks {
+            visit(&m.bundle);
+        }
+    }
+}
+
+/// Take every bundle waiting to be received at `handle`'s end, leaving the
+/// bytes as plain data: garbage collection found that no process can ever
+/// receive them. The caller drops them once it holds no lock.
+#[allow(clippy::indexing_slicing)]
+pub fn take_bundles_toward(handle: StreamSocketHandle) -> Vec<Bundle> {
+    let peer = handle.endpoint() ^ 1;
+    let mut table = PAIRS.lock();
+    match table.get_mut(&handle.pair_id()) {
+        Some(pair) => pair.ring[peer].marks.drain(..).map(|m| m.bundle).collect(),
+        None => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------

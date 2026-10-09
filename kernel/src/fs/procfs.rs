@@ -21,11 +21,12 @@
 //! ├── cacheinfo      Buffer cache and VFS dcache statistics
 //! ├── locks          Advisory file lock information
 //! ├── fdinfo         Open file handle listing
-//! ├── diskstats      Block device statistics
+//! ├── diskstats      Per-device block I/O counts (Linux 6.6's layout)
 //! ├── interrupts     APIC timer and IRQ state
 //! ├── devices        PCI device listing
 //! ├── net            Network interface configuration
-//! ├── vmstat         Virtual memory statistics (frames, swap, zram, OOM)
+//! ├── vmstat         Virtual memory statistics (frames, swap, zram, OOM;
+//! │                  and Linux's pgpgin/pgpgout/pswpin/pswpout)
 //! ├── buddyinfo      Buddy allocator free blocks per order
 //! ├── swaps          Active swap devices with usage and priority
 //! ├── fsstats        Per-filesystem debug statistics
@@ -76,6 +77,12 @@ impl ProcFs {
         Self
     }
 }
+
+/// Root files that are empty on Linux when there is nothing to list, which
+/// the self-test's non-empty check lets be. `locks` is one since 2026-10-01
+/// (`gen_locks`), and the check, never told, stopped the whole procfs battery
+/// at it on its first boot (rq42).
+const EMPTY_WHEN_IDLE: &[&str] = &["locks"];
 
 /// Names of virtual files in the procfs root.
 const ROOT_FILES: &[&str] = &[
@@ -148,9 +155,7 @@ const ROOT_FILES: &[&str] = &[
     "freeze",
     "sealing",
     "recent",
-    "fileinfo",
     "fswalk",
-    "findex",
     "thumbcache",
     "bookmarks",
     "clipboard",
@@ -158,22 +163,16 @@ const ROOT_FILES: &[&str] = &[
     "contextmenu",
     "fileops",
     "fileselect",
-    "filetype",
-    "openwith",
-    "preview",
     "sidebar",
     "statusbar",
     "templates",
     "toolbar",
     "queryable",
-    "immutable",
     "fcomment",
     "rundialog",
     "notifcenter",
-    "appregistry",
     "systray",
     "taskbar",
-    "startmenu",
     "filepicker",
     "theme",
     "hotkeys",
@@ -229,7 +228,6 @@ const ROOT_FILES: &[&str] = &[
     "mousesettings",
     "touchpad",
     "powerprofile",
-    "defaultapps",
     "monitors",
     "fwsettings",
     "updatemgr",
@@ -284,7 +282,6 @@ const ROOT_FILES: &[&str] = &[
     "speechio",
     "mobilelink",
     "screenlock",
-    "appstore",
     "wintiling",
     "peninput",
     "brightness",
@@ -316,7 +313,6 @@ const ROOT_FILES: &[&str] = &[
     "snaplayout",
     "haptfeedback",
     "eyeprotect",
-    "pinnedapps",
     "inputmethod",
     "storagesense",
     "autofix",
@@ -340,7 +336,6 @@ const ROOT_FILES: &[&str] = &[
     "sysresource",
     "faceunlock",
     "usbpolicy",
-    "applaunch",
     "sysprofiler",
     "clipsync",
     "netusage",
@@ -412,7 +407,6 @@ const ROOT_FILES: &[&str] = &[
     "userprofile",
     "diskclean",
     "acl",
-    "associations",
     "logrotate",
     "powerwake",
     "diskio",
@@ -533,7 +527,6 @@ const ROOT_FILES: &[&str] = &[
     "cgmem",
     "vmfrag",
     "pidfd",
-    "columnview",
     "pathbar",
     "viewstate",
     "properties",
@@ -591,6 +584,8 @@ const PID_FILES: &[&str] = &[
     "loginuid",
     "sessionid",
     "io",
+    "wchan",
+    "mem",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -621,14 +616,11 @@ const PID_LINKS: &[&str] = &["cwd", "root", "exe"];
 ///   from each other; `prctl(PR_SET_NAME)` is per-thread).
 /// - `schedstat` — the thread's own CPU time, run-queue wait, and dispatch
 ///   count, all from real per-task accounting.
-///
-/// `stat`/`status` are intentionally omitted for now: their `ppid`,
-/// `tgid`, and `num_threads` fields need the owning process's context
-/// (a thread tid is not a process-table key), so serving them here would
-/// either fabricate those fields or require threading the owner pid
-/// through the per-thread generators — tracked as a follow-up in
-/// `todo.txt` rather than shipped wrong.
-const TASK_FILES: &[&str] = &["comm", "schedstat", "stat", "status"];
+/// - `stat`/`status` — the thread's own fields from its task, the
+///   process-wide ones (`ppid`, `Tgid`, `num_threads`, ...) from the owning
+///   process ([`gen_thread_stat`], [`gen_thread_status`]).
+/// - `wchan` — what the thread is waiting on ([`gen_wchan`]).
+const TASK_FILES: &[&str] = &["comm", "schedstat", "stat", "status", "wchan"];
 
 // ---------------------------------------------------------------------------
 // Content generators
@@ -1127,7 +1119,9 @@ fn gen_pid_mounts(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
-    let global = crate::fs::Vfs::mounts_full();
+    // The process's own mount namespace's table (`fs::mntns`), not the
+    // reader's: `/proc/<pid>/mounts` is about that process.
+    let global = crate::fs::Vfs::mounts_full_in(crate::fs::mntns::of_process(task_id));
     if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
         return Ok(render_container_mounts(&view, &global));
     }
@@ -1248,13 +1242,20 @@ fn gen_filesystems() -> Vec<u8> {
 
 /// `/proc/cmdline` — kernel command line.
 ///
-/// Reports a synthetic command line reflecting the boot configuration.
-/// In the future, this could read actual bootloader-provided arguments.
+/// The command line the machine was started with, as the bootloader passed
+/// it, and a newline -- Linux's format. An empty line when there was none.
+///
+/// Until 2026-10-01 this invented one -- `kernel=mintos cpus=N pages=16k` --
+/// although `boot::kernel_cmdline` holds the real line and its doc says
+/// nothing should fabricate one. The desktop reads this to tell a start for
+/// repair (`recovery`, `single`) from an ordinary one
+/// (`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`,
+/// part 3), and on an invented line it never could. Bytes, not text: a line
+/// that is not UTF-8 is still the line the machine was started with.
 fn gen_cmdline() -> Vec<u8> {
-    // Build a synthetic cmdline from boot state.
-    let cpu_count = crate::acpi::processor_count();
-    let text = format!("kernel=mintos cpus={cpu_count} pages=16k\n");
-    text.into_bytes()
+    let mut out = crate::boot::kernel_cmdline_bytes().map_or_else(Vec::new, <[u8]>::to_vec);
+    out.push(b'\n');
+    out
 }
 
 /// `/proc/loadavg` — system load average approximation.
@@ -1354,96 +1355,180 @@ fn gen_cacheinfo() -> Vec<u8> {
     text.into_bytes()
 }
 
-/// `/proc/locks` — advisory file lock information.
+/// `/proc/locks` — every advisory lock held, in Linux's format, which
+/// `lslocks` and `lsof` parse:
+///
+/// ```text
+/// 1: POSIX  ADVISORY  WRITE 1234 00:03:131074 0 EOF
+/// 2: OFDLCK ADVISORY  READ -1 00:03:131074 100 199
+/// 3: FLOCK  ADVISORY  WRITE 5678 00:03:131075 0 EOF
+/// ```
+///
+/// - the class: `POSIX` (a process's `fcntl` lock), `OFDLCK` (an open file
+///   description's), or `FLOCK` (whole-file);
+/// - `READ` or `WRITE`;
+/// - the holder's pid: the process for a POSIX lock, the process that took
+///   it for a `FLOCK`, -1 for an OFD lock, as Linux reports one;
+/// - the file as `major:minor:inode`: the device `stat` reports
+///   (`st_dev`, major 0, as Linux numbers its anonymous filesystems) and the
+///   inode. A file with no stable identity is `00:00:0`, and a memfd shows
+///   its id as the inode;
+/// - the first and last byte locked, `EOF` for an open end; `0 EOF` for a
+///   `FLOCK`, which is whole-file.
+///
+/// Empty when nothing is locked, as on Linux. Until 2026-10-01 it had a
+/// format of its own and listed `flock` locks only.
 fn gen_locks() -> Vec<u8> {
-    // Query the lock table directly via Vfs internal.
-    // We can use lock_query for individual paths, but for a full dump
-    // we need to access the table.  Use a simpler approach: just report
-    // that the lock subsystem is active.
-    let mut text = String::from("LOCK  TYPE       OWNER    PATH\n");
+    use crate::fs::reclock::{LockKey, RecordLockType};
 
-    // Access the global lock table through a helper on Vfs.
-    let lock_info = super::vfs::lock_table_dump();
-    if lock_info.is_empty() {
-        text.push_str("(no active locks)\n");
-    } else {
-        for (path, lock_type, owner) in &lock_info {
-            let type_str = match lock_type {
-                super::vfs::LockType::Shared => "SHARED   ",
-                super::vfs::LockType::Exclusive => "EXCLUSIVE",
-            };
-            text.push_str(&format!(
-                "FLOCK {} {:>8}  {}\n",
-                type_str,
-                owner,
-                path.display()
-            ));
-        }
+    let mut text = String::new();
+    let mut n: u64 = 0;
+    // The device as `stat` reports it (`vfs::dev_of`), not the mount's
+    // internal id, so `lslocks` can match a lock to a file's `st_dev`.
+    let file = |id: Option<super::vfs::FileId>| {
+        id.map_or((0, 0), |f| (super::vfs::dev_of(f.fs_id), f.ino))
+    };
+    for (key, lock) in crate::fs::reclock::dump() {
+        n = n.saturating_add(1);
+        let ofd = crate::fs::reclock::owner_is_ofd(lock.owner);
+        let class = if ofd { "OFDLCK" } else { "POSIX " };
+        let kind = match lock.lock_type {
+            RecordLockType::Read => "READ",
+            RecordLockType::Write => "WRITE",
+        };
+        let pid = if ofd {
+            -1
+        } else {
+            i64::try_from(lock.owner).unwrap_or(-1)
+        };
+        let (fs, ino): (u32, u64) = match key {
+            LockKey::File { id, .. } => file(id),
+            LockKey::MemFd(id) => (0, id),
+        };
+        let last = if lock.len == 0 {
+            String::from("EOF")
+        } else {
+            format!("{}", lock.end().saturating_sub(1))
+        };
+        text.push_str(&format!(
+            "{}: {} ADVISORY  {} {} 00:{:02x}:{} {} {}\n",
+            n, class, kind, pid, fs, ino, lock.start, last
+        ));
+    }
+    for info in super::vfs::lock_table_dump() {
+        n = n.saturating_add(1);
+        let kind = match info.lock_type {
+            super::vfs::LockType::Shared => "READ",
+            super::vfs::LockType::Exclusive => "WRITE",
+        };
+        let (fs, ino) = file(info.id);
+        text.push_str(&format!(
+            "{}: FLOCK  ADVISORY  {} {} 00:{:02x}:{} 0 EOF\n",
+            n, kind, info.pid, fs, ino
+        ));
     }
     text.into_bytes()
 }
 
-/// `/proc/diskstats` — block device statistics.
-fn gen_diskstats() -> Vec<u8> {
-    let devices = crate::blkdev::list_devices_full();
-    let cache_stats = super::cache::stats();
+/// `/proc/locks` lists record locks and `flock` locks in Linux's format.
+///
+/// Takes one of each on a scratch file, as owners no process uses, and
+/// checks the two lines; residue-free on every path.
+///
+/// # Errors
+///
+/// `InternalError` when a line is missing or malformed.
+pub fn self_test_locks() -> KernelResult<()> {
+    use crate::fs::reclock::{self, LockKey, RecordLockType};
 
-    let mut text = String::from("DEVICE     SECTORS      SIZE         RO    CACHE\n");
+    const PATH: &str = "/tmp/_procfs_locks_test";
+    const RECORD_PID: u64 = 9401;
+    let flock_owner = super::vfs::flock_description_owner(9402);
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = super::Vfs::remove(PATH);
+    super::Vfs::write_file(PATH, b"proc locks")?;
+    let key = LockKey::for_path(PATH);
+    let owner = reclock::posix_owner(RECORD_PID);
+    let taken = reclock::set(&key, owner, 10, 5, RecordLockType::Write)
+        .and_then(|()| super::Vfs::flock(PATH, flock_owner, super::vfs::LockType::Shared));
+    let text = gen_locks();
+    reclock::release_all(owner);
+    super::Vfs::funlock_all(flock_owner);
+    // Best effort: the file is this test's own scratch.
+    let _ = super::Vfs::remove(PATH);
+    taken?;
 
-    if devices.is_empty() {
-        text.push_str("(no block devices)\n");
-    } else {
-        for dev in &devices {
-            // Calculate size from sector count.
-            let bytes = dev.sector_count.saturating_mul(dev.sector_size as u64);
-            let size_str = if bytes >= 1_073_741_824 {
-                format!("{} GiB", bytes / 1_073_741_824)
-            } else if bytes >= 1_048_576 {
-                format!("{} MiB", bytes / 1_048_576)
-            } else if bytes >= 1024 {
-                format!("{} KiB", bytes / 1024)
-            } else {
-                format!("{} B", bytes)
-            };
-
-            let ro_str = if dev.read_only { "yes" } else { "no" };
-
-            text.push_str(&format!(
-                "{:<10} {:<12} {:<12} {:<5} {}/{}\n",
-                dev.name,
-                dev.sector_count,
-                size_str,
-                ro_str,
-                cache_stats.entries_used,
-                cache_stats.capacity,
-            ));
-        }
+    let ino = match &key {
+        LockKey::File { id: Some(id), .. } => id.ino,
+        _ => 0,
+    };
+    // Every byte of it is this function's own ASCII; anything else is a fault.
+    let text = core::str::from_utf8(&text).map_err(|_| KernelError::InternalError)?;
+    let posix = format!("POSIX  ADVISORY  WRITE {} ", RECORD_PID);
+    let flock = "FLOCK  ADVISORY  READ ";
+    let posix_ok = text
+        .lines()
+        .any(|l| l.contains(&posix) && l.ends_with(&format!(":{} 10 14", ino)));
+    let flock_ok = text
+        .lines()
+        .any(|l| l.contains(flock) && l.ends_with(&format!(":{} 0 EOF", ino)));
+    if !posix_ok || !flock_ok {
+        crate::serial_println!(
+            "[procfs]   FAIL: /proc/locks (POSIX line {}, FLOCK line {}):\n{}",
+            posix_ok,
+            flock_ok,
+            text
+        );
+        return Err(KernelError::InternalError);
     }
+    crate::serial_println!("[procfs] /proc/locks: record and flock locks, Linux's format: OK");
+    Ok(())
+}
 
-    // Cache summary.
-    let hit_rate = if cache_stats.reads > 0 {
-        cache_stats.hits.saturating_mul(100) / cache_stats.reads
-    } else {
-        0
-    };
-    text.push_str(&format!(
-        "\nBuffer cache: {} hits / {} reads ({}% hit rate), {} readaheads\n",
-        cache_stats.hits, cache_stats.reads, hit_rate, cache_stats.readaheads,
-    ));
-
-    // Device I/O activity tracking.
-    let io = crate::blkdev::io_stats();
-    let idle_secs = if io.last_io_tick > 0 {
-        let elapsed = crate::apic::tick_count().saturating_sub(io.last_io_tick);
-        elapsed / 100 // ~100 Hz timer
-    } else {
-        0
-    };
-    text.push_str(&format!(
-        "Device I/O: {} reads, {} writes, idle {} sec\n",
-        io.total_reads, io.total_writes, idle_secs,
-    ));
-
+/// `/proc/diskstats` -- block device statistics, in Linux 6.6's layout
+/// (`diskstats_show`): one line per device, `major minor name` and its
+/// seventeen counters, no header, as procps, `iostat` and every other reader
+/// parse it; procps refuses the whole file for one line that does not hold
+/// the first fourteen fields (lane B's
+/// `requests/b-a-procps-vmstat-reads-four-paging-counters-...`). Until
+/// 2026-10-08 it was a table of this kernel's own, with a header and a
+/// buffer-cache summary, which `vmstat -d` could not read.
+///
+/// The counts are the block layer's per-device statistics
+/// (`blkdev::DeviceStats`): requests, 512-byte sectors and milliseconds, for
+/// reads, writes and discards. Nothing here merges requests or flushes a
+/// device's cache, so the merge and flush counts are 0, and the registry
+/// runs one request at a time, so none is in progress when this is read; the
+/// device numbers are `stat`'s (`fs::devnum::for_block`).
+fn gen_diskstats() -> Vec<u8> {
+    use core::fmt::Write as _;
+    let ms = |ns: u64| ns / 1_000_000;
+    let mut text = String::new();
+    for (dev, st) in crate::blkdev::device_stats() {
+        let num = crate::fs::devnum::for_block(&dev.name);
+        let busy = ms(st.busy_ns());
+        // Writing to a `String` cannot fail.
+        let _ = writeln!(
+            text,
+            "{:4} {:7} {} {} 0 {} {} {} 0 {} {} 0 {} {} {} 0 {} {} {} {}",
+            num.major,
+            num.minor,
+            dev.name,
+            st.reads,
+            st.read_sectors,
+            ms(st.read_ns),
+            st.writes,
+            st.write_sectors,
+            ms(st.write_ns),
+            busy,
+            busy,
+            st.discards,
+            st.discard_sectors,
+            ms(st.discard_ns),
+            st.flushes,
+            ms(st.flush_ns),
+        );
+    }
     text.into_bytes()
 }
 
@@ -1690,7 +1775,42 @@ fn gen_vmstat() -> Vec<u8> {
     s.push_str(&format!("oom_events {}\n", info.oom_events));
     s.push_str(&format!("oom_kills {}\n", info.oom_kills));
 
+    s.push_str(&vmstat_paging_lines());
     s.into_bytes()
+}
+
+/// `/proc/vmstat`'s four Linux paging counters, alongside the native keys
+/// (lane B's `requests/b-a-procps-vmstat-reads-four-paging-counters-...`):
+/// procps' `vmstat` reads its `bi`/`bo` and `si`/`so` columns, and `-s`'s
+/// "paged in/out" and "pages swapped in/out" rows, from them, and a key it
+/// cannot find reads as 0.
+///
+/// - `pgpgin`, `pgpgout`: KiB read from and written to the block devices --
+///   Linux counts 512-byte sectors and halves them for this file
+///   (`vmstat_start`), whatever the name says -- from the block layer's
+///   per-device counts (`blkdev::device_stats`). A device unregistered since
+///   takes its counts with it.
+/// - `pswpin`, `pswpout`: pages read back from swap and written to it
+///   (`mm::swap::swap_traffic`), in this system's 16 KiB pages, the size
+///   `sysconf(_SC_PAGESIZE)` reports and `vmstat` converts these by.
+fn vmstat_paging_lines() -> String {
+    let (read_sectors, write_sectors) =
+        crate::blkdev::device_stats()
+            .iter()
+            .fold((0u64, 0u64), |(r, w), (_, st)| {
+                (
+                    r.saturating_add(st.read_sectors),
+                    w.saturating_add(st.write_sectors),
+                )
+            });
+    let (swapped_in, swapped_out) = crate::mm::swap::swap_traffic();
+    format!(
+        "pgpgin {}\npgpgout {}\npswpin {}\npswpout {}\n",
+        read_sectors / 2,
+        write_sectors / 2,
+        swapped_in,
+        swapped_out
+    )
 }
 
 /// `/proc/buddyinfo` — buddy allocator free block counts per order.
@@ -2242,12 +2362,8 @@ fn gen_security() -> Vec<u8> {
 /// and `Tgid`/`Pid` values are kept consistent with [`gen_pid_stat`] and
 /// the `getpid`/`getuid`/`getpgid` syscalls so the files never disagree.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_status(task, task_id))
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
+    Ok(build_pid_status(&task, task_id))
 }
 
 /// `/proc/<pid>/task/<tid>/status` — per-thread status.
@@ -2345,6 +2461,34 @@ fn format_bitmap_list(mask: u64, nbits_in: usize) -> String {
     s
 }
 
+/// `RLIMIT_SIGPENDING`'s index in a process's resource limits: the cap on
+/// signals queued for its real user, which `SigQ` reports against.
+const RLIMIT_SIGPENDING: u32 = 11;
+
+/// A process's signal sets as `/proc` reports them -- pending, blocked and
+/// ignored ([`crate::proc::signal::sets`]) -- and the signals it catches.
+///
+/// "Caught" is known only for a Linux-ABI process, whose handlers the kernel
+/// stores; a native process's handler table is its libc's (design-decisions
+/// §1512), so it reports none, which `SigCgt` then says. All empty for a
+/// kernel thread.
+fn proc_signal_sets(proc_id: u64, task_id: u64) -> (crate::proc::signal::SignalSets, u64) {
+    // `/proc/<pid>` describes the process's main thread (the caller passes
+    // the pid as the task); `/proc/<pid>/task/<tid>` that thread.
+    let sets = if task_id == proc_id {
+        crate::proc::signal::sets(proc_id)
+    } else {
+        crate::proc::signal::thread_sets(proc_id, task_id)
+    };
+    let caught =
+        if crate::proc::pcb::get_abi_mode(proc_id) == Some(crate::proc::pcb::AbiMode::Linux) {
+            crate::syscall::linux::linux_sigaction_caught(proc_id)
+        } else {
+            0
+        };
+    (sets, caught)
+}
+
 /// Build a Linux `/proc/<pid>/status` body.
 ///
 /// Thread-specific fields come from `task` (Name, State, Pid = `task.id`,
@@ -2369,17 +2513,27 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
     // mapping used by /proc/<pid>/stat (see build_pid_stat) so the two files
     // never disagree about a task's state.
-    let state = match task.state {
-        TaskState::Running | TaskState::Ready => "R (running)", // Ready == runnable
-        TaskState::Blocked => "S (sleeping)",
-        TaskState::Suspended => "T (stopped)",
-        TaskState::Dead => "Z (zombie)",
+    let state = if crate::proc::ptrace::is_trace_stopped(task.id) {
+        // In a ptrace-stop, its tracer's to let go (Linux's `t`).
+        "t (tracing stop)"
+    } else {
+        match task.state {
+            TaskState::Running | TaskState::Ready => "R (running)", // Ready == runnable
+            TaskState::Blocked => "S (sleeping)",
+            TaskState::Suspended => "T (stopped)",
+            TaskState::Dead => "Z (zombie)",
+        }
     };
 
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
     let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
     let creds = crate::proc::pcb::get_credentials(proc_id);
-    let (uid, gid) = creds.as_ref().map_or((0, 0), |c| (c.uid, c.gid));
+    let uids = creds.as_ref().map_or([0; 4], |c| {
+        crate::proc::setid::ids(c, crate::proc::setid::Which::User)
+    });
+    let gids = creds.as_ref().map_or([0; 4], |c| {
+        crate::proc::setid::ids(c, crate::proc::setid::Which::Group)
+    });
 
     // Field names and order follow Linux fs/proc/array.c proc_pid_status()
     // closely enough for key-based parsers (ps, htop, glibc, WINE).  Values
@@ -2407,13 +2561,14 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "Ngid:\t0");
     let _ = writeln!(s, "Pid:\t{}", task.id);
     let _ = writeln!(s, "PPid:\t{ppid}");
-    let _ = writeln!(s, "TracerPid:\t0"); // no ptrace tracer tracking yet
-    // Linux prints four credential columns (real, effective, saved-set,
-    // filesystem).  Our credential model holds a single uid/gid, so all four
-    // columns carry the same value — consistent with getuid/geteuid/
-    // getresuid all returning the same id.
-    let _ = writeln!(s, "Uid:\t{uid}\t{uid}\t{uid}\t{uid}");
-    let _ = writeln!(s, "Gid:\t{gid}\t{gid}\t{gid}\t{gid}");
+    let tracer = crate::proc::ptrace::tracer_of(task.id).unwrap_or(0);
+    let _ = writeln!(s, "TracerPid:\t{tracer}");
+    // Linux prints four credential columns: real, effective, saved-set,
+    // filesystem.
+    let [ru, eu, su, fu] = uids;
+    let [rg, eg, sg, fg] = gids;
+    let _ = writeln!(s, "Uid:\t{ru}\t{eu}\t{su}\t{fu}");
+    let _ = writeln!(s, "Gid:\t{rg}\t{eg}\t{sg}\t{fg}");
     // Groups: space-separated supplementary GIDs (may be empty).
     s.push_str("Groups:\t");
     if let Some(c) = creds.as_ref() {
@@ -2425,24 +2580,63 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         }
     }
     s.push('\n');
-    // Memory: only processes with an address-space charge carry these.  A
-    // bare scheduler task (kernel thread) omits them, exactly as Linux omits
-    // the Vm* lines for tasks with no mm.  Derive the size from the SAME
+    // Memory: every process with an address space carries these, as Linux's
+    // with an `mm` does -- from its first instruction, before it has mapped
+    // anything. A bare scheduler task (kernel thread) and a zombie, whose
+    // address space has gone, omit them, exactly as Linux omits the Vm* lines
+    // for tasks with no mm. Until 2026-10-08 they waited for the first
+    // charged mapping, and a program that read `VmLck` before its first mmap
+    // found none (the mlock ring-3 test, 0x31). Derive the size from the SAME
     // 4 KiB ABI-page accounting as /proc/<pid>/statm so the two files agree
     // exactly (Linux keeps VmSize == statm.size * pagesize): pages =
     // ceil(bytes / 4096), VmSize_kB = pages * 4.  VmRSS mirrors VmSize
     // because we do not track resident pages separately — an upper bound,
     // which is the safe direction for callers (see gen_pid_statm).  Threads
     // share the owning process's address space, so this is process-wide.
-    if let Some(as_bytes) = crate::proc::pcb::linux_as_used(proc_id) {
-        if as_bytes > 0 {
-            const ABI_PAGE_SIZE: u64 = 4096;
-            let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
-            let _ = writeln!(s, "VmSize:\t{kb} kB");
-            let _ = writeln!(s, "VmRSS:\t{kb} kB");
-        }
+    if crate::proc::pcb::get_pml4(proc_id).is_some_and(|pml4| pml4 != 0) {
+        const ABI_PAGE_SIZE: u64 = 4096;
+        let as_bytes = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
+        let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
+        let _ = writeln!(s, "VmSize:\t{kb} kB");
+        // Locked memory (`mlock`, `mlockall`, `MAP_LOCKED`): Linux's
+        // `mm->locked_vm`. Absent until 2026-10-07.
+        let locked_kb = crate::mm::mlock::locked_bytes(proc_id)
+            .div_ceil(ABI_PAGE_SIZE)
+            .saturating_mul(4);
+        let _ = writeln!(s, "VmLck:\t{locked_kb} kB");
+        let _ = writeln!(s, "VmRSS:\t{kb} kB");
     }
     let _ = writeln!(s, "Threads:\t{num_threads}");
+    // Signals, in Linux's order and format (fs/proc/array.c task_sig()):
+    // SigQ is the signals queued for the process's real user against its
+    // RLIMIT_SIGPENDING; SigPnd is the thread's own pending set (tgkill,
+    // pthread_kill, a SIGEV_THREAD_ID timer) and ShdPnd the process's; then
+    // the thread's blocked set and the process's ignored and caught sets,
+    // each as 16 hex digits. All were missing until 2026-10-01, when the
+    // kernel began keeping the ignored set (design-decisions §1512); SigPnd
+    // read 0 until signals gained per-thread state on 2026-10-07.
+    let (sig, caught) = proc_signal_sets(proc_id, task.id);
+    // A POSIX timer counts too: Linux charges each timer's preallocated
+    // signal against the limit when the timer is created.
+    let queued: u32 = crate::proc::pcb::pids_of_user(ru)
+        .into_iter()
+        .map(|pid| {
+            let timers = u32::try_from(crate::proc::posix_timer::count(pid)).unwrap_or(u32::MAX);
+            crate::proc::signal::sets(pid).queued.saturating_add(timers)
+        })
+        .fold(0, u32::saturating_add);
+    let queue_limit = crate::proc::pcb::get_rlimit(proc_id, RLIMIT_SIGPENDING).map_or(
+        crate::proc::pcb::DEFAULT_RLIMITS
+            .get(RLIMIT_SIGPENDING as usize)
+            .map_or(0, |&(soft, _)| soft),
+        |(soft, _)| soft,
+    );
+    let _ = writeln!(s, "SigQ:\t{queued}/{queue_limit}");
+    let _ = writeln!(s, "SigPnd:\t{:016x}", sig.thread_pending);
+    let _ = writeln!(s, "ShdPnd:\t{:016x}", sig.pending);
+    let _ = writeln!(s, "SigBlk:\t{:016x}", sig.blocked);
+    let _ = writeln!(s, "SigIgn:\t{:016x}", sig.ignored);
+    let _ = writeln!(s, "SigCgt:\t{caught:016x}");
     // NoNewPrivs (PR_SET_NO_NEW_PRIVS): 1 once a task has irreversibly opted
     // out of privilege-gaining execs, else 0.  systemd, WINE, and container
     // runtimes read this to confirm a sandbox took effect.  Real per-process
@@ -2506,14 +2700,41 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.nivcsw);
 
     // `Name:` first, as Linux orders it, with the comm copied as bytes so a
-    // non-UTF-8 name survives instead of collapsing to a shared `???`.
-    let mut out =
-        alloc::vec::Vec::with_capacity(s.len().saturating_add(name.len()).saturating_add(8));
+    // non-UTF-8 name survives instead of collapsing to a shared `???` --
+    // escaped, though, as `push_status_name` says.
+    let mut out = alloc::vec::Vec::with_capacity(
+        s.len()
+            .saturating_add(name.len().saturating_mul(2))
+            .saturating_add(8),
+    );
     out.extend_from_slice(b"Name:\t");
-    out.extend_from_slice(name);
+    push_status_name(&mut out, name);
     out.push(b'\n');
     out.extend_from_slice(s.as_bytes());
     out
+}
+
+/// Append a task's name to `out` as Linux writes it on `/proc/<pid>/status`'s
+/// `Name:` line: `proc_task_name(.., escape = true)`, which is
+/// `seq_escape_str(.., ESCAPE_SPACE | ESCAPE_SPECIAL, "\n\\")` -- a newline as
+/// the two characters `\n`, a backslash as `\\`, every other byte as it is.
+///
+/// A task chooses its own name (`prctl(PR_SET_NAME)`, or its program file's
+/// name), and a raw newline in it would start a line of its own: a name of
+/// `a\nGroups:\t0` wrote a `Groups:` line ahead of the real one, which every
+/// parser that takes the first match -- `ps`, `htop` -- believed
+/// (requests/d-a-proc-status-writes-the-name-raw-so-a-newline-in-it-forges-lines.md).
+/// Escaping the backslash too keeps the escaping reversible. Only `status`
+/// escapes, as on Linux: `comm` is the name alone, and `stat` brackets it in
+/// parentheses that parsers find by the last `)`.
+fn push_status_name(out: &mut Vec<u8>, name: &[u8]) {
+    for &b in name {
+        match b {
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            _ => out.push(b),
+        }
+    }
 }
 
 /// `/proc/<pid>/cmdline` — full command line, Linux-exact format.
@@ -2534,6 +2755,11 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 /// does not reflect a process rewriting its own `argv[]` at runtime
 /// (`setproctitle`); it reports the argv as captured at spawn.
 fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
+    // 0. A zombie's arguments went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
+
     // 1. Full argv from the persistent snapshot.
     if let Some(argv) = crate::proc::pcb::get_proc_argv(task_id) {
         if !argv.is_empty() {
@@ -2558,11 +2784,7 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
     }
 
     // 3. Fall back to task name from the scheduler.
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
 
     // No decode: the name is bytes on both sides of this function, and
     // `/proc/<pid>/cmdline` is what `ps` reads, so a `???` here is the most
@@ -2586,6 +2808,10 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
 /// environment).
 fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
     let envp = crate::proc::pcb::get_proc_envp(task_id).ok_or(KernelError::NotFound)?;
+    // A zombie's environment went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
     let cap = envp.iter().map(|e| e.len().saturating_add(1)).sum();
     let mut data = Vec::with_capacity(cap);
     for entry in &envp {
@@ -2616,6 +2842,10 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::get_proc_envp(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
+    // A zombie's vector went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
     Ok(crate::proc::pcb::linux_saved_auxv(task_id).unwrap_or_default())
 }
 
@@ -2637,12 +2867,105 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
 /// sizes use the Linux ABI page size of 4096 bytes (see [`gen_pid_statm`]),
 /// not the native 16 KiB frame size.
 fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_stat(task, task_id))
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
+    // The process-wide fields are the owning process's. For a process's own
+    // directory that is the same number (its id is its main thread's); for a
+    // thread's `/proc/<tid>` it is the thread's process; a kernel task has
+    // none, and reports zeros.
+    // A first thread that has exited belongs to no process any more, but
+    // its directory is still the process's (`proc_target`).
+    let proc_id = proc_target(task_id).unwrap_or(0);
+    // utime/stime are the whole process's, as Linux's `do_task_stat(whole)`
+    // reports them (a kernel task's are its own).
+    let times = crate::proc::pcb::process_times(proc_id)
+        .or_else(|| crate::sched::thread_times(task_id))
+        .unwrap_or((0, 0));
+    Ok(build_pid_stat(
+        &task,
+        proc_id,
+        reader_may_inspect(task_id),
+        times,
+    ))
+}
+
+/// `/proc/<pid>/wchan` and `/proc/<pid>/task/<tid>/wchan` — what the task
+/// is waiting on: one line with no trailing newline, as Linux's -- `0` when it
+/// is not waiting, else the kind of wait, its argument, and who holds what it
+/// waits on where the kernel knows (the format is [`crate::wchan`]'s module
+/// doc). For `/proc/<pid>` the task is the process's main thread, whose id is
+/// the pid.
+///
+/// A reader not allowed to inspect the task's process
+/// ([`reader_may_inspect`]) reads `0`, as on Linux, which prints `0` rather
+/// than refusing.
+fn gen_wchan(task_id: u64) -> KernelResult<Vec<u8>> {
+    let Some(report) = crate::wchan::report(task_id) else {
+        // A first thread that has exited waits on nothing: Linux prints 0
+        // for its zombie leader.
+        return if crate::proc::pcb::exited_leader(task_id).is_some() {
+            Ok(b"0".to_vec())
+        } else {
+            Err(KernelError::NotFound)
+        };
+    };
+    if !reader_may_inspect(task_id) {
+        return Ok(b"0".to_vec());
+    }
+    Ok(format!("{report}").into_bytes())
+}
+
+/// The process a `/proc` call runs for: the reader its checks are made for,
+/// `None` for a kernel task.
+fn proc_reader() -> Option<u64> {
+    crate::proc::thread::owner_process(crate::sched::current_task_id()).filter(|&p| p != 0)
+}
+
+/// The process the task `/proc/<task>` names belongs to: the thread's
+/// process, or the process with that id once its threads have gone (a
+/// zombie); `None` for a kernel task.
+fn proc_target(task: u64) -> Option<u64> {
+    crate::proc::thread::owner_process(task)
+        .filter(|&p| p != 0)
+        .or_else(|| crate::proc::pcb::state(task).map(|_| task))
+}
+
+/// Whether the process this call runs for may inspect `task`'s process
+/// ([`crate::proc::pcb::may_inspect`], Linux's `PTRACE_MODE_READ` check).
+///
+/// What it guards, as on Linux: reading `environ`, `auxv`, `maps` and `io`
+/// ([`INSPECT_FILES`]); the `cwd`, `root`, `exe` and `fd/<n>` links; listing
+/// `fd/` and `fdinfo/` and reading `fdinfo/<n>`. Content-level: `wchan`
+/// reads `0`, and `stat` field 35 is 0, for a reader who may not.
+/// (A-PROC-PID-FILES-CHECK-NO-READER: until 2026-10-01 nothing here checked
+/// its reader.)
+fn reader_may_inspect(task: u64) -> bool {
+    crate::proc::pcb::may_inspect(proc_reader(), proc_target(task))
+}
+
+/// The `/proc/<pid>/` files only a reader who may inspect the process reads
+/// ([`reader_may_inspect`]); to anyone else they are `PermissionDenied`
+/// (`EACCES`). Linux's mode-0400 and `mm_access` files: the environment, the
+/// auxiliary vector (its `AT_RANDOM` bytes seed the program's stack canary),
+/// the memory layout (which undoes address randomisation), and I/O counters.
+const INSPECT_FILES: &[&str] = &["environ", "auxv", "maps", "io"];
+
+/// `/proc/<pid>/stat` fields 7 and 8 for process `proc_id`: the Linux
+/// device number of its session's controlling terminal (Linux's
+/// `new_encode_dev` of [`crate::tty::linux_dev`]: the console 5:1, a pty
+/// slave `/dev/pts/N` 136:N), and that terminal's foreground process group;
+/// `0` and `-1` when the session holds no terminal, as Linux prints them.
+/// Both belong to the session, so every thread of a process reports the
+/// same. Until 2026-10-03 every process printed `0 -1`, so `ps` named no
+/// terminal and `w` counted every process on the machine as the console's
+/// (requests/b-ad-proc-stat-reports-no-controlling-terminal.md).
+pub(crate) fn ctty_stat_fields(proc_id: u64) -> (u32, i64) {
+    let Some(tty) = crate::proc::pcb::ctty_tty_of(proc_id) else {
+        return (0, -1);
+    };
+    let tpgid = crate::proc::pcb::ctty_fg_pgrp(tty)
+        .and_then(|g| i64::try_from(g).ok())
+        .unwrap_or(-1);
+    (crate::tty::linux_dev(tty).linux_encode(), tpgid)
 }
 
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
@@ -2660,7 +2983,14 @@ fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
         .iter()
         .find(|t| t.id == tid)
         .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_stat(task, proc_id))
+    // utime/stime are the thread's own.
+    let times = crate::sched::thread_times(tid).unwrap_or((0, 0));
+    Ok(build_pid_stat(
+        task,
+        proc_id,
+        reader_may_inspect(tid),
+        times,
+    ))
 }
 
 /// Length of Linux's `comm` field minus the trailing NUL: `TASK_COMM_LEN - 1`.
@@ -2686,7 +3016,21 @@ fn comm_truncate(name: &[u8]) -> &[u8] {
 /// process's own `/proc/<pid>/stat`, the caller passes `proc_id == task.id`
 /// so the two id sources coincide; for a thread's `task/<tid>/stat` they
 /// differ (`task.id == tid`, `proc_id == owning pid`).
-fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
+///
+/// `inspect` is whether the reader may inspect the task
+/// ([`reader_may_inspect`]): Linux fills the fields that say where the task
+/// is -- here, field 35 -- only for such a reader, and 0 for anyone else.
+///
+/// `times` is the `(user, system)` nanoseconds fields 14 and 15 report: the
+/// process's run time for its own `stat`, the thread's for a thread's, each
+/// split by the tick ratio (`pcb::process_times`, `sched::thread_times`,
+/// Linux's `*_cputime_adjusted`).
+fn build_pid_stat(
+    task: &crate::sched::TaskInfo,
+    proc_id: u64,
+    inspect: bool,
+    times: (u64, u64),
+) -> Vec<u8> {
     use crate::sched::task::TaskState;
 
     // Field 2 (`comm`) must match `/proc/<pid>/comm` exactly, including the
@@ -2695,34 +3039,36 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let full_name = task.name.get(..task.name_len).unwrap_or(&[]);
     let name = comm_truncate(full_name);
 
-    let state_char = match task.state {
-        TaskState::Running => 'R',
-        TaskState::Ready => 'R',     // runnable = R in Linux
-        TaskState::Blocked => 'S',   // sleeping
-        TaskState::Suspended => 'T', // stopped
-        TaskState::Dead => 'Z',      // zombie
+    let state_char = if crate::proc::ptrace::is_trace_stopped(task.id) {
+        't' // in a ptrace-stop
+    } else {
+        match task.state {
+            TaskState::Running => 'R',
+            TaskState::Ready => 'R',     // runnable = R in Linux
+            TaskState::Blocked => 'S',   // sleeping
+            TaskState::Suspended => 'T', // stopped
+            TaskState::Dead => 'Z',      // zombie
+        }
     };
 
     let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
     let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
 
-    // utime/stime (fields 14/15): user and system CPU time in clock
-    // ticks.  USER_HZ == TICK_RATE_HZ == 100, so the raw timer-tick
-    // counts are already in ABI units.  These are this task's own
-    // tick-sampled user/kernel split (Linux `account_user_time`/
-    // `account_system_time` model); `user_ticks + sys_ticks ==
-    // total_ticks`.  For a single-threaded process this equals the
-    // process total; the thread-group-leader sum for multi-threaded
-    // processes is the same TD14 follow-up as getrusage's children path.
-    let utime = task.user_ticks;
-    let stime = task.sys_ticks;
+    // utime/stime (fields 14/15): user and system CPU time in clock ticks
+    // at USER_HZ == 100, from the nanoseconds the caller split (`times`),
+    // truncated as Linux's `nsec_to_clock_t` truncates.
+    const NS_PER_CLOCK_T: u64 = 10_000_000;
+    let utime = times.0 / NS_PER_CLOCK_T;
+    let stime = times.1 / NS_PER_CLOCK_T;
 
     // cutime/cstime (fields 16/17): user/system CPU time of this process's
     // reaped descendants, in clock ticks.  Process-wide, so keyed off
     // `proc_id` (a bare kernel thread with no PCB reports 0).  Credited at
     // wait/reap from each reaped child's (utime+cutime, stime+cstime),
     // mirroring Linux's `signal->cutime`/`cstime`.
-    let (cutime, cstime) = crate::proc::pcb::process_child_ticks(proc_id);
+    let (cutime_ns, cstime_ns) = crate::proc::pcb::process_child_times(proc_id);
+    let cutime = cutime_ns / NS_PER_CLOCK_T;
+    let cstime = cstime_ns / NS_PER_CLOCK_T;
 
     // minflt/majflt (fields 10/12): minor/major page faults charged to this
     // task.  Mirrors the utime/stime treatment above — a per-task value
@@ -2753,23 +3099,27 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let exit_code =
         crate::proc::pcb::exit_code(task.id).map_or(0i64, |c| (i64::from(c) & 0xff) << 8);
 
-    // priority: Linux reports the kernel-internal priority; for normal tasks
-    // this is in the 0..39 range.  nice is 0 (native scheduler has no nice).
+    // priority (field 18): Linux reports the kernel-internal priority; for
+    // normal tasks this is in the 0..39 range.  nice (field 19): the
+    // process's nice, which `thread::set_process_nice` turns into that
+    // priority.  It was a literal 0 until 2026-10-01, so a renice moved
+    // field 18 and left the field that names it unchanged
+    // (requests/e-ad-renicing-another-process-renices-the-caller.md).  A
+    // bare kernel thread (no PCB) reports 0.
     let priority = i64::from(task.priority);
+    let nice = crate::proc::pcb::get_nice(proc_id).unwrap_or(0);
 
-    // pgrp (field 5) and session (field 6).  We don't track process groups
-    // or sessions as distinct objects; our model is "every process is its
-    // own group and session leader", which is exactly what sys_getpgid /
-    // sys_getsid / sys_getpgrp report (pgid == sid == pid).  These are
-    // process-wide, so they key off `proc_id`.  Bare scheduler tasks
-    // (kernel threads, no PCB) have no group/session — getpgid returns
-    // ESRCH for them — so they report 0/0, matching Linux's kernel-thread
-    // convention.
-    let pgrp_sid = if crate::proc::pcb::state(proc_id).is_some() {
-        proc_id
-    } else {
-        0
-    };
+    // pgrp (field 5) and session (field 6): the process's real group and
+    // session, as getpgid/getsid report them.  Until 2026-10-01 both were
+    // the pid, from a time when every process was its own group and
+    // session leader, so a job's members looked unrelated to
+    // `ps -o pgid,sid`.  Process-wide, so keyed off `proc_id`.  Bare
+    // scheduler tasks (kernel threads, no PCB) have no group or session --
+    // getpgid returns ESRCH for them -- so they report 0/0, matching
+    // Linux's kernel-thread convention.
+    let pgrp = crate::proc::pcb::get_pgid(proc_id).unwrap_or(0);
+    let session = crate::proc::pcb::get_sid(proc_id).unwrap_or(0);
+    let (tty_nr, tpgid) = ctty_stat_fields(proc_id);
 
     // starttime (field 22): the boot-relative tick when this task was
     // created, in clock ticks at USER_HZ.  The native timer ticks at
@@ -2787,6 +3137,25 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // value rather than a 0 stub.  Thread/task property → from `task`.
     let processor = task.last_cpu;
 
+    // signal, blocked, sigignore, sigcatch (fields 31-34): decimal, and only
+    // the low 31 signals, as Linux prints them (`& 0x7fffffff`; proc(5) calls
+    // them obsolete in favour of `status`'s Sig* lines). `signal` is the
+    // thread's own pending set -- the process's is `status`'s ShdPnd. Zeros
+    // until 2026-10-01; `signal` 0 until 2026-10-07.
+    const OLD_SIGNALS: u64 = 0x7fff_ffff;
+    let (sig, caught) = proc_signal_sets(proc_id, task.id);
+    let (blocked, sigignore, sigcatch) = (
+        sig.blocked & OLD_SIGNALS,
+        sig.ignored & OLD_SIGNALS,
+        caught & OLD_SIGNALS,
+    );
+
+    // wchan (field 35): 1 while the task waits on something, 0 otherwise --
+    // what Linux has printed since it stopped publishing a kernel address
+    // here; `/proc/<pid>/wchan` says what the wait is. A literal 0 until
+    // 2026-10-01.
+    let wchan = u8::from(inspect && task.wait.is_waiting());
+
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
     // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
@@ -2799,10 +3168,14 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // 49:arg_end 50:env_start 51:env_end 52:exit_code
     // One space between every field, terminated by a single newline.
     // Placeholders left-to-right: pid comm state ppid pgrp session
-    // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime stime
-    // cutime cstime priority nice=0 num_threads itrealvalue=0
-    // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
-    // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
+    // tty_nr tpgid <flags=0> <minflt..cmajflt=0> utime stime
+    // cutime cstime priority nice num_threads itrealvalue=0
+    // starttime vsize rss rsslim <startcode..kstkeip=0> signal blocked
+    // sigignore sigcatch wchan <nswap/cnswap=0> exit_signal=17 processor
+    // rt_priority policy <delayacct_blkio_ticks..env_end=0> exit_code.
+    // rt_priority (1..=99 under SCHED_FIFO/SCHED_RR, else 0) and policy
+    // (Linux's number) are the thread's own; literal zeros until 2026-10-07,
+    // when they became real (design-decisions 1544).
     // Split around the comm so the name can be raw bytes. Field 2 is
     // parenthesised precisely because it may contain anything, and Linux
     // stores it as bytes; decoding it here rendered every undecodable name as
@@ -2812,12 +3185,14 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     out.extend_from_slice(format!("{} (", task.id).as_bytes());
     out.extend_from_slice(name);
     let text = format!(
-        ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} 0 {} 0 {} {} {} {} \
-         0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+        ") {} {} {} {} {} {} 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
+         0 0 0 0 0 {} {} {} {} {} 0 0 17 {} {} {} 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
-        pgrp_sid,
-        pgrp_sid,
+        pgrp,
+        session,
+        tty_nr,
+        tpgid,
         minflt,
         cminflt,
         majflt,
@@ -2827,12 +3202,20 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         cutime,
         cstime,
         priority,
+        nice,
         num_threads,
         starttime,
         vsize,
         rss_pages,
         rsslim,
+        sig.thread_pending & OLD_SIGNALS,
+        blocked,
+        sigignore,
+        sigcatch,
+        wchan,
         processor,
+        task.attr.rt_priority,
+        task.attr.policy.linux(),
         exit_code,
     );
     out.extend_from_slice(text.as_bytes());
@@ -2860,9 +3243,11 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 ///   guard (design-decisions §32).  All our VMAs are private mappings, so the
 ///   fourth char is always `p`.  Guard VMAs are never backed and carry no
 ///   access rights → `---p`.
-/// - `offset`/`dev`/`inode`: we do not track file-backed mappings yet, so
-///   these are `0`/`00:00`/`0`, exactly as Linux reports for anonymous
-///   mappings.
+/// - `offset`/`dev`/`inode`: for a file-backed region, the offset into the
+///   file it maps and the file's device and inode, as `stat` reports them;
+///   `0`/`00:00`/`0` otherwise, exactly as Linux reports for anonymous
+///   mappings. A file-backed region showed the anonymous triple until
+///   2026-10-01.
 /// - `pathname`: a bracketed tag identifying the region kind (`[stack]`,
 ///   `[guard]`, anonymous = empty, fixed = `[fixed]`), mirroring Linux's
 ///   `[stack]`/`[heap]` pseudo-paths.
@@ -2903,22 +3288,44 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
             VmaKind::Guard => "[guard]",
             VmaKind::Fixed => "[fixed]",
             VmaKind::Brk => "[heap]",
-            // A file-backed private mapping; Linux would show the backing
-            // pathname here, but we don't cache the path in the VMA, so the
-            // region renders unnamed (like an anonymous mapping).
-            VmaKind::FileBacked { .. } => "",
-            VmaKind::Anonymous => "",
+            // A file-backed region is named by its file, below.
+            VmaKind::FileBacked { .. } | VmaKind::Anonymous => "",
+        };
+        // A file-backed region names its file as Linux's does: the offset
+        // into it, its device and inode, and the path its handle was opened
+        // under. A handle closed in a race leaves the name empty.
+        let (offset, dev, ino, file_path) = match &vma.kind {
+            VmaKind::FileBacked {
+                handle,
+                file_offset,
+                file_id,
+            } => (
+                *file_offset,
+                file_id.map_or(0, |f| crate::fs::vfs::dev_of(f.fs_id)),
+                file_id.map_or(0, |f| f.ino),
+                crate::fs::handle::handle_name(*handle).ok(),
+            ),
+            _ => (0, 0, 0, None),
         };
         // `write!` into a String is infallible; the Result is ignored.
         // Linux zero-pads start/end to a minimum of 8 hex digits
         // (fs/proc/task_mmu.c show_vma_header_prefix -> seq_put_hex_ll(.., 8));
         // addresses wider than 32 bits print their natural width.  Match that
         // with `{:08x}` so sub-4 GiB addresses align byte-for-byte with Linux.
-        let _ = writeln!(
-            text,
-            "{:08x}-{:08x} {r}{w}{x}p 00000000 00:00 0 {pathname}",
-            vma.start, vma.end
-        );
+        let _ = match file_path {
+            Some(path) => writeln!(
+                text,
+                "{:08x}-{:08x} {r}{w}{x}p {offset:08x} 00:{dev:02x} {ino} {}",
+                vma.start,
+                vma.end,
+                path.display()
+            ),
+            None => writeln!(
+                text,
+                "{:08x}-{:08x} {r}{w}{x}p {offset:08x} 00:{dev:02x} {ino} {pathname}",
+                vma.start, vma.end
+            ),
+        };
     }
     text.into_bytes()
 }
@@ -2976,49 +3383,56 @@ fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
 /// mount_id parent_id major:minor root mount_point options - fstype source super_options
 /// ```
 ///
-/// We have no mount namespaces, so every process sees the same global
-/// mount table — `/proc/<pid>/mountinfo` is identical for all PIDs,
-/// which is accurate rather than fabricated.  Field choices:
+/// A process sees its own mount namespace's table (`fs::mntns`): the
+/// system's, unless it has unshared one or entered another.  Field choices:
 ///
-/// - `mount_id`: a stable small integer per mount (`base + index`).  Linux
-///   assigns these from a global counter; the exact values are opaque to
-///   parsers, which only require uniqueness and stability within one read.
-/// - `parent_id`: the root mount's id for every entry.  We do not model a
-///   mount tree, so all mounts are reported as children of the root mount;
-///   the root reports itself.  Parsers that build a tree tolerate this.
-/// - `major:minor`: `0:<index+1>`.  We have no block-device numbers, and
-///   Linux uses `0:N` minors for anonymous/virtual filesystems anyway.
-/// - `root`: always `/` (we mount whole filesystems, never subtrees).
-/// - optional fields: none, so the separator `-` follows the options
-///   directly (a valid, common case in real `mountinfo`).
+/// - `mount_id`: the mount's ID (`MountRecord::mnt_id`), from a counter and
+///   never reused, as Linux's.  A namespace's copy of a mount has its own.
+/// - `parent_id`: the ID of the mount it is attached to -- Linux's mount
+///   tree, which `findmnt` draws from these two fields: a mount on a mount
+///   point's own, a mount on top of another that one's (2026-10-08; every
+///   mount was the root's child until then). The root, attached to nothing
+///   here, gives its own.
+/// - `major:minor`: `0:<dev>`, the device number `stat` reports for files
+///   on that mount (`vfs::dev_of`), as Linux numbers its anonymous
+///   filesystems. It was the mount's index until 2026-10-01, which moved when
+///   an earlier mount went and matched no `st_dev`.
+/// - `root`: the directory of its filesystem the mount shows -- `/`, or a
+///   bind mount's subtree (`Vfs::bind_mount`), mangled as the mount point is.
+/// - optional fields: `unbindable` for a mount made so (`MS_UNBINDABLE`),
+///   else none, so the separator `-` follows the options directly (a valid,
+///   common case in real `mountinfo`). Nothing here is shared or a slave of
+///   a shared mount, so `shared:N` and `master:N` never appear.
 /// - `source`: `none` (we do not track backing devices), matching what we
 ///   already emit in `/proc/mounts`.
-/// - per-mount and super options are the same `MountOptions` string.
-fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) -> Vec<u8> {
+/// - the sixth field is the mount's own options (`ro` for a bind mount made
+///   read-only, say), the last the filesystem's: `ro` or `rw`, as the
+///   filesystem itself is (`MountRecord::fs_read_only`). This kernel has no
+///   filesystem-specific options to add there.
+fn render_mountinfo(mounts: &[crate::fs::vfs::MountRecord]) -> Vec<u8> {
     use core::fmt::Write as _;
 
-    /// Base for synthetic mount ids.  Linux ids are arbitrary positive
-    /// integers; starting above a small reserved range keeps them clearly
-    /// distinct from the parent-id we report for the root mount.
-    const MOUNT_ID_BASE: usize = 20;
-    let root_id = MOUNT_ID_BASE;
-
     let mut text = String::with_capacity(mounts.len().saturating_mul(96).max(16));
-    for (i, (path, fs_type, options)) in mounts.iter().enumerate() {
-        let mount_id = MOUNT_ID_BASE.saturating_add(i);
-        let minor = i.saturating_add(1);
-        let opts = options.to_string();
-        // Linux mangles the mount-point and fstype fields (see
+    for m in mounts {
+        let mount_id = m.mnt_id;
+        let parent_id = if m.parent == 0 { m.mnt_id } else { m.parent };
+        let minor = m.dev;
+        let opts = m.options.to_string();
+        let super_opts = if m.fs_read_only { "ro" } else { "rw" };
+        let optional = if m.unbindable { " unbindable" } else { "" };
+        // Linux mangles the root, mount-point and fstype fields (see
         // `mangle_mount_field`); the options string is composed of
         // comma-separated flag tokens with no whitespace, so it is emitted
         // verbatim, matching `show_mnt_opts`.
-        let mount_point = mangle_mount_field(path);
-        let fstype = mangle_mount_field(fs_type);
+        let root = mangle_mount_field(&m.root);
+        let mount_point = mangle_mount_field(&m.path);
+        let fstype = mangle_mount_field(&m.fs_type);
         // 11 fields, optional-field section empty (separator `-` follows
-        // the per-mount options directly).
+        // the per-mount options directly). Writing to a `String` cannot
+        // fail.
         let _ = writeln!(
             text,
-            "{mount_id} {root_id} 0:{minor} / {mount_point} {opts} - {fstype} none {opts}",
+            "{mount_id} {parent_id} 0:{minor} {root} {mount_point} {opts}{optional} - {fstype} none {super_opts}",
         );
     }
     text.into_bytes()
@@ -3035,6 +3449,18 @@ fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) 
 /// child was reported as uncovered and got the wrong fstype.
 fn mount_path_covers(mount_path: &Path, host: &Path) -> bool {
     crate::fs::pathutil::path_in_subtree(host, mount_path)
+}
+
+/// The mount serving host path `host`: the longest mount point covering it,
+/// as [`fstype_for_host_path`] chooses, with the device number beside it.
+fn host_mount_for<'a>(
+    host: &Path,
+    global: &'a [crate::fs::vfs::MountRecord],
+) -> Option<&'a crate::fs::vfs::MountRecord> {
+    global
+        .iter()
+        .filter(|m| !m.hidden && mount_path_covers(&m.path, host))
+        .max_by_key(|m| m.path.len())
 }
 
 /// Resolve the filesystem type serving host path `host` from the global mount
@@ -3069,7 +3495,7 @@ fn fstype_for_host_path<'a>(
 /// what a write would actually do inside the container.
 fn render_container_mountinfo(
     view: &[crate::ipc::namespace::MountViewEntry],
-    global: &[(PathBuf, String, crate::fs::vfs::MountOptions)],
+    global: &[crate::fs::vfs::MountRecord],
 ) -> Vec<u8> {
     use core::fmt::Write as _;
 
@@ -3079,8 +3505,11 @@ fn render_container_mountinfo(
     let mut text = String::with_capacity(view.len().saturating_mul(96).max(16));
     for (i, entry) in view.iter().enumerate() {
         let mount_id = MOUNT_ID_BASE.saturating_add(i);
-        let minor = i.saturating_add(1);
-        let fstype = mangle_mount_field(fstype_for_host_path(&entry.host_target, global));
+        // The host mount that serves it: its type, and the device number its
+        // files report, which a container sees as it is.
+        let host = host_mount_for(&entry.host_target, global);
+        let minor = host.map_or(0, |m| m.dev);
+        let fstype = mangle_mount_field(host.map_or("none", |m| m.fs_type.as_str()));
         let mount_point = mangle_mount_field(&entry.guest_path);
         let opts = if entry.read_only { "ro" } else { "rw" };
         let _ = writeln!(
@@ -3106,7 +3535,8 @@ fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
     }
-    let mounts = crate::fs::Vfs::mounts_full();
+    // The process's own mount namespace's table (`fs::mntns`).
+    let mounts = crate::fs::Vfs::mounts_with_dev_in(crate::fs::mntns::of_process(task_id));
     // A container (jailed) process sees its own mount view, not the host's.
     if let Some(view) = crate::ipc::namespace::mount_view_for(task_id) {
         return Ok(render_container_mountinfo(&view, &mounts));
@@ -3295,6 +3725,22 @@ fn set_pid_oom_score_adj(task_id: u64, data: &[u8]) -> KernelResult<()> {
     }
     let adj = parse_oom_score_adj(data)?;
     let pid = u32::try_from(task_id).map_err(|_| KernelError::InvalidArgument)?;
+    // Who may: Linux's file is 0644 and its owner's, and lowering it -- making
+    // the process the last the OOM killer picks -- needs CAP_SYS_RESOURCE.
+    // Here: a writer who may inspect the process and also control it (uid 0,
+    // the process itself, its user's processes, or a `Process` capability with
+    // `WRITE`); lowering, uid 0 or the kernel only.
+    let writer = proc_reader();
+    let target = proc_target(task_id);
+    if !crate::proc::pcb::may_access(writer, target, crate::cap::Rights::WRITE) {
+        return Err(KernelError::PermissionDenied);
+    }
+    let current = crate::fs::oomkiller::get_score(pid).map_or(0, |s| s.adj);
+    let privileged = writer
+        .is_none_or(|w| crate::proc::pcb::process_uid_gid(w).is_some_and(|(uid, _)| uid == 0));
+    if adj < current && !privileged {
+        return Err(KernelError::PermissionDenied);
+    }
     crate::fs::oomkiller::adjust_score(pid, adj)
 }
 
@@ -3331,11 +3777,7 @@ fn gen_pid_schedstat(task_id: u64) -> KernelResult<Vec<u8>> {
     /// Nanoseconds per scheduler tick (USER_HZ == TICK_RATE_HZ == 100).
     const NS_PER_TICK: u64 = 1_000_000_000 / 100;
 
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
 
     let cpu_ns = crate::bench::cycles_to_ns(task.total_cycles);
     let run_delay_ns = task.total_wait_ticks.saturating_mul(NS_PER_TICK);
@@ -3401,18 +3843,32 @@ fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
 /// entry, mirroring Linux's magic fd links.
 ///
 /// Every target is derived from the real fd entry — a regular file
-/// resolves to its VFS path, a pipe to `pipe:[id]`, and anonymous kernel
+/// resolves to its VFS path, a pipe to `pipe:[id]` (both ends the same id), a
+/// named pipe's end to its node, and anonymous kernel
 /// objects (eventfd / pidfd / memfd) to Linux's `anon_inode:[type]`
 /// labels.  The console maps to `/dev/console`.  Nothing here is
 /// fabricated: if a File handle can no longer be resolved (it raced a
 /// close), we report `anon_inode:[file]` rather than inventing a path.
-fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
+pub(crate) fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
         HandleKind::Console => PathBuf::from("/dev/console"),
-        HandleKind::File => crate::fs::handle::handle_path(entry.raw_handle)
+        HandleKind::File => crate::fs::handle::handle_name(entry.raw_handle)
             .unwrap_or_else(|_| PathBuf::from("anon_inode:[file]")),
-        HandleKind::Pipe => PathBuf::from(format!("pipe:[{}]", entry.raw_handle)),
+        // A named pipe's end names its node, as Linux's link does; an
+        // ordinary pipe's, the pipe.
+        HandleKind::Pipe => {
+            match crate::ipc::pipe::fifo_node(crate::ipc::pipe::PipeHandle::from_raw(
+                entry.raw_handle,
+            )) {
+                Some((_, path)) => path,
+                // Both ends name the one pipe, as Linux's one inode.
+                None => PathBuf::from(format!(
+                    "pipe:[{}]",
+                    crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle).pipe_number()
+                )),
+            }
+        }
         HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),
         HandleKind::PidFd => PathBuf::from("anon_inode:[pidfd]"),
         HandleKind::MemFd => PathBuf::from("anon_inode:[memfd]"),
@@ -3464,6 +3920,20 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
         // A daemon-backed AF_INET stream socket resolves to Linux's
         // `socket:[inode]` label; we use the raw handle as the inode.
         HandleKind::Socket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),
+        // A channel end, as the socket a Linux program takes it for, named by
+        // its handle -- the number `/proc/<pid>/wchan` shows for a wait on it.
+        HandleKind::Channel => PathBuf::from(format!("socket:[channel {}]", entry.raw_handle)),
+        HandleKind::ServiceListener => {
+            PathBuf::from(format!("socket:[listener {}]", entry.raw_handle))
+        }
+        // As Linux names every socket: `socket:[<inode>]`, the handle standing
+        // in for the inode.
+        HandleKind::UnixSocket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),
+        // A namespace, as its `/proc/<pid>/ns` link names it: `uts:[N]`.
+        HandleKind::Namespace => match crate::nsfs::decode(entry.raw_handle) {
+            Some((kind, id)) => PathBuf::from(crate::nsfs::link_text(kind, id)),
+            None => PathBuf::from("anon_inode:[namespace]"),
+        },
     }
 }
 
@@ -3625,13 +4095,14 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
     // `comm` reflects the scheduler task name (set by exec / prctl
     // PR_SET_NAME), which is what Linux's `comm` tracks — not the full
     // process name.  Fall back to the process name only if there is no
-    // scheduler task (e.g. a process record without a live task).
-    let tasks = crate::sched::task_list();
+    // scheduler task (a process record that never had a thread). A first
+    // thread that has exited still answers, from its process's snapshot of
+    // it (`proc_task`), as Linux's zombie group leader keeps its `comm`.
     // Bytes, not `String`: the scheduler stores comm as raw bytes and `execve`
     // writes it from `argv[0]` without validating UTF-8, so decoding here
     // rendered any such name as the literal `???` — and `???` is a *constant*,
     // so two processes with different unreadable names reported identically.
-    let name: alloc::vec::Vec<u8> = if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+    let name: alloc::vec::Vec<u8> = if let Some(task) = proc_task(task_id) {
         task.name.get(..task.name_len).unwrap_or(&[]).to_vec()
     } else if let Some(proc_name) = crate::proc::pcb::name(task_id) {
         proc_name.into_bytes()
@@ -3739,11 +4210,8 @@ fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
 
     // Validate the task id resolves to *something* (process or task) so
     // a bogus pid yields NotFound rather than a default table.
-    if pcb::state(task_id).is_none() {
-        let tasks = crate::sched::task_list();
-        if !tasks.iter().any(|t| t.id == task_id) {
-            return Err(KernelError::NotFound);
-        }
+    if !pid_dir_exists(task_id) {
+        return Err(KernelError::NotFound);
     }
 
     let mut s = String::with_capacity(1024);
@@ -3782,7 +4250,14 @@ fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
 }
 
 /// Generate content for a per-PID virtual file.
+///
+/// The [`INSPECT_FILES`] are refused to a reader who may not inspect the
+/// process -- here, so a `stat` of one, which sizes it by generating it,
+/// reports 0 bytes rather than leaking its length.
 fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
+    if INSPECT_FILES.contains(&file_name) && !reader_may_inspect(task_id) {
+        return Err(KernelError::PermissionDenied);
+    }
     match file_name {
         "status" => gen_pid_status(task_id),
         "cmdline" => gen_pid_cmdline(task_id),
@@ -3804,6 +4279,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "loginuid" => gen_pid_loginuid(task_id),
         "sessionid" => gen_pid_sessionid(task_id),
         "io" => gen_pid_io(task_id),
+        "wchan" => gen_wchan(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -3826,6 +4302,7 @@ fn generate_task(pid: u64, tid: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "schedstat" => gen_pid_schedstat(tid),
         "stat" => gen_thread_stat(pid, tid),
         "status" => gen_thread_status(pid, tid),
+        "wchan" => gen_wchan(tid),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -3869,21 +4346,17 @@ fn gen_overlays() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// Generate `/proc/namespaces` — active mount namespaces.
+/// Generate `/proc/namespaces` — the mount namespaces (`fs::mntns`): each
+/// one's id, the processes in it, the holds on it and its mounts.
 fn gen_namespaces() -> Vec<u8> {
-    let nss = crate::fs::mount_ns::list();
+    let nss = crate::fs::mntns::list();
     let mut s = String::with_capacity(512);
     s.push_str(&format!("Mount namespaces: {}\n\n", nss.len()));
     for ns in &nss {
-        let parent = ns
-            .parent
-            .map(|p| format!("{}", p))
-            .unwrap_or_else(|| String::from("none"));
-        s.push_str(&format!("ns {} ({}):\n", ns.id, ns.name));
-        s.push_str(&format!("  parent:     {}\n", parent));
-        s.push_str(&format!("  mounts:     {}\n", ns.mount_count));
-        s.push_str(&format!("  refcount:   {}\n", ns.refcount));
-        s.push_str(&format!("  nested:     {}\n", ns.allow_nested));
+        s.push_str(&format!("ns {}:\n", ns.id));
+        s.push_str(&format!("  processes:  {}\n", ns.processes));
+        s.push_str(&format!("  holds:      {}\n", ns.holds));
+        s.push_str(&format!("  mounts:     {}\n", ns.mounts));
         s.push('\n');
     }
     s.into_bytes()
@@ -5215,31 +5688,6 @@ fn gen_recent() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_fileinfo() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (extractions, fields, errors) = super::fileinfo::stats();
-
-    out.push_str("File Info Metadata Extraction\n");
-    out.push_str("=============================\n\n");
-    out.push_str(&format!("Extractions: {}\n", extractions));
-    out.push_str(&format!("Fields:      {}\n", fields));
-    out.push_str(&format!("Errors:      {}\n\n", errors));
-
-    out.push_str("Supported formats:\n");
-    out.push_str("  audio/mpeg    — MP3 (ID3v1, ID3v2, MPEG frame)\n");
-    out.push_str("  audio/wav     — WAV (RIFF/PCM headers)\n");
-    out.push_str("  image/jpeg    — JPEG (EXIF, SOF dimensions)\n");
-    out.push_str("  image/png     — PNG (IHDR, tEXt chunks)\n");
-    out.push_str("  image/gif     — GIF (dimensions, version)\n");
-    out.push_str("  image/bmp     — BMP (dimensions, bit depth)\n");
-    out.push_str("  application/pdf — PDF (version, linearized)\n");
-    out.push_str("  application/x-elf — ELF (class, machine, type)\n");
-
-    out.into_bytes()
-}
-
 fn gen_fswalk() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5258,31 +5706,6 @@ fn gen_fswalk() -> Vec<u8> {
     out.push_str(&format!("Max results:     {}\n", 65536));
     out.push_str(&format!("Default depth:   {}\n", 64));
     out.push_str("Default excl:    /proc, /sys, /dev\n");
-
-    out.into_bytes()
-}
-
-fn gen_findex() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (builds, index_ops, queries, indexed, fields) = super::findex::stats();
-
-    out.push_str("File Metadata Index\n");
-    out.push_str("===================\n\n");
-    out.push_str(&format!("Indexed files: {}/{}\n", indexed, 16384));
-    out.push_str(&format!("Known fields:  {}/{}\n", fields, 256));
-    out.push_str(&format!("Builds:        {}\n", builds));
-    out.push_str(&format!("Index ops:     {}\n", index_ops));
-    out.push_str(&format!("Queries:       {}\n\n", queries));
-
-    let known = super::findex::known_fields();
-    if !known.is_empty() {
-        out.push_str("Known field names:\n");
-        for (name, label) in &known {
-            out.push_str(&format!("  {:30} {}\n", name, label));
-        }
-    }
 
     out.into_bytes()
 }
@@ -5454,35 +5877,6 @@ fn gen_fileops() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_preview() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (generate_calls, cache_hits, failures, total_bytes) = super::preview::stats();
-
-    out.push_str("Preview Generation\n");
-    out.push_str("==================\n\n");
-    out.push_str(&format!("Generate calls: {}\n", generate_calls));
-    out.push_str(&format!("Cache hits:     {}\n", cache_hits));
-    out.push_str(&format!("Failures:       {}\n", failures));
-    out.push_str(&format!("Bytes generated:{}\n\n", total_bytes));
-
-    let generators = super::preview::list_generators();
-    if !generators.is_empty() {
-        out.push_str("Custom generators:\n");
-        for g in &generators {
-            out.push_str(&format!(
-                "  {} ({}): {}\n",
-                g.id,
-                g.app_name,
-                g.mime_types.join(", ")
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_templates() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5589,60 +5983,22 @@ fn gen_queryable() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_immutable() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (flagged, set_ops, check_ops) = super::immutable::stats();
-
-    out.push_str("Immutable / Append-Only File Flags\n");
-    out.push_str("==================================\n\n");
-    out.push_str(&format!("Flagged files: {}/{}\n", flagged, 65536));
-    out.push_str(&format!("Set ops:       {}\n", set_ops));
-    out.push_str(&format!("Check ops:     {}\n\n", check_ops));
-
-    let flagged_files = super::immutable::list_flagged();
-    if !flagged_files.is_empty() {
-        out.push_str(&format!("{:40} {}\n", "PATH", "FLAGS"));
-        for (path, flags) in &flagged_files {
-            out.push_str(&format!(
-                "{:40} {}\n",
-                path.display(),
-                super::immutable::flags_to_string(*flags)
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_fcomment() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
 
-    let (comment_count, set_ops, get_ops, search_ops) = super::fcomment::stats();
+    // Counts only. The comments are the files' own `user.xdg.comment`
+    // attributes (`fs::fcomment`), read through `getxattr` as each file's
+    // permissions allow; listing them here would show any reader the
+    // comments on files it may not read.
+    let (set_ops, get_ops, search_ops) = super::fcomment::stats();
 
     out.push_str("File Comments\n");
     out.push_str("=============\n\n");
-    out.push_str(&format!("Comments:    {}/{}\n", comment_count, 65536));
-    out.push_str(&format!("Set ops:     {}\n", set_ops));
-    out.push_str(&format!("Get ops:     {}\n", get_ops));
-    out.push_str(&format!("Search ops:  {}\n\n", search_ops));
-
-    let all = super::fcomment::list(None);
-    if !all.is_empty() {
-        out.push_str(&format!("{:40} {:8} {}\n", "PATH", "LENGTH", "PREVIEW"));
-        for (path, comment) in &all {
-            let preview: String = comment.chars().take(40).collect();
-            let preview = preview.replace('\n', " ");
-            out.push_str(&format!(
-                "{:40} {:8} {}\n",
-                path.display(),
-                comment.len(),
-                preview
-            ));
-        }
-    }
+    out.push_str("Kept as each file's user.xdg.comment attribute.\n\n");
+    out.push_str(&format!("Set or removed: {}\n", set_ops));
+    out.push_str(&format!("Read:           {}\n", get_ops));
+    out.push_str(&format!("Searches:       {}\n", search_ops));
 
     out.into_bytes()
 }
@@ -5728,36 +6084,6 @@ fn gen_notifcenter() -> Vec<u8> {
                 "{:20} {:6} {:6} {:6}\n",
                 s.app, s.total, s.unread, muted_s
             ));
-        }
-    }
-
-    out.into_bytes()
-}
-
-fn gen_appregistry() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (app_count, mime_count, register_ops, lookup_ops) = super::appregistry::stats();
-
-    out.push_str("Application Registry\n");
-    out.push_str("====================\n\n");
-    out.push_str(&format!("Apps:         {}/{}\n", app_count, 4096));
-    out.push_str(&format!("MIME types:   {}\n", mime_count));
-    out.push_str(&format!("Register ops: {}\n", register_ops));
-    out.push_str(&format!("Lookup ops:   {}\n\n", lookup_ops));
-
-    let tree = super::appregistry::menu_tree();
-    if !tree.is_empty() {
-        for (cat, entries) in &tree {
-            out.push_str(&format!("[{}]\n", cat.label()));
-            for entry in entries {
-                out.push_str(&format!(
-                    "  {} ({})\n",
-                    entry.name,
-                    entry.exec_path.display()
-                ));
-            }
         }
     }
 
@@ -5873,53 +6199,6 @@ fn gen_taskbar() -> Vec<u8> {
                 e.name,
                 e.windows.len(),
                 state
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
-fn gen_startmenu() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (fav_n, ql_n, recent_n, open_ops, search_ops, launch_ops) = super::startmenu::stats();
-
-    out.push_str("Start Menu\n");
-    out.push_str("==========\n\n");
-    out.push_str(&format!("Favorites:   {}/{}\n", fav_n, 32));
-    out.push_str(&format!("Quick links: {}/{}\n", ql_n, 16));
-    out.push_str(&format!("Recent apps: {}/{}\n", recent_n, 20));
-    out.push_str(&format!("Open ops:    {}\n", open_ops));
-    out.push_str(&format!("Search ops:  {}\n", search_ops));
-    out.push_str(&format!("Launch ops:  {}\n\n", launch_ops));
-
-    let favs = super::startmenu::favorites();
-    if !favs.is_empty() {
-        out.push_str("Favorites:\n");
-        for f in &favs {
-            out.push_str(&format!("  [{}] {} ({})\n", f.position, f.name, f.app_id));
-        }
-        out.push('\n');
-    }
-
-    let links = super::startmenu::quick_links();
-    if !links.is_empty() {
-        out.push_str("Quick Links:\n");
-        for ql in &links {
-            out.push_str(&format!("  {} ({})\n", ql.label, ql.app_id));
-        }
-        out.push('\n');
-    }
-
-    let recent = super::startmenu::recent_apps();
-    if !recent.is_empty() {
-        out.push_str("Recent:\n");
-        for r in &recent {
-            out.push_str(&format!(
-                "  {} (x{}) — {}\n",
-                r.name, r.launch_count, r.app_id
             ));
         }
     }
@@ -8203,27 +8482,6 @@ fn gen_powerprofile() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_defaultapps() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (types, cats, overrides, ops) = super::defaultapps::stats();
-    out.push_str(&format!("type_mappings: {}\n", types));
-    out.push_str(&format!("category_defaults: {}\n", cats));
-    out.push_str(&format!("user_overrides: {}\n", overrides));
-    out.push_str(&format!("ops: {}\n", ops));
-
-    let cat_defaults = super::defaultapps::list_category_defaults(0);
-    if !cat_defaults.is_empty() {
-        out.push_str("categories:\n");
-        for cd in &cat_defaults {
-            out.push_str(&format!("  {}: {}\n", cd.category.label(), cd.app_id));
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_monitors() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9216,18 +9474,6 @@ fn gen_screenlock() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_appstore() -> Vec<u8> {
-    use crate::fs::appstore;
-    let (apps, installed, installs, updates, ops) = appstore::stats();
-    let mut out = String::from("app_count: ");
-    out.push_str(&format!("{}\n", apps));
-    out.push_str(&format!("installed: {}\n", installed));
-    out.push_str(&format!("total_installs: {}\n", installs));
-    out.push_str(&format!("total_updates: {}\n", updates));
-    out.push_str(&format!("ops: {}\n", ops));
-    out.into_bytes()
-}
-
 fn gen_wintiling() -> Vec<u8> {
     use crate::fs::wintiling;
     let (ws, wins, tiles, retiles, ops) = wintiling::stats();
@@ -9674,19 +9920,6 @@ fn gen_eyeprotect() -> Vec<u8> {
     out.push_str(&format!("total_breaks: {}\n", breaks));
     out.push_str(&format!("total_snoozes: {}\n", snoozes));
     out.push_str(&format!("total_skips: {}\n", skips));
-    out.push_str(&format!("ops: {}\n", ops));
-    out.into_bytes()
-}
-
-fn gen_pinnedapps() -> Vec<u8> {
-    use super::pinnedapps;
-    use alloc::format;
-    let (total, taskbar, start, launches, ops) = pinnedapps::stats();
-    let mut out = String::from("total_pinned: ");
-    out.push_str(&format!("{}\n", total));
-    out.push_str(&format!("taskbar_pins: {}\n", taskbar));
-    out.push_str(&format!("startmenu_pins: {}\n", start));
-    out.push_str(&format!("total_launches: {}\n", launches));
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
@@ -10210,19 +10443,6 @@ fn gen_usbpolicy() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_applaunch() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (item_count, total_searches, total_launches, ops) = super::applaunch::stats();
-    out.push_str("subsystem: applaunch\n");
-    out.push_str(&format!("item_count: {}\n", item_count));
-    out.push_str(&format!("total_searches: {}\n", total_searches));
-    out.push_str(&format!("total_launches: {}\n", total_launches));
-    out.push_str(&format!("ops: {}\n", ops));
-    out.into_bytes()
-}
-
 fn gen_sysprofiler() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10487,6 +10707,12 @@ fn gen_secureboot() -> Vec<u8> {
     out.push_str("=== Secure Boot ===\n");
     let (key_count, record_count, total_verified, total_rejected, ops) =
         crate::fs::secureboot::stats();
+    let state = crate::fs::secureboot::get_state();
+    out.push_str(&format!("state: {}\n", state.label()));
+    out.push_str(&format!(
+        "enforcing: {}\n",
+        if state.enforces() { "yes" } else { "no" }
+    ));
     out.push_str(&format!("key_count: {}\n", key_count));
     out.push_str(&format!("record_count: {}\n", record_count));
 
@@ -10870,17 +11096,6 @@ fn gen_acl() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_associations() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-    out.push_str("=== File Associations ===\n");
-    let s = crate::fs::associations::stats();
-    out.push_str(&format!("mime_types: {}\n", s.mime_types));
-    out.push_str(&format!("total_entries: {}\n", s.total_entries));
-    out.push_str(&format!("user_entries: {}\n", s.user_entries));
-    out.into_bytes()
-}
-
 fn gen_logrotate() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10908,17 +11123,19 @@ fn gen_powerwake() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// `/proc/diskio` -- every registered block device's I/O together, from the
+/// block layer's own counts (`fs::diskio`'s projection). Until 2026-10-08 it
+/// read a table nothing fed, and an `ops` line counting calls into that table.
 fn gen_diskio() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Disk I/O ===\n");
-    let (dev_count, reads, writes, bytes_read, bytes_written, ops) = crate::fs::diskio::stats();
+    let (dev_count, reads, writes, bytes_read, bytes_written) = crate::fs::diskio::stats();
     out.push_str(&format!("device_count: {}\n", dev_count));
     out.push_str(&format!("global_reads: {}\n", reads));
     out.push_str(&format!("global_writes: {}\n", writes));
     out.push_str(&format!("global_bytes_read: {}\n", bytes_read));
     out.push_str(&format!("global_bytes_written: {}\n", bytes_written));
-    out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
 }
 
@@ -13456,26 +13673,32 @@ fn gen_netlat() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// `/proc/diskstat` -- each registered block device's I/O, from the block
+/// layer's own counts (`fs::diskio`'s projection). Until 2026-10-08 it read
+/// `fs::diskstat`, a table nothing fed; its flush and merge counts, which
+/// nothing here does, went with it rather than staying as zeros.
 fn gen_diskstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
-    let (devs, reads, writes, rb, wb, ops) = super::diskstat::stats();
+    let (devs, reads, writes, rb, wb) = super::diskio::stats();
     out.push_str("=== Disk Stats ===\n");
     out.push_str(&format!(
-        "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}\n\n",
-        devs, reads, writes, rb, wb, ops
+        "Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}\n\n",
+        devs, reads, writes, rb, wb
     ));
     out.push_str("Per-device:\n");
-    for d in super::diskstat::per_device() {
-        let avg_r = if d.reads > 0 { d.read_ns / d.reads } else { 0 };
-        let avg_w = if d.writes > 0 {
-            d.write_ns / d.writes
-        } else {
-            0
-        };
-        out.push_str(&format!("  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}  flush={}  merges: r={} w={}\n",
-            d.name, d.reads, d.read_bytes, avg_r, d.writes, d.write_bytes, avg_w,
-            d.discards, d.flushes, d.merges_read, d.merges_write));
+    for d in super::diskio::all_devices() {
+        out.push_str(&format!(
+            "  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}\n",
+            d.device_name,
+            d.reads,
+            d.bytes_read,
+            d.avg_read_latency_ns(),
+            d.writes,
+            d.bytes_written,
+            d.avg_write_latency_ns(),
+            d.discards
+        ));
     }
     out.into_bytes()
 }
@@ -13791,49 +14014,6 @@ fn gen_pidfd() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_columnview() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (col_count, pref_count, compute_count) = super::columnview::stats();
-
-    out.push_str("Column View\n");
-    out.push_str("===========\n\n");
-    out.push_str(&format!("Columns:    {}/{}\n", col_count, 512));
-    out.push_str(&format!("User prefs: {}/{}\n", pref_count, 256));
-    out.push_str(&format!("Computes:   {}\n\n", compute_count));
-
-    let cols = super::columnview::list_columns();
-    if !cols.is_empty() {
-        out.push_str(&format!(
-            "{:24} {:16} {:8} {:6} {}\n",
-            "ID", "HEADER", "TYPE", "WIDTH", "APPLIES TO"
-        ));
-        for c in cols.iter().take(30) {
-            let type_str = match c.col_type {
-                super::columnview::ColumnType::Text => "text",
-                super::columnview::ColumnType::Integer => "int",
-                super::columnview::ColumnType::Size => "size",
-                super::columnview::ColumnType::DateTime => "date",
-                super::columnview::ColumnType::Duration => "dur",
-                super::columnview::ColumnType::Boolean => "bool",
-                super::columnview::ColumnType::Dimensions => "dim",
-            };
-            let applies = if c.applies_to.is_empty() {
-                String::from("*")
-            } else {
-                format!("{}", c.applies_to.len())
-            };
-            out.push_str(&format!(
-                "{:24} {:16} {:8} {:6} {}\n",
-                c.id, c.header, type_str, c.default_width, applies
-            ));
-        }
-    }
-
-    out.into_bytes()
-}
-
 fn gen_pathbar() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -13937,22 +14117,6 @@ fn gen_fileselect() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_filetype() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (lookups, registers, type_count, app_icons) = super::filetype::stats();
-
-    out.push_str("File Types\n");
-    out.push_str("==========\n\n");
-    out.push_str(&format!("Types:       {}\n", type_count));
-    out.push_str(&format!("App icons:   {}\n", app_icons));
-    out.push_str(&format!("Lookups:     {}\n", lookups));
-    out.push_str(&format!("Registers:   {}\n", registers));
-
-    out.into_bytes()
-}
-
 fn gen_sidebar() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -13991,22 +14155,6 @@ fn gen_statusbar() -> Vec<u8> {
     out.into_bytes()
 }
 
-fn gen_openwith() -> Vec<u8> {
-    use alloc::format;
-    let mut out = String::new();
-
-    let (opens, defaults, recent, apps) = super::openwith::stats();
-
-    out.push_str("Open With\n");
-    out.push_str("=========\n\n");
-    out.push_str(&format!("Opens:           {}\n", opens));
-    out.push_str(&format!("Default changes: {}\n", defaults));
-    out.push_str(&format!("Recent entries:  {}\n", recent));
-    out.push_str(&format!("Known apps:      {}\n", apps));
-
-    out.into_bytes()
-}
-
 fn gen_properties() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -14021,13 +14169,142 @@ fn gen_properties() -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Check if a task ID currently exists in the scheduler.
+/// The task whose memory `rel` names, if it is `<pid>/mem` or
+/// `<pid>/task/<tid>/mem` of a live one.
+fn mem_file_task(rel: &str) -> Option<u64> {
+    match classify_path(rel) {
+        ProcPath::PidFile(pid, "mem") => pid_dir_exists(pid).then_some(pid),
+        ProcPath::PidTaskFile(pid, tid, "mem") => thread_belongs(pid, tid).then_some(tid),
+        _ => None,
+    }
+}
+
+/// The process whose memory `/proc/<task>/mem` is -- for a reader that is
+/// that process, or holds `DEBUG` over it, as its tracer does (Linux's
+/// `PTRACE_MODE_ATTACH` check, design-decisions 24's right). `EACCES` for
+/// anyone else.
+fn mem_target(task: u64) -> KernelResult<u64> {
+    let target = proc_target(task).ok_or(KernelError::NotFound)?;
+    let reader = proc_reader();
+    let allowed = reader == Some(target)
+        || reader.is_some_and(|r| {
+            crate::proc::pcb::has_capability_for(
+                r,
+                crate::cap::ResourceType::Process,
+                target,
+                crate::cap::Rights::DEBUG,
+            )
+        });
+    if allowed {
+        Ok(target)
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// How much of `/proc/<pid>/mem` one step reads or writes: a page, so a range
+/// that runs into an unmapped page stops there.
+const MEM_STEP: u64 = 4096;
+
+/// `/proc/<task>/mem`'s read: `len` bytes of the process's memory at address
+/// `offset`, a page at a time, up to the first address it does not map -- a
+/// short read, or `EIO` when not even the first byte is mapped (Linux's
+/// `mem_rw`).
+fn mem_read(task: u64, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    let target = mem_target(task)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    let mut addr = offset;
+    while out.len() < len {
+        // 1..=MEM_STEP: what is left of `addr`'s page.
+        let room = MEM_STEP.saturating_sub(addr % MEM_STEP);
+        let want = usize::try_from(room)
+            .unwrap_or(usize::MAX)
+            .min(len.saturating_sub(out.len()));
+        let mut chunk = alloc::vec![0u8; want];
+        if crate::proc::ptrace::read_memory(target, addr, &mut chunk).is_err() {
+            break;
+        }
+        out.extend_from_slice(&chunk);
+        match addr.checked_add(room) {
+            Some(next) => addr = next,
+            None => break,
+        }
+    }
+    if out.is_empty() && len > 0 {
+        return Err(KernelError::IoError);
+    }
+    Ok(out)
+}
+
+/// `/proc/<task>/mem`'s write: `data` into the process's memory at address
+/// `offset`, read-only pages of private mappings included -- a breakpoint
+/// into code -- as a tracer's `PTRACE_POKETEXT` writes them
+/// (`crate::proc::ptrace::write_memory`). `EIO` if any of it cannot be.
+fn mem_write(task: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+    let target = mem_target(task)?;
+    crate::proc::ptrace::write_memory(target, offset, data).map_err(|_| KernelError::IoError)
+}
+
+/// Whether `/proc/<id>` exists: a live task has that id -- a process's first
+/// thread, any other thread (resolvable, though not listed), a kernel task
+/// -- or a process does, whatever has become of its threads.
 ///
-/// Uses the scheduler's cheap map lookup rather than building the full task
-/// list (which would allocate and scan every task's stack) just to test for
-/// membership.
-fn task_exists(task_id: u64) -> bool {
-    crate::sched::task_exists(task_id)
+/// The second half is Linux's rule. Its `/proc/<tgid>` follows the group
+/// leader's `task_struct`, which outlives the leader thread as a zombie
+/// until the whole process is reaped: a process whose first thread called
+/// `pthread_exit`, and a zombie its parent has not waited for yet, both keep
+/// their directory. Here the scheduler frees a dead thread's task at its
+/// next reap pass, so until 2026-10-02 both lost theirs at that moment --
+/// `ps` could not show a zombie at all, and `/proc/self` named a missing
+/// directory for a thread whose first thread had gone (rq42's `/etc/mtab`).
+///
+/// A dead task that is no process -- another thread, a kernel task -- has
+/// no directory, though the scheduler has not freed it yet: Linux releases
+/// such a thread as it exits.
+fn pid_dir_exists(id: u64) -> bool {
+    use crate::sched::task::TaskState;
+    crate::sched::task_state(id).is_some_and(|s| s != TaskState::Dead)
+        || crate::proc::pcb::state(id).is_some()
+}
+
+/// The thread `/proc/<id>`'s per-thread fields describe: the live task with
+/// that id, or -- once a process's first thread has exited -- the snapshot
+/// the process kept of it ([`crate::proc::pcb::exited_leader`]), whose
+/// state `Dead` reads as `Z`, as Linux's zombie group leader does. `None`
+/// for an id that is neither, and for a process that never had a thread.
+///
+/// One task's snapshot, not [`crate::sched::task_list`]'s: that scans every
+/// task's stack under the scheduler lock to find one.
+fn proc_task(id: u64) -> Option<crate::sched::TaskInfo> {
+    crate::sched::task_info(id).or_else(|| crate::proc::pcb::exited_leader(id))
+}
+
+/// Whether `id` is a zombie: a process that has exited and not been reaped.
+/// Its memory and its files are gone (`pcb::release_address_space`,
+/// `pcb::exit_close_fds`), so what Linux reads from them -- `cmdline`,
+/// `environ`, `auxv` -- reads empty, and the `exe`, `cwd` and `root` links
+/// name nothing, as Linux's do once `exit_mm` and `exit_fs` have run.
+fn is_zombie(id: u64) -> bool {
+    crate::proc::pcb::state(id) == Some(crate::proc::pcb::ProcessState::Zombie)
+}
+
+/// The directory `/proc/self` names: the calling process's id -- its main
+/// thread's task id, so the directory that is the process -- or, for a
+/// kernel task with no process, its own id. Until 2026-10-01 this was the
+/// calling *task's* id, which for any thread but the first is not the
+/// process, and before task and process ids shared one counter was not the
+/// process for the first thread either.
+fn self_dir_id() -> u64 {
+    let task = crate::sched::current_task_id();
+    crate::proc::thread::owner_process(task).unwrap_or(task)
+}
+
+/// Whether task `task_id` has a directory in the `/proc` listing: a process's
+/// main thread (whose id is the process's) and a kernel task (no process).
+fn is_listed_at_root(task_id: u64) -> bool {
+    crate::proc::thread::owner_process(task_id).is_none_or(|pid| pid == task_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -14121,9 +14398,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "freeze" => Ok(gen_freeze()),
         "sealing" => Ok(gen_sealing()),
         "recent" => Ok(gen_recent()),
-        "fileinfo" => Ok(gen_fileinfo()),
         "fswalk" => Ok(gen_fswalk()),
-        "findex" => Ok(gen_findex()),
         "thumbcache" => Ok(gen_thumbcache()),
         "bookmarks" => Ok(gen_bookmarks()),
         "clipboard" => Ok(gen_clipboard()),
@@ -14131,22 +14406,16 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "contextmenu" => Ok(gen_contextmenu()),
         "fileops" => Ok(gen_fileops()),
         "fileselect" => Ok(gen_fileselect()),
-        "filetype" => Ok(gen_filetype()),
-        "openwith" => Ok(gen_openwith()),
-        "preview" => Ok(gen_preview()),
         "sidebar" => Ok(gen_sidebar()),
         "statusbar" => Ok(gen_statusbar()),
         "templates" => Ok(gen_templates()),
         "toolbar" => Ok(gen_toolbar()),
         "queryable" => Ok(gen_queryable()),
-        "immutable" => Ok(gen_immutable()),
         "fcomment" => Ok(gen_fcomment()),
         "rundialog" => Ok(gen_rundialog()),
         "notifcenter" => Ok(gen_notifcenter()),
-        "appregistry" => Ok(gen_appregistry()),
         "systray" => Ok(gen_systray()),
         "taskbar" => Ok(gen_taskbar()),
-        "startmenu" => Ok(gen_startmenu()),
         "filepicker" => Ok(gen_filepicker()),
         "theme" => Ok(gen_theme()),
         "hotkeys" => Ok(gen_hotkeys()),
@@ -14202,7 +14471,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "mousesettings" => Ok(gen_mousesettings()),
         "touchpad" => Ok(gen_touchpad()),
         "powerprofile" => Ok(gen_powerprofile()),
-        "defaultapps" => Ok(gen_defaultapps()),
         "monitors" => Ok(gen_monitors()),
         "fwsettings" => Ok(gen_fwsettings()),
         "updatemgr" => Ok(gen_updatemgr()),
@@ -14257,7 +14525,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "speechio" => Ok(gen_speechio()),
         "mobilelink" => Ok(gen_mobilelink()),
         "screenlock" => Ok(gen_screenlock()),
-        "appstore" => Ok(gen_appstore()),
         "wintiling" => Ok(gen_wintiling()),
         "peninput" => Ok(gen_peninput()),
         "brightness" => Ok(gen_brightness()),
@@ -14289,7 +14556,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "snaplayout" => Ok(gen_snaplayout()),
         "haptfeedback" => Ok(gen_haptfeedback()),
         "eyeprotect" => Ok(gen_eyeprotect()),
-        "pinnedapps" => Ok(gen_pinnedapps()),
         "inputmethod" => Ok(gen_inputmethod()),
         "storagesense" => Ok(gen_storagesense()),
         "autofix" => Ok(gen_autofix()),
@@ -14313,7 +14579,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sysresource" => Ok(gen_sysresource()),
         "faceunlock" => Ok(gen_faceunlock()),
         "usbpolicy" => Ok(gen_usbpolicy()),
-        "applaunch" => Ok(gen_applaunch()),
         "sysprofiler" => Ok(gen_sysprofiler()),
         "clipsync" => Ok(gen_clipsync()),
         "netusage" => Ok(gen_netusage()),
@@ -14385,7 +14650,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "userprofile" => Ok(gen_userprofile()),
         "diskclean" => Ok(gen_diskclean()),
         "acl" => Ok(gen_acl()),
-        "associations" => Ok(gen_associations()),
         "logrotate" => Ok(gen_logrotate()),
         "powerwake" => Ok(gen_powerwake()),
         "diskio" => Ok(gen_diskio()),
@@ -14506,7 +14770,6 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cgmem" => Ok(gen_cgmem()),
         "vmfrag" => Ok(gen_vmfrag()),
         "pidfd" => Ok(gen_pidfd()),
-        "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),
         "properties" => Ok(gen_properties()),
@@ -14548,6 +14811,14 @@ enum ProcPath<'a> {
     PidFdInfoDir(u64),
     /// A `/proc/<pid>/fdinfo/<n>` regular file describing fd `n` (pos/flags).
     PidFdInfoFile(u64, i32),
+    /// The `/proc/<pid>/ns` directory: one link per kind of namespace
+    /// (`crate::nsfs::KINDS`).
+    PidNsDir(u64),
+    /// A `/proc/<pid>/ns/<kind>` magic link: to the namespace of that kind
+    /// the process is in (`crate::nsfs`). Its text is `uts:[N]`; opening it
+    /// (the system-call layer, [`namespace_at`]) gives a handle on the
+    /// namespace, which `setns` takes.
+    PidNsLink(u64, crate::nsfs::NsKind),
     /// A directory in the `/proc/sys` sysctl tree.  The `&str` is the path
     /// *under* `/proc/sys` (`""` is `/proc/sys` itself, `"kernel"` is
     /// `/proc/sys/kernel`, etc.).
@@ -14674,14 +14945,16 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
         "kernel/ostype" => format!("{}\n", crate::uname::SYSNAME),
         "kernel/osrelease" => format!("{}\n", crate::uname::RELEASE),
         "kernel/version" => format!("{}\n", crate::uname::VERSION),
-        "kernel/hostname" => {
-            crate::fs::nameservice::init_defaults();
-            format!("{}\n", crate::fs::nameservice::get_hostname())
-        }
-        "kernel/domainname" => {
-            crate::fs::nameservice::init_defaults();
-            format!("{}\n", crate::fs::nameservice::get_domain())
-        }
+        // The reader's UTS namespace's names, as Linux's `proc_do_uts_string`
+        // reads `current->nsproxy->uts_ns`: the system's in the root.
+        "kernel/hostname" => format!(
+            "{}\n",
+            crate::utsns::hostname(crate::utsns::of_current()).unwrap_or_default()
+        ),
+        "kernel/domainname" => format!(
+            "{}\n",
+            crate::utsns::domainname(crate::utsns::of_current()).unwrap_or_default()
+        ),
         // Real PID ceiling (the per-namespace process cap).
         "kernel/pid_max" => format!("{}\n", crate::pidns::MAX_PIDS_PER_NS),
         // Real per-process fd-table size.
@@ -14787,11 +15060,11 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         return ProcPath::NotFound;
     }
 
-    // "self" is a magic alias for the current task's PID.
+    // "self" is a magic alias for the calling process's directory.
     // Linux provides /proc/self as a symlink → /proc/<current_pid>.
     // We resolve it inline since procfs is a virtual filesystem.
     let pid = if first == "self" {
-        crate::sched::current_task_id()
+        self_dir_id()
     } else if let Ok(p) = first.parse::<u64>() {
         p
     } else {
@@ -14842,6 +15115,18 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         return ProcPath::NotFound;
     }
 
+    // The `ns/` subtree: `<pid>/ns` (directory) and `<pid>/ns/<kind>` (a
+    // magic link to the namespace of that kind the process is in).
+    if rest == "ns" {
+        return ProcPath::PidNsDir(pid);
+    }
+    if let Some(sub) = rest.strip_prefix("ns/") {
+        return match crate::nsfs::NsKind::from_name(sub.as_bytes()) {
+            Some(kind) => ProcPath::PidNsLink(pid, kind),
+            None => ProcPath::NotFound,
+        };
+    }
+
     // The `task/` subtree: `<pid>/task`, `<pid>/task/<tid>`, and
     // `<pid>/task/<tid>/<file>` (the only nested directories in procfs).
     if rest == "task" {
@@ -14879,6 +15164,13 @@ impl FileSystem for ProcFs {
         "procfs"
     }
 
+    /// Never: `self` names the caller, a process's directory comes and goes
+    /// with no VFS operation to invalidate a cached lookup, and the `cwd`,
+    /// `root`, `exe` and `fd/<n>` links follow their process.
+    fn dcache_safe(&self) -> bool {
+        false
+    }
+
     fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
         let rel = strip_root(path)?;
 
@@ -14914,11 +15206,30 @@ impl FileSystem for ProcFs {
                     size: 0,
                 });
 
-                // Add per-PID directories for all live tasks.
+                // One directory per process -- its main thread's task id, which is
+                // its pid (`pcb::claim_leader_id`) -- and one per kernel task,
+                // which has no process. A process's other threads are under its
+                // `task/` directory and not listed here, as on Linux; their own
+                // `/proc/<tid>` still resolves.
+                // Live tasks only: a dead one is listed below if it was a
+                // process's first thread, and is otherwise gone
+                // ([`pid_dir_exists`]).
+                let mut listed = alloc::collections::BTreeSet::new();
                 for task in &crate::sched::task_list() {
+                    if task.state != crate::sched::task::TaskState::Dead
+                        && is_listed_at_root(task.id)
+                    {
+                        listed.insert(task.id);
+                    }
+                }
+                // And every process whose first thread is gone -- one that
+                // went on without it, or a zombie not yet waited for: Linux
+                // lists a thread group until it is reaped ([`pid_dir_exists`]).
+                listed.extend(crate::proc::pcb::pids());
+                for id in listed {
                     entries.push(DirEntry {
                         ino: 0,
-                        name: PathBuf::from(format!("{}", task.id)),
+                        name: PathBuf::from(format!("{id}")),
                         entry_type: EntryType::Directory,
                         size: 0,
                     });
@@ -14928,7 +15239,7 @@ impl FileSystem for ProcFs {
             }
             ProcPath::PidDir(pid) => {
                 // Per-PID directory: list virtual files inside it.
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 let mut entries: Vec<DirEntry> = PID_FILES
@@ -14973,14 +15284,47 @@ impl FileSystem for ProcFs {
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
+                // The `ns/` subdirectory (the namespaces it is in).
+                entries.push(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from("ns"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+                Ok(entries)
+            }
+            ProcPath::PidNsDir(pid) => {
+                // `/proc/<pid>/ns` -- one link per kind of namespace this
+                // kernel has, for a process; a kernel task is in none. Only a
+                // reader who may inspect the process lists it, as Linux's
+                // `dr-x--x--x` lets only its owner read it.
+                if !pid_dir_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
+                }
+                let entries = crate::nsfs::KINDS
+                    .iter()
+                    .filter(|&&kind| namespace_of(pid, kind).is_some())
+                    .map(|kind| DirEntry {
+                        ino: 0,
+                        name: PathBuf::from(kind.name()),
+                        entry_type: EntryType::Symlink,
+                        size: 0,
+                    })
+                    .collect();
                 Ok(entries)
             }
             ProcPath::PidFdInfoDir(pid) => {
                 // `/proc/<pid>/fdinfo` — one regular file per open fd, each
                 // holding that fd's pos/flags.  Same fd source and
                 // honestly-empty-for-native behaviour as `fd/`.
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
                 }
                 let entries = crate::proc::pcb::linux_fd_list(pid)
                     .unwrap_or_default()
@@ -15004,8 +15348,11 @@ impl FileSystem for ProcFs {
                 // Linux-ABI processes have a kernel-visible fd table; for a
                 // native process (fds live in userspace) the list is
                 // legitimately empty rather than fabricated.
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
                 }
                 let entries = crate::proc::pcb::linux_fd_list(pid)
                     .unwrap_or_default()
@@ -15060,9 +15407,66 @@ impl FileSystem for ProcFs {
             | ProcPath::PidTaskFile(_, _, _)
             | ProcPath::PidFdLink(_, _)
             | ProcPath::PidFdInfoFile(_, _)
+            | ProcPath::PidNsLink(_, _)
             | ProcPath::SysFile(_) => Err(KernelError::NotADirectory),
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
+    }
+
+    // `/proc/<task>/mem` is bound to the address space its process has as it
+    // is opened: the number of times the process has exec'd. After another
+    // exec the handle reads end-of-file (`FileSystem::open_binding`).
+    fn open_binding(&mut self, path: &Path) -> Option<u64> {
+        let task = mem_file_task(strip_root(path).ok()?)?;
+        crate::proc::pcb::exec_generation(proc_target(task)?)
+    }
+
+    fn binding_current(&mut self, path: &Path, binding: u64) -> bool {
+        strip_root(path)
+            .ok()
+            .and_then(mem_file_task)
+            .and_then(proc_target)
+            .and_then(crate::proc::pcb::exec_generation)
+            == Some(binding)
+    }
+
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let rel = strip_root(path)?;
+        if let Some(task) = mem_file_task(rel) {
+            return mem_read(task, offset, len);
+        }
+        // Every other file: generated whole and sliced (the trait's default).
+        let data = self.read_file(path)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(data.len());
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec))
+    }
+
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path)?;
+        if let Some(task) = mem_file_task(rel) {
+            return mem_write(task, offset, data);
+        }
+        // Every other file is written whole, as the trait's default writes it:
+        // the bytes in place of the range, then the file.
+        let mut contents = match self.read_file(path) {
+            Ok(c) => c,
+            Err(KernelError::NotFound) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        let start = usize::try_from(offset).map_err(|_| KernelError::InvalidArgument)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(KernelError::InvalidArgument)?;
+        if end > contents.len() {
+            contents.resize(end, 0);
+        }
+        if let Some(dest) = contents.get_mut(start..end) {
+            dest.copy_from_slice(data);
+        }
+        self.write_file(path, &contents)
     }
 
     fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
@@ -15075,11 +15479,12 @@ impl FileSystem for ProcFs {
             | ProcPath::PidTaskTidDir(_, _)
             | ProcPath::PidFdDir(_)
             | ProcPath::PidFdInfoDir(_)
+            | ProcPath::PidNsDir(_)
             | ProcPath::SysDir(_) => Err(KernelError::IsADirectory),
             ProcPath::SysFile(rel) => gen_sys(rel),
             ProcPath::RootFile(name) => generate(name),
             ProcPath::PidFile(pid, file_name) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 generate_pid(pid, file_name)
@@ -15093,12 +15498,16 @@ impl FileSystem for ProcFs {
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
             // symlink opened without O_PATH.
-            ProcPath::PidLink(_, _) | ProcPath::SelfLink | ProcPath::PidFdLink(_, _) => {
-                Err(KernelError::InvalidArgument)
-            }
+            ProcPath::PidLink(_, _)
+            | ProcPath::SelfLink
+            | ProcPath::PidFdLink(_, _)
+            | ProcPath::PidNsLink(_, _) => Err(KernelError::InvalidArgument),
             ProcPath::PidFdInfoFile(pid, fd) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
+                }
+                if !reader_may_inspect(pid) {
+                    return Err(KernelError::PermissionDenied);
                 }
                 gen_pid_fdinfo(pid, fd)
             }
@@ -15116,7 +15525,7 @@ impl FileSystem for ProcFs {
 
         match classify_path(rel) {
             ProcPath::PidFile(pid, "oom_score_adj") => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 set_pid_oom_score_adj(pid, data)
@@ -15127,158 +15536,13 @@ impl FileSystem for ProcFs {
     }
 
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
-        let rel = strip_root(path)?;
+        proc_stat(path, true)
+    }
 
-        match classify_path(rel) {
-            ProcPath::Root => Ok(DirEntry {
-                ino: 0,
-                name: PathBuf::from("/"),
-                entry_type: EntryType::Directory,
-                size: 0,
-            }),
-            ProcPath::RootFile(name) => {
-                let size = generate(name).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(name),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::PidDir(pid) => {
-                if !task_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{pid}")),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFile(pid, file_name) => {
-                if !task_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                let size = generate_pid(pid, file_name).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(file_name),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::PidLink(pid, link_name) => {
-                if !task_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(link_name),
-                    entry_type: EntryType::Symlink,
-                    size: 0,
-                })
-            }
-            ProcPath::SelfLink => Ok(DirEntry {
-                ino: 0,
-                name: PathBuf::from("self"),
-                entry_type: EntryType::Symlink,
-                size: 0,
-            }),
-            ProcPath::PidTaskDir(pid) => {
-                if !task_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("task"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidTaskTidDir(pid, tid) => {
-                if !thread_belongs(pid, tid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{tid}")),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidTaskFile(pid, tid, file_name) => {
-                if !thread_belongs(pid, tid) {
-                    return Err(KernelError::NotFound);
-                }
-                let size = generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(file_name),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::PidFdDir(pid) => {
-                if !task_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("fd"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFdLink(pid, fd) => {
-                // Only a currently-open fd is a valid symlink; an absent
-                // fd (or a process with no kernel fd table) is NotFound.
-                crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{fd}")),
-                    entry_type: EntryType::Symlink,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFdInfoDir(pid) => {
-                if !task_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("fdinfo"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFdInfoFile(pid, fd) => {
-                // A regular file, present only for a currently-open fd.
-                let size = gen_pid_fdinfo(pid, fd)?.len() as u64;
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{fd}")),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::SysDir(rel) => Ok(DirEntry {
-                ino: 0,
-                name: PathBuf::from(sys_basename(rel)),
-                entry_type: EntryType::Directory,
-                size: 0,
-            }),
-            ProcPath::SysFile(rel) => {
-                let size = gen_sys(rel).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(sys_basename(rel)),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::NotFound => Err(KernelError::NotFound),
-        }
+    /// `stat`'s type without its size, which procfs finds out by making
+    /// the file: path resolution asks this of every component it walks.
+    fn entry_type(&mut self, path: &Path) -> KernelResult<EntryType> {
+        proc_stat(path, false).map(|e| e.entry_type)
     }
 
     /// Resolve a per-PID symbolic link (`cwd`, `root`).
@@ -15296,9 +15560,23 @@ impl FileSystem for ProcFs {
     /// canonical cwds are ASCII/UTF-8, so this is a theoretical edge.
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
         let rel = strip_root(path)?;
-        match classify_path(rel) {
+        let link = classify_path(rel);
+        // Where a process runs from, what it runs and what it has open: only
+        // a reader who may inspect it, as Linux's `proc_fd_access_allowed`.
+        if let ProcPath::PidLink(pid, _) | ProcPath::PidFdLink(pid, _) | ProcPath::PidNsLink(pid, _) =
+            link
+            && pid_dir_exists(pid)
+            && !reader_may_inspect(pid)
+        {
+            return Err(KernelError::PermissionDenied);
+        }
+        match link {
+            // A zombie runs nothing from nowhere ([`is_zombie`]).
+            ProcPath::PidLink(pid, "root" | "cwd" | "exe") if is_zombie(pid) => {
+                Err(KernelError::NotFound)
+            }
             ProcPath::PidLink(pid, "root") => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(PathBuf::from("/"))
@@ -15331,12 +15609,15 @@ impl FileSystem for ProcFs {
                     crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
                 Ok(fd_link_target(&entry))
             }
+            // `/proc/<pid>/ns/<kind>` → the namespace, as Linux names it:
+            // `uts:[4026531838]`.
+            ProcPath::PidNsLink(pid, kind) => {
+                let id = namespace_of(pid, kind).ok_or(KernelError::NotFound)?;
+                Ok(PathBuf::from(crate::nsfs::link_text(kind, id)))
+            }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
-            ProcPath::SelfLink => Ok(PathBuf::from(format!(
-                "{}",
-                crate::sched::current_task_id()
-            ))),
+            ProcPath::SelfLink => Ok(PathBuf::from(format!("{}", self_dir_id()))),
             _ => Err(KernelError::InvalidArgument),
         }
     }
@@ -15347,6 +15628,10 @@ impl FileSystem for ProcFs {
 
         let perms = if entry.entry_type == EntryType::Directory {
             0o555
+        } else if strip_root(path).is_ok_and(|rel| mem_file_task(rel).is_some()) {
+            // `/proc/<pid>/mem` is read and written, by the process and its
+            // debugger (`mem_target` checks which), as Linux's 0600 says.
+            0o600
         } else {
             0o444
         };
@@ -15386,6 +15671,243 @@ impl FileSystem for ProcFs {
     }
 }
 
+/// What [`ProcFs`]'s `stat` reports for `path`. Without `with_size` the
+/// size is 0 and no file is made to find it out, which is all that
+/// `entry_type`, and so path resolution, wants. Whether an entry exists
+/// is decided the same way in both cases.
+fn proc_stat(path: &Path, with_size: bool) -> KernelResult<DirEntry> {
+    let rel = strip_root(path)?;
+
+    match classify_path(rel) {
+        ProcPath::Root => Ok(DirEntry {
+            ino: 0,
+            name: PathBuf::from("/"),
+            entry_type: EntryType::Directory,
+            size: 0,
+        }),
+        ProcPath::RootFile(name) => {
+            let size = if with_size {
+                generate(name).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(name),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::PidDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{pid}")),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidFile(pid, file_name) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            let size = if with_size {
+                generate_pid(pid, file_name).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(file_name),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::PidLink(pid, link_name) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(link_name),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            })
+        }
+        ProcPath::SelfLink => Ok(DirEntry {
+            ino: 0,
+            name: PathBuf::from("self"),
+            entry_type: EntryType::Symlink,
+            size: 0,
+        }),
+        ProcPath::PidTaskDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("task"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidTaskTidDir(pid, tid) => {
+            if !thread_belongs(pid, tid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{tid}")),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidTaskFile(pid, tid, file_name) => {
+            if !thread_belongs(pid, tid) {
+                return Err(KernelError::NotFound);
+            }
+            let size = if with_size {
+                generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(file_name),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::PidFdDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("fd"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidFdLink(pid, fd) => {
+            // Only a currently-open fd is a valid symlink; an absent
+            // fd (or a process with no kernel fd table) is NotFound.
+            crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{fd}")),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            })
+        }
+        ProcPath::PidFdInfoDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("fdinfo"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidNsDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("ns"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidNsLink(pid, kind) => {
+            // A link while the process is in a namespace of the kind: not for
+            // a kernel task, nor a zombie ([`namespace_of`]).
+            namespace_of(pid, kind).ok_or(KernelError::NotFound)?;
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(kind.name()),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            })
+        }
+        ProcPath::PidFdInfoFile(pid, fd) => {
+            // A regular file, present only for a currently-open fd -- which is
+            // what making it finds out, so it is made either way.
+            let made = gen_pid_fdinfo(pid, fd)?;
+            let size = if with_size { made.len() as u64 } else { 0 };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{fd}")),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::SysDir(rel) => Ok(DirEntry {
+            ino: 0,
+            name: PathBuf::from(sys_basename(rel)),
+            entry_type: EntryType::Directory,
+            size: 0,
+        }),
+        ProcPath::SysFile(rel) => {
+            let size = if with_size {
+                gen_sys(rel).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(sys_basename(rel)),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::NotFound => Err(KernelError::NotFound),
+    }
+}
+
+/// The namespace of `kind` that `/proc/<pid>`'s process is in (`crate::nsfs`):
+/// `None` for a kernel task, which belongs to no process, and for a zombie,
+/// which has left its namespaces as Linux's exiting task drops its
+/// `nsproxy`.
+fn namespace_of(pid: u64, kind: crate::nsfs::NsKind) -> Option<u64> {
+    let process = proc_target(pid)?;
+    if is_zombie(process) {
+        return None;
+    }
+    crate::nsfs::of_process(kind, process)
+}
+
+/// The namespace a path names when it is a `/proc/<pid>/ns/<kind>` link --
+/// `self` for the caller's own -- for the system-call layer, which opens and
+/// stats such a path as Linux follows the link, to the namespace itself.
+/// `path` is the whole canonical path: procfs is at `/proc`.
+///
+/// `None` for any other path. `Some(Err(NotFound))` when the process is not
+/// there or is a zombie, `Some(Err(PermissionDenied))` when the caller may
+/// not inspect it -- Linux's `proc_ns_get_link`, `PTRACE_MODE_READ_FSCREDS`.
+pub(crate) fn namespace_at(path: &[u8]) -> Option<KernelResult<(crate::nsfs::NsKind, u64)>> {
+    let rel = core::str::from_utf8(path.strip_prefix(b"/proc/")?).ok()?;
+    let ProcPath::PidNsLink(pid, kind) = classify_path(rel) else {
+        return None;
+    };
+    if !pid_dir_exists(pid) {
+        return Some(Err(KernelError::NotFound));
+    }
+    if !reader_may_inspect(pid) {
+        return Some(Err(KernelError::PermissionDenied));
+    }
+    Some(
+        namespace_of(pid, kind)
+            .map(|id| (kind, id))
+            .ok_or(KernelError::NotFound),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Mount helper
 // ---------------------------------------------------------------------------
@@ -15401,6 +15923,123 @@ pub fn mount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
     Ok(())
 }
 
+/// Make `/etc/mtab` the mount table, as Linux has it: a symlink to
+/// `/proc/self/mounts`, for the programs that read the table at glibc's
+/// `MOUNTED` path (`setmntent("/etc/mtab")`, older programs, gnulib).
+///
+/// Nothing on the system made it until 2026-10-01, and they got `ENOENT`
+/// (lane D's request `d-a-make-etc-mtab-at-boot`). It is made at boot,
+/// not in the rootfs image: the image is mounted at `/mnt`, and programs
+/// look at `/etc`.
+///
+/// An `/etc/mtab` already there is left as it is: the link an earlier call
+/// made, or a file someone put there on purpose.
+///
+/// # Errors
+///
+/// The VFS's own, from looking or from making the link.
+pub fn make_etc_mtab() -> KernelResult<()> {
+    match crate::fs::Vfs::lstat("/etc/mtab") {
+        Ok(_) => Ok(()),
+        Err(KernelError::NotFound) => crate::fs::Vfs::symlink("/etc/mtab", "/proc/self/mounts"),
+        Err(e) => Err(e),
+    }
+}
+
+/// `/etc/mtab` is the mount table: [`make_etc_mtab`] makes it a link to
+/// `/proc/self/mounts`, and a process reading it gets a line for the root
+/// mount. Read as a process, which `/proc/self/mounts` needs: a kernel task
+/// has no mount table of its own. The process has no thread, so its
+/// directory is there because the process is ([`pid_dir_exists`]) -- which
+/// it was not until 2026-10-02, and this read was `NotFound` (rq42).
+///
+/// Read by two processes in turn, the first gone before the second reads.
+/// Until 2026-10-03 the VFS path cache kept the first reader's resolution of
+/// the link, `/proc/<first>/mounts`, and handed it to every later reader, for
+/// whom it named a directory that was no longer there: rq43's `NotFound`,
+/// after rq42's had been fixed. Procfs resolutions are no longer kept
+/// (`FileSystem::dcache_safe`); the second read is the test of that.
+///
+/// # Errors
+///
+/// `InternalError` when the link or its contents are wrong; the VFS's own.
+pub fn self_test_etc_mtab() -> KernelResult<()> {
+    use crate::serial_println;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[procfs]   FAIL: /etc/mtab: {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    /// `/etc/mtab`'s contents, read as a new process that is gone again on
+    /// return.
+    fn read_as_new_process(name: &str) -> KernelResult<alloc::vec::Vec<u8>> {
+        let pid = crate::proc::pcb::create(name, 0);
+        let table = crate::proc::thread::self_test_as_process(pid, || {
+            let table = crate::fs::Vfs::read_file("/etc/mtab");
+            if table.is_err() {
+                // Each step of the resolution, so a failure says which one
+                // answered: rq42 and rq43 both read `NotFound` and no more.
+                let own = alloc::format!("/proc/{pid}");
+                let own_mounts = alloc::format!("/proc/{pid}/mounts");
+                serial_println!(
+                    "[procfs]   /etc/mtab steps as process {}: readlink /proc/self {:?}; stat {} \
+                     {:?}; read {} {:?}; read /proc/self/mounts {:?}",
+                    pid,
+                    crate::fs::Vfs::readlink("/proc/self"),
+                    own,
+                    crate::fs::Vfs::stat(&own).map(|_| ()),
+                    own_mounts,
+                    crate::fs::Vfs::read_file(&own_mounts).map(|t| t.len()),
+                    crate::fs::Vfs::read_file("/proc/self/mounts").map(|t| t.len())
+                );
+            }
+            table
+        });
+        crate::proc::pcb::destroy(pid);
+        table
+    }
+
+    if crate::fs::Vfs::stat("/etc").is_err() {
+        // Boot makes `/etc` later; made here first, it is the same directory.
+        crate::fs::Vfs::mkdir("/etc")?;
+    }
+    make_etc_mtab()?;
+    match crate::fs::Vfs::readlink("/etc/mtab") {
+        Ok(target) if target.as_path() == Path::new("/proc/self/mounts") => {}
+        other => {
+            serial_println!("[procfs]   /etc/mtab reads as a link to {:?}", other);
+            return fail("it is not a link to /proc/self/mounts");
+        }
+    }
+    let first = read_as_new_process("etc-mtab-selftest-1");
+    let second = read_as_new_process("etc-mtab-selftest-2");
+    for (reader, table) in [("first", &first), ("second", &second)] {
+        // A line whose second field, the mount point, is "/".
+        let has_root = table.as_ref().is_ok_and(|t| {
+            t.split(|&b| b == b'\n')
+                .any(|line| line.split(|&b| b == b' ').nth(1) == Some(b"/".as_slice()))
+        });
+        if !has_root {
+            serial_println!(
+                "[procfs]   /etc/mtab read by the {} process: {:?}",
+                reader,
+                table.as_ref().map(alloc::vec::Vec::len)
+            );
+            return fail(if reader == "first" {
+                "reading it gave no line for the root mount"
+            } else {
+                "a second process read no line for the root mount (a kept resolution?)"
+            });
+        }
+    }
+    serial_println!(
+        "[procfs]   /etc/mtab: a link to /proc/self/mounts, read as the mount table by two \
+         processes in turn: OK"
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -15413,6 +16052,99 @@ pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = ProcFs::new();
+
+    // `/proc/<pid>/mem` is bound, as it is opened, to the address space its
+    // process has then (its exec generation); after an exec that binding no
+    // longer holds -- a handle reads end-of-file, as Linux's does -- and a new
+    // open binds to the new one. Every other file is bound to nothing.
+    {
+        let pid = crate::proc::pcb::create("procfs-mem-binding", 0);
+        let mem = PathBuf::from(format!("/{pid}/mem"));
+        let first = fs.open_binding(&mem);
+        let unbound = fs.open_binding(&PathBuf::from(format!("/{pid}/status")));
+        let held_before = first.is_some_and(|b| fs.binding_current(&mem, b));
+        crate::proc::pcb::note_exec(pid);
+        let held_after = first.is_some_and(|b| fs.binding_current(&mem, b));
+        let second = fs.open_binding(&mem);
+        crate::proc::pcb::destroy(pid);
+        let gone = first.is_some_and(|b| fs.binding_current(&mem, b));
+        if first.is_none()
+            || unbound.is_some()
+            || !held_before
+            || held_after
+            || second.is_none()
+            || second == first
+            || gone
+        {
+            serial_println!(
+                "[procfs]   FAIL: mem binding: first {:?}, status {:?}, held {} then {}, \
+                 reopened {:?}, after reaping {}",
+                first,
+                unbound,
+                held_before,
+                held_after,
+                second,
+                gone
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   /proc/<pid>/mem bound to its exec generation (ends at an exec): OK"
+        );
+    }
+
+    // `entry_type`, which path resolution asks of every component it walks,
+    // agrees with `stat` on every kind of entry, present or not. It is `stat`
+    // without the size (`proc_stat`); an existence check that only one of the
+    // two made would let a path resolve that `stat` then denies, or the
+    // reverse. Added 2026-10-03, with `entry_type`. The process has no thread,
+    // so its `fd/0`, `fdinfo/0` and `task/<pid>` are absent, which they must
+    // be for both.
+    {
+        let pid = crate::proc::pcb::create("procfs-entry-type", 0);
+        let paths = [
+            String::from("/"),
+            String::from("/meminfo"),
+            String::from("/self"),
+            String::from("/sys/kernel"),
+            String::from("/sys/kernel/hostname"),
+            String::from("/no-such-entry"),
+            format!("/{pid}"),
+            format!("/{pid}/status"),
+            format!("/{pid}/cwd"),
+            format!("/{pid}/task"),
+            format!("/{pid}/task/{pid}"),
+            format!("/{pid}/task/{pid}/status"),
+            format!("/{pid}/fd"),
+            format!("/{pid}/fd/0"),
+            format!("/{pid}/fdinfo"),
+            format!("/{pid}/fdinfo/0"),
+            String::from("/999999999"),
+            String::from("/999999999/status"),
+        ];
+        let mut disagreed = false;
+        for p in &paths {
+            let by_stat = fs.stat(Path::new(p)).map(|e| e.entry_type);
+            let by_type = fs.entry_type(Path::new(p));
+            if by_stat != by_type {
+                serial_println!(
+                    "[procfs]   FAIL: {}: stat says {:?}, entry_type says {:?}",
+                    p,
+                    by_stat,
+                    by_type
+                );
+                disagreed = true;
+            }
+        }
+        crate::proc::pcb::destroy(pid);
+        if disagreed {
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   entry_type agrees with stat on {} paths, present and absent: OK",
+            paths.len()
+        );
+    }
 
     // `/proc/sys/kernel/hostname` reports what `fs::nameservice` holds.
     //
@@ -15581,9 +16313,11 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // read_file should return non-empty data.
+        // read_file should return non-empty data -- but for a file that is
+        // empty on Linux when there is nothing to list (`EMPTY_WHEN_IDLE`).
+        // Read all the same: an error is still a failure.
         let data = fs.read_file(Path::new(&path))?;
-        if data.is_empty() {
+        if data.is_empty() && !EMPTY_WHEN_IDLE.contains(name) {
             serial_println!("[procfs]   FAIL: read_file {path} returned empty");
             return Err(KernelError::InternalError);
         }
@@ -15772,7 +16506,7 @@ pub fn self_test() -> KernelResult<()> {
     // short-circuit with ReadOnlyFilesystem; the fs itself decides.
     // - A root file rejects the write at the fs layer (NotSupported).
     // - A well-formed oom_score_adj write to a non-existent PID reaches the
-    //   fs and returns NotFound (task_exists() false) — *not*
+    //   fs and returns NotFound (pid_dir_exists() false) — *not*
     //   ReadOnlyFilesystem, which would mean the write never routed here.
     {
         match crate::fs::Vfs::write_file("/proc/version", b"x") {
@@ -15810,6 +16544,7 @@ pub fn self_test() -> KernelResult<()> {
             ("5/task/7/schedstat", "file"),
             ("5/task/7/stat", "file"),       // stat is a thread file too
             ("5/task/7/status", "file"),     // status is a thread file too
+            ("5/task/7/wchan", "file"),      // so is wchan
             ("5/task/7/maps", "notfound"),   // maps not in TASK_FILES
             ("5/task/abc", "notfound"),      // non-numeric tid
             ("5/task/7/comm/x", "notfound"), // nested beyond a thread file
@@ -15913,7 +16648,9 @@ pub fn self_test() -> KernelResult<()> {
         use crate::proc::linux_fd::FdEntry;
         let renders: &[(FdEntry, &str)] = &[
             (FdEntry::console(0), "/dev/console"),
-            (FdEntry::pipe(42, 0), "pipe:[42]"),
+            // Both ends of pipe 21 (handles 42 and 43) name the one pipe.
+            (FdEntry::pipe(42, 0), "pipe:[21]"),
+            (FdEntry::pipe(43, 0), "pipe:[21]"),
             (FdEntry::eventfd(0, 0), "anon_inode:[eventfd]"),
             (FdEntry::pidfd(7, 0), "anon_inode:[pidfd]"),
             (FdEntry::memfd(0, 0), "anon_inode:[memfd]"),
@@ -15988,11 +16725,17 @@ pub fn self_test() -> KernelResult<()> {
             ("5/fdinfo/255", "fdinfofile"),
             ("5/fdinfo/abc", "notfound"), // non-numeric fd
             ("5/fdinfo/0/x", "notfound"), // nested beyond an fd
+            ("5/ns", "nsdir"),
+            ("5/ns/uts", "nslink"),
+            ("5/ns/net", "notfound"),   // a kind this kernel has not got
+            ("5/ns/uts/x", "notfound"), // nested beyond a link
         ];
         for (path, want) in cases {
             let got = match classify_path(path) {
                 ProcPath::PidFdInfoDir(5) => "fdinfodir",
                 ProcPath::PidFdInfoFile(5, _) => "fdinfofile",
+                ProcPath::PidNsDir(5) => "nsdir",
+                ProcPath::PidNsLink(5, crate::nsfs::NsKind::Uts) => "nslink",
                 ProcPath::NotFound => "notfound",
                 _ => "other",
             };
@@ -16131,6 +16874,60 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   thread status: Pid/Tgid=={} OK", probe);
     }
 
+    // --- who may read what of a process (A-PROC-PID-FILES-CHECK-NO-READER) ---
+    // Read as a process, through `self_test_as_process`: a user may not read
+    // another user's environment or memory layout, may read their own, and
+    // still sees everyone's `cmdline`; a kernel task's wait reads `0` to a
+    // user and is the wait itself to the kernel. A process with no threads
+    // stands in for each user's process -- the check keys on the process.
+    {
+        use crate::proc::pcb::{self, ProcessCredentials};
+        use crate::proc::thread::self_test_as_process;
+        /// A kernel task's body that never runs: it is created suspended.
+        extern "C" fn never_runs(_arg: u64) {}
+
+        let alice = pcb::create("procfs-alice", 0);
+        let bob = pcb::create("procfs-bob", 0);
+        let parked = crate::sched::spawn_suspended(b"procfs-parked", 16, never_runs, 0, 0)?;
+        let outcome = (|| -> Result<(), &'static str> {
+            for (pid, uid) in [(alice, 1000), (bob, 1001)] {
+                pcb::set_credentials(pid, ProcessCredentials::new(uid, uid))
+                    .map_err(|_| "set_credentials")?;
+            }
+            let as_alice = |f: &dyn Fn() -> KernelResult<Vec<u8>>| self_test_as_process(alice, f);
+            for file in INSPECT_FILES {
+                if as_alice(&|| generate_pid(bob, file)) != Err(KernelError::PermissionDenied) {
+                    serial_println!("[procfs]   FAIL: a user read another user's {}", file);
+                    return Err("an inspect file was not refused");
+                }
+            }
+            if as_alice(&|| generate_pid(alice, "environ")).is_err() {
+                return Err("a user could not read their own environ");
+            }
+            if as_alice(&|| generate_pid(bob, "cmdline")).is_err() {
+                return Err("a user could not read another user's cmdline");
+            }
+            if as_alice(&|| gen_wchan(parked)) != Ok(b"0".to_vec()) {
+                return Err("a kernel task's wait was not 0 to a user");
+            }
+            if gen_wchan(parked) != Ok(b"wait".to_vec()) {
+                return Err("a suspended kernel task's wait was not `wait` to the kernel");
+            }
+            Ok(())
+        })();
+        crate::sched::kill_task(parked);
+        crate::sched::reap_dead_tasks();
+        pcb::destroy(bob);
+        pcb::destroy(alice);
+        if let Err(what) = outcome {
+            serial_println!("[procfs]   FAIL: reader check: {}", what);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   reader check: environ/auxv/maps/io guarded, cmdline open, wchan 0: OK"
+        );
+    }
+
     // --- build_pid_stat starttime wiring (deterministic) ---
     // The live stat test above runs in the boot task (start_tick 0), so it
     // would still pass if field 22 were hardcoded 0.  Drive build_pid_stat
@@ -16148,8 +16945,6 @@ pub fn self_test() -> KernelResult<()> {
             state: crate::sched::task::TaskState::Ready,
             priority: 20,
             total_ticks: 7,
-            user_ticks: 5,
-            sys_ticks: 2,
             min_flt: 0,
             maj_flt: 0,
 
@@ -16166,8 +16961,14 @@ pub fn self_test() -> KernelResult<()> {
             max_wait_ticks: 0,
             stack_used: None,
             stack_pct: None,
+            attr: crate::sched::task::SchedAttr {
+                policy: crate::sched::task::SchedPolicy::Fifo,
+                rt_priority: 50,
+                reset_on_fork: false,
+            },
+            wait: crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, 0x7f00_1000),
         };
-        let data = build_pid_stat(&synth, 999_999);
+        let data = build_pid_stat(&synth, 999_999, true, (50_000_001, 29_999_999));
         let text = core::str::from_utf8(&data).unwrap_or("");
         let line = text.strip_suffix('\n').unwrap_or(text);
         let close = line.rfind(')').unwrap_or(0);
@@ -16195,8 +16996,19 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // fields 40 (rt_priority) and 41 (policy), indices 37 and 38: the
+        // synthetic thread is SCHED_FIFO (1) at 50.
+        if rest.get(37) != Some(&"50") || rest.get(38) != Some(&"1") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat rt_priority/policy (fields 40/41) = {:?}/{:?}, want 50/1",
+                rest.get(37),
+                rest.get(38)
+            );
+            return Err(KernelError::InternalError);
+        }
         // field 14 (utime) sits at index 11; field 15 (stime) at index 12.
-        // The synthetic task has user_ticks=5, sys_ticks=2 (sum == total 7).
+        // The synthetic times are 50.000001 ms and 29.999999 ms: 5 and 2
+        // ticks, truncated.
         if rest.get(11).and_then(|f| f.parse::<u64>().ok()) != Some(5) {
             serial_println!(
                 "[procfs]   FAIL: synthetic stat utime (field 14) = {:?}, want 5",
@@ -16216,7 +17028,45 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[procfs]   FAIL: synthetic stat field1 != 4242");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor+utime/stime OK");
+        // field 35 (wchan) sits at index 32: 1 while the task waits, and 0
+        // for the same task not waiting.
+        if rest.get(32).copied() != Some("1") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat wchan (field 35) = {:?} for a waiting task, want 1",
+                rest.get(32)
+            );
+            return Err(KernelError::InternalError);
+        }
+        // ... and 0 to a reader who may not inspect the task, waiting or not.
+        let hidden_data = build_pid_stat(&synth, 999_999, false, (0, 0));
+        let hidden_text = core::str::from_utf8(&hidden_data).unwrap_or("");
+        let hidden_field = hidden_text
+            .get(hidden_text.rfind(')').unwrap_or(0)..)
+            .and_then(|t| t.split(' ').filter(|s| !s.is_empty()).nth(33));
+        if hidden_field != Some("0") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat wchan (field 35) = {:?} to a reader who may not inspect, want 0",
+                hidden_field
+            );
+            return Err(KernelError::InternalError);
+        }
+        let mut idle = synth;
+        idle.wait = crate::wchan::Wait::NONE;
+        let idle_data = build_pid_stat(&idle, 999_999, true, (0, 0));
+        let idle_text = core::str::from_utf8(&idle_data).unwrap_or("");
+        let idle_field = idle_text
+            .get(idle_text.rfind(')').unwrap_or(0)..)
+            .and_then(|t| t.split(' ').filter(|s| !s.is_empty()).nth(33));
+        if idle_field != Some("0") {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat wchan (field 35) = {:?} for a task not waiting, want 0",
+                idle_field
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   build_pid_stat: synthetic starttime+processor+utime/stime+wchan OK"
+        );
     }
 
     // --- stat <-> status State-char consistency (deterministic) ---
@@ -16245,8 +17095,6 @@ pub fn self_test() -> KernelResult<()> {
                 state: st,
                 priority: 20,
                 total_ticks: 0,
-                user_ticks: 0,
-                sys_ticks: 0,
                 min_flt: 0,
                 maj_flt: 0,
 
@@ -16263,10 +17111,12 @@ pub fn self_test() -> KernelResult<()> {
                 max_wait_ticks: 0,
                 stack_used: None,
                 stack_pct: None,
+                attr: crate::sched::task::SchedAttr::default(),
+                wait: crate::wchan::Wait::NONE,
             };
             // stat field 3 is the first token after the `(comm) ` prefix.  The
             // synthetic comm has no parens, so `") "` locates the boundary.
-            let stat = build_pid_stat(&synth, 999_999);
+            let stat = build_pid_stat(&synth, 999_999, true, (0, 0));
             let stat_text = core::str::from_utf8(&stat).unwrap_or("");
             let stat_char = stat_text
                 .rfind(") ")
@@ -16319,8 +17169,6 @@ pub fn self_test() -> KernelResult<()> {
             state: crate::sched::task::TaskState::Ready,
             priority: 20,
             total_ticks: 0,
-            user_ticks: 0,
-            sys_ticks: 0,
             min_flt: 0,
             maj_flt: 0,
 
@@ -16337,8 +17185,10 @@ pub fn self_test() -> KernelResult<()> {
             max_wait_ticks: 0,
             stack_used: None,
             stack_pct: None,
+            attr: crate::sched::task::SchedAttr::default(),
+            wait: crate::wchan::Wait::NONE,
         };
-        let data = build_pid_stat(&synth, 999_999);
+        let data = build_pid_stat(&synth, 999_999, true, (0, 0));
         let text = core::str::from_utf8(&data).unwrap_or("");
         // comm is the token between the first '(' and the last ')'.
         let open = text.find('(').map_or(0, |i| i.saturating_add(1));
@@ -16369,6 +17219,36 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_status: Name truncated to 15 bytes OK");
+
+        // A name with a newline cannot forge a line: `a\nGroups:\t0` is
+        // written `a\\nGroups:\t0`, so `status` holds exactly one line that
+        // starts `Groups:` (the kernel's), and a backslash is doubled.
+        let forged = b"a\nGroups:\t0\\";
+        let mut fname = [0u8; 32];
+        for (to, from) in fname.iter_mut().zip(forged.iter()) {
+            *to = *from;
+        }
+        let forger = crate::sched::TaskInfo {
+            name: fname,
+            name_len: forged.len(),
+            ..synth.clone()
+        };
+        let fdata = build_pid_status(&forger, 999_999);
+        let ftext = core::str::from_utf8(&fdata).unwrap_or("");
+        let groups_lines = ftext.lines().filter(|l| l.starts_with("Groups:")).count();
+        let fline = ftext.lines().next().unwrap_or("");
+        if groups_lines != 1 || fline != "Name:\ta\\nGroups:\t0\\\\" {
+            serial_println!(
+                "[procfs]   FAIL: status of a task named {:?}: first line {:?}, {} Groups: line(s)",
+                core::str::from_utf8(forged).unwrap_or(""),
+                fline,
+                groups_lines
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   build_pid_status: a newline or backslash in the name is escaped OK"
+        );
 
         // NoNewPrivs and Seccomp must be present (Linux always prints them) and,
         // for this synthetic proc_id with no PCB / no installed filter, both
@@ -16498,11 +17378,15 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   stat {}: directory OK", pid_path);
 
-    // readdir on PID directory — PID_FILES + PID_LINKS, plus the three
+    // readdir on PID directory — PID_FILES + PID_LINKS, plus the four
     // subdirectories every PID directory exposes: `task` (per-thread tree),
-    // `fd` (open file descriptors) and `fdinfo` (per-fd pos/flags).
+    // `fd` (open file descriptors), `fdinfo` (per-fd pos/flags) and `ns`
+    // (the namespaces it is in -- listed for a kernel task too, empty).
     let pid_entries = fs.readdir(Path::new(&pid_path))?;
-    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 3;
+    let expected_pid_entries = PID_FILES
+        .len()
+        .saturating_add(PID_LINKS.len())
+        .saturating_add(4);
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
@@ -16512,8 +17396,9 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    // The extra entries must be the `task`, `fd` and `fdinfo` directories.
-    for subdir in ["task", "fd", "fdinfo"] {
+    // The extra entries must be the `task`, `fd`, `fdinfo` and `ns`
+    // directories.
+    for subdir in ["task", "fd", "fdinfo", "ns"] {
         if !pid_entries
             .iter()
             .any(|e| e.name.as_path() == Path::new(subdir) && e.entry_type == EntryType::Directory)
@@ -16647,6 +17532,7 @@ pub fn self_test() -> KernelResult<()> {
                     | PageFlags::USER_ACCESSIBLE
                     | PageFlags::WRITABLE
                     | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // Stack: present, user, writable, no-exec → "rw-p [stack]".
             Vma {
@@ -16657,6 +17543,7 @@ pub fn self_test() -> KernelResult<()> {
                     | PageFlags::USER_ACCESSIBLE
                     | PageFlags::WRITABLE
                     | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // Guard: never mapped → "---p [guard]".
             Vma {
@@ -16664,6 +17551,7 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x10_0000,
                 kind: VmaKind::Guard,
                 flags: PageFlags::empty(),
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // Large (>32-bit) address: must print natural width, NOT padded
             // beyond its own digits — verifies the {:08x} minimum-width does
@@ -16673,6 +17561,7 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x5555_5556_0000,
                 kind: VmaKind::Anonymous,
                 flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
             // PROT_NONE anonymous: PRESENT but NOT user-accessible → "---p"
             // (real guard/trap region; the 'r' bit must drop, design-decisions
@@ -16683,6 +17572,25 @@ pub fn self_test() -> KernelResult<()> {
                 end: 0x21_0000,
                 kind: VmaKind::Anonymous,
                 flags: PageFlags::PRESENT | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
+            },
+            // File-backed: the offset it maps and the file's inode. The
+            // handle names nothing and the filesystem id no mount, so the
+            // path is empty and the device 00:00 -- the fields that do not
+            // depend on live state are the ones pinned here.
+            Vma {
+                start: 0x30_0000,
+                end: 0x30_4000,
+                kind: VmaKind::FileBacked {
+                    handle: u64::MAX,
+                    file_offset: 0x4000,
+                    file_id: Some(crate::fs::vfs::FileId {
+                        fs_id: u64::MAX,
+                        ino: 77,
+                    }),
+                },
+                flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE,
+                fork: crate::mm::vma::ForkPolicy::COPY,
             },
         ];
         let rendered = render_maps(&vmas);
@@ -16696,6 +17604,7 @@ pub fn self_test() -> KernelResult<()> {
             "000c0000-00100000 ---p 00000000 00:00 0 [guard]",
             "555555550000-555555560000 r-xp 00000000 00:00 0 ",
             "00200000-00210000 ---p 00000000 00:00 0 ",
+            "00300000-00304000 r--p 00004000 00:00 77 ",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -16724,34 +17633,68 @@ pub fn self_test() -> KernelResult<()> {
     // down the 11-field Linux layout, the id/minor numbering, and that the
     // options string appears in both the per-mount and super-options slots.
     {
-        use crate::fs::vfs::MountOptions;
+        use crate::fs::vfs::{MountOptions, MountRecord};
+        let record =
+            |path: &str, fs_type: &str, options: &str, fs_ro: bool, dev: u32, root: &str| {
+                MountRecord {
+                    mnt_id: 0,
+                    parent: 20,
+                    path: PathBuf::from(path),
+                    fs_type: String::from(fs_type),
+                    options: MountOptions::parse(options),
+                    fs_read_only: fs_ro,
+                    unbindable: false,
+                    hidden: false,
+                    dev,
+                    root: PathBuf::from(root),
+                }
+            };
+        // Device numbers out of index order, so a renderer that numbered by
+        // position would be caught.
+        // IDs as the table gives them: the root attached to nothing, the
+        // rest to it, and the last to the second.
+        let with_ids = |mnt_id: u64, parent: u64, r: MountRecord| MountRecord {
+            mnt_id,
+            parent,
+            ..r
+        };
         let mounts = [
-            (
-                PathBuf::from("/"),
-                String::from("ext4"),
-                MountOptions::defaults(),
-            ),
-            (
-                PathBuf::from("/tmp"),
-                String::from("tmpfs"),
-                MountOptions::parse("ro,noatime"),
-            ),
+            with_ids(20, 0, record("/", "ext4", "rw", false, 5, "/")),
+            // Mounted read-only: the mount and the filesystem both are; the
+            // filesystem's options carry no per-mount flag (`noatime`).
+            with_ids(21, 20, record("/tmp", "tmpfs", "ro,noatime", true, 2, "/")),
             // A mount point containing a space exercises the Linux
             // `mangle()`-equivalent escaping: the space must become `\040`
             // so the space-separated layout stays parseable.
-            (
-                PathBuf::from("/mnt/my disk"),
-                String::from("ext4"),
-                MountOptions::defaults(),
+            with_ids(22, 20, record("/mnt/my disk", "ext4", "rw", false, 9, "/")),
+            // A bind mount shows its subtree in the root field, mangled as
+            // the mount point is, on its source's device; made read-only by
+            // a bind remount, so the mount is `ro` and the filesystem `rw`.
+            with_ids(
+                23,
+                20,
+                record("/srv", "ext4", "ro", false, 5, "/data/web site"),
+            ),
+            // Made unbindable: the optional field says so, before the `-`.
+            // Attached to /tmp's mount, whose ID is its parent's.
+            with_ids(
+                24,
+                21,
+                MountRecord {
+                    unbindable: true,
+                    ..record("/tmp/x", "tmpfs", "rw", false, 7, "/")
+                },
             ),
         ];
         let rendered = render_mountinfo(&mounts);
         let mi_text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = mi_text.lines().collect();
         let expected = [
-            "20 20 0:1 / / rw - ext4 none rw",
-            "21 20 0:2 / /tmp ro,noatime - tmpfs none ro,noatime",
-            "22 20 0:3 / /mnt/my\\040disk rw - ext4 none rw",
+            "20 20 0:5 / / rw - ext4 none rw",
+            "21 20 0:2 / /tmp ro,noatime - tmpfs none ro",
+            "22 20 0:9 / /mnt/my\\040disk rw - ext4 none rw",
+            "23 20 0:5 /data/web\\040site /srv ro - ext4 none rw",
+            "24 21 0:7 / /tmp/x rw unbindable - tmpfs none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -16829,26 +17772,26 @@ pub fn self_test() -> KernelResult<()> {
     // container's own view.  This pins that a container sees ITS mounts, not
     // the host's, and never leaks host backing paths.
     {
-        use crate::fs::vfs::MountOptions;
+        use crate::fs::vfs::{MountOptions, MountRecord};
         use crate::ipc::namespace::MountViewEntry;
+        let record = |path: &str, fs_type: &str, dev: u32| MountRecord {
+            mnt_id: 0,
+            parent: 0,
+            path: PathBuf::from(path),
+            fs_type: String::from(fs_type),
+            options: MountOptions::defaults(),
+            fs_read_only: false,
+            unbindable: false,
+            hidden: false,
+            dev,
+            root: PathBuf::from("/"),
+        };
         // Host mount table the container's targets resolve their fstype against:
         // the rootfs overlay, the ext4 host root, and a tmpfs-backing memfs.
         let global = [
-            (
-                PathBuf::from("/"),
-                String::from("ext4"),
-                MountOptions::defaults(),
-            ),
-            (
-                PathBuf::from("/containers/c1/rootfs"),
-                String::from("overlay"),
-                MountOptions::defaults(),
-            ),
-            (
-                PathBuf::from("/var/lib/slate/tmpfs/1-0"),
-                String::from("tmpfs"),
-                MountOptions::defaults(),
-            ),
+            record("/", "ext4", 1),
+            record("/containers/c1/rootfs", "overlay", 4),
+            record("/var/lib/slate/tmpfs/1-0", "tmpfs", 6),
         ];
         // Container view: read-only rootfs, a read-only bind volume served by
         // the ext4 host root, and a writable tmpfs.
@@ -16873,12 +17816,14 @@ pub fn self_test() -> KernelResult<()> {
         let text = core::str::from_utf8(&rendered).map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = text.lines().collect();
         let expected = [
-            // rootfs `/` → overlay, read-only, source hidden.
-            "20 20 0:1 / / ro - overlay none ro",
-            // /logs bind → served by the ext4 host root, read-only.
-            "21 20 0:2 / /logs ro - ext4 none ro",
+            // rootfs `/` → overlay, read-only, source hidden; the
+            // overlay mount's device.
+            "20 20 0:4 / / ro - overlay none ro",
+            // /logs bind → served by the ext4 host root, read-only, and
+            // so on the root's device.
+            "21 20 0:1 / /logs ro - ext4 none ro",
             // /tmp tmpfs → served by the memfs mount, writable.
-            "22 20 0:3 / /tmp rw - tmpfs none rw",
+            "22 20 0:6 / /tmp rw - tmpfs none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(
@@ -16917,7 +17862,12 @@ pub fn self_test() -> KernelResult<()> {
 
         // The `/proc/mounts` line format for the same container view:
         // `none <mount_point> <fstype> <opts> 0 0`, source hidden.
-        let mounts_rendered = render_container_mounts(&view, &global);
+        // `/proc/mounts` has no device field: the table without it.
+        let global3: Vec<(PathBuf, String, MountOptions)> = global
+            .iter()
+            .map(|m| (m.path.clone(), m.fs_type.clone(), m.options))
+            .collect();
+        let mounts_rendered = render_container_mounts(&view, &global3);
         let mounts_text =
             core::str::from_utf8(&mounts_rendered).map_err(|_| KernelError::InternalError)?;
         let mounts_lines: Vec<&str> = mounts_text.lines().collect();
@@ -17648,27 +18598,46 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   FAIL: stat has a non-integer numeric field");
         return Err(KernelError::InternalError);
     }
-    // Fields 5 (pgrp) and 6 (session) must agree with the getpgid/getsid
-    // model: pgrp == session, and both equal the pid for a real process or
-    // 0 for a bare kernel task (no PCB).  rest_fields is field3-based, so
-    // index 2 == field 5 (pgrp) and index 3 == field 6 (session).
-    let pgrp_field = rest_fields.get(2).and_then(|f| f.parse::<u64>().ok());
-    let session_field = rest_fields.get(3).and_then(|f| f.parse::<u64>().ok());
-    let expected_pgrp = if crate::proc::pcb::state(current_tid).is_some() {
-        current_tid
-    } else {
-        0
-    };
-    if pgrp_field != Some(expected_pgrp) || session_field != Some(expected_pgrp) {
+    // Fields 5 (pgrp) and 6 (session) are what getpgid/getsid report for
+    // the process the line describes, and field 19 is its nice; a bare
+    // kernel task (no PCB) reports 0 for all three.  rest_fields is
+    // field3-based, so index 2 == field 5, index 3 == field 6 and index
+    // 16 == field 19.  (Until 2026-10-01 the first two were the pid and
+    // the third a literal 0.)
+    let field = |i: usize| rest_fields.get(i).and_then(|f| f.parse::<i64>().ok());
+    let as_field = |v: u64| i64::try_from(v).ok();
+    // The process the line describes: the task's owner (none, so 0, for this
+    // kernel task).
+    let owner = crate::proc::thread::owner_process(current_tid).unwrap_or(0);
+    let expected = (
+        as_field(crate::proc::pcb::get_pgid(owner).unwrap_or(0)),
+        as_field(crate::proc::pcb::get_sid(owner).unwrap_or(0)),
+        Some(i64::from(crate::proc::pcb::get_nice(owner).unwrap_or(0))),
+    );
+    if (field(2), field(3), field(16)) != expected {
         serial_println!(
-            "[procfs]   FAIL: stat pgrp/session = {:?}/{:?}, expected {}/{}",
-            pgrp_field,
-            session_field,
-            expected_pgrp,
-            expected_pgrp
+            "[procfs]   FAIL: stat pgrp/session/nice = {:?}/{:?}/{:?}, expected {:?}",
+            field(2),
+            field(3),
+            field(16),
+            expected
         );
         return Err(KernelError::InternalError);
     }
+    // Fields 7 (tty_nr) and 8 (tpgid), at indices 4 and 5: this task's
+    // session's terminal, which for a kernel task is none -- 0 and -1.
+    let (tty_nr, tpgid) = ctty_stat_fields(owner);
+    if (field(4), field(5)) != (Some(i64::from(tty_nr)), Some(tpgid)) {
+        serial_println!(
+            "[procfs]   FAIL: stat tty_nr/tpgid = {:?}/{:?}, expected {}/{}",
+            field(4),
+            field(5),
+            tty_nr,
+            tpgid
+        );
+        return Err(KernelError::InternalError);
+    }
+    self_test_ctty_stat_fields()?;
     // Field 22 (starttime) must equal the live task's captured start_tick.
     // rest_fields is field3-based, so field 22 sits at index 22 - 3 == 19.
     // This guards the field-position wiring (a regression would shift every
@@ -17898,6 +18867,9 @@ pub fn self_test() -> KernelResult<()> {
             counts.len()
         );
     }
+
+    // --- /proc/diskstats and /proc/vmstat's paging counters ---
+    self_test_diskstats(&mut fs)?;
 
     // --- /proc/sys sysctl tree ---
     // The sysctl tree is the only nested-directory subtree besides per-PID
@@ -18212,7 +19184,319 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   through-the-mount: /proc not mounted, skipped");
     }
 
+    test_pid_signal_sets()?;
+
     skips.report("[procfs]");
     serial_println!("[procfs] Self-test PASSED{}", skips.suffix());
+    Ok(())
+}
+
+/// `/proc/<pid>/status`'s Sig* lines and `stat`'s fields 31-34 report the
+/// kernel's record of the process's signals: the pending set as ShdPnd (and
+/// the thread's own, SigPnd, empty), the blocked and ignored sets, nothing
+/// caught for a process the kernel holds no handlers for -- and in `stat`,
+/// the low 31 bits of each, in decimal, as Linux prints them.
+fn test_pid_signal_sets() -> KernelResult<()> {
+    use crate::proc::signal;
+    use crate::serial_println;
+    // No process record: signal state alone, which is all these read.
+    const PID: u64 = 0xFFFF_5160_0300;
+    let mut name = [0u8; 32];
+    name[..3].copy_from_slice(b"sig");
+    let synth = crate::sched::TaskInfo {
+        id: 4243,
+        name,
+        name_len: 3,
+        state: crate::sched::task::TaskState::Ready,
+        priority: 20,
+        total_ticks: 0,
+        min_flt: 0,
+        maj_flt: 0,
+        nvcsw: 0,
+        nivcsw: 0,
+        total_cycles: 0,
+        schedule_count: 0,
+        start_tick: 0,
+        last_cpu: 0,
+        cpu_quota_pct: 0,
+        throttled: false,
+        total_wait_ticks: 0,
+        max_wait_ticks: 0,
+        stack_used: None,
+        stack_pct: None,
+        attr: crate::sched::task::SchedAttr::default(),
+        wait: crate::wchan::Wait::NONE,
+    };
+    // SIGHUP and SIGRTMAX (64) ignored, SIGINT blocked, SIGTERM pending.
+    let ignored = 1u64 | (1u64 << 63);
+    let result = (|| -> Result<(), &'static str> {
+        signal::set_ignored(PID, ignored, false).map_err(|_| "set_ignored refused")?;
+        let _ = signal::set_blocked(PID, 1 << 1);
+        signal::set_pending(PID, 15);
+
+        let status = build_pid_status(&synth, PID);
+        let text = core::str::from_utf8(&status).unwrap_or("");
+        for line in [
+            "SigPnd:\t0000000000000000",
+            "ShdPnd:\t0000000000004000",
+            "SigBlk:\t0000000000000002",
+            "SigIgn:\t8000000000000001",
+            "SigCgt:\t0000000000000000",
+        ] {
+            if !text.lines().any(|l| l == line) {
+                serial_println!("[procfs]   status lacks {:?}", line);
+                return Err("a Sig* line of /proc/<pid>/status");
+            }
+        }
+        let sigq = text
+            .lines()
+            .find_map(|l| l.strip_prefix("SigQ:\t"))
+            .and_then(|q| q.split_once('/'));
+        if !sigq.is_some_and(|(n, max)| n.parse::<u32>().is_ok() && max.parse::<u64>().is_ok()) {
+            return Err("SigQ is not queued/limit");
+        }
+
+        let stat = build_pid_stat(&synth, PID, true, (0, 0));
+        let text = core::str::from_utf8(&stat).unwrap_or("");
+        let close = text.rfind(')').unwrap_or(0);
+        let fields: Vec<&str> = text
+            .get(close.saturating_add(1)..)
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        // Field n sits at index n - 3 of the fields after the comm.
+        let field = |n: usize| fields.get(n.saturating_sub(3)).copied();
+        if field(31) != Some("0")
+            || field(32) != Some("2")
+            || field(33) != Some("1")
+            || field(34) != Some("0")
+            || field(38) != Some("17")
+        {
+            serial_println!(
+                "[procfs]   stat fields 31-34, 38: {:?}",
+                (31..=38).map(field).collect::<Vec<_>>()
+            );
+            return Err("stat's signal fields");
+        }
+        Ok(())
+    })();
+    signal::remove(PID);
+    match result {
+        Ok(()) => {
+            serial_println!("[procfs]   /proc/<pid>/status Sig* lines and stat fields 31-34: OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[procfs]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `/proc/diskstats` in Linux 6.6's layout -- every line `major minor name`
+/// and seventeen counters, no header, which procps refuses whole for one line
+/// short of fourteen fields -- carrying the block layer's counts; and
+/// `/proc/vmstat`'s `pgpgin`/`pgpgout` (KiB) and `pswpin`/`pswpout` beside
+/// the native keys (lane B's procps request). A scratch RAM disk is
+/// registered, read, written and discarded on, and unregistered again.
+fn self_test_diskstats(fs: &mut ProcFs) -> KernelResult<()> {
+    use crate::blkdev::{self, SECTOR_SIZE};
+    use crate::serial_println;
+
+    const NAME: &str = "zzdiskstats0";
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[procfs]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    }
+    fn vmstat_key(fs: &mut ProcFs, key: &str) -> Option<u64> {
+        let data = fs.read_file(Path::new("/vmstat")).ok()?;
+        let text = core::str::from_utf8(&data).ok()?;
+        text.lines().find_map(|line| {
+            let (k, v) = line.split_once(' ')?;
+            if k == key {
+                v.trim().parse().ok()
+            } else {
+                None
+            }
+        })
+    }
+    /// The device's line in `/proc/diskstats`, as numbers -- every field
+    /// but the name -- or why it is not one.
+    fn disk_line(fs: &mut ProcFs, name: &str) -> Result<Vec<u64>, &'static str> {
+        let data = fs
+            .read_file(Path::new("/diskstats"))
+            .map_err(|_| "/diskstats could not be read")?;
+        let text = core::str::from_utf8(&data).map_err(|_| "/diskstats is not text")?;
+        let mut found = None;
+        for line in text.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() != 20 {
+                return Err("a /diskstats line does not have Linux 6.6's twenty fields");
+            }
+            let mut numbers = Vec::with_capacity(19);
+            for (i, field) in fields.iter().enumerate() {
+                if i == 2 {
+                    continue;
+                }
+                numbers.push(
+                    field
+                        .parse::<u64>()
+                        .map_err(|_| "a /diskstats field other than the name is not a number")?,
+                );
+            }
+            if fields.get(2) == Some(&name) {
+                found = Some(numbers);
+            }
+        }
+        found.ok_or("the scratch disk has no /diskstats line")
+    }
+
+    // An empty registry's file would prove nothing about a line: add one.
+    blkdev::register(
+        NAME,
+        alloc::boxed::Box::new(blkdev::RamBlockDevice::new(64)),
+    );
+    let (Some(pgpgin_before), Some(pgpgout_before), Some(_), Some(_)) = (
+        vmstat_key(fs, "pgpgin"),
+        vmstat_key(fs, "pgpgout"),
+        vmstat_key(fs, "pswpin"),
+        vmstat_key(fs, "pswpout"),
+    ) else {
+        blkdev::unregister(NAME);
+        return fail("/vmstat lacks pgpgin, pgpgout, pswpin or pswpout");
+    };
+    if vmstat_key(fs, "nr_free_frames").is_none() {
+        blkdev::unregister(NAME);
+        return fail("/vmstat lost its native keys beside the Linux ones");
+    }
+    match disk_line(fs, NAME) {
+        Ok(n) if n.iter().skip(2).all(|&v| v == 0) => {}
+        Ok(_) => {
+            blkdev::unregister(NAME);
+            return fail("a disk nothing has used yet shows I/O in /diskstats");
+        }
+        Err(what) => {
+            blkdev::unregister(NAME);
+            return fail(what);
+        }
+    }
+
+    // One read of four sectors, one write of two, one discard of eight, one
+    // cache flush.
+    let mut four = [0u8; 4 * SECTOR_SIZE];
+    let two = [0x5Au8; 2 * SECTOR_SIZE];
+    let io = blkdev::with_device(NAME, |dev| {
+        dev.read_sectors(0, 4, &mut four)?;
+        dev.write_sectors(8, 2, &two)?;
+        dev.discard(16, 8)?;
+        dev.flush()
+    });
+    if !matches!(io, Some(Ok(()))) {
+        blkdev::unregister(NAME);
+        serial_println!("[procfs]   (scratch disk I/O gave {:?})", io);
+        return fail("the scratch disk's read, write, discard or flush failed");
+    }
+    let line = disk_line(fs, NAME);
+    let pgpgin_after = vmstat_key(fs, "pgpgin");
+    let pgpgout_after = vmstat_key(fs, "pgpgout");
+    blkdev::unregister(NAME);
+    let n = match line {
+        Ok(n) => n,
+        Err(what) => return fail(what),
+    };
+    // Numbers, the name left out: 0 major, 1 minor, 2 reads, 3 merged,
+    // 4 sectors read, 5 ms, 6 writes, 7 merged, 8 sectors written, 9 ms,
+    // 10 in flight, 11 ms busy, 12 weighted, 13 discards, 14 merged,
+    // 15 sectors discarded, 16 ms, 17 flushes, 18 ms.
+    let field = |i: usize| n.get(i).copied().unwrap_or(u64::MAX);
+    if (field(2), field(4)) != (1, 4) {
+        return fail("/diskstats did not count one read of four sectors");
+    }
+    if (field(6), field(8)) != (1, 2) {
+        return fail("/diskstats did not count one write of two sectors");
+    }
+    if (field(13), field(15)) != (1, 8) {
+        return fail("/diskstats did not count one discard of eight sectors");
+    }
+    if field(17) != 1 {
+        return fail("/diskstats did not count one cache flush");
+    }
+    if field(3) != 0 || field(7) != 0 || field(10) != 0 || field(14) != 0 {
+        return fail("/diskstats shows merges or I/O in flight nothing here does");
+    }
+    if field(11) < field(5).max(field(9)).max(field(16)).max(field(18)) || field(12) != field(11) {
+        return fail("/diskstats' busy time is not every request's time");
+    }
+    // pgpgin and pgpgout are KiB: the four sectors read are 2 more at least
+    // (other I/O may come between), the two written 1.
+    let (Some(pgpgin_after), Some(pgpgout_after)) = (pgpgin_after, pgpgout_after) else {
+        return fail("/vmstat's pgpgin or pgpgout went away");
+    };
+    if pgpgin_after.saturating_sub(pgpgin_before) < 2
+        || pgpgout_after.saturating_sub(pgpgout_before) < 1
+    {
+        return fail("/vmstat's pgpgin and pgpgout did not count the scratch disk's KiB");
+    }
+    serial_println!(
+        "[procfs]   /diskstats: Linux 6.6's twenty fields, a read, a write, a discard and a \
+         cache flush counted; /vmstat: pgpgin, pgpgout, pswpin and pswpout beside the native \
+         keys: OK"
+    );
+    Ok(())
+}
+
+/// `/proc/<pid>/stat` fields 7 and 8 for a process whose session holds a
+/// terminal: a fresh session leader acquires a new pty's slave as its
+/// controlling terminal and must read as `/dev/pts/N` (136:N, Linux's
+/// encoding) with its own group in the foreground; after it gives the
+/// terminal up, `0` and `-1` again.
+fn self_test_ctty_stat_fields() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::tty::pty;
+
+    let pid = pcb::create("ctty-stat", 0);
+    let Ok((master, slave)) = pty::create() else {
+        pcb::destroy(pid);
+        crate::serial_println!("[procfs]   FAIL: could not create a pty for the tty_nr check");
+        return Err(KernelError::InternalError);
+    };
+    let id = slave.id();
+    let pgid = pcb::get_pgid(pid).and_then(|g| i64::try_from(g).ok());
+    let acquired = pcb::ctty_acquire(pid, id).is_ok();
+    let held = ctty_stat_fields(pid);
+    // Releasing returns the foreground group it hung up; the check is that
+    // the fields go back, so the group itself is not needed here.
+    let _ = pcb::ctty_release(pid);
+    let released = ctty_stat_fields(pid);
+    // Closing an end returns the groups owed a hangup; the session gave the
+    // terminal up above, so there are none to signal.
+    let _ = pty::close(slave);
+    let _ = pty::close(master);
+    pcb::destroy(pid);
+
+    let want = (
+        crate::fs::devnum::DevNum::new(crate::fs::devnum::UNIX98_PTY_SLAVE_MAJOR, id)
+            .linux_encode(),
+        pgid.unwrap_or(-1),
+    );
+    if !acquired || pgid.is_none() || held != want || released != (0, -1) {
+        crate::serial_println!(
+            "[procfs]   FAIL: tty_nr/tpgid with pts/{} held {:?} (want {:?}, acquired {}), \
+             released {:?} (want (0, -1))",
+            id,
+            held,
+            want,
+            acquired,
+            released
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[procfs]   stat tty_nr/tpgid: pts/{} reads {:#x}/{} while held, 0/-1 after: OK",
+        id,
+        held.0,
+        held.1
+    );
     Ok(())
 }

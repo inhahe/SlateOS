@@ -1,7 +1,7 @@
 # E → A: a rootfs.ext4 with no manifest should stop the boot test in seconds, not after two and a half hours
 
 **From:** lane E · **To:** lane A · **Filed:** 2026-09-25
-**Status:** open — one ask, a few lines in `scripts/boot-test.sh`'s prerequisite check
+**Status:** FIXED 2026-09-26 by lane A (`4b7ae2386`), on `main`. Reply at the end.
 
 ## In short
 
@@ -36,3 +36,16 @@ fixtures, the SlateOS userland and a freshly packed image, each of which the
 tooling refuses by name but only when it is reached.
 
 — lane E
+
+---
+
+## Reply, lane A — 2026-10-01: fixed on 2026-09-26, stamped late
+
+`4b7ae2386` ("check rootfs.ext4 before the gates, and never copy a sibling's
+image") moved `ctest-fixtures.py image-check` ahead of the gates. A missing or
+stale manifest now refuses the run at once, with the commands that fix it.
+`bootstrap-worktree.sh` no longer copies a sibling's image, which is how
+D, E and F started without a manifest. Lane A's own boot this morning
+refused a stale image 14 seconds in, which is the case you asked for.
+
+— lane A

@@ -37,8 +37,8 @@
 //!   to move every descendant node; now it moves one `u64` between two
 //!   maps, which is both O(1) and impossible to half-complete.
 //!
-//! Hard links to *directories* are refused ([`KernelError::PermissionDenied`],
-//! as on Linux): the resolver below assumes the directory graph is a tree,
+//! Hard links to *directories* are refused ([`KernelError::NotPermitted`],
+//! `EPERM`, as on Linux): the resolver below assumes the directory graph is a tree,
 //! and a second name for a directory would let a path walk loop forever.
 //!
 //! Path resolution walks the tree component by component with
@@ -52,6 +52,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::attr_policy;
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{
     DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, metadata_now_ns,
@@ -101,6 +102,14 @@ enum MemFsNodeKind {
     /// (starts with `/`) or relative (resolved from the symlink's
     /// parent directory).  Resolution happens during path traversal.
     Symlink(PathBuf),
+    /// A Unix-domain socket's name ([`EntryType::Socket`]). It holds
+    /// nothing: the socket bound to it is found by this node's inode number
+    /// in [`crate::ipc::unix_socket`]'s table.
+    Socket,
+    /// A named pipe's node ([`EntryType::Fifo`]). It holds nothing either:
+    /// the pipe opening it leads to is [`crate::ipc::fifo`]'s, found by this
+    /// node's inode number.
+    Fifo,
 }
 
 /// A single node in the memory filesystem tree.
@@ -118,10 +127,14 @@ struct MemFsNode {
     ///
     /// This is the *link count in the namespace*, not the value reported as
     /// `st_nlink` — for a directory those differ, see [`MemFs::nlink_of`].
-    /// A file or symlink whose count reaches zero has no name left and its
-    /// inode is dropped; memfs has no open-file table keeping an unlinked
-    /// inode alive, because every VFS operation here arrives by path.
+    /// A file or symlink whose count reaches zero has no name left; its
+    /// inode is dropped then unless an open handle holds it (`opens`).
     links: u32,
+    /// Open handles holding this node (`FileSystem::pin_ino`). A file whose
+    /// last name goes while one is open stays, unnamed, until the last
+    /// [`MemFs::unpin_ino`]: POSIX's rule, which SQLite's temporary files and
+    /// every `tmpfile` rely on. Only regular files are held.
+    opens: u32,
     /// Timestamps (wall-clock: nanoseconds since the Unix epoch).
     created_ns: Timestamp,
     modified_ns: Timestamp,
@@ -203,20 +216,93 @@ fn node_list_xattrs(node: &MemFsNode) -> Vec<Vec<u8>> {
     node.xattrs.iter().map(|(k, _)| k.clone()).collect()
 }
 
+/// `utimensat` on a resolved node: each time that is not 0 is set, and the
+/// change time is now, as POSIX has it for any timestamp change. The change
+/// time was left as it was until 2026-10-01.
+fn node_set_times(node: &mut MemFsNode, accessed_ns: Timestamp, modified_ns: Timestamp) {
+    if accessed_ns != 0 {
+        node.accessed_ns = accessed_ns;
+    }
+    if modified_ns != 0 {
+        node.modified_ns = modified_ns;
+    }
+    node.changed_ns = metadata_now_ns();
+}
+
 impl MemFsNode {
+    /// The error for reading or writing contents this node does not have: a
+    /// socket's name has nothing behind it to open (`ENXIO`, as `open` on one
+    /// answers); anything else that is not a file is a directory here, since
+    /// symlinks are followed before a node is read.
+    fn not_a_file(&self) -> KernelError {
+        if matches!(self.kind, MemFsNodeKind::Socket | MemFsNodeKind::Fifo) {
+            KernelError::NoSuchDeviceOrAddress
+        } else {
+            KernelError::IsADirectory
+        }
+    }
+
+    /// `len` bytes of the file from `offset`, fewer at its end; none past it.
+    fn read_range(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let data = self.file_data().ok_or_else(|| self.not_a_file())?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(data.len());
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec))
+    }
+
+    /// Write `data` at `offset`, growing the file as needed, under its
+    /// attributes: nothing into an immutable file, and only at the end of an
+    /// append-only one (`fs::attr_policy::may_write_at`).
+    fn write_range(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
+        if !self.is_file() {
+            return Err(self.not_a_file());
+        }
+        attr_policy::may_write_at(self.attributes, offset, self.size())?;
+        let start = usize::try_from(offset).map_err(|_| KernelError::FileTooLarge)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(KernelError::FileTooLarge)?;
+        let not_a_file = self.not_a_file();
+        let file_data = self.file_data_mut().ok_or(not_a_file)?;
+        if end > file_data.len() {
+            file_data.resize(end, 0);
+        }
+        if let Some(dest) = file_data.get_mut(start..end) {
+            dest.copy_from_slice(data);
+        }
+        self.touch_modified();
+        Ok(())
+    }
+
+    /// Cut or zero-extend the file to `size` bytes, under its attributes:
+    /// not an immutable or append-only one (`fs::attr_policy::may_rewrite`).
+    fn set_len(&mut self, size: u64) -> KernelResult<()> {
+        attr_policy::may_rewrite(self.attributes)?;
+        let size = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
+        let not_a_file = self.not_a_file();
+        let file_data = self.file_data_mut().ok_or(not_a_file)?;
+        file_data.resize(size, 0);
+        self.touch_modified();
+        Ok(())
+    }
+
     /// Build a fresh node of `kind` with mode `permissions`, a newly
     /// allocated inode number and **one** link.
     ///
-    /// One link, not zero, because a node is only ever created in order to
-    /// be named: the three callers below each insert it under exactly one
-    /// name in the same operation.  Additional names go through
-    /// [`MemFs::add_link`], which is the only other place `links` grows.
+    /// One link, not zero, because a node is almost always created in order
+    /// to be named: the three callers below each insert it under exactly one
+    /// name in the same operation.  The exception, `create_unnamed`, sets it
+    /// to 0 itself.  Additional names go through [`MemFs::add_link`], which
+    /// is the only other place `links` grows.
     fn new(kind: MemFsNodeKind, permissions: u16) -> Self {
         let now = metadata_now_ns();
         Self {
             kind,
             ino: alloc_memfs_ino(),
             links: 1,
+            opens: 0,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -298,10 +384,11 @@ impl MemFsNode {
     /// - Files: data length.
     /// - Directories: 0.
     /// - Symlinks: length of the target path string (like Linux `lstat`).
+    /// - Sockets: 0.
     fn size(&self) -> u64 {
         match &self.kind {
             MemFsNodeKind::File(data) => data.len() as u64,
-            MemFsNodeKind::Dir(_) => 0,
+            MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
             MemFsNodeKind::Symlink(target) => target.len() as u64,
         }
     }
@@ -312,6 +399,8 @@ impl MemFsNode {
             MemFsNodeKind::File(_) => EntryType::File,
             MemFsNodeKind::Dir(_) => EntryType::Directory,
             MemFsNodeKind::Symlink(_) => EntryType::Symlink,
+            MemFsNodeKind::Socket => EntryType::Socket,
+            MemFsNodeKind::Fifo => EntryType::Fifo,
         }
     }
 
@@ -339,6 +428,8 @@ impl MemFsNode {
             size: self.size(),
             entry_type: self.entry_type(),
             ino: self.ino,
+            dev: 0,
+            rdev: crate::fs::devnum::DevNum::NONE,
             created_ns: self.created_ns,
             modified_ns: self.modified_ns,
             accessed_ns: self.accessed_ns,
@@ -523,34 +614,31 @@ impl MemFs {
     /// about, so there is one implementation of the rules rather than two.
     ///
     /// # Errors
-    /// - `PermissionDenied` if `ino` is a directory.  Directory hard links
+    /// - `NotPermitted` if `ino` is a directory.  Directory hard links
     ///   would make the namespace a graph rather than a tree, which
     ///   [`resolve_path_str`](Self::resolve_path_str) assumes it is not:
     ///   a cycle would make it loop without the symlink-depth counter ever
     ///   firing, because no symlink is involved.  Linux refuses these for the
     ///   same reason (`EPERM`), so refusing costs no compatibility.
-    /// - `PermissionDenied` if `ino` or the new parent is immutable.
     /// - `AlreadyExists` if `new_path`'s final component is taken.  `link(2)`
     ///   never replaces — unlike `rename`, which does.
+    /// - `NotPermitted` if the new parent is immutable, or `ino` immutable or
+    ///   append-only (`fs::attr_policy`).
     fn link_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        // A directory gets no second name: `EPERM`, as Linux's `vfs_link`
+        // answers, not the `EACCES` of a permission bit.
         if self.node(ino)?.is_dir() {
-            return Err(KernelError::PermissionDenied);
-        }
-        if self.node(ino)?.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
+            return Err(KernelError::NotPermitted);
         }
 
         let (parent_ino, name) = self.resolve_parent(new_path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, name)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        // In `vfs_link`'s order, after the name: the directory, then the
+        // object (`fs::attr_policy`).
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
+        attr_policy::may_link(self.node(ino)?.attributes)?;
 
         let name = name.to_path_buf();
         self.add_link(parent_ino, name, ino)
@@ -580,9 +668,11 @@ impl MemFs {
             return;
         };
         node.links = node.links.saturating_sub(1);
-        if node.links == 0 {
+        if node.links == 0 && node.opens == 0 {
             self.inodes.remove(&ino);
         } else {
+            // Still named elsewhere, or held open with no name left: the
+            // file lives on, its link count changed.
             node.changed_ns = metadata_now_ns();
         }
     }
@@ -836,6 +926,20 @@ impl MemFs {
             }
         }
     }
+
+    /// A node that holds nothing -- a socket's or a named pipe's, `kind` --
+    /// at `path`, with permission bits `mode`: its inode number.
+    fn mknod_empty(&mut self, path: &Path, mode: u16, kind: MemFsNodeKind) -> KernelResult<u64> {
+        let (parent_ino, name) = self.resolve_parent(path)?;
+        if self.child_ino(parent_ino, name)?.is_some() {
+            return Err(KernelError::AlreadyExists);
+        }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
+        let node = MemFsNode::new(kind, mode & 0o7777);
+        let ino = node.ino;
+        self.insert_new(parent_ino, name.to_path_buf(), node)?;
+        Ok(ino)
+    }
 }
 
 impl FileSystem for MemFs {
@@ -868,7 +972,7 @@ impl FileSystem for MemFs {
         // Two-phase: resolve immutably to get data, then update atime.
         let data = {
             let node = self.resolve(path)?;
-            let d = node.file_data().ok_or(KernelError::IsADirectory)?;
+            let d = node.file_data().ok_or_else(|| node.not_a_file())?;
             d.clone()
         };
         // Relatime: update access timestamp if stale.
@@ -906,18 +1010,15 @@ impl FileSystem for MemFs {
         match self.child_ino(parent_ino, &filename)? {
             Some(existing_ino) => {
                 let existing = self.node_mut(existing_ino)?;
-                // Enforce attribute restrictions.
-                if existing.attributes.contains(FileAttr::IMMUTABLE) {
-                    return Err(KernelError::PermissionDenied);
-                }
                 if existing.is_dir() {
                     return Err(KernelError::IsADirectory);
                 }
-                // Append-only: reject full overwrites (use write_at for appends).
-                if existing.attributes.contains(FileAttr::APPEND_ONLY) {
-                    return Err(KernelError::PermissionDenied);
-                }
-                let file_data = existing.file_data_mut().ok_or(KernelError::IsADirectory)?;
+                // A whole-file overwrite: not of an immutable file, nor of an
+                // append-only one, which is written only at its end
+                // (`fs::attr_policy::may_rewrite`).
+                attr_policy::may_rewrite(existing.attributes)?;
+                let not_a_file = existing.not_a_file();
+                let file_data = existing.file_data_mut().ok_or(not_a_file)?;
                 file_data.clear();
                 file_data.extend_from_slice(data);
                 // NLL: file_data borrow ends here (last use above).
@@ -946,11 +1047,12 @@ impl FileSystem for MemFs {
             .ok_or(KernelError::NotFound)?;
         {
             let node = self.node(ino)?;
-            if node.is_dir() {
+            let victim = node.attributes;
+            let is_dir = node.is_dir();
+            // Before the kind of name, as Linux's `may_delete` orders it.
+            attr_policy::may_delete(self.node(parent_ino)?.attributes, victim)?;
+            if is_dir {
                 return Err(KernelError::IsADirectory);
-            }
-            if node.attributes.contains(FileAttr::IMMUTABLE) {
-                return Err(KernelError::PermissionDenied);
             }
         }
         self.take_child(parent_ino, filename)?;
@@ -964,16 +1066,10 @@ impl FileSystem for MemFs {
         // mkdir does NOT follow the final component — if the name
         // already exists (even as a symlink), it returns AlreadyExists.
         let (parent_ino, dirname) = self.resolve_parent(path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, dirname)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
 
         self.insert_new(parent_ino, dirname.to_path_buf(), MemFsNode::new_dir())?;
         Ok(())
@@ -988,11 +1084,10 @@ impl FileSystem for MemFs {
             .child_ino(parent_ino, dirname)?
             .ok_or(KernelError::NotFound)?;
         {
+            let victim = self.node(ino)?.attributes;
+            attr_policy::may_delete(self.node(parent_ino)?.attributes, victim)?;
             let node = self.node(ino)?;
             let children = node.children().ok_or(KernelError::NotADirectory)?;
-            if node.attributes.contains(FileAttr::IMMUTABLE) {
-                return Err(KernelError::PermissionDenied);
-            }
             // Must be empty.
             if !children.is_empty() {
                 return Err(KernelError::InvalidArgument); // Directory not empty.
@@ -1007,18 +1102,8 @@ impl FileSystem for MemFs {
     }
 
     fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        let result = {
-            let node = self.resolve(path)?;
-            let data = node.file_data().ok_or(KernelError::IsADirectory)?;
-            let start = (offset as usize).min(data.len());
-            let end = (start.saturating_add(len)).min(data.len());
-            data.get(start..end).map_or_else(Vec::new, |s| s.to_vec())
-        };
-        // Relatime: update access timestamp if stale.
-        if let Ok(node) = self.resolve_mut(path) {
-            node.touch_accessed_relatime();
-        }
-        Ok(result)
+        let ino = self.resolve_ino(path)?;
+        self.read_ino(ino, offset, len)
     }
 
     fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
@@ -1031,53 +1116,125 @@ impl FileSystem for MemFs {
             }
             Err(e) => return Err(e),
         };
-
-        // Enforce attribute restrictions before borrowing file_data.
-        let attrs = node.attributes;
-        if attrs.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
-        }
-        if !node.is_file() {
-            return Err(KernelError::IsADirectory);
-        }
-        // Check append-only: get current length before mutable borrow.
-        let current_len = node.size() as usize;
-        if attrs.contains(FileAttr::APPEND_ONLY) && (offset as usize) != current_len {
-            return Err(KernelError::PermissionDenied);
-        }
-
-        // Now perform the write.
-        let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
-
-        let start = offset as usize;
-        let end = start.saturating_add(data.len());
-
-        // Extend if writing past current end.
-        if end > file_data.len() {
-            file_data.resize(end, 0);
-        }
-
-        if let Some(dest) = file_data.get_mut(start..end) {
-            dest.copy_from_slice(data);
-        }
-
-        // NLL: file_data borrow ends here (last use is the copy above).
-        node.touch_modified();
-        Ok(())
+        node.write_range(offset, data)
     }
 
     fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
-        let node = self.resolve_mut(path)?;
-        // Check attributes before getting mutable data reference.
-        if node.attributes.contains(FileAttr::IMMUTABLE)
-            || node.attributes.contains(FileAttr::APPEND_ONLY)
-        {
-            return Err(KernelError::PermissionDenied);
+        self.resolve_mut(path)?.set_len(size)
+    }
+
+    // --- An open file, by inode: what `fs::handle` uses for a file it holds ---
+
+    fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        // Regular files and named pipes' nodes are held; anything else stays
+        // path-addressed.
+        if !node.is_file() && !matches!(node.kind, MemFsNodeKind::Fifo) {
+            return Err(KernelError::NotSupported);
         }
-        let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
-        file_data.resize(size as usize, 0);
-        // NLL: file_data borrow ends here (last use is the resize above).
-        node.touch_modified();
+        node.opens = node
+            .opens
+            .checked_add(1)
+            .ok_or(KernelError::ResourceExhausted)?;
+        Ok(())
+    }
+
+    fn unpin_ino(&mut self, ino: u64) {
+        let Some(node) = self.inodes.get_mut(&ino) else {
+            return;
+        };
+        node.opens = node.opens.saturating_sub(1);
+        // The last handle on a file with no name left: it goes now.
+        if node.opens == 0 && node.links == 0 {
+            self.inodes.remove(&ino);
+        }
+    }
+
+    fn read_ino(&mut self, ino: u64, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let out = self.node(ino)?.read_range(offset, len)?;
+        // Relatime: update the access timestamp if it is stale.
+        if let Ok(node) = self.node_mut(ino) {
+            node.touch_accessed_relatime();
+        }
+        Ok(out)
+    }
+
+    fn write_ino(&mut self, ino: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+        self.node_mut(ino)?.write_range(offset, data)
+    }
+
+    fn append_ino(&mut self, ino: u64, data: &[u8]) -> KernelResult<u64> {
+        let node = self.node_mut(ino)?;
+        let at = node.size();
+        node.write_range(at, data)?;
+        Ok(at)
+    }
+
+    fn truncate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        self.node_mut(ino)?.set_len(size)
+    }
+
+    fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
+        // A file whose last name went while open reports 0 links, as Linux's
+        // `fstat` does; SQLite checks for exactly that.
+        let nlinks = self.nlink_of(ino);
+        Ok(self.node(ino)?.to_file_meta(nlinks))
+    }
+
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let dir_ino = self.resolve_ino(dir)?;
+        let parent = self.node(dir_ino)?;
+        if !parent.is_dir() {
+            return Err(KernelError::NotADirectory);
+        }
+        // Nothing is made in an immutable directory, named or not.
+        attr_policy::may_create(parent.attributes)?;
+        let mut node = MemFsNode::new(MemFsNodeKind::File(Vec::new()), mode & 0o7777);
+        // No name, and one hold: the caller's (`pin_ino`'s count).
+        node.links = 0;
+        node.opens = 1;
+        let ino = node.ino;
+        self.inodes.insert(ino, node);
+        Ok(ino)
+    }
+
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        // Held, as the trait asks: a node with no name and no hold is gone.
+        if self.node(ino)?.opens == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.link_ino(ino, new_path)
+    }
+
+    fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.permissions = permissions;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn set_attributes_ino(&mut self, ino: u64, attrs: FileAttr) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.attributes = attrs;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.uid = uid;
+        node.gid = gid;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn utimes_ino(
+        &mut self,
+        ino: u64,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        node_set_times(self.node_mut(ino)?, accessed_ns, modified_ns);
         Ok(())
     }
 
@@ -1248,6 +1405,8 @@ impl FileSystem for MemFs {
         let mut files = 0usize;
         let mut dirs = 0usize;
         let mut links = 0usize;
+        let mut sockets = 0usize;
+        let mut fifos = 0usize;
         let mut bytes = 0u64;
         for node in self.inodes.values() {
             match &node.kind {
@@ -1257,6 +1416,8 @@ impl FileSystem for MemFs {
                 }
                 MemFsNodeKind::Dir(_) => dirs = dirs.wrapping_add(1),
                 MemFsNodeKind::Symlink(_) => links = links.wrapping_add(1),
+                MemFsNodeKind::Socket => sockets = sockets.wrapping_add(1),
+                MemFsNodeKind::Fifo => fifos = fifos.wrapping_add(1),
             }
         }
 
@@ -1264,8 +1425,8 @@ impl FileSystem for MemFs {
         let mut s = String::new();
         let _ = write!(
             s,
-            "memfs: {} files, {} dirs, {} symlinks, {} bytes",
-            files, dirs, links, bytes
+            "memfs: {} files, {} dirs, {} symlinks, {} sockets, {} fifos, {} bytes",
+            files, dirs, links, sockets, fifos, bytes
         );
         s
     }
@@ -1315,13 +1476,7 @@ impl FileSystem for MemFs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        let node = self.resolve_mut(path)?;
-        if accessed_ns != 0 {
-            node.accessed_ns = accessed_ns;
-        }
-        if modified_ns != 0 {
-            node.modified_ns = modified_ns;
-        }
+        node_set_times(self.resolve_mut(path)?, accessed_ns, modified_ns);
         Ok(())
     }
 
@@ -1354,14 +1509,12 @@ impl FileSystem for MemFs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        let node = self.resolve_no_follow_mut(path)?;
-        if accessed_ns != 0 {
-            node.accessed_ns = accessed_ns;
-        }
-        if modified_ns != 0 {
-            node.modified_ns = modified_ns;
-        }
+        node_set_times(self.resolve_no_follow_mut(path)?, accessed_ns, modified_ns);
         Ok(())
+    }
+
+    fn xattrs_supported(&self) -> bool {
+        true
     }
 
     fn get_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
@@ -1404,6 +1557,23 @@ impl FileSystem for MemFs {
         Ok(node_list_xattrs(self.resolve_no_follow(path)?))
     }
 
+    fn get_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<Vec<u8>> {
+        node_get_xattr(self.node(ino)?, key)
+    }
+
+    fn set_xattr_ino(&mut self, ino: u64, key: &[u8], value: &[u8]) -> KernelResult<()> {
+        node_validate_xattr(key, value)?;
+        node_set_xattr(self.node_mut(ino)?, key, value)
+    }
+
+    fn remove_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<()> {
+        node_remove_xattr(self.node_mut(ino)?, key)
+    }
+
+    fn list_xattrs_ino(&mut self, ino: u64) -> KernelResult<Vec<Vec<u8>>> {
+        Ok(node_list_xattrs(self.node(ino)?))
+    }
+
     // --- Symlink operations ---
 
     fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {
@@ -1417,16 +1587,10 @@ impl FileSystem for MemFs {
         }
 
         let (parent_ino, linkname) = self.resolve_parent(path)?;
-        if self
-            .node(parent_ino)?
-            .attributes
-            .contains(FileAttr::IMMUTABLE)
-        {
-            return Err(KernelError::PermissionDenied);
-        }
         if self.child_ino(parent_ino, linkname)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
+        attr_policy::may_create(self.node(parent_ino)?.attributes)?;
 
         self.insert_new(
             parent_ino,
@@ -1434,6 +1598,14 @@ impl FileSystem for MemFs {
             MemFsNode::new_symlink(target.to_path_buf()),
         )?;
         Ok(())
+    }
+
+    fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        self.mknod_empty(path, mode, MemFsNodeKind::Socket)
+    }
+
+    fn mknod_fifo(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        self.mknod_empty(path, mode, MemFsNodeKind::Fifo)
     }
 
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
@@ -1489,18 +1661,49 @@ impl FileSystem for MemFs {
         // would have reported it twice.
         let node_count = self.inodes.len() as u64;
 
+        // What this file system holds, in blocks: each file's bytes and each
+        // symlink's target, rounded up to whole blocks as tmpfs charges whole
+        // pages.
+        let held_blocks = self
+            .inodes
+            .values()
+            .map(|n| match &n.kind {
+                MemFsNodeKind::File(data) => blocks_for(data.len()),
+                MemFsNodeKind::Symlink(target) => blocks_for(target.as_bytes().len()),
+                MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
+            })
+            .fold(0u64, u64::saturating_add);
+        // memfs has no cap of its own: it grows until memory runs out. So its
+        // room is what it holds plus the free memory it could still take.
+        // This answered 0 blocks, 0 free and 0 inodes free until 2026-10-07,
+        // which every caller reads as a full volume: `df` showed /tmp full,
+        // and a program checking for room before a write refused it
+        // (requests/d-a-memfs-reports-itself-full.md).
+        let free_blocks =
+            crate::mm::frame::stats().map_or(0, |s| (s.free_bytes as u64) / MEMFS_BLOCK_SIZE);
         Ok(FsInfo {
             fs_type: String::from("memfs"),
             volume_label: String::new(),
-            block_size: 1,   // Byte-granular allocation.
-            total_blocks: 0, // Unlimited (bounded by heap).
-            free_blocks: 0,
-            total_inodes: node_count,
-            free_inodes: 0, // Unlimited.
+            block_size: MEMFS_BLOCK_SIZE,
+            total_blocks: held_blocks.saturating_add(free_blocks),
+            free_blocks,
+            // Inodes as tmpfs counts them by default: one per block of room.
+            total_inodes: node_count.saturating_add(free_blocks),
+            free_inodes: free_blocks,
             max_name_len: 255,
             read_only: false,
         })
     }
+}
+
+/// The block size memfs reports: 4096, the page tmpfs reports on Linux and the
+/// page size the Linux ABI is told (`AT_PAGESZ`). memfs allocates bytes, not
+/// blocks; the size is only the unit its room is counted in.
+const MEMFS_BLOCK_SIZE: u64 = 4096;
+
+/// Whole [`MEMFS_BLOCK_SIZE`] blocks needed for `len` bytes.
+fn blocks_for(len: usize) -> u64 {
+    (len as u64).div_ceil(MEMFS_BLOCK_SIZE)
 }
 
 // ---------------------------------------------------------------------------
@@ -1701,7 +1904,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test immutable attribute.
     fs.set_attributes(Path::new("/meta.txt"), FileAttr::IMMUTABLE)?;
     match fs.write_file(Path::new("/meta.txt"), b"should fail") {
-        Err(KernelError::PermissionDenied) => {
+        Err(KernelError::NotPermitted) => {
             crate::serial_println!("[memfs]   immutable write rejected: OK");
         }
         _ => {
@@ -1710,7 +1913,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     match fs.remove(Path::new("/meta.txt")) {
-        Err(KernelError::PermissionDenied) => {
+        Err(KernelError::NotPermitted) => {
             crate::serial_println!("[memfs]   immutable remove rejected: OK");
         }
         _ => {
@@ -1724,7 +1927,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test append-only attribute.
     fs.set_attributes(Path::new("/meta.txt"), FileAttr::APPEND_ONLY)?;
     match fs.truncate(Path::new("/meta.txt"), 0) {
-        Err(KernelError::PermissionDenied) => {
+        Err(KernelError::NotPermitted) => {
             crate::serial_println!("[memfs]   append-only truncate rejected: OK");
         }
         _ => {
@@ -2096,7 +2299,10 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     // which copied instead of linking would fail, which is why they check
     // shared data and shared inode numbers rather than merely that `link`
     // returned Ok.
-    let inodes_before = fs.statvfs()?.total_inodes;
+    // Inodes in use: what the inode counts say beyond what is free (the free
+    // part follows free memory, which this test does not hold still).
+    let used_inodes = |info: FsInfo| info.total_inodes.saturating_sub(info.free_inodes);
+    let inodes_before = used_inodes(fs.statvfs()?);
 
     fs.write_file(Path::new("/hl_orig.txt"), b"shared")?;
     fs.link(Path::new("/hl_orig.txt"), Path::new("/hl_second.txt"))?;
@@ -2174,7 +2380,7 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     // resolver's no-cycles assumption holds.
     fs.mkdir(Path::new("/hl_dir"))?;
     match fs.link(Path::new("/hl_dir"), Path::new("/hl_dir_alias")) {
-        Err(KernelError::PermissionDenied) => {}
+        Err(KernelError::NotPermitted) => {}
         other => {
             crate::serial_println!("[memfs]   FAILED: hard link to directory gave {:?}", other);
             return Err(KernelError::IoError);
@@ -2224,7 +2430,7 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
     }
-    let inodes_after = fs.statvfs()?.total_inodes;
+    let inodes_after = used_inodes(fs.statvfs()?);
     if inodes_after != inodes_before {
         crate::serial_println!(
             "[memfs]   FAILED: hard link test leaked inodes ({} -> {})",
@@ -2234,6 +2440,33 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     crate::serial_println!("[memfs]   last unlink frees the inode: OK");
+
+    // statvfs reports room: 4096-byte blocks, some free when memory is, and
+    // what is held -- total less free -- grows by a file's whole blocks.
+    let held = |info: &FsInfo| info.total_blocks.saturating_sub(info.free_blocks);
+    let before = fs.statvfs()?;
+    fs.write_file(Path::new("/room.bin"), &alloc::vec![7u8; 10_000])?;
+    let after = fs.statvfs()?;
+    fs.remove(Path::new("/room.bin"))?;
+    let gone = fs.statvfs()?;
+    let frames_known = crate::mm::frame::stats().is_some();
+    if after.block_size != 4096
+        || (frames_known && after.free_blocks == 0)
+        || held(&after) != held(&before).saturating_add(3)
+        || held(&gone) != held(&before)
+        || after.free_inodes != after.free_blocks
+    {
+        crate::serial_println!(
+            "[memfs]   FAILED: statvfs room: bsize {}, free {}, held {} -> {} -> {}",
+            after.block_size,
+            after.free_blocks,
+            held(&before),
+            held(&after),
+            held(&gone)
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   statvfs reports the room left, in 4096-byte blocks: OK");
 
     // Clean up.
     fs.remove(Path::new("/target.txt"))?;

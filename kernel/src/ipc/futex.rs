@@ -32,11 +32,24 @@
 //!
 //! ## Implementation
 //!
-//! The kernel maintains a hash table mapping (`address_space`, `virtual_address`)
-//! pairs to wait queues.  The address-space key is the PML4 physical address
-//! (0 for kernel tasks).  This prevents aliasing: the same virtual address in
-//! different processes maps to different physical pages, so they must not
-//! share a futex queue.
+//! The kernel maintains a hash table of wait queues keyed by a [`FutexKey`]:
+//!
+//! - a word on a **private** page is keyed by (address space, virtual
+//!   address).  The address-space key is the PML4 physical address (0 for
+//!   kernel tasks).  This prevents aliasing: the same virtual address in
+//!   different processes maps to different physical pages, so they must not
+//!   share a futex queue.  It is also the fast path: no page walk decides it
+//!   beyond the one that finds the page private.
+//! - a word on a page **shared by design** (`PageFlags::SHARED`: a
+//!   shared-memory region, an io ring) is keyed by its *physical* address,
+//!   so every process that maps the page meets in one queue whatever address
+//!   it maps it at -- Linux's non-private futex key.  This is what
+//!   process-shared mutexes, condition variables and semaphores
+//!   (`PTHREAD_PROCESS_SHARED`, `sem_init(…, 1, …)`) need; no syscall takes
+//!   a new argument for it, since the key follows from the mapping.
+//!
+//! A copy-on-write page is private even while its frame is still shared
+//! after a fork: its contents are not shared, so neither is its futex.
 //!
 //! The hash table uses separate chaining with a fixed number of buckets.
 //! Each bucket is a `VecDeque<Waiter>`.  The table is protected by a
@@ -44,7 +57,7 @@
 //!
 //! Lock ordering: `FUTEX_TABLE` → `SCHED` (wake calls `sched::wake()`).
 
-use super::waiters::{current_user_pid, deliverable_signal_pending};
+use super::waiters::{current_user_pid, deliverable_signal_pending, park_interruptible};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::user::read_user_value;
 use crate::sched::{self, task::TaskId};
@@ -80,6 +93,108 @@ fn current_addr_space() -> u64 {
         return 0; // Kernel task — no per-process address space.
     }
     crate::proc::pcb::get_pml4(pid).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Futex keys
+// ---------------------------------------------------------------------------
+
+/// Which wait queue a futex word belongs to: what a waiter is queued under
+/// and what a waker searches for.
+///
+/// See the module note: a private word is `(virtual address, address
+/// space)`, a word on a shared-by-design page is `(physical address,
+/// SHARED_KEY_SPACE)`.  The user word itself is always *accessed* through
+/// the accessing task's own virtual address, never through a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FutexKey {
+    /// The word's virtual address (private) or physical address (shared).
+    addr: u64,
+    /// The PML4 physical address for a private word (0 for a kernel task),
+    /// or [`SHARED_KEY_SPACE`] for a shared one.
+    space: u64,
+}
+
+/// The `space` of every shared futex key.
+///
+/// Never a PML4 physical address (those are frame-aligned) and never 0 (the
+/// kernel's), so a shared key cannot collide with any private one.
+const SHARED_KEY_SPACE: u64 = 1;
+
+impl FutexKey {
+    /// The hash bucket this key's waiters live in.
+    fn bucket(self) -> usize {
+        FutexTable::bucket_index(self.addr, self.space)
+    }
+
+    /// The key as the scheduler stores it for a task blocked on a PI futex
+    /// (it only ever hands it back to [`find_pi_owner`]).
+    const fn to_pi_wait(self) -> sched::task::PiWaitKey {
+        (self.addr, self.space)
+    }
+
+    /// The inverse of [`Self::to_pi_wait`].
+    const fn from_pi_wait(key: sched::task::PiWaitKey) -> Self {
+        Self {
+            addr: key.0,
+            space: key.1,
+        }
+    }
+}
+
+/// The key of the futex word at `uaddr` in the current task's address space.
+fn futex_key(uaddr: u64) -> FutexKey {
+    key_in(current_addr_space(), uaddr)
+}
+
+/// How many tasks are queued (plain or bitset waits) on the futex word at
+/// physical address `phys`, on a page shared by design.
+///
+/// For the cross-process self-test (`proc::spawn::self_test_shm_futex`): it
+/// must know the waiting process is really queued under the shared key
+/// before it starts the process that wakes it -- a wake that found nobody
+/// would prove nothing.
+#[must_use]
+pub fn waiters_on_shared_word(phys: u64) -> usize {
+    waiters_on(FutexKey {
+        addr: phys,
+        space: SHARED_KEY_SPACE,
+    })
+}
+
+/// How many tasks are queued (plain or bitset waits) under `key`.
+fn waiters_on(key: FutexKey) -> usize {
+    let table = FUTEX_TABLE.lock();
+    // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
+    #[allow(clippy::indexing_slicing)]
+    table.buckets[key.bucket()]
+        .iter()
+        .filter(|w| w.key == key)
+        .count()
+}
+
+/// The key of the futex word at `uaddr` in the address space whose PML4 is
+/// `space` (0: the kernel's).
+///
+/// A word on a present leaf marked shared by design is keyed by its physical
+/// address; anything else -- a private page, an unmapped address, a kernel
+/// task's word -- by `(uaddr, space)`.  An unmapped word gets a private key
+/// rather than an error: the access that follows reports the fault, and a
+/// wake on a word nobody can wait on wakes nobody either way.
+///
+/// Separate from [`futex_key`] so that the self-test can key words in address
+/// spaces it builds without running in them.
+fn key_in(space: u64, uaddr: u64) -> FutexKey {
+    if space != 0
+        && let Some(phys) =
+            crate::mm::page_table::shared_phys(space, crate::mm::page_table::VirtAddr::new(uaddr))
+    {
+        return FutexKey {
+            addr: phys,
+            space: SHARED_KEY_SPACE,
+        };
+    }
+    FutexKey { addr: uaddr, space }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,19 +279,23 @@ fn note_contention(addr: u64, ns: u64) {
 }
 
 /// Remove this task's lingering futex waiter from whatever bucket holds it,
-/// scoped to `addr_space`, and report whether one was found.
+/// and report whether one was found.
 ///
 /// A waiter is normally dequeued by its waker (`futex_wake` / a successful
 /// requeue), so finding ourselves *still* queued after a wake means the wake
 /// came from a different source — a timeout or a signal — and we must evict the
-/// stale entry ourselves.  We first probe the original `addr` bucket (the common
-/// case), then fall back to a full scan because `FUTEX_CMP_REQUEUE` may have
-/// moved us to a *different* address (hence a different bucket) before the wake.
+/// stale entry ourselves.  We first probe the bucket of the `key` we queued
+/// under (the common case), then fall back to a full scan because
+/// `FUTEX_CMP_REQUEUE` may have moved us to a *different* key -- a different
+/// bucket, and after a requeue between a private and a shared word, a
+/// different key space -- before the wake.  The fallback matches on the task
+/// alone: a `TaskId` is never reused, and a task waits on one single-key futex
+/// at a time.
 ///
 /// Returns `true` iff a waiter for `task` was found and removed.
-fn remove_self_waiter(addr: u64, addr_space: u64, task: u64) -> bool {
+fn remove_self_waiter(key: FutexKey, task: u64) -> bool {
     let mut table = FUTEX_TABLE.lock();
-    let idx = FutexTable::bucket_index(addr, addr_space);
+    let idx = key.bucket();
 
     // SAFETY: idx is masked to NUM_BUCKETS-1 by bucket_index.
     #[allow(clippy::indexing_slicing)]
@@ -184,20 +303,17 @@ fn remove_self_waiter(addr: u64, addr_space: u64, task: u64) -> bool {
         let bucket = &mut table.buckets[idx];
         if let Some(pos) = bucket
             .iter()
-            .position(|w| w.task_id == task && w.addr == addr && w.addr_space == addr_space)
+            .position(|w| w.task_id == task && w.key == key)
         {
             bucket.remove(pos);
             return true;
         }
     }
 
-    // Requeued elsewhere: scan all buckets for this task within our address
-    // space and evict any lingering entry.
+    // Requeued elsewhere: scan all buckets for this task and evict any
+    // lingering entry.
     for bucket in &mut table.buckets {
-        if let Some(pos) = bucket
-            .iter()
-            .position(|w| w.task_id == task && w.addr_space == addr_space)
-        {
+        if let Some(pos) = bucket.iter().position(|w| w.task_id == task) {
             bucket.remove(pos);
             return true;
         }
@@ -255,18 +371,11 @@ pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffff_ffff;
 
 /// A task waiting on a futex address.
 struct Waiter {
-    /// The virtual address being waited on.
-    addr: u64,
-    /// The address space identifier (PML4 physical address) that owns
-    /// this futex address.  0 = kernel address space.
-    ///
-    /// This prevents aliasing: the same virtual address in different
-    /// processes maps to different physical pages, so they must not
-    /// share a futex queue.  Shared memory futexes (same physical page
-    /// mapped into multiple address spaces) should use the same PML4 —
-    /// which is correct because shared memory regions are mapped into
-    /// the kernel address space (PML4 = 0) during early development.
-    addr_space: u64,
+    /// The queue this waiter is in ([`FutexKey`]): its word's virtual
+    /// address and address space when the word is private, the word's
+    /// physical address when it lies on a page shared by design.  A requeue
+    /// replaces it with the destination word's key.
+    key: FutexKey,
     /// The blocked task's ID.
     task_id: TaskId,
     /// The 32-bit wakeup bitset this waiter registered with
@@ -405,7 +514,8 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     }
 
     let current_task = sched::current_task_id();
-    let addr_space = current_addr_space();
+    // Decided before the table lock: it is a page walk and takes no lock.
+    let key = futex_key(addr);
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -428,13 +538,12 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
 
         super::stats::futex_wait();
         // Value matches — add to wait queue and block.
-        let idx = FutexTable::bucket_index(addr, addr_space);
+        let idx = key.bucket();
 
         // SAFETY: idx is masked to NUM_BUCKETS-1, which is < NUM_BUCKETS.
         #[allow(clippy::indexing_slicing)]
         table.buckets[idx].push_back(Waiter {
-            addr,
-            addr_space,
+            key,
             task_id: current_task,
             bitset,
             multi_index: None,
@@ -456,7 +565,10 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     if pid == 0 {
         // Kernel task (boot self-test, etc.): no signal context — park
         // uninterruptibly.  Woken only by futex_wake.
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            addr,
+        ));
         note_contention(addr, crate::hpet::elapsed_ns().saturating_sub(blocked_at));
         return Ok(true);
     }
@@ -471,13 +583,16 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
         crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
         // A signal is already pending: unwind our queue entry and report the
         // interruption (unless a racing futex_wake already dequeued us).
-        if remove_self_waiter(addr, addr_space, current_task) {
+        if remove_self_waiter(key, current_task) {
             return Err(KernelError::Interrupted);
         }
         return Ok(true);
     }
 
-    sched::block_current();
+    sched::block_current_on(crate::wchan::Wait::new(
+        crate::wchan::WaitChannel::Futex,
+        addr,
+    ));
     crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
     // Every exit below this point has been parked, so the elapsed time is a
     // real blocked interval whether the wake was a futex_wake, a signal or
@@ -492,7 +607,7 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     // evict ourselves, then report Interrupted only when a deliverable signal
     // is actually pending; otherwise treat it as a spurious wake (the caller
     // re-checks the futex word).
-    if remove_self_waiter(addr, addr_space, current_task) && deliverable_signal_pending(pid) {
+    if remove_self_waiter(key, current_task) && deliverable_signal_pending(pid) {
         return Err(KernelError::Interrupted);
     }
 
@@ -543,7 +658,8 @@ pub fn futex_wait_bitset_timeout(
     }
 
     let current_task = sched::current_task_id();
-    let addr_space = current_addr_space();
+    // Decided before the table lock: it is a page walk and takes no lock.
+    let key = futex_key(addr);
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -563,12 +679,11 @@ pub fn futex_wait_bitset_timeout(
             return Err(KernelError::TimedOut);
         }
 
-        let idx = FutexTable::bucket_index(addr, addr_space);
+        let idx = key.bucket();
 
         #[allow(clippy::indexing_slicing)]
         table.buckets[idx].push_back(Waiter {
-            addr,
-            addr_space,
+            key,
             task_id: current_task,
             bitset,
             multi_index: None,
@@ -605,7 +720,7 @@ pub fn futex_wait_bitset_timeout(
         if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
             crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
             crate::hrtimer::cancel(timer_handle);
-            if remove_self_waiter(addr, addr_space, current_task) {
+            if remove_self_waiter(key, current_task) {
                 return Err(KernelError::Interrupted);
             }
             return Ok(true);
@@ -613,7 +728,10 @@ pub fn futex_wait_bitset_timeout(
     }
 
     // Block until woken (by futex_wake, the timer, or a signal).
-    sched::block_current();
+    sched::block_current_on(crate::wchan::Wait::new(
+        crate::wchan::WaitChannel::Futex,
+        addr,
+    ));
 
     if pid != 0 {
         crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
@@ -628,7 +746,7 @@ pub fn futex_wait_bitset_timeout(
     // still queued the wake came from the timer or a signal.  remove_self_waiter
     // probes the original bucket then falls back to a full scan (handling a
     // requeue that moved us to a different bucket).
-    let still_queued = remove_self_waiter(addr, addr_space, current_task);
+    let still_queued = remove_self_waiter(key, current_task);
 
     if !still_queued {
         // A futex_wake (or successful requeue+wake) released us — a real wake.
@@ -741,14 +859,18 @@ pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvO
             }
             super::stats::futex_wait();
             for (i, key) in keys.iter().enumerate() {
-                let bidx = FutexTable::bucket_index(key.uaddr, addr_space);
+                // Keyed on every setup pass, not once up front: a spurious
+                // wake re-runs setup, and the mapping may have changed since.
+                // A page walk, so safe under the table lock (the loads above
+                // walk the same tables).
+                let fkey = key_in(addr_space, key.uaddr);
+                let bidx = fkey.bucket();
                 #[allow(clippy::cast_possible_truncation)]
                 let index = i as u32;
                 // SAFETY: bidx is masked to NUM_BUCKETS-1 by bucket_index.
                 #[allow(clippy::indexing_slicing)]
                 table.buckets[bidx].push_back(Waiter {
-                    addr: key.uaddr,
-                    addr_space,
+                    key: fkey,
                     task_id: current_task,
                     bitset: FUTEX_BITSET_MATCH_ANY,
                     multi_index: Some(index),
@@ -790,7 +912,10 @@ pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvO
         }
 
         // ---- park ----
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            keys.first().map_or(0, |k| k.uaddr),
+        ));
 
         if pid != 0 {
             crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
@@ -860,41 +985,45 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
         return 0;
     }
 
-    let addr_space = current_addr_space();
+    let key = futex_key(addr);
 
     // Collect (task, multi_index) pairs to wake while holding the table
     // lock, then record indices + wake outside the lock to respect lock
     // ordering.  `multi_index` is `Some` only for a `futex_waitv` parker.
-    let mut to_wake: [(TaskId, Option<u32>); 32] = [(0, None); 32];
-    let mut wake_count: usize = 0;
+    //
+    // A Vec, not an array: until 2026-09-27 this was a 32-slot array and a
+    // wake stopped at 32 whatever it was asked for, so FUTEX_WAKE(INT_MAX) --
+    // a condition variable's broadcast, a barrier's release -- left every
+    // waiter past the 32nd asleep.  Allocating under the table lock adds no
+    // new lock order: the wait path's push_back already does.  A reservation
+    // that fails ends the wake early, and the count returned says so.
+    let mut to_wake: alloc::vec::Vec<(TaskId, Option<u32>)> = alloc::vec::Vec::new();
 
     {
         let mut table = FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr, addr_space);
+        let idx = key.bucket();
 
         // SAFETY: idx is masked to NUM_BUCKETS-1.
         #[allow(clippy::indexing_slicing)]
         let bucket = &mut table.buckets[idx];
 
-        // Remove up to max_wake waiters with matching address AND
-        // address space AND an overlapping wakeup bitset.  This prevents
-        // cross-process wake (a process can only wake tasks that share the
-        // same address-space mapping) and honours FUTEX_WAKE_BITSET's
-        // selective wakeup.
+        // Remove up to max_wake waiters with the same key AND an overlapping
+        // wakeup bitset.  The key prevents cross-process wakes on private
+        // words (a process can only wake tasks queued in its own address
+        // space) and allows them exactly where the word is shared, and the
+        // bitset honours FUTEX_WAKE_BITSET's selective wakeup.
+        let limit = max_wake as usize;
         let mut i = 0;
-        while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
-            if let Some(waiter) = bucket.get(i)
-                && waiter.addr == addr
-                && waiter.addr_space == addr_space
-                && waiter.bitset & bitset != 0
-                && let Some(removed) = bucket.remove(i)
+        while i < bucket.len() && to_wake.len() < limit {
+            if bucket
+                .get(i)
+                .is_some_and(|w| w.key == key && w.bitset & bitset != 0)
             {
-                if let Some(slot) = to_wake.get_mut(wake_count) {
-                    *slot = (removed.task_id, removed.multi_index);
+                if to_wake.try_reserve(1).is_err() {
+                    break;
                 }
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    wake_count += 1;
+                if let Some(removed) = bucket.remove(i) {
+                    to_wake.push((removed.task_id, removed.multi_index));
                 }
                 // Don't increment i — the next element shifted down.
                 continue;
@@ -910,19 +1039,18 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
     // *before* waking it, so the parker observes its index once it resumes.
     // First-writer-wins: a concurrent waker on another of the parker's keys
     // may also try to record — keep the earliest (either index is valid).
-    for (task_id, multi_index) in to_wake.get(..wake_count).unwrap_or(&[]) {
+    for &(task_id, multi_index) in &to_wake {
         if let Some(index) = multi_index {
-            MULTI_WOKEN.lock().entry(*task_id).or_insert(*index);
+            MULTI_WOKEN.lock().entry(task_id).or_insert(index);
         }
     }
 
     // Wake the collected tasks outside the FUTEX_TABLE lock.
-    for (task_id, _) in to_wake.get(..wake_count).unwrap_or(&[]) {
-        sched::wake(*task_id);
+    for &(task_id, _) in &to_wake {
+        sched::wake(task_id);
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let result = wake_count as u32;
+    let result = u32::try_from(to_wake.len()).unwrap_or(u32::MAX);
     super::stats::futex_wake(result);
     // Safe here: the comment above records that the FUTEX_TABLE lock was
     // already dropped before the wake loop.
@@ -942,10 +1070,10 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
 /// mutex is released.  Waking them all at once would have every waiter
 /// race for the mutex, with all but one immediately re-blocking.
 ///
-/// Both addresses are interpreted in the caller's address space, so a
-/// process can only ever wake or move its own waiters (cross-process
-/// aliasing is prevented by the `addr_space` key, exactly as in
-/// [`futex_wake`]).
+/// Both addresses are keyed in the caller's address space ([`futex_key`]),
+/// so a process can only ever wake or move waiters queued on the same
+/// words: its own for a private word, any process's for a word on a shared
+/// page -- exactly as in [`futex_wake`].
 ///
 /// Returns the total number of tasks affected: woken + requeued (this
 /// matches Linux's `futex_requeue` return value).
@@ -1003,17 +1131,19 @@ fn requeue_inner(
         return Ok(0);
     }
 
-    let addr_space = current_addr_space();
+    let key1 = futex_key(addr1);
+    let key2 = (addr2 != 0).then(|| futex_key(addr2));
 
     // Collect task IDs to wake while holding the table lock, then wake
     // them outside the lock to respect lock ordering (FUTEX_TABLE → SCHED).
-    let mut to_wake: [TaskId; 32] = [0; 32];
-    let mut wake_count: usize = 0;
+    // A Vec for the reason given in futex_wake_bitset: a fixed 32 capped the
+    // wake phase at 32 whatever nr_wake said.
+    let mut to_wake: alloc::vec::Vec<TaskId> = alloc::vec::Vec::new();
     let mut requeued: u32 = 0;
 
     {
         let mut table = FUTEX_TABLE.lock();
-        let idx1 = FutexTable::bucket_index(addr1, addr_space);
+        let idx1 = key1.bucket();
 
         // Compare phase (CMP_REQUEUE only): the value check must happen
         // under the same lock that guards the wake/requeue, so that a
@@ -1036,19 +1166,15 @@ fn requeue_inner(
             // SAFETY: idx1 is masked to NUM_BUCKETS-1 by bucket_index.
             #[allow(clippy::indexing_slicing)]
             let bucket = &mut table.buckets[idx1];
+            let limit = max_wake as usize;
             let mut i = 0;
-            while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
-                if let Some(waiter) = bucket.get(i)
-                    && waiter.addr == addr1
-                    && waiter.addr_space == addr_space
-                    && let Some(removed) = bucket.remove(i)
-                {
-                    if let Some(slot) = to_wake.get_mut(wake_count) {
-                        *slot = removed.task_id;
+            while i < bucket.len() && to_wake.len() < limit {
+                if bucket.get(i).is_some_and(|w| w.key == key1) {
+                    if to_wake.try_reserve(1).is_err() {
+                        break;
                     }
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        wake_count += 1;
+                    if let Some(removed) = bucket.remove(i) {
+                        to_wake.push(removed.task_id);
                     }
                     // Don't increment i — the next element shifted down.
                     continue;
@@ -1064,26 +1190,27 @@ fn requeue_inner(
         // onto addr2.  Re-borrow the source and destination buckets each
         // iteration: addr1 and addr2 may hash to the same bucket, so we
         // cannot hold two mutable borrows simultaneously.
-        if addr2 != 0 && max_requeue > 0 {
-            let idx2 = FutexTable::bucket_index(addr2, addr_space);
+        if let Some(key2) = key2
+            && max_requeue > 0
+        {
+            let idx2 = key2.bucket();
             while requeued < max_requeue {
                 // Detach the next matching waiter from the source bucket.
                 let moved = {
                     // SAFETY: idx1 is masked to NUM_BUCKETS-1.
                     #[allow(clippy::indexing_slicing)]
                     let b1 = &mut table.buckets[idx1];
-                    match b1
-                        .iter()
-                        .position(|w| w.addr == addr1 && w.addr_space == addr_space)
-                    {
+                    match b1.iter().position(|w| w.key == key1) {
                         Some(p) => b1.remove(p),
                         None => None,
                     }
                 };
                 let Some(mut waiter) = moved else { break };
-                // Re-point the waiter at the destination futex so that a
-                // later wake/timeout on addr2 will find and match it.
-                waiter.addr = addr2;
+                // Re-key the waiter to the destination futex so that a later
+                // wake/timeout on addr2 will find and match it.  The key may
+                // change space: a private condvar word requeued onto a mutex
+                // on a shared page moves into the shared key space.
+                waiter.key = key2;
                 // SAFETY: idx2 is masked to NUM_BUCKETS-1.
                 #[allow(clippy::indexing_slicing)]
                 table.buckets[idx2].push_back(waiter);
@@ -1096,12 +1223,11 @@ fn requeue_inner(
     }
 
     // Wake the collected tasks outside the FUTEX_TABLE lock.
-    for task_id in to_wake.get(..wake_count).unwrap_or(&[]) {
-        sched::wake(*task_id);
+    for &task_id in &to_wake {
+        sched::wake(task_id);
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let woken = wake_count as u32;
+    let woken = u32::try_from(to_wake.len()).unwrap_or(u32::MAX);
     super::stats::futex_wake(woken);
     // Safe here: the comment above records that the FUTEX_TABLE lock was
     // dropped before the wake loop.  Attributed to `addr1`, which is the
@@ -1330,10 +1456,14 @@ const FUTEX_OWNER_DIED_BIT: u32 = 1 << 30;
 
 /// A task waiting on a PI futex address.
 struct PiWaiter {
-    /// The virtual address being waited on.
-    addr: u64,
-    /// Address-space key (PML4 physical address, 0 = kernel).
-    addr_space: u64,
+    /// The queue this waiter is in ([`FutexKey`]).
+    key: FutexKey,
+    /// The waiter's *own* virtual address of the word.  Handed on to the
+    /// [`PiOwner`] record when ownership passes to this waiter, because the
+    /// owner's exit cleanup stores to the word from the owner's address
+    /// space -- which, for a word on a shared page, need not be the
+    /// unlocker's, nor map the word at the same address.
+    uaddr: u64,
     /// The blocked task's ID.
     task_id: TaskId,
     /// The task's effective priority at the time of blocking.
@@ -1355,12 +1485,15 @@ struct PiWaiter {
 /// waiter into an inconsistent state: such waiters are serviced *only* by
 /// `futex_cmp_requeue_pi`, matching the way glibc's PI condvar signals.
 struct RequeuePiWaiter {
-    /// The condvar (source) address the task is parked on.
-    cond_addr: u64,
-    /// Address-space key (PML4 physical address, 0 = kernel).
-    addr_space: u64,
-    /// The PI mutex (destination) address the task will be requeued onto.
-    target_addr: u64,
+    /// The key of the condvar (source) word the task is parked on.
+    cond_key: FutexKey,
+    /// The key of the PI mutex (destination) word the task will be requeued
+    /// onto.
+    target_key: FutexKey,
+    /// The task's own virtual address of the PI mutex word -- carried into the
+    /// [`PiWaiter`] or [`PiOwner`] record the requeue makes for it (see
+    /// [`PiWaiter::uaddr`]).
+    target_uaddr: u64,
     /// The blocked task's ID.
     task_id: TaskId,
     /// The task's effective priority captured at wait time (used to pick
@@ -1370,10 +1503,13 @@ struct RequeuePiWaiter {
 
 /// An ownership record for a PI futex.
 struct PiOwner {
-    /// The futex address this task holds.
-    addr: u64,
-    /// Address-space key (PML4 physical address, 0 = kernel).
-    addr_space: u64,
+    /// The key of the futex word this task holds ([`FutexKey`]).
+    key: FutexKey,
+    /// The *owner's* virtual address of the word.  Always in the owner's own
+    /// address space -- it took the lock itself, or was handed it as a waiter
+    /// (`PiWaiter::uaddr`) -- because [`exit_pi_owned_futexes`] stores through
+    /// it from the dying owner's context.
+    uaddr: u64,
     /// The owning task's ID.
     owner_id: TaskId,
 }
@@ -1413,48 +1549,88 @@ impl PiFutexTable {
 /// table lock, then call sched functions outside the lock).
 static PI_FUTEX_TABLE: Mutex<PiFutexTable> = Mutex::new(PiFutexTable::new());
 
-/// Look up the current owner of a PI futex address.
+/// Look up the current owner of the PI futex a blocked task waits on.
 ///
 /// Used as the `find_owner` callback for transitive PI chain walking.
 /// Acquires `PI_FUTEX_TABLE` lock briefly.  Safe to call from
 /// `pi_chain_boost` since that function does not hold any locks
 /// (it alternates between PI_FUTEX_TABLE and SCHED without nesting).
 ///
-/// Uses the caller's address space (addr_space = 0 during chain walks
-/// within the kernel).  For cross-process PI (future), the chain walk
-/// would need to carry the addr_space along.
-fn find_pi_owner(addr: u64) -> Option<TaskId> {
-    let addr_space = current_addr_space();
+/// `wait` is the blocked task's own key, recorded when it blocked
+/// ([`sched::set_blocked_on_pi`]).  Until 2026-09-27 the scheduler recorded
+/// only the virtual address, and this looked it up in the address space of
+/// whichever task was *walking* the chain -- the wrong one for any link that
+/// crossed into another process.
+fn find_pi_owner(wait: sched::task::PiWaitKey) -> Option<TaskId> {
+    let key = FutexKey::from_pi_wait(wait);
     let table = PI_FUTEX_TABLE.lock();
-    let idx = FutexTable::bucket_index(addr, addr_space);
-    // SAFETY: idx is masked to NUM_BUCKETS - 1.
+    // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx]
+    table.owners[key.bucket()]
         .iter()
-        .find(|o| o.addr == addr && o.addr_space == addr_space)
+        .find(|o| o.key == key)
         .map(|o| o.owner_id)
 }
 
-/// Register a task as the PI futex owner for an address.
-fn register_pi_owner(addr: u64, addr_space: u64, owner_id: TaskId) {
+/// The thread that owns the priority-inheritance futex `waiter` is blocked
+/// on, or `None` if it is blocked on no PI futex (a plain futex has no owner
+/// the kernel can see) or the futex has no recorded owner.
+///
+/// For `/proc/<pid>/wchan`'s holder ([`crate::wchan::holder`]). Takes `SCHED`,
+/// then `PI_FUTEX_TABLE`, one after the other: call with neither held.
+#[must_use]
+pub fn pi_owner_of_waiter(waiter: TaskId) -> Option<TaskId> {
+    find_pi_owner(sched::get_blocked_on_pi(waiter)?)
+}
+
+/// A thread blocked on a priority-inheritance futex was just given a new
+/// priority (`sched_setscheduler`, a nice change): lend its level on to the
+/// futex's holder and down the chain, as Linux's `rt_mutex_adjust_pi` does,
+/// so a waiter made real-time while it waits does not stay stuck behind an
+/// ordinary holder. A *lowered* waiter takes nothing back here: the holder
+/// keeps the larger loan until it releases, when its inheritance is worked
+/// out afresh -- an over-boost that lasts no longer than the hold.
+///
+/// Takes `SCHED` and `PI_FUTEX_TABLE` one after the other: call with
+/// neither held.
+pub fn pi_waiter_priority_changed(waiter: TaskId) {
+    let Some(owner) = pi_owner_of_waiter(waiter) else {
+        return;
+    };
+    let Some(level) = sched::get_effective_priority(waiter) else {
+        return;
+    };
+    // A holder that has gone since the lookup has nothing to be lent.
+    if sched::boost_priority(owner, level).is_some() {
+        sched::pi_chain_boost(owner, level, find_pi_owner);
+    }
+}
+
+/// Register a task as the PI futex owner of `key`; `uaddr` is the owner's
+/// own virtual address of the word (see [`PiOwner::uaddr`]).
+fn register_pi_owner(key: FutexKey, uaddr: u64, owner_id: TaskId) {
     let mut table = PI_FUTEX_TABLE.lock();
-    let idx = FutexTable::bucket_index(addr, addr_space);
-    // SAFETY: idx is masked to NUM_BUCKETS - 1.
+    push_pi_owner(&mut table, key, uaddr, owner_id);
+}
+
+/// [`register_pi_owner`] for a caller already holding the table lock -- the
+/// ownership transfers, which must register the new owner in the same
+/// critical section that dequeued it as a waiter.
+fn push_pi_owner(table: &mut PiFutexTable, key: FutexKey, uaddr: u64, owner_id: TaskId) {
+    // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx].push_back(PiOwner {
-        addr,
-        addr_space,
+    table.owners[key.bucket()].push_back(PiOwner {
+        key,
+        uaddr,
         owner_id,
     });
 }
 
-/// Remove a task's PI ownership record for an address.
-fn unregister_pi_owner(table: &mut PiFutexTable, addr: u64, addr_space: u64, owner_id: TaskId) {
-    let idx = FutexTable::bucket_index(addr, addr_space);
-    // SAFETY: idx is masked to NUM_BUCKETS - 1.
+/// Remove a task's PI ownership record for `key`.
+fn unregister_pi_owner(table: &mut PiFutexTable, key: FutexKey, owner_id: TaskId) {
+    // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx]
-        .retain(|o| !(o.addr == addr && o.addr_space == addr_space && o.owner_id == owner_id));
+    table.owners[key.bucket()].retain(|o| !(o.key == key && o.owner_id == owner_id));
 }
 
 /// Recalculate the inherited priority for a task based on all PI
@@ -1475,12 +1651,12 @@ fn recalculate_inherited_for_owner(table: &PiFutexTable, owner_id: TaskId) -> Op
             if ownership.owner_id != owner_id {
                 continue;
             }
-            // Check for PI waiters on this address + addr_space.
-            let widx = FutexTable::bucket_index(ownership.addr, ownership.addr_space);
+            // Check for PI waiters on this key.
+            let widx = ownership.key.bucket();
             // SAFETY: widx is masked to NUM_BUCKETS - 1.
             #[allow(clippy::indexing_slicing)]
             for waiter in &table.waiters[widx] {
-                if waiter.addr == ownership.addr && waiter.addr_space == ownership.addr_space {
+                if waiter.key == ownership.key {
                     best = Some(match best {
                         Some(p) => p.min(waiter.priority),
                         None => waiter.priority,
@@ -1611,20 +1787,82 @@ fn try_acquire_ownerless(addr: u64, current_tid: u32) -> KernelResult<bool> {
     )
 }
 
+/// Where the holder a PI word names stands, for the first contended locker
+/// to attach to it -- Linux's `attach_to_pi_owner`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiHolder {
+    /// A live task in the caller's own address space: the kernel records it
+    /// as the owner, with the caller's address of the word as its own.
+    Recordable,
+    /// A live user task in another address space -- a word on a page shared
+    /// by design. Waited on, but not recorded: its own address of the word,
+    /// which its exit cleanup stores through, is not known here.
+    Elsewhere,
+    /// No task has that id: `ESRCH`, unless the word has moved on meanwhile.
+    Gone,
+    /// A kernel task, named by a user caller's word: `EPERM`, as Linux
+    /// refuses a `PF_KTHREAD` owner.
+    Kernel,
+}
+
+/// Where the task `owner_id` stands for the caller ([`PiHolder`]).
+fn pi_holder_standing(owner_id: TaskId) -> PiHolder {
+    // A task that has exited but is not yet reaped is gone too: it will never
+    // let go, and its exit cleanup has already run (Linux's `PF_EXITING`
+    // owner, which `handle_exit_race` answers ESRCH for once it is dead).
+    match sched::task_state(owner_id) {
+        None | Some(sched::task::TaskState::Dead) => return PiHolder::Gone,
+        Some(_) => {}
+    }
+    let ours = current_addr_space();
+    let theirs = crate::proc::thread::owner_process(owner_id)
+        .filter(|&p| p != 0)
+        .map_or(0, |p| crate::proc::pcb::get_pml4(p).unwrap_or(0));
+    if theirs == ours {
+        PiHolder::Recordable
+    } else if theirs == 0 {
+        PiHolder::Kernel
+    } else {
+        PiHolder::Elsewhere
+    }
+}
+
 /// Shared implementation of PI lock acquisition.
 ///
 /// `timeout_ns`:
-/// - `None` — block indefinitely until the lock is transferred to us.
+/// - `None` — block until the lock is transferred to us (or a signal).
 /// - `Some(0)` — non-blocking: acquire only if uncontended.
 /// - `Some(ns)` — block until acquired or until `ns` nanoseconds elapse.
 ///
-/// The only events that wake a blocked PI waiter are (a) `futex_unlock_pi`
-/// transferring ownership to us, or (b) our own timeout timer firing.  We
-/// disambiguate by checking, under the `PI_FUTEX_TABLE` lock, whether an
-/// ownership record now exists for us: holding the lock across both the
-/// ownership check and our waiter removal closes the timeout-vs-transfer
-/// race (either `unlock_pi` won the lock and made us owner, or we won the
-/// lock and removed ourselves so `unlock_pi` can no longer pick us).
+/// **The holder is recorded.** A thread that took the word by its userspace
+/// fast path (one compare-and-swap, no kernel entry) has no ownership record
+/// until somebody waits for it. The first contended locker makes one, as
+/// Linux's `attach_to_pi_owner` does: it looks the holder up by the id in the
+/// word (`NoSuchProcess` -- `ESRCH` -- if no task has it and the word has not
+/// moved on; `NotPermitted` for a kernel task named by a user word) and
+/// records it when it shares the caller's address space. From then on the
+/// holder's unlock comes through the kernel (the waiter set
+/// `FUTEX_WAITERS`), which removes the record. Without it -- until
+/// 2026-10-07 -- a waiter that timed out left its priority with the holder
+/// for good, a chain of lenders stopped at the holder, and unlocking another
+/// mutex took away priority the holder still needed
+/// (requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md).
+///
+/// **`FUTEX_WAITERS` is set by compare-and-swap on the word as read.** An OR,
+/// as before, set it on a word whose holder had meanwhile let go by its own
+/// CAS: the waiter then slept on a free word that no unlock would hand over.
+/// A word that moved on sends the locker round again (Linux's `-EAGAIN`
+/// retry).
+///
+/// **What wakes a waiter**: `futex_unlock_pi` handing it the word, its
+/// timeout, or a deliverable signal. We disambiguate under the
+/// `PI_FUTEX_TABLE` lock, where an ownership record for us says we were
+/// handed it: holding the lock across both the ownership check and our
+/// waiter removal closes the give-up-vs-transfer race (either `unlock_pi`
+/// won the lock and made us owner, or we won it and removed ourselves so
+/// `unlock_pi` can no longer pick us). A signal is `Interrupted`, which the
+/// Linux ABI turns into a transparent restart (`ERESTARTNOINTR`, as Linux's
+/// `futex_lock_pi` does) and a native caller retries.
 fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     if addr == 0 {
         return Err(KernelError::InvalidAddress);
@@ -1635,7 +1873,7 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     }
 
     let current_id = sched::current_task_id();
-    let addr_space = current_addr_space();
+    let key = futex_key(addr);
     #[allow(clippy::cast_possible_truncation)]
     let current_tid = (current_id as u32) & FUTEX_TID_MASK;
 
@@ -1645,170 +1883,187 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     // reference to it must not be held across the park. See
     // `D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` in `known-issues.md`.
 
-    // Fast path: claim an ownerless word.  This covers the uncontended
-    // case (word == 0) and the dead-owner case (FUTEX_OWNER_DIED set with
-    // no TID) that robust/PI exit cleanup leaves behind, preserving the
-    // OWNER_DIED bit so userspace robust recovery (EOWNERDEAD) still works.
-    if try_acquire_ownerless(addr, current_tid)? {
-        register_pi_owner(addr, addr_space, current_id);
-        return Ok(());
-    }
-
-    // Slow (contended) path.
-    //
-    // Read the owner from the futex word.  Retry the claim if the lock
-    // appears to have become ownerless between our first attempt and this
-    // read (race window on SMP; harmless retry on single-CPU).
-    let owner_id = {
-        let word = crate::mm::user::user_atomic_load_u32(addr)?;
-        let oid = u64::from(word & FUTEX_TID_MASK);
-
-        if oid == current_id {
-            return Err(KernelError::Deadlock); // Caller already owns it.
-        }
-        if oid == 0 {
-            // Lock became ownerless between attempts — retry the claim.
-            if try_acquire_ownerless(addr, current_tid)? {
-                register_pi_owner(addr, addr_space, current_id);
-                return Ok(());
-            }
-            let w2 = crate::mm::user::user_atomic_load_u32(addr)?;
-            let o2 = u64::from(w2 & FUTEX_TID_MASK);
-            if o2 == current_id {
-                return Err(KernelError::Deadlock);
-            }
-            o2
-        } else {
-            oid
-        }
-    };
-
-    // A zero timeout means "try once": contended, so fail without blocking.
-    if matches!(timeout_ns, Some(0)) {
-        return Err(KernelError::TimedOut);
-    }
-
-    // Get our effective priority for the PI donation.
+    // Our effective priority, lent to the holder while we wait.
     let our_priority =
         sched::get_effective_priority(current_id).unwrap_or(sched::task::IDLE_PRIORITY);
 
-    // Register as a PI waiter under the PI table lock.
-    {
-        let mut table = PI_FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr, addr_space);
-        // SAFETY: idx is masked to NUM_BUCKETS - 1.
-        #[allow(clippy::indexing_slicing)]
-        table.waiters[idx].push_back(PiWaiter {
-            addr,
-            addr_space,
-            task_id: current_id,
-            priority: our_priority,
-        });
-    }
-
-    // Set the WAITERS bit so the unlocker knows to enter the kernel.
-    //
-    // If the word has become inaccessible since the claim attempts above (a
-    // peer thread unmapped it), back the registration out rather than parking:
-    // without the WAITERS bit no unlocker will ever enter the kernel for this
-    // address, so the wait could never be satisfied.
-    if let Err(e) = crate::mm::user::user_atomic_rmw_u32(
-        addr,
-        crate::mm::user::UserAtomicOp::Or,
-        FUTEX_WAITERS_BIT,
-    ) {
-        let mut table = PI_FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr, addr_space);
-        // SAFETY: idx is masked to NUM_BUCKETS - 1.
-        #[allow(clippy::indexing_slicing)]
-        if let Some(pos) = table.waiters[idx]
-            .iter()
-            .position(|w| w.task_id == current_id && w.addr == addr && w.addr_space == addr_space)
-        {
-            table.waiters[idx].remove(pos);
+    // Until this task is queued with FUTEX_WAITERS set on the very word it
+    // read, any change to the word sends it round again: a holder that let
+    // go, another that took over, an owner that died. Each pass takes the
+    // word, refuses, or queues; one is repeated only when another thread's
+    // atomic succeeded meanwhile, so the system as a whole moves on.
+    let owner_id = loop {
+        // An ownerless word is taken: free (0), or a dead owner's
+        // (FUTEX_OWNER_DIED with no id), the bit kept so userspace robust
+        // recovery (EOWNERDEAD) still sees the death.
+        if try_acquire_ownerless(addr, current_tid)? {
+            register_pi_owner(key, addr, current_id);
+            return Ok(());
         }
-        return Err(e);
-    }
+        let word = crate::mm::user::user_atomic_load_u32(addr)?;
+        let owner_id = u64::from(word & FUTEX_TID_MASK);
+        if owner_id == current_id {
+            return Err(KernelError::Deadlock); // Caller already owns it.
+        }
+        if owner_id == 0 {
+            continue; // Let go between the claim and the read: claim again.
+        }
+        let standing = pi_holder_standing(owner_id);
+        match standing {
+            PiHolder::Gone => {
+                // Linux's `handle_exit_race`: a word that changed since it was
+                // read is tried again; one still naming no task is ESRCH.
+                if crate::mm::user::user_atomic_load_u32(addr)? != word {
+                    continue;
+                }
+                return Err(KernelError::NoSuchProcess);
+            }
+            PiHolder::Kernel => return Err(KernelError::NotPermitted),
+            PiHolder::Recordable | PiHolder::Elsewhere => {}
+        }
+
+        // A zero timeout means "try once": contended, so fail without blocking.
+        if matches!(timeout_ns, Some(0)) {
+            return Err(KernelError::TimedOut);
+        }
+
+        // Queue, and record the holder if the kernel has none for the word.
+        let recorded = {
+            let mut table = PI_FUTEX_TABLE.lock();
+            let idx = key.bucket();
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            let known = table.owners[idx].iter().any(|o| o.key == key);
+            let record = !known && standing == PiHolder::Recordable;
+            if record {
+                push_pi_owner(&mut table, key, addr, owner_id);
+            }
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            table.waiters[idx].push_back(PiWaiter {
+                key,
+                uaddr: addr,
+                task_id: current_id,
+                priority: our_priority,
+            });
+            record
+        };
+
+        // FUTEX_WAITERS on the word as read, so the holder's unlock enters
+        // the kernel. Set already -- by another waiter in the meantime -- is
+        // as good.
+        let want = word | FUTEX_WAITERS_BIT;
+        let set = crate::mm::user::user_atomic_cas_u32(addr, word, want)
+            .map(|r| r.map_or_else(|now| now == want, |_| true));
+        if matches!(set, Ok(true)) {
+            break owner_id;
+        }
+        // The word moved on, or became unreachable (a peer thread unmapped
+        // it): out of the queue, this pass's record withdrawn, and round
+        // again -- or the error.
+        {
+            let mut table = PI_FUTEX_TABLE.lock();
+            let idx = key.bucket();
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            if let Some(pos) = table.waiters[idx]
+                .iter()
+                .position(|w| w.task_id == current_id && w.key == key)
+            {
+                table.waiters[idx].remove(pos);
+            }
+            if recorded {
+                unregister_pi_owner(&mut table, key, owner_id);
+            }
+        }
+        set?;
+    };
 
     // Boost the lock holder's priority if ours is higher (lower number),
-    // then propagate transitively through the PI chain.
-    if owner_id != 0 {
-        sched::boost_priority(owner_id, our_priority);
-        // Walk the chain: if owner_id is itself blocked on another PI
-        // futex, boost that futex's owner, and so on.
-        sched::pi_chain_boost(owner_id, our_priority, find_pi_owner);
-    }
+    // then propagate transitively through the PI chain: if the holder is
+    // itself blocked on another PI futex, boost that futex's owner, and so on
+    // (`find_pi_owner` reads the records, the one just made included).
+    sched::boost_priority(owner_id, our_priority);
+    sched::pi_chain_boost(owner_id, our_priority, find_pi_owner);
 
     // Record that we're blocked on this PI address (enables transitive
     // PI for tasks that later block on a lock we hold).
-    sched::set_blocked_on_pi_addr(current_id, Some(addr));
+    sched::set_blocked_on_pi(current_id, Some(key.to_pi_wait()));
 
-    // Arm a one-shot timeout timer if requested.
-    let timer_handle = match timeout_ns {
-        Some(ns) => {
-            // ns == 0 was handled above, so this is a real deadline.
-            fn pi_timeout_wake(tid: u64) {
-                if !sched::try_wake(tid) {
-                    sched::defer_wake(tid);
-                }
+    // Arm a one-shot timeout timer if requested (`Some(0)` returned above).
+    let deadline = timeout_ns.map(|ns| crate::hrtimer::now_ns().saturating_add(ns));
+    let timer_handle = timeout_ns.map(|ns| {
+        fn pi_timeout_wake(tid: u64) {
+            if !sched::try_wake(tid) {
+                sched::defer_wake(tid);
             }
-            Some(crate::hrtimer::schedule_ns(ns, pi_timeout_wake, current_id))
         }
-        None => None,
-    };
+        crate::hrtimer::schedule_ns(ns, pi_timeout_wake, current_id)
+    });
 
-    // Block until ownership is transferred to us, or the timer fires.
-    // Deboost data is collected under the table lock and applied after
-    // release to respect the PI_FUTEX_TABLE → SCHED lock ordering.
+    // Block until ownership is transferred to us, the timer fires, or a
+    // signal arrives. Deboost data is collected under the table lock and
+    // applied after release to respect the PI_FUTEX_TABLE → SCHED lock
+    // ordering.
+    let pid = current_user_pid();
     let mut deboost: Option<(TaskId, Option<u8>)> = None;
     let outcome: KernelResult<()> = loop {
-        sched::block_current();
+        park_interruptible(
+            pid,
+            current_id,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Futex, addr),
+        );
 
         let mut table = PI_FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr, addr_space);
+        let idx = key.bucket();
 
         // Did unlock_pi transfer ownership to us?
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         let is_owner = table.owners[idx]
             .iter()
-            .any(|o| o.addr == addr && o.addr_space == addr_space && o.owner_id == current_id);
-
+            .any(|o| o.key == key && o.owner_id == current_id);
         if is_owner {
             break Ok(());
         }
 
-        // Not the owner.  With no timeout, the only legitimate wake is an
-        // ownership transfer, so any wake without ownership is spurious —
-        // block again.  With a timeout, this wake is the timer firing.
-        if timeout_ns.is_none() {
+        // Not handed the word: the deadline, a signal, or a spurious wake,
+        // which waits again.
+        let expired = deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d);
+        if !expired && !deliverable_signal_pending(pid) {
             drop(table);
             continue;
         }
 
-        // Timed out: remove our waiter entry and clean up PI donation.
+        // Giving up: remove our waiter entry and clean up the PI donation.
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         if let Some(pos) = table.waiters[idx]
             .iter()
-            .position(|w| w.task_id == current_id && w.addr == addr && w.addr_space == addr_space)
+            .position(|w| w.task_id == current_id && w.key == key)
         {
             table.waiters[idx].remove(pos);
         }
 
-        // If no waiters remain on this addr, clear the WAITERS bit.  Doing
-        // this under the table lock serialises against new registrations
-        // (which also take the lock before setting the bit), so we cannot
-        // clear a bit that a freshly-queued waiter still needs.
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        let more = table.waiters[idx]
+        let more = table.waiters[idx].iter().any(|w| w.key == key);
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let real_owner = table.owners[idx]
             .iter()
-            .any(|w| w.addr == addr && w.addr_space == addr_space);
-        if !more {
-            // Best-effort: this is cleanup on the timeout path, and the only
-            // way it can fail is the word having become unmapped — in which
-            // case there is no bit left to clear and nobody to mislead.
+            .find(|o| o.key == key)
+            .map(|o| o.owner_id);
+        // With no waiter left and no record to keep in step, clear
+        // FUTEX_WAITERS so the holder's unlock stays in userspace. With a
+        // record, the bit stays: the holder's unlock then comes through the
+        // kernel, which removes the record and frees the word -- Linux leaves
+        // it set too. (Clearing it with a record left, as before, would have
+        // let the holder's unlock be the CAS and the record outlive the
+        // ownership.) Under the table lock, so a freshly queued waiter cannot
+        // lose a bit it set. Best-effort: it can fail only with the word
+        // unmapped, and then there is no bit and nobody to mislead.
+        if !more && real_owner.is_none() {
             let _ = crate::mm::user::user_atomic_rmw_u32(
                 addr,
                 crate::mm::user::UserAtomicOp::AndN,
@@ -1818,15 +2073,13 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
 
         // Deboost the real current owner: with us gone, its inherited
         // priority may drop.
-        // SAFETY: idx is masked to NUM_BUCKETS - 1.
-        #[allow(clippy::indexing_slicing)]
-        let real_owner = table.owners[idx]
-            .iter()
-            .find(|o| o.addr == addr && o.addr_space == addr_space)
-            .map(|o| o.owner_id);
         deboost = real_owner.map(|oid| (oid, recalculate_inherited_for_owner(&table, oid)));
 
-        break Err(KernelError::TimedOut);
+        break Err(if expired {
+            KernelError::TimedOut
+        } else {
+            KernelError::Interrupted
+        });
     };
 
     // Cancel the timer (no-op if it already fired).
@@ -1835,7 +2088,7 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     }
 
     // We're no longer blocked on this PI address.
-    sched::set_blocked_on_pi_addr(current_id, None);
+    sched::set_blocked_on_pi(current_id, None);
 
     // Apply any deboost outside the table lock.
     if let Some((oid, recalc)) = deboost {
@@ -1873,14 +2126,16 @@ pub fn futex_trylock_pi(addr: u64) -> KernelResult<()> {
     }
 
     let current_id = sched::current_task_id();
-    let addr_space = current_addr_space();
+    let key = futex_key(addr);
     #[allow(clippy::cast_possible_truncation)]
     let current_tid = (current_id as u32) & FUTEX_TID_MASK;
 
     // Through `mm::user`: see the note in `lock_pi_inner`.
-    // Fast path: CAS 0 → our tid (uncontended acquisition).
-    if crate::mm::user::user_atomic_cas_u32(addr, 0, current_tid)?.is_ok() {
-        register_pi_owner(addr, addr_space, current_id);
+    // An ownerless word is taken: free, or a dead owner's (FUTEX_OWNER_DIED
+    // alone), as `lock_pi_inner` and Linux's FUTEX_TRYLOCK_PI take it. Until
+    // 2026-10-07 only a word of exactly 0 was.
+    if try_acquire_ownerless(addr, current_tid)? {
+        register_pi_owner(key, addr, current_id);
         return Ok(());
     }
 
@@ -1915,7 +2170,7 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
     }
 
     let current_id = sched::current_task_id();
-    let addr_space = current_addr_space();
+    let key = futex_key(addr);
 
     // Through `mm::user`: see the note in `lock_pi_inner`.
     // Verify we're the owner.
@@ -1934,38 +2189,46 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
         let mut table = PI_FUTEX_TABLE.lock();
 
         // Remove our ownership record.
-        unregister_pi_owner(&mut table, addr, addr_space, current_id);
+        unregister_pi_owner(&mut table, key, current_id);
 
-        // Find the highest-priority (lowest number) waiter for this addr
-        // in our address space.
-        let idx = FutexTable::bucket_index(addr, addr_space);
+        // Find the highest-priority (lowest number) waiter on this key --
+        // in our address space for a private word, in any for a shared one.
+        let idx = key.bucket();
         let mut best_idx: Option<usize> = None;
         let mut best_prio: u8 = u8::MAX;
 
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         for (i, w) in table.waiters[idx].iter().enumerate() {
-            if w.addr == addr && w.addr_space == addr_space && w.priority < best_prio {
+            if w.key == key && w.priority < best_prio {
                 best_prio = w.priority;
                 best_idx = Some(i);
             }
         }
 
         // Remove the selected waiter.
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let chosen = best_idx.and_then(|bi| table.waiters[idx].remove(bi));
+
+        // Check if more waiters remain on this key.
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         {
-            waiter_to_wake = best_idx
-                .and_then(|bi| table.waiters[idx].remove(bi))
-                .map(|w| w.task_id);
+            has_more_waiters = table.waiters[idx].iter().any(|w| w.key == key);
         }
 
-        // Check if more waiters remain for this address + addr_space.
-        #[allow(clippy::indexing_slicing)]
-        {
-            has_more_waiters = table.waiters[idx]
-                .iter()
-                .any(|w| w.addr == addr && w.addr_space == addr_space);
+        // Register the new owner *here*, in the critical section that
+        // dequeued it.  Until 2026-09-27 this happened after the lock was
+        // dropped, and a waiter whose timeout fired in that gap found itself
+        // neither owner nor queued, returned TimedOut -- and was then made
+        // owner of a lock it had given up on, which nobody would ever unlock.
+        // Its record carries the waiter's own address of the word, which for
+        // a word on a shared page may differ from ours.
+        if let Some(w) = &chosen {
+            push_pi_owner(&mut table, key, w.uaddr, w.task_id);
         }
+        waiter_to_wake = chosen.map(|w| w.task_id);
 
         // Recalculate our inherited priority based on remaining locks.
         recalc_priority = recalculate_inherited_for_owner(&table, current_id);
@@ -1993,11 +2256,7 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
             };
         let r = crate::mm::user::user_atomic_store_u32(addr, new_word);
 
-        // Register the new owner (same addr_space — they're in the same
-        // address space since they were waiting on the same futex).
-        register_pi_owner(addr, addr_space, new_owner_id);
-
-        // Wake the new owner.
+        // Wake the new owner (registered above, under the lock).
         sched::wake(new_owner_id);
         r
     } else {
@@ -2246,7 +2505,9 @@ pub fn exit_pi_owned_futexes(dying_task: TaskId) {
         // Collected under the PI table lock, applied after release to honour
         // the PI_FUTEX_TABLE → SCHED lock ordering.
         struct Handoff {
-            addr: u64,
+            /// The dying owner's own address of the word (`PiOwner::uaddr`):
+            /// the store below runs in its address space.
+            uaddr: u64,
             new_owner: Option<TaskId>,
             has_more: bool,
         }
@@ -2255,63 +2516,55 @@ pub fn exit_pi_owned_futexes(dying_task: TaskId) {
             let mut table = PI_FUTEX_TABLE.lock();
 
             // Find one ownership record for the dying task.
-            let mut found: Option<(u64, u64)> = None;
+            let mut found: Option<(FutexKey, u64)> = None;
             'scan: for bucket in &table.owners {
                 for o in bucket {
                     if o.owner_id == dying_task {
-                        found = Some((o.addr, o.addr_space));
+                        found = Some((o.key, o.uaddr));
                         break 'scan;
                     }
                 }
             }
-            let (addr, addr_space) = match found {
+            let (key, uaddr) = match found {
                 Some(v) => v,
                 None => break, // no more owned PI mutexes
             };
 
             // Drop the dead owner's record.
-            unregister_pi_owner(&mut table, addr, addr_space, dying_task);
+            unregister_pi_owner(&mut table, key, dying_task);
 
-            // Pick the highest-priority (lowest number) waiter for this addr.
-            let idx = FutexTable::bucket_index(addr, addr_space);
+            // Pick the highest-priority (lowest number) waiter on this key.
+            let idx = key.bucket();
             let mut best_idx: Option<usize> = None;
             let mut best_prio: u8 = u8::MAX;
             // SAFETY: idx is masked to NUM_BUCKETS - 1 by bucket_index.
             #[allow(clippy::indexing_slicing)]
             for (i, w) in table.waiters[idx].iter().enumerate() {
-                if w.addr == addr && w.addr_space == addr_space && w.priority < best_prio {
+                if w.key == key && w.priority < best_prio {
                     best_prio = w.priority;
                     best_idx = Some(i);
                 }
             }
             // SAFETY: idx is masked to NUM_BUCKETS - 1.
             #[allow(clippy::indexing_slicing)]
-            let new_owner = best_idx
-                .and_then(|bi| table.waiters[idx].remove(bi))
-                .map(|w| w.task_id);
+            let chosen = best_idx.and_then(|bi| table.waiters[idx].remove(bi));
 
             // Any waiters still queued after we removed the chosen one?
             // SAFETY: idx is masked to NUM_BUCKETS - 1.
             #[allow(clippy::indexing_slicing)]
-            let has_more = table.waiters[idx]
-                .iter()
-                .any(|w| w.addr == addr && w.addr_space == addr_space);
+            let has_more = table.waiters[idx].iter().any(|w| w.key == key);
 
             // Register the new owner while still holding the lock so a
-            // concurrent locker cannot race in between.
-            if let Some(new_id) = new_owner {
-                // SAFETY: idx is masked to NUM_BUCKETS - 1.
-                #[allow(clippy::indexing_slicing)]
-                table.owners[idx].push_back(PiOwner {
-                    addr,
-                    addr_space,
-                    owner_id: new_id,
-                });
+            // concurrent locker cannot race in between.  Its record carries
+            // its own address of the word -- a waiter in another process,
+            // for a word on a shared page.
+            if let Some(w) = &chosen {
+                push_pi_owner(&mut table, key, w.uaddr, w.task_id);
             }
 
             Handoff {
-                addr,
-                new_owner,
+                uaddr,
+                new_owner: chosen.map(|w| w.task_id),
                 has_more,
             }
         };
@@ -2338,7 +2591,7 @@ pub fn exit_pi_owned_futexes(dying_task: TaskId) {
             // a robust mutex still detects the death.
             None => FUTEX_OWNER_DIED_BIT,
         };
-        let _ = crate::mm::user::user_atomic_store_u32(handoff.addr, word);
+        let _ = crate::mm::user::user_atomic_store_u32(handoff.uaddr, word);
 
         // Wake the new owner — even if the word store above failed, the
         // ownership record is registered, so the waiter returns Ok once it
@@ -2376,28 +2629,22 @@ pub fn exit_pi_owned_futexes(dying_task: TaskId) {
 // behaviourally complete for the intended caller.  Documented in todo.txt.
 
 /// Remove and return the highest-priority requeue-PI waiter parked on
-/// `cond_addr` whose destination matches `target_addr`.
+/// `cond_key` whose destination is `target_key`.
 ///
 /// "Highest priority" = lowest priority number; ties break FIFO (earliest
 /// enqueued), matching the ordering `unlock_pi` uses for the PI queue.
 fn take_best_requeue_waiter(
     table: &mut PiFutexTable,
-    cidx: usize,
-    cond_addr: u64,
-    addr_space: u64,
-    target_addr: u64,
+    cond_key: FutexKey,
+    target_key: FutexKey,
 ) -> Option<RequeuePiWaiter> {
-    // SAFETY: cidx is masked to NUM_BUCKETS - 1 by bucket_index.
+    // SAFETY: bucket() is masked to NUM_BUCKETS - 1 by bucket_index.
     #[allow(clippy::indexing_slicing)]
-    let q = &mut table.requeue_waiters[cidx];
+    let q = &mut table.requeue_waiters[cond_key.bucket()];
     let mut best: Option<usize> = None;
     let mut best_prio: u8 = u8::MAX;
     for (i, w) in q.iter().enumerate() {
-        if w.cond_addr == cond_addr
-            && w.addr_space == addr_space
-            && w.target_addr == target_addr
-            && w.priority < best_prio
-        {
+        if w.cond_key == cond_key && w.target_key == target_key && w.priority < best_prio {
             best_prio = w.priority;
             best = Some(i);
         }
@@ -2426,8 +2673,9 @@ fn take_best_requeue_waiter(
 /// - `Err(TimedOut)` — the deadline expired (→ `ETIMEDOUT`).
 /// - `Err(InvalidAddress)` — either address is null.
 /// - `Err(BadAlignment)` — either address is not 4-byte aligned.
-/// - `Err(InvalidArgument)` — `cond_addr == pi_addr` (Linux requires they
-///   differ).
+/// - `Err(InvalidArgument)` — `cond_addr == pi_addr`, or the two are the
+///   same futex by another name (one shared page mapped twice): Linux
+///   requires they differ, by address and by key.
 ///
 /// # Safety contract
 ///
@@ -2453,7 +2701,13 @@ pub fn futex_wait_requeue_pi(
     }
 
     let current_id = sched::current_task_id();
-    let addr_space = current_addr_space();
+    let cond_key = futex_key(cond_addr);
+    let pi_key = futex_key(pi_addr);
+    // Linux's futex_wait_requeue_pi checks the keys too (match_futex): two
+    // mappings of one shared page are one futex, whatever the addresses say.
+    if cond_key == pi_key {
+        return Err(KernelError::InvalidArgument);
+    }
     let our_priority =
         sched::get_effective_priority(current_id).unwrap_or(sched::task::IDLE_PRIORITY);
 
@@ -2481,13 +2735,12 @@ pub fn futex_wait_requeue_pi(
             return Err(KernelError::TimedOut);
         }
         super::stats::futex_wait();
-        let cidx = FutexTable::bucket_index(cond_addr, addr_space);
-        // SAFETY: cidx is masked to NUM_BUCKETS - 1.
+        // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        table.requeue_waiters[cidx].push_back(RequeuePiWaiter {
-            cond_addr,
-            addr_space,
-            target_addr: pi_addr,
+        table.requeue_waiters[cond_key.bucket()].push_back(RequeuePiWaiter {
+            cond_key,
+            target_key: pi_key,
+            target_uaddr: pi_addr,
             task_id: current_id,
             priority: our_priority,
         });
@@ -2496,7 +2749,7 @@ pub fn futex_wait_requeue_pi(
     // We are conceptually trying to acquire pi_addr; record it so that once
     // cmp_requeue_pi moves us onto the PI waiter queue, transitive PI sees
     // us as blocked on that lock.  Cleared on every exit path below.
-    sched::set_blocked_on_pi_addr(current_id, Some(pi_addr));
+    sched::set_blocked_on_pi(current_id, Some(pi_key.to_pi_wait()));
 
     // Arm a one-shot timeout if requested.  The same timer covers both the
     // condvar-wait phase and the post-requeue PI-wait phase.
@@ -2517,18 +2770,21 @@ pub fn futex_wait_requeue_pi(
     // SCHED order).
     let mut deboost: Option<(TaskId, Option<u8>)> = None;
     let outcome: KernelResult<()> = loop {
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            pi_addr,
+        ));
 
         let mut table = PI_FUTEX_TABLE.lock();
-        let pidx = FutexTable::bucket_index(pi_addr, addr_space);
-        let cidx = FutexTable::bucket_index(cond_addr, addr_space);
+        let pidx = pi_key.bucket();
+        let cidx = cond_key.bucket();
 
         // (1) Did cmp_requeue_pi / unlock_pi make us the PI mutex owner?
         // SAFETY: pidx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         let is_owner = table.owners[pidx]
             .iter()
-            .any(|o| o.addr == pi_addr && o.addr_space == addr_space && o.owner_id == current_id);
+            .any(|o| o.key == pi_key && o.owner_id == current_id);
         if is_owner {
             break Ok(());
         }
@@ -2548,9 +2804,10 @@ pub fn futex_wait_requeue_pi(
         // Phase A: still parked on the condvar (never signalled).
         // SAFETY: cidx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        if let Some(pos) = table.requeue_waiters[cidx].iter().position(|w| {
-            w.task_id == current_id && w.cond_addr == cond_addr && w.addr_space == addr_space
-        }) {
+        if let Some(pos) = table.requeue_waiters[cidx]
+            .iter()
+            .position(|w| w.task_id == current_id && w.cond_key == cond_key)
+        {
             table.requeue_waiters[cidx].remove(pos);
             break Err(KernelError::TimedOut);
         }
@@ -2558,16 +2815,15 @@ pub fn futex_wait_requeue_pi(
         // Phase B: requeued onto the PI mutex, awaiting ownership transfer.
         // SAFETY: pidx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
-        if let Some(pos) = table.waiters[pidx].iter().position(|w| {
-            w.task_id == current_id && w.addr == pi_addr && w.addr_space == addr_space
-        }) {
+        if let Some(pos) = table.waiters[pidx]
+            .iter()
+            .position(|w| w.task_id == current_id && w.key == pi_key)
+        {
             table.waiters[pidx].remove(pos);
             // Clear WAITERS if we were the last PI waiter on this address.
             // SAFETY: pidx is masked to NUM_BUCKETS - 1.
             #[allow(clippy::indexing_slicing)]
-            let more = table.waiters[pidx]
-                .iter()
-                .any(|w| w.addr == pi_addr && w.addr_space == addr_space);
+            let more = table.waiters[pidx].iter().any(|w| w.key == pi_key);
             if !more {
                 // Best-effort: we are unwinding a timed-out wait and have
                 // already dequeued ourselves, so a vanished mapping (the
@@ -2585,7 +2841,7 @@ pub fn futex_wait_requeue_pi(
             #[allow(clippy::indexing_slicing)]
             let real_owner = table.owners[pidx]
                 .iter()
-                .find(|o| o.addr == pi_addr && o.addr_space == addr_space)
+                .find(|o| o.key == pi_key)
                 .map(|o| o.owner_id);
             deboost = real_owner.map(|oid| (oid, recalculate_inherited_for_owner(&table, oid)));
             break Err(KernelError::TimedOut);
@@ -2601,7 +2857,7 @@ pub fn futex_wait_requeue_pi(
     if let Some(handle) = timer_handle {
         crate::hrtimer::cancel(handle);
     }
-    sched::set_blocked_on_pi_addr(current_id, None);
+    sched::set_blocked_on_pi(current_id, None);
     if let Some((oid, recalc)) = deboost {
         sched::set_inherited_priority(oid, recalc);
     }
@@ -2625,7 +2881,8 @@ pub fn futex_wait_requeue_pi(
 ///
 /// - `Err(WouldBlock)` — `*cond_addr != val` (→ `EAGAIN`); nothing touched.
 /// - `Err(InvalidAddress)` / `Err(BadAlignment)` — bad address.
-/// - `Err(InvalidArgument)` — `cond_addr == pi_addr`.
+/// - `Err(InvalidArgument)` — `cond_addr == pi_addr`, or the same futex by
+///   another name (see [`futex_wait_requeue_pi`]).
 ///
 /// # Safety contract
 ///
@@ -2648,7 +2905,11 @@ pub fn futex_cmp_requeue_pi(
         return Err(KernelError::InvalidArgument);
     }
 
-    let addr_space = current_addr_space();
+    let cond_key = futex_key(cond_addr);
+    let pi_key = futex_key(pi_addr);
+    if cond_key == pi_key {
+        return Err(KernelError::InvalidArgument);
+    }
 
     // Both user words are touched one operation at a time through
     // `mm::user` (see the note in `lock_pi_inner`), which validates the
@@ -2681,8 +2942,7 @@ pub fn futex_cmp_requeue_pi(
             return Err(KernelError::WouldBlock);
         }
 
-        let cidx = FutexTable::bucket_index(cond_addr, addr_space);
-        let pidx = FutexTable::bucket_index(pi_addr, addr_space);
+        let pidx = pi_key.bucket();
 
         // Budget: one implicit wake (the proxy-lock acquisition, Linux's
         // nr_wake which must be 1) plus max_requeue requeues.
@@ -2702,9 +2962,7 @@ pub fn futex_cmp_requeue_pi(
                 }
             };
 
-            let Some(w) =
-                take_best_requeue_waiter(&mut table, cidx, cond_addr, addr_space, pi_addr)
-            else {
+            let Some(w) = take_best_requeue_waiter(&mut table, cond_key, pi_key) else {
                 break;
             };
             processed = processed.saturating_add(1);
@@ -2722,13 +2980,9 @@ pub fn futex_cmp_requeue_pi(
                 if let Err(e) = crate::mm::user::user_atomic_store_u32(pi_addr, new_tid) {
                     fault.get_or_insert(e);
                 }
-                // SAFETY: pidx is masked to NUM_BUCKETS - 1.
-                #[allow(clippy::indexing_slicing)]
-                table.owners[pidx].push_back(PiOwner {
-                    addr: pi_addr,
-                    addr_space,
-                    owner_id: w.task_id,
-                });
+                // The record carries the *waiter's* own address of the word
+                // (`PiOwner::uaddr`); ours may differ for a shared word.
+                push_pi_owner(&mut table, pi_key, w.target_uaddr, w.task_id);
                 owner_to_wake = Some(w.task_id);
                 woken = 1;
             } else {
@@ -2737,8 +2991,8 @@ pub fn futex_cmp_requeue_pi(
                 // SAFETY: pidx is masked to NUM_BUCKETS - 1.
                 #[allow(clippy::indexing_slicing)]
                 table.waiters[pidx].push_back(PiWaiter {
-                    addr: pi_addr,
-                    addr_space,
+                    key: pi_key,
+                    uaddr: w.target_uaddr,
                     task_id: w.task_id,
                     priority: w.priority,
                 });
@@ -2773,7 +3027,7 @@ pub fn futex_cmp_requeue_pi(
     }
 
     // Apply scheduler effects outside the PI table lock.  Requeued waiters
-    // already recorded `blocked_on_pi_addr = pi_addr` in their wait path, so
+    // already recorded `blocked_on_pi` (the PI mutex's key) in their wait path, so
     // only the boost and the wake of the new owner remain.
     if let Some((oid, prio)) = boost {
         sched::boost_priority(oid, prio);
@@ -2827,8 +3081,260 @@ pub fn self_test() -> KernelResult<()> {
     test_pi_owner_death_handoff()?;
     test_priority_inheritance()?;
     test_accounting_reaches_futexstat()?;
+    test_keys_follow_the_mapping()?;
+    test_wake_many()?;
 
     serial_println!("[futex] Futex self-test PASSED");
+    Ok(())
+}
+
+/// The word [`test_wake_many`]'s waiters park on.  Static, not on the test's
+/// stack: a waiter must never outlive its word, even when the test fails and
+/// returns early.
+static WAKE_MANY_WORD: AtomicU32 = AtomicU32::new(0);
+
+/// How many of [`test_wake_many`]'s waiters have been woken and finished.
+static WAKE_MANY_DONE: AtomicU32 = AtomicU32::new(0);
+
+/// More than the 32 a wake used to stop at.
+const WAKE_MANY_WAITERS: u32 = 40;
+
+/// A [`test_wake_many`] waiter: parks while the word is 1, then counts itself
+/// done.  The loop re-checks the word, so a waiter the test starts late, or
+/// wakes spuriously, still finishes once the word is 0.
+extern "C" fn wake_many_waiter(_arg: u64) {
+    let addr = (&raw const WAKE_MANY_WORD) as u64;
+    while WAKE_MANY_WORD.load(Ordering::Acquire) == 1 {
+        // A mismatch or a wake both end in the re-check above.
+        let _ = futex_wait(addr, 1);
+    }
+    WAKE_MANY_DONE.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Release every [`test_wake_many`] waiter, however the test went: set the
+/// word to 0 and wake until all have finished (bounded).  A wake capped
+/// below the waiter count is exactly the bug being tested for, so one wake
+/// is not enough to clean up after it.
+fn release_wake_many(addr: u64) {
+    WAKE_MANY_WORD.store(0, Ordering::Release);
+    for _ in 0..200 {
+        if WAKE_MANY_DONE.load(Ordering::Acquire) >= WAKE_MANY_WAITERS {
+            return;
+        }
+        let _ = futex_wake(addr, u32::MAX);
+        sched::yield_now();
+    }
+}
+
+/// A wake wakes every waiter it is asked to, not the first 32.
+///
+/// Forty kernel tasks park on one word, and `futex_wake(addr, u32::MAX)` --
+/// what FUTEX_WAKE(INT_MAX) becomes, a condition variable's broadcast -- must
+/// report forty woken, and all forty must finish.  Until 2026-09-27 the wake
+/// collected its wakees in a 32-slot array and stopped there, leaving eight
+/// asleep and reporting 32 as if that were everyone.
+fn test_wake_many() -> KernelResult<()> {
+    let addr = (&raw const WAKE_MANY_WORD) as u64;
+    let key = FutexKey { addr, space: 0 };
+    WAKE_MANY_DONE.store(0, Ordering::Release);
+    WAKE_MANY_WORD.store(1, Ordering::Release);
+
+    let mut spawned = 0u32;
+    for _ in 0..WAKE_MANY_WAITERS {
+        if let Err(e) = sched::spawn(b"futex-wake-many", 16, wake_many_waiter, 0, 0) {
+            serial_println!(
+                "[futex]   FAIL: wake-many could start only {} of {} waiters ({:?})",
+                spawned,
+                WAKE_MANY_WAITERS,
+                e
+            );
+            // Count the ones that never started as done, so the release
+            // below waits for the started ones only.
+            WAKE_MANY_DONE.fetch_add(WAKE_MANY_WAITERS.saturating_sub(spawned), Ordering::AcqRel);
+            release_wake_many(addr);
+            return Err(e);
+        }
+        spawned = spawned.saturating_add(1);
+    }
+
+    // Every waiter parked: the wake below must find all forty queued.
+    let mut parked = 0;
+    for _ in 0..4000 {
+        parked = waiters_on(key);
+        if parked == WAKE_MANY_WAITERS as usize {
+            break;
+        }
+        sched::yield_now();
+    }
+
+    WAKE_MANY_WORD.store(0, Ordering::Release);
+    let woken = futex_wake(addr, u32::MAX);
+    for _ in 0..4000 {
+        if WAKE_MANY_DONE.load(Ordering::Acquire) >= WAKE_MANY_WAITERS {
+            break;
+        }
+        sched::yield_now();
+    }
+    let done = WAKE_MANY_DONE.load(Ordering::Acquire);
+    release_wake_many(addr);
+
+    if parked != WAKE_MANY_WAITERS as usize
+        || woken != WAKE_MANY_WAITERS
+        || done != WAKE_MANY_WAITERS
+    {
+        serial_println!(
+            "[futex]   FAIL: wake-many: {} parked, a wake of u32::MAX woke {}, {} finished \
+             (want {} each)",
+            parked,
+            woken,
+            done,
+            WAKE_MANY_WAITERS
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[futex]   a wake of u32::MAX woke all {} parked waiters (not the first 32): OK",
+        WAKE_MANY_WAITERS
+    );
+    Ok(())
+}
+
+/// Futex keys follow the mapping ([`key_in`]).
+///
+/// Two address spaces, built here and never run, map one frame twice each:
+/// once shared by design (at different addresses in the two), once privately
+/// (at the same address in both, as fork leaves a copy-on-write page).
+///
+/// - a word on the shared mapping has one key in both spaces -- its physical
+///   address, offset within the frame included -- whatever address each maps
+///   it at: that is what lets a process-shared mutex's waiter in one process
+///   be woken from another;
+/// - a word on the private mapping has a different key in each space, even
+///   though the frame is the same one: its contents are not shared, so its
+///   waiters must not be;
+/// - a kernel task's word, and an unmapped word, are keyed privately.
+// Arithmetic: user addresses below 2^47 and a physical frame address plus an
+// offset under 16 KiB; none can overflow.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_keys_follow_the_mapping() -> KernelResult<()> {
+    use crate::mm::frame;
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    const SHARED_A: u64 = 0x0000_4000_0010_0000;
+    const SHARED_B: u64 = 0x0000_4000_0024_0000; // a different address
+    const PRIVATE: u64 = 0x0000_4000_0030_0000; // the same in both
+    const UNMAPPED: u64 = 0x0000_4000_0040_0000;
+    // In the third 4 KiB page of the 16 KiB frame, so the offset is carried
+    // across the sub-page PTEs too.
+    const OFFSET: u64 = 0x2000 + 0x7C8;
+
+    let a = page_table::alloc_pml4()?;
+    let b = match page_table::alloc_pml4() {
+        Ok(b) => b,
+        Err(e) => {
+            // SAFETY: `a` was just built and is loaded in no CR3.
+            unsafe { page_table::destroy_user_address_space(a) };
+            return Err(e);
+        }
+    };
+    // Tears down both spaces; each mapping's frame reference goes with it.
+    let teardown = || {
+        // SAFETY: neither PML4 is loaded in any CR3; no thread uses them.
+        unsafe {
+            page_table::destroy_user_address_space(a);
+            page_table::destroy_user_address_space(b);
+        }
+    };
+
+    let outcome = (|| -> KernelResult<()> {
+        let frame = frame::alloc_frame_zeroed()?;
+        let phys = frame.addr();
+        let private_rw = PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | PageFlags::USER_ACCESSIBLE
+            | PageFlags::NO_EXECUTE;
+        let shared_rw = private_rw | PageFlags::SHARED;
+        // Four mappings, four references: the allocation is the first, and
+        // each teardown drops one.
+        let mappings = [
+            (a, SHARED_A, shared_rw),
+            (b, SHARED_B, shared_rw),
+            (a, PRIVATE, private_rw),
+            (b, PRIVATE, private_rw),
+        ];
+        for (i, &(space, virt, flags)) in mappings.iter().enumerate() {
+            if i > 0 {
+                // SAFETY: the frame is allocated and referenced by the
+                // mappings made so far.
+                unsafe { frame::ref_inc(frame)? };
+            }
+            // SAFETY: space is a PML4 built above; virt is a frame-aligned
+            // user address with nothing mapped at it yet.
+            if let Err(e) =
+                unsafe { page_table::map_frame(space, VirtAddr::new(virt), frame, flags) }
+            {
+                // This mapping's reference has no mapping to drop it at
+                // teardown, so drop it here.  Ignoring a failure to free is
+                // safe: it can only mean the reference was never taken.
+                // SAFETY: the frame holds the reference taken for it.
+                let _ = unsafe { frame::free_frame(frame) };
+                return Err(e);
+            }
+        }
+
+        let fail = |what: &str, got: FutexKey, want: FutexKey| -> KernelResult<()> {
+            serial_println!(
+                "[futex]   FAIL: futex key of {}: ({:#x}, {:#x}), want ({:#x}, {:#x})",
+                what,
+                got.addr,
+                got.space,
+                want.addr,
+                want.space
+            );
+            Err(KernelError::InternalError)
+        };
+        let shared_key = FutexKey {
+            addr: phys + OFFSET,
+            space: SHARED_KEY_SPACE,
+        };
+        for (what, space, virt) in [
+            ("the shared word in A", a, SHARED_A),
+            ("the shared word in B", b, SHARED_B),
+        ] {
+            let got = key_in(space, virt + OFFSET);
+            if got != shared_key {
+                return fail(what, got, shared_key);
+            }
+        }
+        for (what, space) in [("the private word in A", a), ("the private word in B", b)] {
+            let want = FutexKey {
+                addr: PRIVATE + OFFSET,
+                space,
+            };
+            let got = key_in(space, PRIVATE + OFFSET);
+            if got != want {
+                return fail(what, got, want);
+            }
+        }
+        for (what, space, virt) in [
+            ("a kernel task's word", 0, SHARED_A + OFFSET),
+            ("an unmapped word", a, UNMAPPED),
+        ] {
+            let want = FutexKey { addr: virt, space };
+            let got = key_in(space, virt);
+            if got != want {
+                return fail(what, got, want);
+            }
+        }
+        Ok(())
+    })();
+
+    teardown();
+    outcome?;
+    serial_println!(
+        "[futex]   keys follow the mapping: a shared word has one key in every space \
+         that maps it, a private one (even on a frame fork left shared) does not: OK"
+    );
     Ok(())
 }
 
@@ -3261,10 +3767,18 @@ static PID_FAIL: AtomicU32 = AtomicU32::new(0);
 /// Driver sets this to release the owner worker after the handoff.
 static PID_EXIT: AtomicU32 = AtomicU32::new(0);
 
-/// Owner worker: acquires the PI mutex, then spins until released.  It does
-/// NOT unlock — the driver simulates its death by transferring ownership
-/// away with `exit_pi_owned_futexes`, so by exit time it no longer owns the
-/// lock.
+/// Owner worker: acquires the PI mutex, then waits -- alive -- until the
+/// driver releases it. It does NOT unlock: the driver simulates its death by
+/// transferring ownership away with `exit_pi_owned_futexes`, so by exit time
+/// it no longer owns the lock.
+///
+/// It waits on a plain futex rather than spinning with `yield_now`: the
+/// driver runs below this task's level, so a yielding owner kept the CPU,
+/// ran its spin out and exited before the driver had started the waiter --
+/// and a word naming a task that has exited is `ESRCH` to the next locker
+/// (Linux's `handle_exit_race`), which is what the first release boot after
+/// the lock path learned that rule found (2026-10-08). The owner must be
+/// alive while the waiter queues, as a real holder is.
 extern "C" fn pi_death_owner(_arg: u64) {
     let addr = (&raw const PID_PI) as u64;
     if futex_lock_pi(addr).is_err() {
@@ -3273,13 +3787,23 @@ extern "C" fn pi_death_owner(_arg: u64) {
         return;
     }
     PID_OWNED.store(1, Ordering::SeqCst);
-    // Bounded spin so a missed signal can never hang the self-test.
-    for _ in 0..100_000 {
+    let exit_addr = (&raw const PID_EXIT) as u64;
+    // Bounded, so a lost wake can never hang the self-test: each round is a
+    // wait the driver ends, or returns at once once PID_EXIT is set.
+    for _ in 0..1_000 {
         if PID_EXIT.load(Ordering::SeqCst) != 0 {
             break;
         }
-        sched::yield_now();
+        // Either answer -- woken, or the word already moved on -- sends it
+        // round to look at PID_EXIT again; an error would too.
+        let _ = futex_wait(exit_addr, 0);
     }
+}
+
+/// Let the owner worker of the death test go: set [`PID_EXIT`] and wake it.
+fn release_pi_death_owner() {
+    PID_EXIT.store(1, Ordering::SeqCst);
+    let _ = futex_wake((&raw const PID_EXIT) as u64, 1);
 }
 
 /// Waiter worker: blocks on the PI mutex the owner holds.  When the owner
@@ -3330,12 +3854,17 @@ fn test_pi_owner_death_handoff() -> KernelResult<()> {
         sched::yield_now();
     }
     if PID_OWNED.load(Ordering::SeqCst) != 1 {
+        release_pi_death_owner();
         serial_println!("[futex]   FAIL: PI-death owner never acquired");
         return Err(KernelError::InternalError);
     }
 
-    // Spawn the waiter; let it register as a PI waiter and block.
-    sched::spawn(b"pi-death-wait", 16, pi_death_waiter, 0, 0)?;
+    // Spawn the waiter; let it register as a PI waiter and block. The owner
+    // is waiting on PID_EXIT meanwhile, alive, as a holder is.
+    if let Err(e) = sched::spawn(b"pi-death-wait", 16, pi_death_waiter, 0, 0) {
+        release_pi_death_owner();
+        return Err(e);
+    }
     for _ in 0..50 {
         if PID_W_PARKED.load(Ordering::SeqCst) >= 1 {
             break;
@@ -3361,7 +3890,7 @@ fn test_pi_owner_death_handoff() -> KernelResult<()> {
     }
 
     // Release the owner worker and let it (and the waiter) finish.
-    PID_EXIT.store(1, Ordering::SeqCst);
+    release_pi_death_owner();
     for _ in 0..100 {
         if PID_OWNED.load(Ordering::SeqCst) == 1 && PID_RECOVERED.load(Ordering::SeqCst) != 0 {
             // Both progressed; a few more yields lets them return.
@@ -3996,6 +4525,7 @@ pub fn self_test_timeout() -> KernelResult<()> {
     test_timeout_woken_before_deadline()?;
     test_timeout_zero_nonblocking()?;
     test_lock_pi_timeout()?;
+    test_lock_pi_fast_path_owner()?;
     test_wait_multiple_timeout()?;
     test_wait_multiple_woken()?;
 
@@ -4140,13 +4670,17 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
         }
     }
 
-    // We were the only waiter, so the WAITERS bit must be cleared and the
-    // owner must still hold the lock.
+    // The owner still holds the lock, and FUTEX_WAITERS stays set although we
+    // were the only waiter: the kernel holds a record of the owner, so its
+    // unlock must come through the kernel, which removes the record and
+    // frees the word -- Linux leaves the bit set too. (Until 2026-10-07 the
+    // timeout cleared it, and an owner that unlocked by its userspace CAS
+    // left its record behind.)
     let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
     let w = word.load(Ordering::SeqCst);
-    if w != owner_tid {
+    if w != owner_tid | FUTEX_WAITERS_BIT {
         serial_println!(
-            "[futex]   FAIL: after PI timeout word={:#x} (expected owner tid {:#x})",
+            "[futex]   FAIL: after PI timeout word={:#x} (expected owner tid {:#x} with FUTEX_WAITERS)",
             w,
             owner_tid
         );
@@ -4170,6 +4704,182 @@ fn test_lock_pi_timeout() -> KernelResult<()> {
 
     sched::reap_dead_tasks();
     serial_println!("[futex]   Lock PI timeout (held lock → ETIMEDOUT): OK");
+    Ok(())
+}
+
+/// The fast-path test's holder: 0 before it runs, 1 holding, 2 let go, 9 if
+/// it could not take the word.
+static PI_FP_STAGE: AtomicU32 = AtomicU32::new(0);
+/// The fast-path test's holder waits on this (1) until told to let go (0).
+static PI_FP_CONTROL: AtomicU32 = AtomicU32::new(1);
+/// The fast-path test's waiter: 0 still waiting, 1 `TimedOut`, 2 anything
+/// else.
+static PI_FP_WAITED: AtomicU32 = AtomicU32::new(0);
+
+/// The holder of [`test_lock_pi_fast_path_owner`]: takes the word as a
+/// userspace fast path does -- one compare-and-swap, no kernel entry, so no
+/// kernel record -- waits to be told to let go, then lets go as glibc's
+/// unlock does: a compare-and-swap back to 0, or `FUTEX_UNLOCK_PI` when
+/// `FUTEX_WAITERS` is set.
+extern "C" fn pi_fast_path_owner_task(addr: u64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let me = (sched::current_task_id() as u32) & FUTEX_TID_MASK;
+    let took = crate::mm::user::user_atomic_cas_u32(addr, 0, me).is_ok_and(|r| r.is_ok());
+    PI_FP_STAGE.store(if took { 1 } else { 9 }, Ordering::SeqCst);
+    let _ = futex_wait((&raw const PI_FP_CONTROL) as u64, 1);
+    let let_go = crate::mm::user::user_atomic_cas_u32(addr, me, 0).is_ok_and(|r| r.is_ok());
+    if !let_go {
+        let _ = futex_unlock_pi(addr);
+    }
+    PI_FP_STAGE.store(2, Ordering::SeqCst);
+}
+
+/// The waiter of [`test_lock_pi_fast_path_owner`], at a higher priority than
+/// the holder: gives up after 200 ms.
+extern "C" fn pi_fast_path_waiter_task(addr: u64) {
+    let outcome = match futex_lock_pi_timeout(addr, 200_000_000) {
+        Err(KernelError::TimedOut) => 1,
+        _ => 2,
+    };
+    PI_FP_WAITED.store(outcome, Ordering::SeqCst);
+}
+
+/// The fast-path test's word. A static, not a local: the workers use it
+/// for as long as they run, which a failing check does not shorten.
+static PI_FP_WORD: AtomicU32 = AtomicU32::new(0);
+
+/// A PI holder that took its word by the userspace fast path is recorded by
+/// its first waiter (Linux's `attach_to_pi_owner`), is lent the waiter's
+/// priority, and gives it back when the waiter times out -- the case of
+/// requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md
+/// that left the loan with the holder for good. `FUTEX_WAITERS` stays set,
+/// so the holder's unlock comes through the kernel and removes the record.
+///
+/// Whatever a check finds, the holder is told to let go and both workers are
+/// waited for before the test returns: a failing check that returned at once
+/// left the holder blocked for good, and the waiter -- whose word was on this
+/// function's stack until 2026-10-08 -- still timing out on it.
+fn test_lock_pi_fast_path_owner() -> KernelResult<()> {
+    PI_FP_STAGE.store(0, Ordering::SeqCst);
+    PI_FP_CONTROL.store(1, Ordering::SeqCst);
+    PI_FP_WAITED.store(0, Ordering::SeqCst);
+    PI_FP_WORD.store(0, Ordering::SeqCst);
+
+    let addr = (&raw const PI_FP_WORD) as u64;
+    let wait_key = futex_key(addr).to_pi_wait();
+    let control = (&raw const PI_FP_CONTROL) as u64;
+
+    let owner_id = sched::spawn(b"pi-fp-own", 24, pi_fast_path_owner_task, addr, 0)?;
+    let mut waiter_started = false;
+    let outcome = (|| -> Result<(), &'static str> {
+        for _ in 0..50 {
+            if PI_FP_STAGE.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            sched::yield_now();
+        }
+        if PI_FP_STAGE.load(Ordering::SeqCst) != 1 {
+            return Err("the holder did not take the word");
+        }
+        if find_pi_owner(wait_key).is_some() {
+            return Err("a take without the kernel made a record");
+        }
+
+        // The waiter records the holder and lends it priority 8 before it
+        // parks.
+        sched::spawn(b"pi-fp-wait", 8, pi_fast_path_waiter_task, addr, 0)
+            .map_err(|_| "could not spawn the waiter")?;
+        waiter_started = true;
+        let mut recorded = false;
+        for _ in 0..50 {
+            if find_pi_owner(wait_key) == Some(owner_id) {
+                recorded = true;
+                break;
+            }
+            sched::yield_now();
+        }
+        if !recorded {
+            return Err("the waiter did not record the holder");
+        }
+        let lent = sched::get_effective_priority(owner_id);
+        if lent != Some(8) {
+            serial_println!("[futex]   the holder's priority while lent: {:?}", lent);
+            return Err("the holder was not lent the waiter's priority");
+        }
+
+        // The waiter times out -- and takes its loan back.
+        for _ in 0..400 {
+            if PI_FP_WAITED.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            sched::sleep_ms(10);
+        }
+        if PI_FP_WAITED.load(Ordering::SeqCst) != 1 {
+            return Err("the waiter did not time out");
+        }
+        // Its base, or that less the interactive boost (see the inheritance
+        // test); not the lent 8.
+        let base_min = 24u8.saturating_sub(sched::task::INTERACTIVE_BOOST);
+        match sched::get_effective_priority(owner_id) {
+            Some(p) if (base_min..=24).contains(&p) => {}
+            other => {
+                serial_println!(
+                    "[futex]   the holder's priority after the waiter left: {:?}",
+                    other
+                );
+                return Err("the timed-out waiter's priority stayed with the holder");
+            }
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
+        if PI_FP_WORD.load(Ordering::SeqCst) != owner_tid | FUTEX_WAITERS_BIT
+            || find_pi_owner(wait_key) != Some(owner_id)
+        {
+            return Err("the record or FUTEX_WAITERS did not stay with the holder");
+        }
+
+        // The holder lets go: its compare-and-swap fails on FUTEX_WAITERS, so
+        // the unlock comes through the kernel and takes the record with it.
+        PI_FP_CONTROL.store(0, Ordering::SeqCst);
+        let _ = futex_wake(control, 1);
+        for _ in 0..50 {
+            if PI_FP_STAGE.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            sched::yield_now();
+        }
+        if PI_FP_STAGE.load(Ordering::SeqCst) != 2 {
+            return Err("the holder did not let go");
+        }
+        if PI_FP_WORD.load(Ordering::SeqCst) != 0 || find_pi_owner(wait_key).is_some() {
+            return Err("the unlock left the word held or the record behind");
+        }
+        Ok(())
+    })();
+
+    // Whatever was found: the holder lets go, and both workers are finished
+    // with before the statics are used again. (Woken twice is harmless: the
+    // second finds no one waiting.)
+    PI_FP_CONTROL.store(0, Ordering::SeqCst);
+    let _ = futex_wake(control, 1);
+    for _ in 0..100 {
+        let holder_done = matches!(PI_FP_STAGE.load(Ordering::SeqCst), 2 | 9);
+        let waiter_done = !waiter_started || PI_FP_WAITED.load(Ordering::SeqCst) != 0;
+        if holder_done && waiter_done {
+            break;
+        }
+        sched::sleep_ms(10);
+    }
+    sched::reap_dead_tasks();
+
+    if let Err(what) = outcome {
+        serial_println!("[futex]   FAIL: PI holder taken in userspace: {}", what);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[futex]   PI holder taken in userspace: recorded by its waiter, lent priority, \
+         given it back on the timeout, unlocked through the kernel: OK"
+    );
     Ok(())
 }
 

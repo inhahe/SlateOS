@@ -713,14 +713,22 @@ pub fn event_bytes(ev: &InputEvent) -> [u8; INPUT_EVENT_SIZE] {
 /// 0x57/0x58. The self-test pins those four anchors plus the letter block so a
 /// future edit cannot quietly break the correspondence.
 ///
+/// **One exception: 0x54 is `KEY_SYSRQ` (99).** A keyboard sends it, with no
+/// prefix, for Print Screen while an Alt is held (set 2's 0x84, after the
+/// i8042's translation; QEMU's `ps2.c` does the same). Linux's `atkbd` maps it
+/// to `KEY_SYSRQ`, the unmodified key's keycode; the identity would give 84,
+/// which the Linux ABI leaves unassigned, so Alt+Print Screen reached the
+/// desktop as an unknown key until 2026-10-01 (lane C's request
+/// `c-a-keys-that-never-reach-the-desktop`).
+///
 /// Returns `None` for 0 (not a key) and for codes above 0x58, which set 1 does
 /// not assign and which therefore have no keycode to give.
 #[must_use]
 pub const fn set1_to_keycode(code: u8) -> Option<u16> {
-    if code == 0 || code > 0x58 {
-        None
-    } else {
-        Some(code as u16)
+    match code {
+        0 | 0x59..=u8::MAX => None,
+        0x54 => Some(99),
+        _ => Some(code as u16),
     }
 }
 
@@ -1197,6 +1205,10 @@ pub fn self_test() -> KernelResult<()> {
     check!(set1_to_keycode(0x57) == Some(87), "F11 -> KEY_F11(87)");
     check!(set1_to_keycode(0x58) == Some(88), "F12 -> KEY_F12(88)");
     check!(set1_to_keycode(0x00).is_none(), "0 is not a key");
+    check!(
+        set1_to_keycode(0x54) == Some(99),
+        "0x54 (Alt+Print Screen) -> KEY_SYSRQ(99), as the unmodified key"
+    );
     check!(
         set1_to_keycode(0x59).is_none(),
         "0x59 is unassigned in set 1"

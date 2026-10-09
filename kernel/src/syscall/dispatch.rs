@@ -23,84 +23,109 @@ use crate::serial_println;
 
 use super::handlers;
 use super::number::{
-    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_BRIGHTNESS_SET, SYS_CAP_QUERY, SYS_CAP_REQUEST,
-    SYS_CAP_REQUEST_CANCEL, SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE,
-    SYS_CHANNEL_PEER_CRED, SYS_CHANNEL_RECV, SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT,
+    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_BRIGHTNESS_SET, SYS_CAP_BROKER_REGISTER,
+    SYS_CAP_BROKER_UNREGISTER, SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_CANCEL,
+    SYS_CAP_REQUEST_DECIDE, SYS_CAP_REQUEST_FOR, SYS_CAP_REQUEST_LIST, SYS_CAP_REQUEST_STATUS,
+    SYS_CAP_REQUEST_WAIT, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_PEER_CRED,
+    SYS_CHANNEL_PEER_HAS_KEY, SYS_CHANNEL_RECV, SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT,
     SYS_CHANNEL_SEND, SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME, SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME,
     SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR, SYS_CONSOLE_TRY_READ_CHAR, SYS_CONSOLE_WRITE,
     SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY, SYS_CP_REGISTER, SYS_CP_TRY_WAIT,
-    SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_TIMES, SYS_DEBUG_PRINT, SYS_DMA_ALLOC,
-    SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY, SYS_DMA_FREE,
-    SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS, SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
-    SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS,
-    SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE,
-    SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE,
-    SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP,
-    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ,
-    SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT,
-    SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP,
-    SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT,
-    SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR,
+    SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_CLOCK, SYS_CPU_COUNT, SYS_CPU_CURRENT, SYS_CPU_TIMES,
+    SYS_DEBUG_PRINT, SYS_DMA_ALLOC, SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE,
+    SYS_DMA_DOMAIN_DESTROY, SYS_DMA_FREE, SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS,
+    SYS_DNS_RESOLVE, SYS_DNS_RESOLVE2, SYS_DNS_REVERSE_RESOLVE, SYS_DOMAINNAME_SET,
+    SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO,
+    SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE,
+    SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY,
+    SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE,
+    SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT,
+    SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FIFO_OPEN,
+    SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP,
+    SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FLOCK_HANDLE, SYS_FS_FORMAT,
+    SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR,
     SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH,
-    SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS,
-    SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED,
-    SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_READ, SYS_FS_READ_FILE,
-    SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED,
-    SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR,
-    SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT,
-    SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE,
-    SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM,
-    SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED,
-    SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
-    SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
-    SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
-    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING,
-    SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
-    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET,
-    SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
-    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
-    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
-    SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL,
-    SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE,
-    SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL,
-    SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
-    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
-    SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
-    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
-    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
-    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID,
+    SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LINK_HANDLE, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR,
+    SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE,
+    SYS_FS_MKDIRAT_PINNED, SYS_FS_MKFIFO, SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE,
+    SYS_FS_OPENAT2, SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT,
+    SYS_FS_READLINK, SYS_FS_RECORD_LOCK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME,
+    SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
+    SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_STATUS_FLAGS, SYS_FS_SET_TIMES,
+    SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED,
+    SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST,
+    SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED,
+    SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ,
+    SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI,
+    SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI,
+    SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT,
+    SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
+    SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
+    SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
+    SYS_MEMBARRIER, SYS_MEMORY_ADVISE, SYS_MEMORY_LOCK, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE,
+    SYS_MMAP, SYS_MMAP_FILE, SYS_MPROTECT, SYS_MUNMAP, SYS_NAMESPACE_CLOSE, SYS_NAMESPACE_ENTER,
+    SYS_NAMESPACE_ENTER_PROCESS, SYS_NAMESPACE_INFO, SYS_NAMESPACE_OPEN, SYS_NAMESPACE_UNSHARE,
+    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
+    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
+    SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
+    SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH,
+    SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
+    SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
+    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
+    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
+    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_POSIX_TIMER, SYS_POWER_OFF,
+    SYS_POWER_REBOOT, SYS_POWER_RELOAD, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
+    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_DUMPABLE, SYS_PROCESS_GET_ARGS,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_IDS,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR,
+    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_GETGROUPS,
     SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
-    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_FDS,
-    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
-    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
-    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE,
+    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_IDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID,
+    SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN,
+    SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK,
+    SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTRACE, SYS_PTY_CLOSE, SYS_PTY_CREATE,
     SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
     SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
     SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
-    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE,
-    SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT,
-    SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER,
-    SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE,
-    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
-    SYS_SIGNAL_STOP_SELF, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE,
-    SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
-    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
-    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
-    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
-    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
-    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
-    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME,
-    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
-    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
-    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
-    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_RSEQ, SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE,
+    SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_EXIT_SELF,
+    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
+    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
+    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
+    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
+    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
+    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
+    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
+    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
+    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
+    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
+    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
+    SYS_THREAD_SCHEDULER, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
+    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
+    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6, SYS_UDP_RECV, SYS_UDP_RECV6,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_UDP_SEND6, SYS_UDP_SET_OPTION,
+    SYS_WAIT_MULTIPLE, SYS_YIELD,
+};
+use super::number::{
+    SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
+    SYS_FS_ADD_SEALS, SYS_FS_DEFER, SYS_FS_DEFER_CANCEL, SYS_FS_DEFER_LIST, SYS_FS_GET_SEALS,
+};
+use super::number::{
+    SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
+    SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
+    SYS_UNIX_RECV, SYS_UNIX_SEND, SYS_UNIX_SET_OPTION, SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -260,7 +285,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_EXIT as usize] = Some(handlers::sys_exit);
     handlers[SYS_TASK_ID as usize] = Some(handlers::sys_task_id);
     handlers[SYS_DEBUG_PRINT as usize] = Some(handlers::sys_debug_print);
-    handlers[SYS_MMAP as usize] = Some(handlers::sys_mmap);
+    handlers[SYS_MMAP as usize] = Some(handlers::sys_mmap_native);
     handlers[SYS_MUNMAP as usize] = Some(handlers::sys_munmap);
     handlers[SYS_MPROTECT as usize] = Some(handlers::sys_mprotect);
     handlers[SYS_IRQ_REGISTER as usize] = Some(handlers::sys_irq_register);
@@ -341,6 +366,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SHM_CLOSE as usize] = Some(handlers::sys_shm_close);
     handlers[SYS_SHM_MAP as usize] = Some(handlers::sys_shm_map);
     handlers[SYS_SHM_UNMAP as usize] = Some(handlers::sys_shm_unmap);
+    handlers[SYS_SHM_MAP_AT as usize] = Some(handlers::sys_shm_map_at);
     handlers[SYS_SOCKETPAIR_CREATE as usize] = Some(handlers::sys_socketpair_create);
     handlers[SYS_SOCKETPAIR_SEND as usize] = Some(handlers::sys_socketpair_send);
     handlers[SYS_SOCKETPAIR_RECV as usize] = Some(handlers::sys_socketpair_recv);
@@ -468,6 +494,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SET_CWD as usize] = Some(handlers::sys_process_set_cwd);
     handlers[SYS_PROCESS_GET_CWD as usize] = Some(handlers::sys_process_get_cwd);
     handlers[SYS_PROCESS_UMASK as usize] = Some(handlers::sys_process_umask);
+    // Secure Boot's db/dbx table (1082-1084, design-decisions §978): enrol and
+    // remove need ENROLL_SECUREBOOT; asking for a verdict needs nothing.
+    handlers[SYS_SECUREBOOT_ENROLL as usize] = Some(handlers::sys_secureboot_enroll);
+    handlers[SYS_SECUREBOOT_REMOVE as usize] = Some(handlers::sys_secureboot_remove);
+    handlers[SYS_SECUREBOOT_VERIFY as usize] = Some(handlers::sys_secureboot_verify);
     handlers[SYS_PROCESS_GET_NICE as usize] = Some(handlers::sys_process_get_nice);
     handlers[SYS_PROCESS_SET_NICE as usize] = Some(handlers::sys_process_set_nice);
 
@@ -542,14 +573,66 @@ const fn build_v1_table() -> SyscallTable {
     // so it has no flat-table entry.
     handlers[SYS_SIGNAL_REGISTER as usize] = Some(handlers::sys_signal_register);
     handlers[SYS_SIGNAL_SEND as usize] = Some(handlers::sys_signal_send);
+    handlers[SYS_SIGNAL_QUEUE as usize] = Some(handlers::sys_signal_queue);
+    handlers[SYS_SIGNAL_TGKILL as usize] = Some(handlers::sys_signal_tgkill);
+    handlers[SYS_PROCESS_GET_PRIORITY as usize] = Some(handlers::sys_process_get_priority);
+    handlers[SYS_PROCESS_SET_PRIORITY as usize] = Some(handlers::sys_process_set_priority);
+    handlers[SYS_PROCESS_SET_EXEC_CLOSE as usize] = Some(handlers::sys_process_set_exec_close);
+    handlers[SYS_FS_WATCH_READ_RECORDS as usize] = Some(handlers::sys_fs_watch_read_records);
+    handlers[SYS_CPU_CURRENT as usize] = Some(handlers::sys_cpu_current);
+    handlers[SYS_FS_RECORD_LOCK as usize] = Some(handlers::sys_fs_record_lock);
+    handlers[SYS_FS_FLOCK_HANDLE as usize] = Some(handlers::sys_fs_flock_handle);
+    handlers[SYS_FS_SET_STATUS_FLAGS as usize] = Some(handlers::sys_fs_set_status_flags);
+    handlers[SYS_FS_LINK_HANDLE as usize] = Some(handlers::sys_fs_link_handle);
+    handlers[SYS_DNS_RESOLVE2 as usize] = Some(handlers::sys_dns_resolve2);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
+    handlers[SYS_SIGNAL_SET_IGNORED as usize] = Some(handlers::sys_signal_set_ignored);
+    handlers[SYS_SIGNAL_GET_IGNORED as usize] = Some(handlers::sys_signal_get_ignored);
+    handlers[SYS_SCHED_SET_AFFINITY as usize] = Some(handlers::sys_sched_set_affinity);
+    handlers[SYS_SCHED_GET_AFFINITY as usize] = Some(handlers::sys_sched_get_affinity);
+    handlers[SYS_PROCESS_GET_PHDR as usize] = Some(handlers::sys_process_get_phdr);
+    handlers[SYS_CHANNEL_PEER_HAS_KEY as usize] = Some(handlers::sys_channel_peer_has_key);
+
+    // Unix-domain sockets by name (1104-1118): the native door to
+    // `ipc::unix_socket`, which the Linux table reaches through AF_UNIX.
+    handlers[SYS_UNIX_SOCKET as usize] = Some(handlers::sys_unix_socket);
+    handlers[SYS_UNIX_PAIR as usize] = Some(handlers::sys_unix_pair);
+    handlers[SYS_UNIX_BIND as usize] = Some(handlers::sys_unix_bind);
+    handlers[SYS_UNIX_LISTEN as usize] = Some(handlers::sys_unix_listen);
+    handlers[SYS_UNIX_ACCEPT as usize] = Some(handlers::sys_unix_accept);
+    handlers[SYS_UNIX_CONNECT as usize] = Some(handlers::sys_unix_connect);
+    handlers[SYS_UNIX_SEND as usize] = Some(handlers::sys_unix_send);
+    handlers[SYS_UNIX_RECV as usize] = Some(handlers::sys_unix_recv);
+    handlers[SYS_UNIX_NAME as usize] = Some(handlers::sys_unix_name);
+    handlers[SYS_UNIX_PEER_CRED as usize] = Some(handlers::sys_unix_peer_cred);
+    handlers[SYS_UNIX_SHUTDOWN as usize] = Some(handlers::sys_unix_shutdown);
+    handlers[SYS_UNIX_CLOSE as usize] = Some(handlers::sys_unix_close);
+    handlers[SYS_UNIX_POLL as usize] = Some(handlers::sys_unix_poll);
+    handlers[SYS_UNIX_SET_OPTION as usize] = Some(handlers::sys_unix_set_option);
+    handlers[SYS_UNIX_GET_OPTION as usize] = Some(handlers::sys_unix_get_option);
+
+    // The device door (1119-1123): the Linux device ABI -- today the sound
+    // card's -- reached natively, answering in Linux errnos.
+    handlers[SYS_DEVICE_OPEN as usize] = Some(handlers::sys_device_open);
+    handlers[SYS_DEVICE_IOCTL as usize] = Some(handlers::sys_device_ioctl);
+    handlers[SYS_DEVICE_READ as usize] = Some(handlers::sys_device_read);
+    handlers[SYS_DEVICE_WRITE as usize] = Some(handlers::sys_device_write);
+    handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_device_close);
+    // Seals on a file (1124-1125): `fs::sealing`, by handle.
+    handlers[SYS_FS_ADD_SEALS as usize] = Some(handlers::sys_fs_add_seals);
+    handlers[SYS_FS_GET_SEALS as usize] = Some(handlers::sys_fs_get_seals);
+    // Deferred filesystem operations (1126-1128): `fs::deferred_ops`.
+    handlers[SYS_FS_DEFER as usize] = Some(handlers::sys_fs_defer);
+    handlers[SYS_FS_DEFER_LIST as usize] = Some(handlers::sys_fs_defer_list);
+    handlers[SYS_FS_DEFER_CANCEL as usize] = Some(handlers::sys_fs_defer_cancel);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
     handlers[SYS_THREAD_EXIT as usize] = Some(handlers::sys_thread_exit);
     handlers[SYS_THREAD_JOIN as usize] = Some(handlers::sys_thread_join);
+    handlers[SYS_THREAD_JOIN_TIMEOUT as usize] = Some(handlers::sys_thread_join_timeout);
     handlers[SYS_THREAD_SUSPEND as usize] = Some(handlers::sys_thread_suspend);
     handlers[SYS_THREAD_RESUME as usize] = Some(handlers::sys_thread_resume);
     handlers[SYS_THREAD_SET_PRIORITY as usize] = Some(handlers::sys_thread_set_priority);
@@ -610,6 +693,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_CLOSE as usize] = Some(handlers::sys_fs_close);
     handlers[SYS_FS_READ as usize] = Some(handlers::sys_fs_read);
     handlers[SYS_FS_WRITE as usize] = Some(handlers::sys_fs_write);
+    handlers[SYS_FS_PREAD as usize] = Some(handlers::sys_fs_pread);
+    handlers[SYS_FS_PWRITE as usize] = Some(handlers::sys_fs_pwrite);
     handlers[SYS_FS_SEEK as usize] = Some(handlers::sys_fs_seek);
     handlers[SYS_FS_TRUNCATE as usize] = Some(handlers::sys_fs_truncate);
     handlers[SYS_FS_RENAME as usize] = Some(handlers::sys_fs_rename);
@@ -659,6 +744,12 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_UDP_LOCAL_PORT as usize] = Some(handlers::sys_udp_local_port);
     handlers[SYS_UDP_MCAST_JOIN as usize] = Some(handlers::sys_udp_mcast_join);
     handlers[SYS_UDP_MCAST_LEAVE as usize] = Some(handlers::sys_udp_mcast_leave);
+    handlers[SYS_UDP_SEND6 as usize] = Some(handlers::sys_udp_send6);
+    handlers[SYS_UDP_RECV6 as usize] = Some(handlers::sys_udp_recv6);
+    handlers[SYS_UDP_MCAST_JOIN6 as usize] = Some(handlers::sys_udp_mcast_join6);
+    handlers[SYS_UDP_MCAST_LEAVE6 as usize] = Some(handlers::sys_udp_mcast_leave6);
+    handlers[SYS_UDP_SET_OPTION as usize] = Some(handlers::sys_udp_set_option);
+    handlers[SYS_UDP_GET_OPTION as usize] = Some(handlers::sys_udp_get_option);
     handlers[SYS_DNS_RESOLVE as usize] = Some(handlers::sys_dns_resolve);
     handlers[SYS_DNS_REVERSE_RESOLVE as usize] = Some(handlers::sys_dns_reverse_resolve);
     handlers[SYS_NET_STAT as usize] = Some(handlers::sys_net_stat);
@@ -680,6 +771,46 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_NET_RAW_TX as usize] = Some(handlers::sys_net_raw_tx);
     handlers[SYS_NET_RAW_RX as usize] = Some(handlers::sys_net_raw_rx);
     handlers[SYS_NET_RAW_CLOSE as usize] = Some(handlers::sys_net_raw_close);
+    handlers[SYS_NET_RAW_MCAST as usize] = Some(handlers::sys_net_raw_mcast);
+    handlers[SYS_SIGNAL_EXIT_SELF as usize] = Some(handlers::sys_signal_exit_self);
+    handlers[SYS_PIDFD_OPEN as usize] = Some(handlers::sys_pidfd_open);
+    handlers[SYS_PIDFD_CLOSE as usize] = Some(handlers::sys_pidfd_close);
+    handlers[SYS_POWER_RELOAD as usize] = Some(handlers::sys_power_reload);
+    handlers[SYS_POWER_OFF as usize] = Some(handlers::sys_power_off);
+    handlers[SYS_POWER_REBOOT as usize] = Some(handlers::sys_power_reboot);
+    handlers[SYS_MEMORY_ADVISE as usize] = Some(handlers::sys_memory_advise);
+    handlers[SYS_POSIX_TIMER as usize] = Some(handlers::sys_posix_timer);
+    handlers[SYS_PROCESS_DUMPABLE as usize] = Some(handlers::sys_process_dumpable);
+    handlers[SYS_PROCESS_GETGROUPS as usize] = Some(handlers::sys_process_getgroups);
+    handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
+    handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
+    handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
+    handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
+    handlers[SYS_RSEQ as usize] = Some(handlers::sys_rseq);
+    handlers[SYS_PTRACE as usize] = Some(handlers::sys_ptrace);
+    // The capability request broker's answering side (design-decisions 1548).
+    handlers[SYS_CAP_BROKER_REGISTER as usize] = Some(handlers::sys_cap_broker_register);
+    handlers[SYS_CAP_BROKER_UNREGISTER as usize] = Some(handlers::sys_cap_broker_unregister);
+    handlers[SYS_CAP_REQUEST_DECIDE as usize] = Some(handlers::sys_cap_request_decide);
+    handlers[SYS_CAP_REQUEST_LIST as usize] = Some(handlers::sys_cap_request_list);
+    handlers[SYS_CAP_REQUEST_FOR as usize] = Some(handlers::sys_cap_request_for);
+    handlers[SYS_CAP_REQUEST_WAIT as usize] = Some(handlers::sys_cap_request_wait);
+    // The CPU-time clocks, for native programs.
+    handlers[SYS_CPU_CLOCK as usize] = Some(handlers::sys_cpu_clock);
+    // Named pipes, for native programs.
+    handlers[SYS_FS_MKFIFO as usize] = Some(handlers::sys_fs_mkfifo);
+    handlers[SYS_FIFO_OPEN as usize] = Some(handlers::sys_fifo_open);
+    // Real, effective, saved and filesystem ids, for native programs.
+    handlers[SYS_PROCESS_SET_IDS as usize] = Some(handlers::sys_process_set_ids);
+    handlers[SYS_PROCESS_GET_IDS as usize] = Some(handlers::sys_process_get_ids);
+    // Namespaces as Linux has them -- unshare, /proc/<pid>/ns handles, setns
+    // -- for native programs (crate::nsfs).
+    handlers[SYS_NAMESPACE_UNSHARE as usize] = Some(handlers::sys_namespace_unshare);
+    handlers[SYS_NAMESPACE_OPEN as usize] = Some(handlers::sys_namespace_open);
+    handlers[SYS_NAMESPACE_ENTER as usize] = Some(handlers::sys_namespace_enter);
+    handlers[SYS_NAMESPACE_ENTER_PROCESS as usize] = Some(handlers::sys_namespace_enter_process);
+    handlers[SYS_NAMESPACE_CLOSE as usize] = Some(handlers::sys_namespace_close);
+    handlers[SYS_NAMESPACE_INFO as usize] = Some(handlers::sys_namespace_info);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -999,6 +1130,30 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_termios_syscalls()?;
     test_tty_flush()?;
     test_process_cwd_umask_registered()?;
+    test_thread_join_timeout_registered()?;
+    test_dispatch_signal_siginfo_frame()?;
+    test_dispatch_signal_ignored()?;
+    test_dispatch_sched_affinity()?;
+    test_dispatch_process_get_phdr()?;
+    test_dispatch_channel_peer_has_key()?;
+    test_dispatch_unix_sockets()?;
+    test_dispatch_priority_doors()?;
+    test_dispatch_exec_close()?;
+    test_dispatch_native_socket_possession()?;
+    test_dispatch_udp_v6_and_options()?;
+    test_dispatch_raw_mcast()?;
+    test_dispatch_exit_status_is_not_a_signal()?;
+    test_dispatch_pidfd()?;
+    test_dispatch_tioc_and_watch_records()?;
+    test_cpu_current()?;
+    test_dispatch_shared_anonymous_memory()?;
+    test_dispatch_secureboot_doors()?;
+    test_dispatch_power_reload()?;
+    test_dispatch_power_off_and_reboot()?;
+    test_dispatch_memory_advise()?;
+    test_dispatch_posix_timer()?;
+    test_dispatch_ipc_possession()?;
+    test_dispatch_dropping_root_is_one_way()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -1192,9 +1347,369 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_uts_name()?;
     test_dispatch_dns_hosts()?;
     test_dispatch_brightness_gated()?;
+    // Record locks, flock and the fs doors' gates: each writes a file in
+    // /tmp, so after the mount (they were put in the Step 11 list first, and
+    // would have failed there for want of a filesystem).
+    test_dispatch_record_lock()?;
+    test_dispatch_seals()?;
+    test_dispatch_deferred()?;
+    test_dispatch_flock()?;
+    test_dispatch_fs_gates()?;
+    test_dispatch_status_flags()?;
+    test_dispatch_tmpfile()?;
+    test_dispatch_dns_resolve2()?;
+    test_dispatch_xattr_buffers()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
+}
+
+/// `SYS_FS_GET_XATTR` and `SYS_FS_LIST_XATTRS` on a file in `/tmp`, and their
+/// buffers (lane D's `d-a-xattr-answers-only-the-filesystem-can-give`, items 1
+/// and 2):
+/// - a value or list that fits is copied, and its length returned;
+/// - one that does not is not copied at all: the length comes back and the
+///   buffer is as it was;
+/// - a capacity is not checked against the buffer before the lookup, nor
+///   past what is copied: a missing attribute is `NoAttribute`, and a
+///   present one is copied, under a capacity no buffer could have.
+fn test_dispatch_xattr_buffers() -> KernelResult<()> {
+    use crate::fs::Vfs;
+
+    const NAME: &str = "/tmp/xattr-dispatch-selftest";
+    // Far past any buffer: checked before the lookup, as it was, it was
+    // `InvalidAddress` whatever the lookup would have said.
+    const VAST: u64 = 1 << 40;
+    let path = NAME.as_bytes();
+    let get = |key: &[u8], buf: &mut [u8], capacity: u64| {
+        dispatch(
+            SYS_FS_GET_XATTR,
+            &SyscallArgs {
+                arg0: path.as_ptr() as u64,
+                arg1: path.len() as u64,
+                arg2: key.as_ptr() as u64,
+                arg3: buf.as_mut_ptr() as u64,
+                arg4: capacity,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let list = |buf: &mut [u8], capacity: u64| {
+        dispatch(
+            SYS_FS_LIST_XATTRS,
+            &SyscallArgs {
+                arg0: path.as_ptr() as u64,
+                arg1: path.len() as u64,
+                arg2: buf.as_mut_ptr() as u64,
+                arg3: capacity,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = Vfs::remove(NAME);
+    let outcome = (|| -> Result<(), &'static str> {
+        Vfs::write_file(NAME, b"x").map_err(|_| "could not make the file")?;
+        Vfs::set_xattr(NAME, b"user.k", b"value").map_err(|_| "could not set user.k")?;
+        let key = b"user.k\0";
+
+        let mut fits = [0xEEu8; 8];
+        if get(key, &mut fits, 8) != 5 || fits != *b"value\xEE\xEE\xEE" {
+            return Err("a value that fits was not copied, or more was written");
+        }
+        let mut small = [0xEEu8; 3];
+        if get(key, &mut small, 3) != 5 || small != [0xEE; 3] {
+            return Err("a value too big for the buffer was written into it");
+        }
+        if get(key, &mut [], 0) != 5 {
+            return Err("a size query did not give the length");
+        }
+        let mut vast = [0xEEu8; 8];
+        if get(key, &mut vast, VAST) != 5 || vast.get(..5) != Some(b"value".as_slice()) {
+            return Err("a vast capacity was checked past what was copied");
+        }
+        if get(b"user.none\0", &mut vast, VAST) != i64::from(KernelError::NoAttribute.code()) {
+            return Err("a missing attribute was not NoAttribute under a vast capacity");
+        }
+
+        // "user.k\0" is the whole list.
+        let mut fits = [0xEEu8; 8];
+        if list(&mut fits, 8) != 7 || fits != *b"user.k\0\xEE" {
+            return Err("a list that fits was not copied, or more was written");
+        }
+        let mut small = [0xEEu8; 4];
+        if list(&mut small, 4) != 7 || small != [0xEE; 4] {
+            return Err("a list too big for the buffer was written into it");
+        }
+        Ok(())
+    })();
+    // Best effort: this test's scratch file.
+    let _ = Vfs::remove(NAME);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   xattr buffers: a value or list copied only when it fits, \
+                 the capacity never checked past what is copied: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: xattr buffers: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_DNS_RESOLVE2` (1097), answered from the kernel's hosts table so no
+/// query leaves the machine:
+/// - `localhost` as `AF_UNSPEC`: `::1` then `127.0.0.1`, canonical
+///   `localhost`, in the layout the number's doc gives;
+/// - as `AF_INET`, the one IPv4 record;
+/// - a buffer that cannot hold the answer is `BufferTooSmall`, with nothing
+///   written; a family that is not one of the three, `InvalidArgument`.
+fn test_dispatch_dns_resolve2() -> KernelResult<()> {
+    const AF_UNSPEC: u64 = 0;
+    const AF_INET: u64 = 2;
+    let name = b"localhost";
+    let resolve = |family: u64, out: &mut [u8]| {
+        dispatch(
+            SYS_DNS_RESOLVE2,
+            &SyscallArgs {
+                arg0: name.as_ptr() as u64,
+                arg1: name.len() as u64,
+                arg2: family,
+                arg3: out.as_mut_ptr() as u64,
+                arg4: out.len() as u64,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let fail = |what: &str| {
+        serial_println!("[syscall]   FAIL: SYS_DNS_RESOLVE2: {}", what);
+        Err(KernelError::InternalError)
+    };
+
+    let mut out = [0xEEu8; 128];
+    let n = resolve(AF_UNSPEC, &mut out);
+    let mut want = alloc::vec::Vec::new();
+    want.extend_from_slice(&2u16.to_le_bytes());
+    want.extend_from_slice(&9u16.to_le_bytes());
+    want.extend_from_slice(b"localhost\0");
+    want.extend_from_slice(&10u16.to_le_bytes());
+    want.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    want.extend_from_slice(&2u16.to_le_bytes());
+    want.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    if n != 2 || out.get(..want.len()) != Some(want.as_slice()) {
+        serial_println!(
+            "[syscall]   AF_UNSPEC localhost -> {}, {:02x?}",
+            n,
+            out.get(..want.len())
+        );
+        return fail("localhost as AF_UNSPEC was not ::1 then 127.0.0.1, canonical localhost");
+    }
+    let mut out = [0u8; 64];
+    let n = resolve(AF_INET, &mut out);
+    if n != 1 || out.get(14..20) != Some([2u8, 0, 127, 0, 0, 1].as_slice()) {
+        return fail("localhost as AF_INET was not 127.0.0.1 alone");
+    }
+    let mut small = [0xEEu8; 8];
+    let too_small = resolve(AF_UNSPEC, &mut small);
+    if too_small != i64::from(KernelError::BufferTooSmall.code()) || small != [0xEE; 8] {
+        return fail("a buffer too small for the answer was written, or not refused");
+    }
+    let mut out = [0u8; 64];
+    if resolve(99, &mut out) != i64::from(KernelError::InvalidArgument.code()) {
+        return fail("an unknown family was accepted");
+    }
+    serial_println!(
+        "[syscall]   SYS_DNS_RESOLVE2 (1097): every address, the canonical name, the layout: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_TMPFILE` (648) and `SYS_FS_LINK_HANDLE` (1096), on `/tmp`:
+/// - a file made with no name is written through its handle, and named
+///   by the second door, after which its name reads what was written;
+/// - one made with `EXCL` is not named (`NotFound`);
+/// - flags that do not allow writing are `InvalidArgument`;
+/// - a process that does not hold the handle cannot name it
+///   (`InvalidHandle`).
+fn test_dispatch_tmpfile() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const NAME: &str = "/tmp/tmpfile-dispatch-selftest";
+    let dir = b"/tmp";
+    let name = NAME.as_bytes();
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let rw = u64::from(OpenFlags::READ.union(OpenFlags::WRITE).bits());
+    let excl = rw | u64::from(OpenFlags::EXCL.bits());
+    let tmpfile = |flags: u64| {
+        dispatch(
+            SYS_FS_TMPFILE,
+            &args(dir.as_ptr() as u64, dir.len() as u64, flags),
+        )
+        .value
+    };
+    let link = |h: u64| {
+        dispatch(
+            SYS_FS_LINK_HANDLE,
+            &args(h, name.as_ptr() as u64, name.len() as u64),
+        )
+        .value
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(NAME);
+    let stranger = pcb::create("tmpfile-dispatch", 0);
+
+    let outcome = (|| -> Result<(), &'static str> {
+        let h = u64::try_from(tmpfile(rw)).map_err(|_| "SYS_FS_TMPFILE refused a writable open")?;
+        let wrote = handle::write(h, b"made unnamed");
+        let theirs = self_test_as_process(stranger, || link(h));
+        let named = link(h);
+        // Best effort: this test's own handle.
+        let _ = handle::close(h);
+        if wrote != Ok(12) {
+            return Err("the unnamed file was not written through its handle");
+        }
+        if theirs != i64::from(KernelError::InvalidHandle.code()) {
+            return Err("a process named a file through a handle it does not hold");
+        }
+        if named != 0
+            || crate::fs::Vfs::read_file(NAME).as_deref() != Ok(b"made unnamed".as_slice())
+        {
+            return Err("SYS_FS_LINK_HANDLE did not name the file with what was written");
+        }
+        let h = u64::try_from(tmpfile(excl)).map_err(|_| "SYS_FS_TMPFILE refused EXCL")?;
+        let _ = crate::fs::Vfs::remove(NAME);
+        let refused = link(h);
+        // Best effort: this test's own handle.
+        let _ = handle::close(h);
+        if refused != i64::from(KernelError::NotFound.code()) {
+            return Err("a file made with EXCL was named");
+        }
+        let read_only = u64::from(OpenFlags::READ.bits());
+        if tmpfile(read_only) != i64::from(KernelError::InvalidArgument.code()) {
+            return Err("a read-only unnamed file was made");
+        }
+        Ok(())
+    })();
+
+    pcb::destroy(stranger);
+    // Best effort: this test's scratch name.
+    let _ = crate::fs::Vfs::remove(NAME);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   tmpfile: SYS_FS_TMPFILE (648) makes it unnamed, SYS_FS_LINK_HANDLE (1096) names it: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: tmpfile: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_FS_SET_STATUS_FLAGS` (1095), on a file in `/tmp`:
+/// - with `APPEND` set, a write after a seek to 0 lands at the end;
+/// - cleared, the next lands at the cursor again;
+/// - a bit above bit 8 is `InvalidArgument`, a directory `IsADirectory`;
+/// - a process that does not hold the handle gets `InvalidHandle`.
+fn test_dispatch_status_flags() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags, SeekFrom};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/status-flags-selftest";
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"abc")?;
+    let h = handle::open(PATH, OpenFlags::READ.union(OpenFlags::WRITE))?;
+    let dir = handle::open("/tmp", OpenFlags::READ.union(OpenFlags::DIRECTORY))?;
+    let stranger = pcb::create("status-flags", 0);
+    let append = u64::from(OpenFlags::APPEND.bits());
+
+    let outcome = (|| -> Result<(), &'static str> {
+        let rewrite_at_start = |data: &[u8]| -> Result<(), &'static str> {
+            handle::seek(h, SeekFrom::Start(0)).map_err(|_| "a seek failed")?;
+            handle::write(h, data).map_err(|_| "a write failed")?;
+            Ok(())
+        };
+        let contents = || crate::fs::Vfs::read_file(PATH).unwrap_or_default();
+
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, append)).value != 0 {
+            return Err("setting APPEND was refused");
+        }
+        rewrite_at_start(b"d")?;
+        if contents() != b"abcd" {
+            return Err("a write with APPEND set did not land at the end");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, 0)).value != 0 {
+            return Err("clearing APPEND was refused");
+        }
+        rewrite_at_start(b"X")?;
+        if contents() != b"Xbcd" {
+            return Err("a write with APPEND cleared did not land at the cursor");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, 1 << 9)).value
+            != i64::from(KernelError::InvalidArgument.code())
+        {
+            return Err("a bit above bit 8 was accepted");
+        }
+        if dispatch(SYS_FS_SET_STATUS_FLAGS, &args(dir, append)).value
+            != i64::from(KernelError::IsADirectory.code())
+        {
+            return Err("a directory handle took APPEND");
+        }
+        let theirs = self_test_as_process(stranger, || {
+            dispatch(SYS_FS_SET_STATUS_FLAGS, &args(h, append)).value
+        });
+        if theirs != i64::from(KernelError::InvalidHandle.code()) {
+            return Err("a process set the flags of a handle it does not hold");
+        }
+        Ok(())
+    })();
+
+    pcb::destroy(stranger);
+    // Best effort, all three: scratch state this test made.
+    let _ = handle::close(dir);
+    let _ = handle::close(h);
+    let _ = crate::fs::Vfs::remove(PATH);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   status flags: SYS_FS_SET_STATUS_FLAGS (1095) sets and clears APPEND: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: status flags: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// Verify the **native** `SYS_FS_OPENAT2` (661): its resolve-bit gate, the
@@ -2009,18 +2524,23 @@ fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
         }
     }
 
-    // (2) The argument gate runs *before* caller resolution, so a malformed
+    // (2) The argument gate runs *before* caller resolution, so a negative
     //     pgid is EINVAL even when the caller could not be established. If
     //     these two ever collapse into one verdict, a program would learn
-    //     "no such process" for what is really a bad argument.
+    //     "no such process" for what is really a bad argument. Group 0 is not
+    //     a bad argument but a group that does not exist (Linux's
+    //     `tiocspgrp`), judged after the caller and its terminal: for this
+    //     caller, which has no process, NoSuchProcess. It was InvalidArgument
+    //     until 2026-10-01.
     #[allow(clippy::cast_sign_loss)]
     let minus_one = -1_i64 as u64;
-    for (arg, what) in [(0_u64, "tcsetpgrp(0)"), (minus_one, "tcsetpgrp(-1)")] {
-        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value
-            != i64::from(KernelError::InvalidArgument.code())
-        {
-            serial_println!("[syscall]     ({} did not report InvalidArgument)", what);
-            return fail("a non-positive pgid should be InvalidArgument");
+    for (arg, what, want) in [
+        (0_u64, "tcsetpgrp(0)", KernelError::NoSuchProcess),
+        (minus_one, "tcsetpgrp(-1)", KernelError::InvalidArgument),
+    ] {
+        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value != i64::from(want.code()) {
+            serial_println!("[syscall]     ({} did not report {:?})", what, want);
+            return fail("tcsetpgrp's argument gate");
         }
     }
 
@@ -2164,6 +2684,3770 @@ fn test_process_cwd_umask_registered() -> KernelResult<()> {
         }
     }
     serial_println!("[syscall]   Native cwd/umask record (1077-1079) is wired: OK");
+    Ok(())
+}
+
+/// `SYS_THREAD_JOIN_TIMEOUT` (1085) is registered. From this kernel task the
+/// target names no thread of a process, so a wired number answers
+/// `NoSuchProcess`; an unwired one would answer `NoSuchSyscall`. The time
+/// limit itself is `proc::thread::self_test`'s (`test_join_timeout`).
+fn test_thread_join_timeout_registered() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: u64::MAX - 1,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_THREAD_JOIN_TIMEOUT, &args).value;
+    if got != i64::from(KernelError::NoSuchProcess.code()) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_THREAD_JOIN_TIMEOUT (1085) answered {}, expected NoSuchProcess -- is it registered?",
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_THREAD_JOIN_TIMEOUT (1085) is wired: OK");
+    Ok(())
+}
+
+/// `SYS_SIGNAL_SET_IGNORED` (1098) and `SYS_SIGNAL_GET_IGNORED` (1099), made
+/// as a process makes them (`thread::self_test_as_process`), and what the
+/// set they keep does to a send (`SYS_SIGNAL_SEND`):
+///
+/// - the set is recorded, with `SA_NOCLDWAIT` from the flag;
+/// - `SIGKILL` or `SIGSTOP` in it, an unknown flag, or an out-pointer it
+///   cannot write is refused, and leaves the set as it was;
+/// - `GET` needs a pointer, and an unwritable one is `InvalidAddress` (from a
+///   self-test every pointer is one: the task keeps the kernel's address
+///   space);
+/// - an ignored `SIGHUP` sent to a process with no handler trampoline -- a
+///   program `nohup` started, before its libc runs -- is discarded, where it
+///   used to end the process.
+fn test_dispatch_signal_ignored() -> KernelResult<()> {
+    use super::number::SIGNAL_IGNORED_NOCLDWAIT;
+    use crate::proc::pcb;
+    use crate::proc::signal;
+    use crate::proc::thread::self_test_as_process;
+
+    let pid = pcb::create("ignored-door", 0);
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let sighup: u64 = 1;
+    let sigchld: u64 = 1 << 16;
+    let mut out = 0u64;
+    let out_ptr = core::ptr::from_mut(&mut out) as u64;
+
+    let result = (|| -> Result<(), &'static str> {
+        if as_pid(
+            SYS_SIGNAL_SET_IGNORED,
+            args(sighup | sigchld, 0, SIGNAL_IGNORED_NOCLDWAIT),
+        ) != 0
+            || signal::ignored(pid) != sighup | sigchld
+            || !signal::nocldwait(pid)
+        {
+            return Err("the set and SA_NOCLDWAIT were not recorded");
+        }
+        for (a, why) in [
+            (args(1 << 8, 0, 0), "SIGKILL in the set"),
+            (args(1 << 18, 0, 0), "SIGSTOP in the set"),
+            (args(0, 0, 2), "an unknown flag"),
+        ] {
+            if as_pid(SYS_SIGNAL_SET_IGNORED, a) != code(KernelError::InvalidArgument) {
+                serial_println!("[syscall]   FAIL: SYS_SIGNAL_SET_IGNORED accepted {}", why);
+                return Err("a refusal");
+            }
+        }
+        if as_pid(SYS_SIGNAL_SET_IGNORED, args(0, out_ptr, 0)) != code(KernelError::InvalidAddress)
+        {
+            return Err("an unwritable out-pointer was not InvalidAddress");
+        }
+        if signal::ignored(pid) != sighup | sigchld || !signal::nocldwait(pid) {
+            return Err("a refused call changed the set");
+        }
+        if as_pid(SYS_SIGNAL_GET_IGNORED, args(0, 0, 0)) != code(KernelError::InvalidArgument)
+            || as_pid(SYS_SIGNAL_GET_IGNORED, args(out_ptr, 0, 0))
+                != code(KernelError::InvalidAddress)
+        {
+            return Err("SYS_SIGNAL_GET_IGNORED's pointer checks");
+        }
+
+        // The nohup case, sent as another process sends it: a kernel task
+        // may signal anyone.
+        let send = dispatch(SYS_SIGNAL_SEND, &args(pid, 1, 0)).value;
+        if send != 0 || pcb::state(pid).is_none() || pcb::exit_code(pid).is_some() {
+            return Err("an ignored SIGHUP to a process with no trampoline ended it");
+        }
+        if as_pid(SYS_SIGNAL_SET_IGNORED, args(0, 0, 0)) != 0 || signal::ignored(pid) != 0 {
+            return Err("clearing the set");
+        }
+        Ok(())
+    })();
+    signal::remove(pid);
+    pcb::destroy(pid);
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   SYS_SIGNAL_SET_IGNORED / GET_IGNORED (1098/1099), and an ignored send: OK"
+            );
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: ignored set: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_SCHED_SET_AFFINITY` (1100) and `SYS_SCHED_GET_AFFINITY` (1101):
+///
+/// - an unknown flag, a null out-pointer and an empty mask are refused, and a
+///   thread or process that does not exist is `NoSuchProcess`;
+/// - the kernel sets a thread's mask, and reading it back gives that mask;
+///   the caller reads its own;
+/// - a process may not move a kernel task, but may read its mask (from a
+///   self-test, the read gets as far as the pointer, which a process-context
+///   self-test cannot write: `InvalidAddress`, not `PermissionDenied`);
+/// - who may move whom: a process itself, its parent, the kernel -- not its
+///   child, and no process a kernel task (`may_change_affinity`).
+///
+/// The CPUs-moved half needs two CPUs and hotplug's online mask, and runs
+/// later in the boot (`sched::affinity_self_test`).
+fn test_dispatch_sched_affinity() -> KernelResult<()> {
+    use super::handlers::may_change_affinity;
+    use super::number::SCHED_AFFINITY_THREAD;
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    /// Ids no task or process has.
+    const NOBODY: u64 = 0x00F0_0000_0000_0000;
+    /// A kernel task's body that never runs: it is created suspended.
+    extern "C" fn never_runs(_arg: u64) {}
+
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let mut out = 0u64;
+    let out_ptr = core::ptr::from_mut(&mut out) as u64;
+    let me = crate::sched::current_task_id();
+    let thread = SCHED_AFFINITY_THREAD;
+
+    // A kernel task that never runs, to be moved and read.
+    let parked = crate::sched::spawn_suspended(b"affinity-door", 16, never_runs, 0, 0)?;
+    let parent = pcb::create("affinity-parent", 0);
+    let child = pcb::create("affinity-child", parent);
+
+    let result = (|| -> Result<(), &'static str> {
+        for (nr, a, want, why) in [
+            (
+                SYS_SCHED_SET_AFFINITY,
+                args(0, 1, 2),
+                KernelError::InvalidArgument,
+                "SET: an unknown flag",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(0, out_ptr, 2),
+                KernelError::InvalidArgument,
+                "GET: an unknown flag",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(0, 0, thread),
+                KernelError::InvalidArgument,
+                "GET: a null pointer",
+            ),
+            (
+                SYS_SCHED_SET_AFFINITY,
+                args(parked, 0, thread),
+                KernelError::InvalidArgument,
+                "SET: an empty mask",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(NOBODY, out_ptr, thread),
+                KernelError::NoSuchProcess,
+                "GET: no such thread",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(NOBODY, out_ptr, 0),
+                KernelError::NoSuchProcess,
+                "GET: no such process",
+            ),
+            (
+                SYS_SCHED_SET_AFFINITY,
+                args(NOBODY, 1, thread),
+                KernelError::NoSuchProcess,
+                "SET: no such thread",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(parent, out_ptr, 0),
+                KernelError::NoSuchProcess,
+                "GET: a process with no threads",
+            ),
+        ] {
+            if dispatch(nr, &a).value != code(want) {
+                serial_println!("[syscall]   FAIL: affinity: {} was not {:?}", why, want);
+                return Err("a refusal");
+            }
+        }
+        // The caller reads its own.
+        if dispatch(SYS_SCHED_GET_AFFINITY, &args(0, out_ptr, thread)).value != 0
+            || Some(out) != crate::sched::affinity_of(me)
+            || out == 0
+        {
+            return Err("the caller's own mask did not read back");
+        }
+        // The kernel moves a thread, and reads the move back. CPU 0 is
+        // always online.
+        out = 0;
+        if dispatch(SYS_SCHED_SET_AFFINITY, &args(parked, 1, thread)).value != 0
+            || crate::sched::get_cpu_affinity(parked) != Some(1)
+            || dispatch(SYS_SCHED_GET_AFFINITY, &args(parked, out_ptr, thread)).value != 0
+            || out != 1
+        {
+            return Err("a mask the kernel set did not read back");
+        }
+        // A process may not move a kernel task, but may read its mask.
+        let as_parent =
+            |nr: u64, a: SyscallArgs| self_test_as_process(parent, || dispatch(nr, &a).value);
+        if as_parent(SYS_SCHED_SET_AFFINITY, args(parked, 1, thread))
+            != code(KernelError::PermissionDenied)
+        {
+            return Err("a process moved a kernel task");
+        }
+        if as_parent(SYS_SCHED_GET_AFFINITY, args(parked, out_ptr, thread))
+            != code(KernelError::InvalidAddress)
+        {
+            return Err("reading a kernel task's mask was refused before the pointer");
+        }
+        // Who may move whom.
+        if !may_change_affinity(Some(parent), Some(parent))
+            || !may_change_affinity(Some(parent), Some(child))
+            || may_change_affinity(Some(child), Some(parent))
+            || !may_change_affinity(None, Some(child))
+            || may_change_affinity(Some(parent), None)
+        {
+            return Err("the rule for who may move whom");
+        }
+        Ok(())
+    })();
+    crate::sched::kill_task(parked);
+    crate::sched::reap_dead_tasks();
+    pcb::destroy(child);
+    pcb::destroy(parent);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_SCHED_SET_AFFINITY / GET_AFFINITY (1100/1101): OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: affinity: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_PROCESS_GET_PHDR` (1102), as a kernel task and as a process
+/// (`thread::self_test_as_process`): a kernel task has no process
+/// (`NoSuchProcess`); a null pointer is `InvalidArgument`; a process with no
+/// table recorded is `NotFound`; one with a table gets as far as the copy-out,
+/// which a process-context self-test cannot write (`InvalidAddress`). The
+/// table's placement itself is `spawn::self_test_main_phdr`'s.
+fn test_dispatch_process_get_phdr() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    let args = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let mut out = [0u8; 16];
+    let out_ptr = out.as_mut_ptr() as u64;
+    let pid = pcb::create("phdr-door", 0);
+    let as_pid =
+        |a: SyscallArgs| self_test_as_process(pid, || dispatch(SYS_PROCESS_GET_PHDR, &a).value);
+    let result = (|| -> Result<(), &'static str> {
+        if dispatch(SYS_PROCESS_GET_PHDR, &args(out_ptr)).value != code(KernelError::NoSuchProcess)
+        {
+            return Err("a kernel task was not NoSuchProcess");
+        }
+        if as_pid(args(0)) != code(KernelError::InvalidArgument) {
+            return Err("a null pointer was not InvalidArgument");
+        }
+        if as_pid(args(out_ptr)) != code(KernelError::NotFound) {
+            return Err("a process with no table recorded was not NotFound");
+        }
+        let table = crate::proc::spawn::MainPhdr {
+            vaddr: 0x40_0000,
+            phnum: 3,
+            phentsize: 56,
+        };
+        pcb::set_main_phdr(pid, Some(table)).map_err(|_| "set_main_phdr")?;
+        if pcb::main_phdr(pid) != Some(table) {
+            return Err("a recorded table did not read back");
+        }
+        if as_pid(args(out_ptr)) != code(KernelError::InvalidAddress) {
+            return Err("a recorded table did not reach the copy-out");
+        }
+        Ok(())
+    })();
+    pcb::destroy(pid);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_PROCESS_GET_PHDR (1102): OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: SYS_PROCESS_GET_PHDR: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// The native Unix-domain socket calls (`SYS_UNIX_*`, 1104-1118):
+///
+/// - a socket is handed out to the process that makes it, and another
+///   process may not use it (`InvalidHandle`); an unknown kind is refused;
+/// - datagrams by abstract name: bind, a second bind of the name
+///   (`AddrInUse`), a relative path (`InvalidArgument` -- the library
+///   resolves those), send to the name, receive with the info record (whole
+///   length, an unnamed sender), `WouldBlock` when empty;
+/// - the `UNIX_OPT_PASSCRED` option: off on a new socket, set and read back,
+///   a value other than 0 or 1 refused, an unknown option `NotSupported`;
+/// - a stream: listen, connect, accept (handed out, with its listener's
+///   `UNIX_OPT_PASSCRED`), bytes across, the accepted socket's own name, no
+///   credentials for a kernel-context peer (`NoAddress`), end of file after
+///   the peer shuts its sending half;
+/// - a pair; and close, after which the handle is no longer held.
+///
+/// Sockets are made in the owner's name (so they are handed out) and used
+/// from kernel context, which holds every handle, so the buffers can be
+/// kernel memory. The owner's teardown closes whatever is left.
+#[allow(clippy::too_many_lines)] // one linear script
+fn test_dispatch_unix_sockets() -> KernelResult<()> {
+    use super::number::{UNIX_NAME_ABSTRACT, UNIX_NONBLOCK, UNIX_OPT_PASSCRED, UNIX_RECV_INFO_LEN};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    let a = |arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let call = |nr: u64, args: SyscallArgs| dispatch(nr, &args).value;
+    let owner = pcb::create("unix-owner", 0);
+    let other = pcb::create("unix-other", 0);
+    let as_owner = |nr: u64, args: SyscallArgs| self_test_as_process(owner, || dispatch(nr, &args));
+    let ptr = |b: &[u8]| b.as_ptr() as u64;
+    let handle = |v: i64| u64::try_from(v).map_err(|_| "a socket was not handed out");
+
+    let result = (|| -> Result<(), &'static str> {
+        // --- handed out, and held ---
+        let srv = handle(as_owner(SYS_UNIX_SOCKET, a(2, 0, 0, 0, 0, 0)).value)?;
+        let cli = handle(as_owner(SYS_UNIX_SOCKET, a(2, 0, 0, 0, 0, 0)).value)?;
+        if as_owner(SYS_UNIX_SOCKET, a(3, 0, 0, 0, 0, 0)).value
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("an unknown socket kind was not refused");
+        }
+        let foreign = self_test_as_process(other, || {
+            dispatch(SYS_UNIX_POLL, &a(srv, 0, 0, 0, 0, 0)).value
+        });
+        if foreign != code(KernelError::InvalidHandle) {
+            return Err("another process used a socket it does not hold");
+        }
+
+        // --- datagrams by abstract name ---
+        let name = b"slt-native";
+        let abs = UNIX_NAME_ABSTRACT;
+        let nb = UNIX_NONBLOCK;
+        let len = |b: &[u8]| b.len() as u64;
+        if call(SYS_UNIX_BIND, a(srv, ptr(name), len(name), 0, abs, 0)) != 0 {
+            return Err("bind to an abstract name failed");
+        }
+        if call(SYS_UNIX_BIND, a(cli, ptr(name), len(name), 0, abs, 0))
+            != code(KernelError::AddrInUse)
+        {
+            return Err("a second bind of a name in use was not AddrInUse");
+        }
+        if call(SYS_UNIX_BIND, a(cli, ptr(b"rel"), 3, 0o600, 0, 0))
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("a relative path was not refused");
+        }
+        if call(
+            SYS_UNIX_SEND,
+            a(cli, ptr(b"hey"), 3, ptr(name), len(name), abs | nb),
+        ) != 3
+        {
+            return Err("a send to an abstract name failed");
+        }
+        let mut buf = [0u8; 8];
+        let mut info = [0u8; UNIX_RECV_INFO_LEN];
+        let got = call(
+            SYS_UNIX_RECV,
+            a(
+                srv,
+                buf.as_mut_ptr() as u64,
+                8,
+                info.as_mut_ptr() as u64,
+                nb,
+                0,
+            ),
+        );
+        if got != 3 || buf.get(..3) != Some(&b"hey"[..]) {
+            return Err("the datagram did not arrive whole");
+        }
+        if info.get(..8) != Some(&3u64.to_le_bytes()[..]) || info.get(28..32) != Some(&[0u8; 4][..])
+        {
+            return Err("the receive record has the wrong length or sender");
+        }
+        if call(SYS_UNIX_RECV, a(srv, buf.as_mut_ptr() as u64, 8, 0, nb, 0))
+            != code(KernelError::WouldBlock)
+        {
+            return Err("an empty socket did not answer WouldBlock");
+        }
+
+        // --- options ---
+        let passcred = UNIX_OPT_PASSCRED;
+        if call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0 {
+            return Err("a new socket asks for credentials");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 1, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 1
+        {
+            return Err("UNIX_OPT_PASSCRED did not set, or did not read back");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 2, 0, 0, 0))
+            != code(KernelError::InvalidArgument)
+        {
+            return Err("UNIX_OPT_PASSCRED took a value other than 0 or 1");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, passcred, 0, 0, 0, 0)) != 0
+        {
+            return Err("UNIX_OPT_PASSCRED did not turn off again");
+        }
+        if call(SYS_UNIX_SET_OPTION, a(srv, 0x7FFF, 1, 0, 0, 0)) != code(KernelError::NotSupported)
+            || call(SYS_UNIX_GET_OPTION, a(srv, 0x7FFF, 0, 0, 0, 0))
+                != code(KernelError::NotSupported)
+        {
+            return Err("an unknown option was not NotSupported");
+        }
+        // The timeouts: nanoseconds, 0 for none; each its own.
+        let (rcv, snd) = (
+            super::number::UNIX_OPT_RCVTIMEO,
+            super::number::UNIX_OPT_SNDTIMEO,
+        );
+        if call(SYS_UNIX_GET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(srv, rcv, 5_000_000, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 5_000_000
+            || call(SYS_UNIX_GET_OPTION, a(srv, snd, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_GET_OPTION, a(srv, rcv, 0, 0, 0, 0)) != 0
+        {
+            return Err("UNIX_OPT_RCVTIMEO did not set, read back, clear, or keep to itself");
+        }
+
+        // --- a stream ---
+        let st = b"slt-native-st";
+        let lst = handle(as_owner(SYS_UNIX_SOCKET, a(1, 0, 0, 0, 0, 0)).value)?;
+        let con = handle(as_owner(SYS_UNIX_SOCKET, a(1, 0, 0, 0, 0, 0)).value)?;
+        if call(SYS_UNIX_BIND, a(lst, ptr(st), len(st), 0, abs, 0)) != 0
+            || call(SYS_UNIX_LISTEN, a(lst, 2, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_SET_OPTION, a(lst, passcred, 1, 0, 0, 0)) != 0
+        {
+            return Err("bind, listen and UNIX_OPT_PASSCRED failed");
+        }
+        if call(SYS_UNIX_CONNECT, a(con, ptr(st), len(st), abs | nb, 0, 0)) != 0 {
+            return Err("connect failed");
+        }
+        let acc = handle(as_owner(SYS_UNIX_ACCEPT, a(lst, nb, 0, 0, 0, 0)).value)?;
+        if call(SYS_UNIX_GET_OPTION, a(acc, passcred, 0, 0, 0, 0)) != 1
+            || call(SYS_UNIX_GET_OPTION, a(con, passcred, 0, 0, 0, 0)) != 0
+        {
+            return Err("the accepted socket did not take its listener's UNIX_OPT_PASSCRED");
+        }
+        if call(SYS_UNIX_SEND, a(con, ptr(b"ok"), 2, 0, 0, nb)) != 2
+            || call(SYS_UNIX_RECV, a(acc, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 2
+        {
+            return Err("the stream did not carry the bytes");
+        }
+        let mut rec = [0u8; super::number::UNIX_ADDR_LEN];
+        if call(SYS_UNIX_NAME, a(acc, 0, rec.as_mut_ptr() as u64, 0, 0, 0)) != 0
+            || rec.get(..4) != Some(&2u32.to_le_bytes()[..])
+            || rec.get(8..).and_then(|r| r.get(..st.len())) != Some(&st[..])
+        {
+            return Err("the accepted socket does not report the listener's abstract name");
+        }
+        let mut cred = [0u8; 16];
+        if call(
+            SYS_UNIX_PEER_CRED,
+            a(acc, cred.as_mut_ptr() as u64, 0, 0, 0, 0),
+        ) != code(KernelError::NoAddress)
+        {
+            return Err("a kernel-context peer was reported with credentials");
+        }
+        if call(SYS_UNIX_SHUTDOWN, a(con, 1, 0, 0, 0, 0)) != 0
+            || call(SYS_UNIX_RECV, a(acc, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 0
+        {
+            return Err("end of file did not follow the peer's shutdown of its sending half");
+        }
+
+        // --- a pair, and close ---
+        let pair = as_owner(SYS_UNIX_PAIR, a(1, 0, 0, 0, 0, 0));
+        let (p0, p1) = (handle(pair.value)?, handle(pair.value2)?);
+        if call(SYS_UNIX_SEND, a(p0, ptr(b"p"), 1, 0, 0, nb)) != 1
+            || call(SYS_UNIX_RECV, a(p1, buf.as_mut_ptr() as u64, 8, 0, nb, 0)) != 1
+        {
+            return Err("a pair did not carry a byte");
+        }
+        if as_owner(SYS_UNIX_CLOSE, a(srv, 0, 0, 0, 0, 0)).value != 0
+            || as_owner(SYS_UNIX_POLL, a(srv, 0, 0, 0, 0, 0)).value
+                != code(KernelError::InvalidHandle)
+        {
+            return Err("a closed socket is still held");
+        }
+        Ok(())
+    })();
+    pcb::destroy(other);
+    // Closes every socket the owner still holds.
+    pcb::destroy(owner);
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   SYS_UNIX_* (1104-1118): held by their maker, datagrams by abstract \
+                 name, the credentials option, a stream through listen/connect/accept, names, \
+                 a pair, close: OK"
+            );
+            Ok(())
+        }
+        Err(why) => {
+            serial_println!("[syscall]   FAIL: unix sockets: {}", why);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_CHANNEL_PEER_HAS_KEY` (1103): a service connection's peer holds the
+/// service's key only with a `(Service, key_id(name), READ)` capability, and
+/// only while it still holds its end of the channel; a channel not made by
+/// connecting to a service is `NotFound`.
+///
+/// The client connects as a process (`thread::self_test_as_process`), so
+/// the kernel records it on its end as it would a real client; its end is
+/// registered with it as the native connect does.
+fn test_dispatch_channel_peer_has_key() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::ipc::{channel, service};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const NAME: &[u8] = b"slate.selftest.keyed";
+    let args = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let ask = |h: channel::ChannelHandle| dispatch(SYS_CHANNEL_PEER_HAS_KEY, &args(h.raw())).value;
+    let client = pcb::create("keyed-client", 0);
+    let listener = service::register(NAME)?;
+    let connected = self_test_as_process(client, || service::connect(NAME));
+    let result = (|| -> Result<(), &'static str> {
+        let client_end = connected.map_err(|_| "the client could not connect")?;
+        pcb::register_ipc_handle(client, ResourceType::Channel, client_end.raw());
+        let server_end = service::try_accept(listener)
+            .ok()
+            .flatten()
+            .ok_or("the service had no connection to accept")?;
+        let outcome = (|| {
+            if ask(server_end) != 0 {
+                return Err("a peer with no key was said to hold one");
+            }
+            pcb::grant_capability(
+                client,
+                ResourceType::Service,
+                service::key_id(b"another.service"),
+                Rights::READ,
+            )
+            .map_err(|_| "grant")?;
+            if ask(server_end) != 0 {
+                return Err("another service's key was taken for this one's");
+            }
+            pcb::grant_capability(
+                client,
+                ResourceType::Service,
+                service::key_id(NAME),
+                Rights::READ,
+            )
+            .map_err(|_| "grant")?;
+            if ask(server_end) != 1 {
+                return Err("a peer holding the key was not said to");
+            }
+            // A process that no longer holds its end answers nothing.
+            pcb::deregister_ipc_handle(client, ResourceType::Channel, client_end.raw());
+            if ask(server_end) != 0 {
+                return Err("a peer that let go of its end still answered");
+            }
+            let (plain, other) = channel::create();
+            let not_service = ask(plain);
+            channel::close(plain);
+            channel::close(other);
+            if not_service != i64::from(KernelError::NotFound.code()) {
+                return Err("a channel not made to a service was not NotFound");
+            }
+            Ok(())
+        })();
+        channel::close(server_end);
+        channel::close(client_end);
+        outcome
+    })();
+    // The test's own listener; gone either way.
+    let _ = service::unregister(listener);
+    pcb::destroy(client);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_CHANNEL_PEER_HAS_KEY (1103): OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: SYS_CHANNEL_PEER_HAS_KEY: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// The native siginfo frame and the sends that fill it
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`), made as
+/// a process makes them, through `thread::self_test_as_process`:
+///
+/// - `SYS_SIGNAL_REGISTER` answers the flags it honours -- 1 for
+///   `SIGNAL_FRAME_SIGINFO`, 0 without it or when unregistering -- ignores
+///   unknown bits, and the registry records which frame the trampoline reads;
+/// - `SYS_SIGNAL_QUEUE` posts `SI_QUEUE` with the caller as sender and the
+///   value, answers a group (pid not above zero) `NoSuchProcess`, and posts
+///   nothing for signal 0;
+/// - `SYS_SIGNAL_TGKILL` posts `SI_TKILL` for a thread of the process, and
+///   refuses a thread of another (`NoSuchProcess`) and ids not above zero
+///   (`InvalidArgument`);
+/// - `SYS_SIGNAL_SEND`'s signal 0 to one process is the probe its page says
+///   it is (it answered `InvalidArgument` until 2026-10-01);
+/// - none of them lets a process signal one that is not its child, while a
+///   signal the kernel raises reaches it all the same (`SI_KERNEL`, pid 0) --
+///   the terminal's `^C` reaching a foreground job its writer did not start.
+fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
+    use super::number::SIGNAL_FRAME_SIGINFO;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::signal::{self, si_code};
+    use crate::proc::thread::self_test_as_process;
+
+    const SIGUSR1: u64 = 10;
+    const SIGUSR2: u64 = 12;
+    const VALUE: u64 = 0xDEAD_BEEF_0000_0001;
+
+    fn cleanup(pids: &[ProcessId]) {
+        for &p in pids {
+            signal::remove(p);
+            pcb::destroy(p);
+        }
+    }
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: siginfo frame: {}", msg);
+        cleanup(pids);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("siginfo-frame", 0);
+    let stranger = pcb::create("siginfo-stranger", 0);
+    let pids = [pid, stranger];
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+
+    // Registration answers what it honours, and the registry agrees.
+    for (flags, answer, extended) in [
+        (SIGNAL_FRAME_SIGINFO, 1, true),
+        (0, 0, false),
+        (0b110, 0, false),
+        (0b111, 1, true),
+    ] {
+        let got = as_pid(SYS_SIGNAL_REGISTER, args(0x4000, flags, 0));
+        if got != answer || signal::trampoline_frame(pid) != Some((0x4000, extended)) {
+            serial_println!(
+                "[syscall]   register(0x4000, {:#b}) answered {}, registry {:?}",
+                flags,
+                got,
+                signal::trampoline_frame(pid)
+            );
+            return fail("SYS_SIGNAL_REGISTER's answer or record", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_REGISTER, args(0, SIGNAL_FRAME_SIGINFO, 0)) != 0
+        || signal::trampoline_frame(pid).is_some()
+        || signal::extended_frame(pid)
+    {
+        return fail("unregistering honours nothing and keeps nothing", &pids);
+    }
+    // A trampoline makes a post pending (`Deliver`) instead of the default
+    // action, so each send below can be read back.
+    if as_pid(SYS_SIGNAL_REGISTER, args(0x4000, SIGNAL_FRAME_SIGINFO, 0)) != 1 {
+        return fail("re-registering for the sends", &pids);
+    }
+
+    // sigqueue: SI_QUEUE, the caller as sender, the value.
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, SIGUSR1, VALUE)) != 0 {
+        return fail("sigqueue to itself refused", &pids);
+    }
+    match signal::take_deliverable_info(pid) {
+        Some((10, info))
+            if info.code == si_code::SI_QUEUE
+                && u64::from(info.sender_pid) == pid
+                && info.value == VALUE => {}
+        other => {
+            serial_println!("[syscall]   sigqueue posted {:?}", other);
+            return fail("sigqueue's record", &pids);
+        }
+    }
+    // Its probe posts nothing; a group is no process; a bad number is caught
+    // once the target is known to exist.
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, 0, 5)) != 0 || signal::pending(pid) != 0 {
+        return fail("sigqueue's signal 0", &pids);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let minus_five = (-5i64) as u64;
+    for group in [0, minus_five] {
+        if as_pid(SYS_SIGNAL_QUEUE, args(group, SIGUSR1, 0)) != code(KernelError::NoSuchProcess) {
+            return fail("sigqueue to a group", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, 65, 0)) != code(KernelError::InvalidArgument) {
+        return fail("sigqueue's signal 65", &pids);
+    }
+
+    // tgkill: a thread of `pid`. Not this task: the self-test runs on the
+    // boot task, whose id is 0, which no thread has -- tgkill refuses it,
+    // as Linux does. An id far above any the id counter reaches stands in.
+    const THREAD: u64 = 0x7FFF_0001;
+    let tgkill = |tgid: u64, tid: u64| {
+        crate::proc::thread::self_test_with_thread(THREAD, pid, || {
+            as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2))
+        })
+    };
+    if tgkill(pid, THREAD) != 0 {
+        return fail("tgkill to its own thread refused", &pids);
+    }
+    // Thread-directed: on THREAD's own queue, which only THREAD takes from
+    // (design-decisions 1542) -- not the boot task, which is no thread of
+    // `pid`. Until 2026-10-07 this read the process's queue and found nothing.
+    match signal::take_deliverable_info_as(pid, THREAD) {
+        Some((12, info)) if info.code == si_code::SI_TKILL && u64::from(info.sender_pid) == pid => {
+        }
+        other => {
+            serial_println!("[syscall]   tgkill posted {:?}", other);
+            return fail("tgkill's record", &pids);
+        }
+    }
+    if tgkill(stranger, THREAD) != code(KernelError::NoSuchProcess) {
+        return fail("tgkill named a thread of another process", &pids);
+    }
+    for (tgid, tid) in [(0, THREAD), (pid, 0)] {
+        if tgkill(tgid, tid) != code(KernelError::InvalidArgument) {
+            return fail("tgkill with an id not above zero", &pids);
+        }
+    }
+
+    // SYS_SIGNAL_SEND's single-process probe.
+    if as_pid(SYS_SIGNAL_SEND, args(pid, 0, 0)) != 0 || signal::pending(pid) != 0 {
+        return fail("kill(pid, 0) is a probe", &pids);
+    }
+
+    // Authority: `stranger` is not `pid`'s child, whichever way it is asked.
+    signal::register_trampoline(stranger, 0x4000);
+    for (what, nr, a) in [
+        ("kill", SYS_SIGNAL_SEND, args(stranger, SIGUSR1, 0)),
+        ("kill's probe", SYS_SIGNAL_SEND, args(stranger, 0, 0)),
+        ("sigqueue", SYS_SIGNAL_QUEUE, args(stranger, SIGUSR1, 1)),
+    ] {
+        if as_pid(nr, a) != code(KernelError::PermissionDenied) {
+            serial_println!("[syscall]   {} to a stranger was not refused", what);
+            return fail("a send without authority", &pids);
+        }
+    }
+    if signal::pending(stranger) != 0 {
+        return fail("a refused send posted anyway", &pids);
+    }
+    // The kernel's own signal needs no authority: raised on `pid`'s thread, it
+    // still reaches `stranger`, from the kernel.
+    #[allow(clippy::cast_possible_truncation)]
+    let posted = self_test_as_process(pid, || {
+        handlers::post_kernel_signal(stranger, SIGUSR1 as u32)
+    });
+    if posted.is_err() {
+        return fail("a kernel signal was refused", &pids);
+    }
+    match signal::take_deliverable_info(stranger) {
+        Some((10, info)) if info.code == si_code::SI_KERNEL && info.sender_pid == 0 => {}
+        other => {
+            serial_println!("[syscall]   kernel signal posted {:?}", other);
+            return fail("a kernel signal's record", &pids);
+        }
+    }
+
+    cleanup(&pids);
+    serial_println!(
+        "[syscall]   signal frame flags, SYS_SIGNAL_QUEUE (1086), SYS_SIGNAL_TGKILL (1087), \
+         authority: OK"
+    );
+    Ok(())
+}
+
+/// The nice doors, made as a process makes them
+/// (`requests/e-ad-renicing-another-process-renices-the-caller.md`;
+/// `proc::priority`, design-decisions §1503):
+///
+/// - `SYS_PROCESS_SET_PRIORITY` (1089) reaches the named process: a parent
+///   lowers its child's priority, and is refused a stranger
+///   (`PermissionDenied`) and a raise beyond the child's `RLIMIT_NICE`
+///   (`ResourceExhausted`);
+/// - `SYS_PROCESS_GET_PRIORITY` (1088) reads any process with no authority,
+///   gives a group's most favoured member, and refuses an unknown `which`;
+/// - `SYS_PROCESS_SET_NICE` (532), the caller's own, now has its raise
+///   decided by the kernel.
+///
+/// The rule's own cases, groups and users included, are
+/// `proc::priority::self_test`'s.
+fn test_dispatch_priority_doors() -> KernelResult<()> {
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: priority doors: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    // Nice n travels as n + 20.
+    let biased = |nice: i64| u64::try_from(nice.saturating_add(20)).unwrap_or(20);
+
+    let parent = pcb::create("prio-door-parent", 0);
+    let stranger = pcb::create("prio-door-stranger", 0);
+    let Ok(child) = pcb::fork_create(parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new())
+    else {
+        return fail("could not fork the scratch child", &[parent, stranger]);
+    };
+    let pids = [child, parent, stranger];
+    let as_parent =
+        |nr: u64, a: SyscallArgs| self_test_as_process(parent, || dispatch(nr, &a).value);
+    let as_stranger =
+        |nr: u64, a: SyscallArgs| self_test_as_process(stranger, || dispatch(nr, &a).value);
+
+    // Lowering a child's priority: allowed, and it is the child that moves.
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, child, biased(10))) != 0
+        || pcb::get_nice(child) != Some(10)
+        || pcb::get_nice(parent) != Some(0)
+    {
+        return fail(
+            "a parent could not renice its child, or reniced itself",
+            &pids,
+        );
+    }
+    // A stranger is not the parent's to renice; a raise is not without the right.
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, stranger, biased(10)))
+        != code(KernelError::PermissionDenied)
+        || pcb::get_nice(stranger) != Some(0)
+    {
+        return fail("a stranger was reniced", &pids);
+    }
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, child, biased(5)))
+        != code(KernelError::ResourceExhausted)
+        || pcb::get_nice(child) != Some(10)
+    {
+        return fail("a raise without the right went through", &pids);
+    }
+    // Reading needs no authority; a group answers its most favoured member.
+    if as_parent(SYS_PROCESS_GET_PRIORITY, args(0, stranger, 0)) != 20
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(1, 0, 0)) != 20
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(0, child, 0)) != 30
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(3, 0, 0)) != code(KernelError::InvalidArgument)
+    {
+        return fail("getpriority's answers", &pids);
+    }
+    // The caller's own: a raise refused, a lowering answered with the old nice.
+    if as_stranger(SYS_PROCESS_SET_NICE, args(biased(-5), 0, 0))
+        != code(KernelError::ResourceExhausted)
+        || as_stranger(SYS_PROCESS_SET_NICE, args(biased(5), 0, 0)) != 20
+        || pcb::get_nice(stranger) != Some(5)
+    {
+        return fail("SYS_PROCESS_SET_NICE's raise check", &pids);
+    }
+
+    for p in pids {
+        pcb::destroy(p);
+    }
+    serial_println!(
+        "[syscall]   SYS_PROCESS_GET_PRIORITY (1088), SYS_PROCESS_SET_PRIORITY (1089), \
+         SYS_PROCESS_SET_NICE's raise: OK"
+    );
+    Ok(())
+}
+
+/// The IPv6 UDP calls and the multicast options through the syscall layer,
+/// with real user memory (`SYS_UDP_SEND6` .. `SYS_UDP_GET_OPTION`, 1129-1134).
+/// A socket joins an IPv6 group named in its own memory and sets hop limit 0,
+/// so nothing leaves the machine. It sends to the group and receives its own
+/// datagram back, with the source in the 18-byte record. An option reads back
+/// as set, and an option number that does not exist is refused.
+fn test_dispatch_udp_v6_and_options() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::cap::{ResourceType, Rights};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    /// A link-scoped group nothing else here joins.
+    const GROUP: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0x43];
+    const PORT: u16 = 47_812;
+    const PAYLOAD: &[u8] = b"udp6 through the syscall layer";
+
+    fn fail(msg: &str, pid: ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: UDP over IPv6: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("udp6-dispatch", 0);
+    if pcb::grant_capability(pid, ResourceType::Socket, 0, Rights::READ | Rights::WRITE).is_err() {
+        return fail("could not grant the Socket capability", pid);
+    }
+    // A page of the process's memory: the group at 0, the payload at 64, the
+    // receive buffer at 256, the source record at 512.
+    let mapped = self_test_as_process(pid, || {
+        dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE, 0, 0)).value
+    });
+    let Ok(page) = u64::try_from(mapped) else {
+        return fail("could not map the process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the process has no address space", pid);
+    };
+    let (group_at, payload_at, buf_at, src_at) = (
+        page,
+        page.saturating_add(64),
+        page.saturating_add(256),
+        page.saturating_add(512),
+    );
+    if copy_to_user_as(pml4, group_at, &GROUP).is_err()
+        || copy_to_user_as(pml4, payload_at, PAYLOAD).is_err()
+    {
+        return fail("could not write into the process's memory", pid);
+    }
+    let call = |nr: u64, a: SyscallArgs| self_test_in_process(pid, || dispatch(nr, &a).value);
+
+    let Some(Ok(h)) = call(SYS_UDP_BIND, args(u64::from(PORT), 0, 0, 0, 0)).map(u64::try_from)
+    else {
+        return fail("could not bind a UDP socket", pid);
+    };
+    let joined = call(SYS_UDP_MCAST_JOIN6, args(h, group_at, 0, 0, 0)) == Some(0);
+    let hops_set = call(SYS_UDP_SET_OPTION, args(h, 3, 0, 0, 0)) == Some(0);
+    let hops_read = call(SYS_UDP_GET_OPTION, args(h, 3, 0, 0, 0)) == Some(0);
+    let no_such =
+        call(SYS_UDP_SET_OPTION, args(h, 99, 1, 0, 0)) == Some(code(KernelError::InvalidArgument));
+    let len = PAYLOAD.len() as u64;
+    let sent = call(
+        SYS_UDP_SEND6,
+        args(h, group_at, u64::from(PORT), payload_at, len),
+    ) == Some(0);
+    let received = call(SYS_UDP_RECV6, args(h, buf_at, 64, src_at, 0));
+    let mut buf = [0u8; 64];
+    let mut src = [0u8; 18];
+    let read_back = copy_from_user_as(pml4, buf_at, &mut buf).is_ok()
+        && copy_from_user_as(pml4, src_at, &mut src).is_ok();
+    let empty =
+        call(SYS_UDP_RECV6, args(h, buf_at, 64, 0, 0)) == Some(code(KernelError::WouldBlock));
+    let closed = call(SYS_UDP_CLOSE, args(h, 0, 0, 0, 0)) == Some(0);
+
+    if !(joined && hops_set && hops_read) {
+        return fail("the join or the hop-limit option did not take", pid);
+    }
+    if !no_such {
+        return fail("an option that does not exist was taken", pid);
+    }
+    let payload_ok = received == Some(len as i64) && buf.get(..PAYLOAD.len()) == Some(PAYLOAD);
+    // The source: this machine's link-local address (a link-scoped group's
+    // source), then the socket's own port, little-endian.
+    let source_ok = src.get(..2) == Some([0xfe, 0x80].as_slice())
+        && src.get(16..) == Some(PORT.to_le_bytes().as_slice());
+    if !(sent && read_back && payload_ok && source_ok) {
+        serial_println!(
+            "[syscall]     sent {}, received {:?}, source {:02x?}",
+            sent,
+            received,
+            src
+        );
+        return fail(
+            "the socket's own datagram to the group did not come back to it",
+            pid,
+        );
+    }
+    if !(empty && closed) {
+        return fail("a second receive found something, or the close failed", pid);
+    }
+
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   SYS_UDP_SEND6/RECV6/MCAST_JOIN6/SET_OPTION/GET_OPTION (1129-1134): a \
+         group joined from user memory, hop limit 0, the datagram looped back with its \
+         source: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_PIDFD_OPEN`/`SYS_PIDFD_CLOSE` (1137/1138) and the `Process` kind of
+/// `SYS_WAIT_MULTIPLE`, through the syscall layer with the wait set in the
+/// watcher's own memory: refusals (pid 0, flags, no such process); a live
+/// child's pidfd not ready; a pid the watcher does not hold `POLLNVAL`; the
+/// child a zombie -- not yet reaped -- and the pidfd `POLLIN`, as Linux's
+/// is at exit; still `POLLIN` once reaped; closed, then not held.
+fn test_dispatch_pidfd() -> KernelResult<()> {
+    use super::linux::poll_bits::{POLLIN, POLLNVAL};
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: pidfd: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let watcher = pcb::create("pidfd-watcher", 0);
+    let child = pcb::create("pidfd-child", 0);
+    let both = [watcher, child];
+    const CHILD_TID: u64 = 9_990;
+    if pcb::set_running(child).is_err() || pcb::add_thread(child, CHILD_TID).is_err() {
+        return fail("could not start the child", &both);
+    }
+    let mapped = self_test_as_process(watcher, || {
+        dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+    });
+    let Ok(page) = u64::try_from(mapped) else {
+        return fail("could not map the watcher's memory", &both);
+    };
+    let Some(pml4) = pcb::get_pml4(watcher).filter(|&p| p != 0) else {
+        return fail("the watcher has no address space", &both);
+    };
+    let call = |nr: u64, a: SyscallArgs| self_test_in_process(watcher, || dispatch(nr, &a).value);
+    // One SYS_WAIT_MULTIPLE item at `page`: handle, kind 6 (Process),
+    // events POLLIN, revents 0, pad. Polls once and reads revents back.
+    let poll = |handle: u64| -> Option<(i64, u16)> {
+        let mut item = [0u8; 24];
+        item[..8].copy_from_slice(&handle.to_ne_bytes());
+        item[8..12].copy_from_slice(&6u32.to_ne_bytes());
+        item[12..16].copy_from_slice(&u32::from(POLLIN).to_ne_bytes());
+        copy_to_user_as(pml4, page, &item).ok()?;
+        let ready = call(SYS_WAIT_MULTIPLE, args(page, 1, 0))?;
+        let mut back = [0u8; 24];
+        copy_from_user_as(pml4, page, &mut back).ok()?;
+        let revents = u32::from_ne_bytes(<[u8; 4]>::try_from(&back[16..20]).ok()?);
+        Some((ready, u16::try_from(revents).unwrap_or(u16::MAX)))
+    };
+
+    let refused = call(SYS_PIDFD_OPEN, args(0, 0, 0)) == Some(code(KernelError::InvalidArgument))
+        && call(SYS_PIDFD_OPEN, args(child, 1, 0)) == Some(code(KernelError::InvalidArgument))
+        && call(SYS_PIDFD_OPEN, args(u64::MAX >> 2, 0, 0))
+            == Some(code(KernelError::NoSuchProcess));
+    if !refused {
+        return fail("pid 0, a flag, or no such process was not refused", &both);
+    }
+    let Some(Ok(h)) = call(SYS_PIDFD_OPEN, args(child, 0, 0)).map(u64::try_from) else {
+        return fail("could not open the child's pidfd", &both);
+    };
+    if h != child {
+        return fail("the handle is not the pid", &both);
+    }
+    if poll(h) != Some((0, 0)) {
+        return fail("a live child's pidfd was ready", &both);
+    }
+    // A pid the watcher holds no handle for: POLLNVAL, not an oracle.
+    if poll(watcher).map(|(_, r)| r & POLLNVAL) != Some(POLLNVAL) {
+        return fail("a pid the watcher does not hold was waited on", &both);
+    }
+    // The child exits; its parent (pid 0) has not reaped it.
+    let zombie = pcb::set_exit_code(child, 0).is_ok()
+        && matches!(
+            pcb::remove_thread(child, CHILD_TID, pcb::ThreadExitAccounting::default()),
+            Ok((true, _, _))
+        );
+    if !zombie {
+        return fail("the child did not become a zombie", &both);
+    }
+    if poll(h) != Some((1, POLLIN)) {
+        serial_println!("[syscall]     zombie child's pidfd polled {:?}", poll(h));
+        return fail("an exited (unreaped) child's pidfd was not POLLIN", &both);
+    }
+    if pcb::try_reap(0, child).ok().flatten().is_none() {
+        return fail("the child could not be reaped", &both);
+    }
+    if poll(h) != Some((1, POLLIN)) {
+        return fail("a reaped child's pidfd was not POLLIN", &[watcher]);
+    }
+    let closed = call(SYS_PIDFD_CLOSE, args(h, 0, 0)) == Some(0)
+        && call(SYS_PIDFD_CLOSE, args(h, 0, 0)) == Some(code(KernelError::InvalidHandle));
+    if !closed {
+        return fail("close, or a second close, answered wrongly", &[watcher]);
+    }
+    if poll(h).map(|(_, r)| r & POLLNVAL) != Some(POLLNVAL) {
+        return fail("a closed pidfd could still be waited on", &[watcher]);
+    }
+    pcb::destroy(watcher);
+    serial_println!(
+        "[syscall]   SYS_PIDFD_OPEN/CLOSE (1137/1138): refusals, a live child not ready, an \
+         exited one POLLIN before and after its reap, a pid not held POLLNVAL: OK"
+    );
+    Ok(())
+}
+
+/// A child's ending as its parent's `wait` reports it, through the real wait
+/// path (`syscall::wait::scan_once`, which both ABIs' waits use), for zombie
+/// records made the ways the kernel makes them:
+///
+/// - `exit(128)` and `exit(255)` are exits with those statuses -- until
+///   2026-10-03 the first read as a success (signal "0") and the second as
+///   a stop (low byte `0x7f`), since the encoder took 128 to 255 for a
+///   signal death (requests/b-ad-an-exit-status-of-128-to-255-is-reported-
+///   as-a-signal-death.md);
+/// - a recorded death by `SIGTERM` is `WIFSIGNALED` with `WTERMSIG` 15;
+/// - an exit recorded after a kill replaces it, so the two fields never
+///   disagree.
+///
+/// And `SYS_SIGNAL_EXIT_SELF` (1136) refuses a signal whose default action
+/// does not terminate -- checked before it looks for a caller, so this kernel
+/// task survives asking.
+fn test_dispatch_exit_status_is_not_a_signal() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::syscall::wait::{WaitClasses, WaitRequest, WaitTarget, scan_once};
+
+    type Ending = fn(u64) -> KernelResult<()>;
+    const CASES: [(&str, Ending, i32); 5] = [
+        ("exit 128", |p| pcb::set_exit_code(p, 128), 128 << 8),
+        ("exit 255", |p| pcb::set_exit_code(p, 255), 255 << 8),
+        ("exit 0", |p| pcb::set_exit_code(p, 0), 0),
+        (
+            "killed by SIGTERM",
+            |p| pcb::set_killed_by_signal(p, 15),
+            15,
+        ),
+        (
+            "killed by SIGKILL, then exit 3",
+            |p| {
+                pcb::set_killed_by_signal(p, 9)?;
+                pcb::set_exit_code(p, 3)
+            },
+            3 << 8,
+        ),
+    ];
+
+    fn fail(msg: &str, pid: u64) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: exit status: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+
+    for (tid, (what, end, want)) in (9980u64..).zip(CASES) {
+        let pid = pcb::create("exit-status", 0);
+        if pcb::set_running(pid).is_err() || pcb::add_thread(pid, tid).is_err() {
+            return fail("could not start a child", pid);
+        }
+        if end(pid).is_err() {
+            return fail("could not record the ending", pid);
+        }
+        match pcb::remove_thread(pid, tid, pcb::ThreadExitAccounting::default()) {
+            Ok((true, _, _)) => {}
+            _ => return fail("the child did not become a zombie", pid),
+        }
+        let req = WaitRequest {
+            target: WaitTarget::Pid(pid),
+            classes: WaitClasses {
+                exited: true,
+                stopped: false,
+                continued: false,
+                traced: true,
+            },
+            nohang: true,
+            nowait: false,
+        };
+        // A reap: the record is gone once this answers.
+        let got = scan_once(0, req).map(|found| found.map(|f| f.to_wstatus()));
+        if got != Ok(Some(want)) {
+            serial_println!(
+                "[syscall]     {}: the parent read {:?}, want wstatus {:#x}",
+                what,
+                got,
+                want
+            );
+            return fail(what, pid);
+        }
+    }
+
+    let refused = i64::from(KernelError::InvalidArgument.code());
+    for sig in [0u64, 17, 18, 19, 65] {
+        let args = SyscallArgs {
+            arg0: sig,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch(SYS_SIGNAL_EXIT_SELF, &args).value != refused {
+            serial_println!(
+                "[syscall]   FAIL: SYS_SIGNAL_EXIT_SELF took signal {}, which is not fatal by default",
+                sig
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   exit 128/255 reported as exits, a SIGTERM death as WIFSIGNALED 15, an exit \
+         after a kill replacing it, SYS_SIGNAL_EXIT_SELF (1136) refusing non-fatal signals: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_NET_RAW_MCAST` (1135) through the syscall layer, the list in the
+/// caller's own memory: refused to a process without the raw claim; with it,
+/// the filter takes the list (sorted, duplicates dropped) and reports the raw
+/// owner; a unicast address or a list past the limit is refused and changes
+/// nothing; an empty list passes none; and releasing the claim puts the
+/// kernel stack's set back. Skipped if something already holds the claim --
+/// normally nothing does, as the netstack daemon starts after the boot
+/// self-tests.
+fn test_dispatch_raw_mcast() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::mm::user::copy_to_user_as;
+    use crate::net::mcast_filter::{self, Owner};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    const LIST: [[u8; 6]; 3] = [
+        [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB], // ff02::fb
+        [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB], // 224.0.0.251
+        [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB], // again: kept once
+    ];
+    const EXPECTED: [[u8; 6]; 2] = [
+        [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB],
+        [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB],
+    ];
+    const UNICAST: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    fn fail(msg: &str, pid: ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: SYS_NET_RAW_MCAST: {}", msg);
+        // Releasing a claim the process may not hold is a no-op, and never
+        // fails (`net::raw::release`).
+        let _ = crate::net::raw::release(pid);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    if crate::net::raw::is_claimed() {
+        serial_println!("[syscall]   SYS_NET_RAW_MCAST (1135): the NIC is claimed -- skipped");
+        return Ok(());
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let filter = || mcast_filter::current().ok();
+
+    let pid = pcb::create("raw-mcast-dispatch", 0);
+    let mapped = self_test_as_process(pid, || {
+        dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+    });
+    let Ok(page) = u64::try_from(mapped) else {
+        return fail("could not map the process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the process has no address space", pid);
+    };
+    let flat: alloc::vec::Vec<u8> = LIST.iter().flatten().copied().collect();
+    let unicast_at = page.saturating_add(64);
+    if copy_to_user_as(pml4, page, &flat).is_err()
+        || copy_to_user_as(pml4, unicast_at, &UNICAST).is_err()
+    {
+        return fail("could not write into the process's memory", pid);
+    }
+    let call = |a: SyscallArgs| self_test_in_process(pid, || dispatch(SYS_NET_RAW_MCAST, &a).value);
+
+    if call(args(page, 3, 0)) != Some(code(KernelError::PermissionDenied)) {
+        return fail("taken from a process without the raw claim", pid);
+    }
+    if crate::net::raw::claim(pid).is_err() {
+        return fail("could not claim the NIC", pid);
+    }
+    let set = call(args(page, 3, 0)) == Some(0);
+    if !set || filter() != Some((Owner::Raw, EXPECTED.to_vec())) {
+        return fail("the list did not become the filter", pid);
+    }
+    let too_many = u64::try_from(mcast_filter::MAX_ADDRS.saturating_add(1)).unwrap_or(u64::MAX);
+    let unicast = call(args(unicast_at, 1, 0)) == Some(code(KernelError::InvalidArgument));
+    let oversize = call(args(page, too_many, 0)) == Some(code(KernelError::InvalidArgument));
+    if !(unicast && oversize) || filter() != Some((Owner::Raw, EXPECTED.to_vec())) {
+        return fail("a refused list was taken, or changed the filter", pid);
+    }
+    let emptied = call(args(0, 0, 0)) == Some(0)
+        && filter().is_some_and(|(owner, addrs)| owner == Owner::Raw && addrs.is_empty());
+    if !emptied {
+        return fail("an empty list did not empty the filter", pid);
+    }
+    // Releasing never fails; it hands the cards back to the kernel's set.
+    let _ = crate::net::raw::release(pid);
+    let restored = filter().is_some_and(|(owner, addrs)| {
+        owner == Owner::Kernel && addrs.contains(&mcast_filter::ALL_HOSTS_MAC)
+    });
+    pcb::destroy(pid);
+    if !restored {
+        serial_println!(
+            "[syscall]   FAIL: SYS_NET_RAW_MCAST: the release did not restore the kernel's set"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_NET_RAW_MCAST (1135): refused without the claim; with it the list \
+         from user memory became the filter, refusals changed nothing, release restored \
+         the kernel's set: OK"
+    );
+    Ok(())
+}
+
+/// Native TCP and UDP socket handles are their holders' (`net::native_socket`;
+/// `known-issues` `A-TCP-AND-UDP-SOCKETS-ARE-NOT-COUNTED-PER-PROCESS`):
+///
+/// - a socket a process binds answers that process's calls and nobody
+///   else's: another process naming the same handle gets `InvalidHandle`,
+///   close included, and the socket is untouched;
+/// - a handle of one kind is refused by the other kind's calls;
+/// - a second holder -- what a fork adds -- keeps the socket open through the
+///   first holder's close, and the first holder is refused after it;
+/// - an exec that drops the handle releases the hold, and the last ends the
+///   socket.
+///
+/// Until 2026-10-02 the handle was a slot index any process with the
+/// `Socket` capability could name, and use, by counting.
+fn test_dispatch_native_socket_possession() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::net::native_socket;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::spawn::fd_handle_type;
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: native socket handles: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let refused = i64::from(KernelError::InvalidHandle.code());
+
+    let owner = pcb::create("netsock-owner", 0);
+    let other = pcb::create("netsock-other", 0);
+    let pids = [owner, other];
+    for &p in &pids {
+        if pcb::grant_capability(p, ResourceType::Socket, 0, Rights::READ | Rights::WRITE).is_err()
+        {
+            return fail("could not grant the Socket capability", &pids);
+        }
+    }
+    let call = |pid: ProcessId, nr: u64, handle: u64| {
+        self_test_as_process(pid, || dispatch(nr, &args(handle))).value
+    };
+
+    // The owner binds a UDP socket, on a port nothing else is likely to hold.
+    let Some(h) =
+        (47_700u64..47_740).find_map(|port| u64::try_from(call(owner, SYS_UDP_BIND, port)).ok())
+    else {
+        return fail("could not bind a UDP socket", &pids);
+    };
+    let port = call(owner, SYS_UDP_LOCAL_PORT, h);
+    let stranger_reads = call(other, SYS_UDP_LOCAL_PORT, h);
+    let stranger_closes = call(other, SYS_UDP_CLOSE, h);
+    let untouched = call(owner, SYS_UDP_LOCAL_PORT, h) == port;
+    let wrong_kind = call(owner, SYS_TCP_LOCAL_PORT, h);
+    if port <= 0 {
+        return fail("the owner could not use its own socket", &pids);
+    }
+    if stranger_reads != refused || stranger_closes != refused || !untouched {
+        serial_println!(
+            "[syscall]     another process: local port {}, close {}; the owner's still open: {}",
+            stranger_reads,
+            stranger_closes,
+            untouched
+        );
+        return fail("another process reached the owner's socket", &pids);
+    }
+    if wrong_kind != refused {
+        return fail("a TCP call reached a UDP socket", &pids);
+    }
+
+    // A second holder, as a fork adds one: the first holder's close leaves the
+    // socket open for it, and the first holder can no longer use it.
+    if native_socket::dup(h).is_err() {
+        return fail("could not add a holder", &pids);
+    }
+    pcb::register_ipc_handle(other, ResourceType::NativeSocket, h);
+    let first_close = call(owner, SYS_UDP_CLOSE, h);
+    let owner_after = call(owner, SYS_UDP_LOCAL_PORT, h);
+    let other_after = call(other, SYS_UDP_LOCAL_PORT, h);
+    if first_close != 0 || owner_after != refused || other_after != port {
+        serial_println!(
+            "[syscall]     first close {}; then the first holder reads {}, the second {}",
+            first_close,
+            owner_after,
+            other_after
+        );
+        return fail(
+            "a second holder did not keep the socket through the first's close",
+            &pids,
+        );
+    }
+
+    // The second holder's exec drops the handle: the last hold goes, and the
+    // socket with it.
+    let exec_close = handlers::close_handle_at_exec(other, fd_handle_type::UDP_SOCKET, h);
+    let after_exec = call(other, SYS_UDP_LOCAL_PORT, h);
+    if exec_close != Ok(true) || after_exec != refused || native_socket::kind_of(h).is_some() {
+        serial_println!(
+            "[syscall]     exec close {:?}; then {}",
+            exec_close,
+            after_exec
+        );
+        return fail("an exec did not release the process's hold", &pids);
+    }
+
+    for p in pids {
+        pcb::destroy(p);
+    }
+    serial_println!(
+        "[syscall]   native TCP/UDP socket handles: the holder's alone, of their own kind, \
+         counted per holder, released by an exec: OK"
+    );
+    Ok(())
+}
+
+/// The close-on-exec handles of a native exec
+/// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`):
+///
+/// - `SYS_PROCESS_SET_EXEC_CLOSE` (1090) is wired: an empty list is
+///   accepted, and a list it must read from user memory is read from there;
+/// - the exec takes the list less the handles a kept descriptor names;
+/// - `handlers::close_handle_at_exec` closes a pipe end the process holds
+///   as `close()` would -- the reader sees end-of-file at once -- and leaves
+///   alone a console handle, a socket the process does not hold, a handle
+///   already closed, and another process's pipe.
+///
+/// `exec_process` calls these once the new image is in; that path itself is
+/// a ring-3 fixture's to prove (lane B's step 5).
+fn test_dispatch_exec_close() -> KernelResult<()> {
+    use crate::ipc::pipe::{self, PipeHandle};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::spawn::fd_handle_type;
+    use crate::proc::thread::self_test_as_process;
+
+    const POLL_HANGUP: u16 = 0x10;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: exec close: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    let pid = pcb::create("exec-close", 0);
+    let other = pcb::create("exec-close-other", 0);
+    let pids = [pid, other];
+
+    // Wired: an empty list clears; a real list is read from user memory,
+    // which a kernel address is not.
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a));
+    if as_pid(SYS_PROCESS_SET_EXEC_CLOSE, args(0, 0)).value != 0 {
+        return fail("an empty list was not accepted", &pids);
+    }
+    let entry = [0u64; 2];
+    let from_kernel_memory = as_pid(SYS_PROCESS_SET_EXEC_CLOSE, args(entry.as_ptr() as u64, 1));
+    if from_kernel_memory.value != i64::from(KernelError::InvalidAddress.code()) {
+        serial_println!(
+            "[syscall]   SYS_PROCESS_SET_EXEC_CLOSE read kernel memory: {}",
+            from_kernel_memory.value
+        );
+        return fail("the list was not read from user memory", &pids);
+    }
+
+    // A pipe for each process.
+    let mine = as_pid(SYS_PIPE_CREATE, args(0, 0));
+    let theirs = self_test_as_process(other, || dispatch(SYS_PIPE_CREATE, &args(0, 0)));
+    let (Ok(read_end), Ok(write_end), Ok(their_read), Ok(their_write)) = (
+        u64::try_from(mine.value),
+        u64::try_from(mine.value2),
+        u64::try_from(theirs.value),
+        u64::try_from(theirs.value2),
+    ) else {
+        return fail("could not create the scratch pipes", &pids);
+    };
+
+    // The exec keeps the read end under fd 3 and drops the write end: the
+    // read end is filtered out of the close list, the rest stay.
+    pcb::set_exec_inherited_fds(pid, alloc::vec![(3, fd_handle_type::PIPE, read_end)]);
+    pcb::set_exec_close_handles(
+        pid,
+        alloc::vec![
+            (fd_handle_type::PIPE, write_end),
+            (fd_handle_type::PIPE, read_end),
+            (fd_handle_type::TCP_SOCKET, 5),
+            (fd_handle_type::CONSOLE, 0),
+        ],
+    );
+    let taken = pcb::take_exec_close_handles(pid);
+    let want = pcb::ExecCloseList {
+        close: alloc::vec![
+            (fd_handle_type::PIPE, write_end),
+            (fd_handle_type::TCP_SOCKET, 5),
+            (fd_handle_type::CONSOLE, 0),
+        ],
+        // Kept open; its descriptor still counts as closed for record locks.
+        shared: alloc::vec![(fd_handle_type::PIPE, read_end)],
+    };
+    if taken != want || pcb::take_exec_close_handles(pid) != pcb::ExecCloseList::default() {
+        serial_println!("[syscall]   took {:?}, want {:?} once", taken, want);
+        return fail("the close list was not split by the kept handle", &pids);
+    }
+
+    // Closing the write end: the reader sees end-of-file at once.
+    let close = |ty, h| handlers::close_handle_at_exec(pid, ty, h);
+    if close(fd_handle_type::PIPE, write_end) != Ok(true)
+        || pipe::poll_status(PipeHandle::from_raw(read_end)) & POLL_HANGUP == 0
+        || pcb::owns_ipc_handle(pid, crate::cap::ResourceType::Pipe, write_end)
+    {
+        return fail(
+            "the dropped write end was not closed as close() closes it",
+            &pids,
+        );
+    }
+    // Left alone: a console handle, a socket the process does not hold, a
+    // handle already closed, and another process's pipe.
+    if close(fd_handle_type::CONSOLE, 0) != Ok(false)
+        || close(fd_handle_type::TCP_SOCKET, 5) != Ok(false)
+        || close(fd_handle_type::PIPE, write_end) != Ok(false)
+        || close(fd_handle_type::PIPE, their_write) != Ok(false)
+        || pipe::poll_status(PipeHandle::from_raw(their_read)) & POLL_HANGUP != 0
+    {
+        return fail(
+            "a handle that is not the process's to close was touched",
+            &pids,
+        );
+    }
+
+    // Clean up the rest as their owners would.
+    let leftover_mine = handlers::close_handle_at_exec(pid, fd_handle_type::PIPE, read_end);
+    let leftover_theirs = [their_read, their_write]
+        .map(|h| handlers::close_handle_at_exec(other, fd_handle_type::PIPE, h));
+    pcb::set_exec_inherited_fds(pid, alloc::vec::Vec::new());
+    for p in pids {
+        pcb::destroy(p);
+    }
+    if leftover_mine != Ok(true) || leftover_theirs != [Ok(true), Ok(true)] {
+        serial_println!(
+            "[syscall]   FAIL: exec close: cleanup closed {:?} / {:?}",
+            leftover_mine,
+            leftover_theirs
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_PROCESS_SET_EXEC_CLOSE (1090), close at exec: OK");
+    Ok(())
+}
+
+/// `requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`,
+/// made as a process makes the calls:
+///
+/// - through a pty **master**, a terminal no session holds has foreground
+///   group 0, Linux's answer (it was ENOTTY);
+/// - through a **slave** that is not the caller's controlling terminal, both
+///   calls are ENOTTY (they answered for the terminal anyway);
+/// - group 0, or a group that does not exist, is ESRCH after the terminal
+///   checks (0 was EINVAL);
+/// - a watch event whose path is longer than 255 bytes arrives whole through
+///   `SYS_FS_WATCH_READ_RECORDS` (1091), and a read too small for the first
+///   record leaves it queued.
+fn test_dispatch_tioc_and_watch_records() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+    use crate::tty::pty;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!(
+            "[syscall]   FAIL: tcgetpgrp/tcsetpgrp, watch records: {}",
+            msg
+        );
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let (master, slave) = pty::create()?;
+    let pid = pcb::create("tioc-session", 0);
+    pcb::register_ipc_handle(pid, ResourceType::Pty, master.raw());
+    pcb::register_ipc_handle(pid, ResourceType::Pty, slave.raw());
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let verdict = (|| {
+        // No session holds the terminal yet.
+        if as_pid(SYS_PTY_GET_PGRP, args(master.raw(), 0)) != 0 {
+            return Err("a master with no session should read group 0");
+        }
+        let not_ours = code(KernelError::NotSupported);
+        if as_pid(SYS_PTY_GET_PGRP, args(slave.raw(), 0)) != not_ours
+            || as_pid(SYS_PTY_SET_PGRP, args(slave.raw(), pid)) != not_ours
+        {
+            return Err("a slave that is not our terminal should be ENOTTY");
+        }
+        // Make the slave our controlling terminal: now it answers.
+        if pcb::ctty_acquire(pid, slave.id()).is_err() {
+            return Err("could not make the slave our terminal");
+        }
+        if as_pid(SYS_PTY_GET_PGRP, args(slave.raw(), 0)) != i64::try_from(pid).unwrap_or(-1) {
+            return Err("our own terminal's slave should read our group");
+        }
+        let missing = code(KernelError::NoSuchProcess);
+        if as_pid(SYS_PTY_SET_PGRP, args(slave.raw(), 0)) != missing
+            || as_pid(SYS_PTY_SET_PGRP, args(master.raw(), 7_654_321)) != missing
+            || as_pid(SYS_TTY_SET_PGRP, args(0, 0)) != missing
+        {
+            return Err("group 0 or a missing group should be ESRCH");
+        }
+        if as_pid(SYS_PTY_SET_PGRP, args(master.raw(), pid)) != 0 {
+            return Err("handing the terminal to our own group failed");
+        }
+        Ok(())
+    })();
+    pcb::destroy(pid);
+    // The hangups name the session just destroyed: nobody is left to tell.
+    let _ = pty::close(master);
+    let _ = pty::close(slave);
+    if let Err(msg) = verdict {
+        return fail(msg);
+    }
+
+    // A path of 300 bytes under a watched directory.
+    let mut path = alloc::vec::Vec::from(&b"/WATCH-RECORDS-PROBE/"[..]);
+    path.resize(300, b'n');
+    let watch = crate::fs::notify::create_watch(
+        "/WATCH-RECORDS-PROBE",
+        crate::fs::notify::FsEventMask::ALL_CHANGES,
+        false,
+    )?;
+    crate::fs::notify::emit_created(path.as_slice());
+    let too_small = crate::fs::notify::read_events_within(watch, 8, handlers::watch_record_len);
+    let still_queued = crate::fs::notify::pending_count(watch);
+    let read = crate::fs::notify::read_events_within(watch, 4096, handlers::watch_record_len);
+    crate::fs::notify::close_watch(watch)?;
+    if too_small.as_ref().err() != Some(&KernelError::BufferTooSmall) || still_queued != Ok(1) {
+        return fail("a read too small for the first record did not leave it queued");
+    }
+    let Ok(events) = read else {
+        return fail("the long-path event could not be read");
+    };
+    let [event] = events.as_slice() else {
+        return fail("expected exactly the one long-path event");
+    };
+    let mut record = alloc::vec::Vec::new();
+    handlers::encode_watch_record(event, &mut record);
+    let field32 = |at: usize| {
+        record
+            .get(at..at.saturating_add(4))
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_le_bytes)
+    };
+    let name_end = handlers::WATCH_RECORD_HEADER.saturating_add(path.len());
+    let whole = record.len() == handlers::watch_record_len(event)
+        && record.len() % 8 == 0
+        && record.get(..8) == Some(&watch.to_le_bytes()[..])
+        && field32(8) == Some(0)
+        && field32(16) == u32::try_from(path.len()).ok()
+        && field32(20) == Some(0)
+        && record.get(handlers::WATCH_RECORD_HEADER..name_end) == Some(path.as_slice())
+        && record.get(name_end) == Some(&0);
+    if !whole {
+        serial_println!(
+            "[syscall]     record of {} bytes: {:?}",
+            record.len(),
+            record.get(..24)
+        );
+        return fail("the long path did not arrive whole in its record");
+    }
+    serial_println!(
+        "[syscall]   tcgetpgrp/tcsetpgrp on named terminals, group 0, \
+         SYS_FS_WATCH_READ_RECORDS (1091): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_CPU_CURRENT` (1092) answers a CPU that exists, on node 0, packed as
+/// `cpu | node << 32` (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`).
+/// Which CPU is not pinned: the task may run anywhere.
+fn test_cpu_current() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_CPU_CURRENT, &args).value;
+    let cpus = i64::try_from(crate::smp::cpu_count().max(1)).unwrap_or(i64::MAX);
+    if !(0..cpus).contains(&got) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_CPU_CURRENT answered {:#x} with {} CPUs (cpu below the count, node 0)",
+            got,
+            cpus
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_CPU_CURRENT (1092): CPU {}, node 0: OK",
+        got
+    );
+    Ok(())
+}
+
+/// Shared anonymous memory, through both ABIs, as a scratch process maps it
+/// (known-issues `A-FORK-MADE-SHARED-MEMORY-COPY-ON-WRITE`, "Not done"):
+///
+/// - native `SYS_MMAP` with `MAP_SHARED` maps committed pages marked
+///   `PageFlags::SHARED`, which fork shares rather than copies
+///   (`mm::cow::test_fork_keeps_shared_pages_shared`) and futexes key by
+///   physical page;
+/// - `MAP_SHARED | MAP_LAZY` is refused;
+/// - the Linux `MAP_SHARED | MAP_ANONYMOUS` does the same (it was `ENOSYS`),
+///   and a map with neither `MAP_SHARED` nor `MAP_PRIVATE` is `EINVAL`.
+fn test_dispatch_shared_anonymous_memory() -> KernelResult<()> {
+    use super::number::{MAP_LAZY, MAP_READ, MAP_SHARED, MAP_WRITE};
+    use crate::mm::page_table::{VirtAddr, shared_phys};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: shared anonymous memory: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4: u64::MAX, // the Linux fd: -1
+        arg5: 0,
+    };
+    const LEN: u64 = 0x8000; // two 16 KiB frames
+
+    let pid = pcb::create("shared-anon", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let shared_at = |va: u64| shared_phys(pml4, VirtAddr::new(va)).is_some();
+
+    // Native: committed, shared, every page.
+    let native = as_pid(SYS_MMAP, args(0, LEN, MAP_READ | MAP_WRITE | MAP_SHARED, 0));
+    let Ok(native) = u64::try_from(native) else {
+        serial_println!("[syscall]     native MAP_SHARED answered {}", native);
+        return fail("native MAP_SHARED did not map", pid);
+    };
+    let native_ok = shared_at(native) && shared_at(native.saturating_add(0x4000));
+    let unmapped = as_pid(SYS_MUNMAP, args(native, LEN, 0, 0));
+    if !native_ok || unmapped != 0 {
+        return fail("native MAP_SHARED pages are not marked shared", pid);
+    }
+    if as_pid(SYS_MMAP, args(0, LEN, MAP_READ | MAP_SHARED | MAP_LAZY, 0))
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("MAP_SHARED | MAP_LAZY was not refused", pid);
+    }
+
+    // Linux: MAP_SHARED | MAP_ANONYMOUS (0x21), PROT_READ | PROT_WRITE.
+    let linux = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MMAP, &args(0, LEN, 0x3, 0x21)).value
+    });
+    let Ok(linux) = u64::try_from(linux) else {
+        serial_println!(
+            "[syscall]     Linux MAP_SHARED|MAP_ANONYMOUS answered {}",
+            linux
+        );
+        return fail("Linux shared anonymous mmap did not map", pid);
+    };
+    let linux_ok = shared_at(linux);
+    let linux_unmapped = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MUNMAP, &args(linux, LEN, 0, 0)).value
+    });
+    let neither = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MMAP, &args(0, LEN, 0x3, 0x20)).value
+    });
+    if !linux_ok || linux_unmapped != 0 {
+        return fail("Linux shared anonymous pages are not marked shared", pid);
+    }
+    if neither != i64::from(super::linux::errno::EINVAL).wrapping_neg() {
+        serial_println!("[syscall]     a map with no type answered {}", neither);
+        return fail(
+            "a map with neither MAP_SHARED nor MAP_PRIVATE was not EINVAL",
+            pid,
+        );
+    }
+
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   shared anonymous memory (native MAP_SHARED, Linux MAP_SHARED|MAP_ANONYMOUS): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_ADD_SEALS` / `SYS_FS_GET_SEALS` (1124-1125) as a scratch process
+/// calls them, on handles of its own (design-decisions 1526):
+///
+/// - an unknown bit and no bits are `InvalidArgument`, and a handle open
+///   only for reading may not seal (`NotPermitted`, Linux's rule);
+/// - a handle open for writing seals, the answer is the file's seals in
+///   Linux's `F_SEAL_*` bits, and the read-only handle reads them back;
+/// - the seal binds the VFS: a write to the file is then `NotPermitted`.
+///
+/// Every route's enforcement is `vfs::self_test_seal_rules`; this is the
+/// door.
+fn test_dispatch_seals() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/seal-dispatch";
+    const F_SEAL_GROW: u64 = 0x04;
+    const F_SEAL_WRITE: u64 = 0x08;
+    const F_SEAL_FUTURE_WRITE: u64 = 0x10;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: seals: {}", msg);
+        pcb::destroy(pid);
+        // Best effort: the file is this test's scratch, and its seals go
+        // with it.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("seal-door", 0);
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"sealed").is_err() {
+        return fail("could not create the scratch file", pid);
+    }
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    let (Ok(writer), Ok(reader)) = (handle::open(PATH, rw), handle::open(PATH, OpenFlags::READ))
+    else {
+        return fail("could not open the scratch file twice", pid);
+    };
+    // Given to the process as an open would give them; its teardown closes
+    // them.
+    pcb::register_ipc_handle(pid, ResourceType::File, writer);
+    pcb::register_ipc_handle(pid, ResourceType::File, reader);
+    let call = |nr: u64, h: u64, bits: u64| {
+        self_test_as_process(pid, || dispatch(nr, &args(h, bits)).value)
+    };
+
+    let unknown = call(SYS_FS_ADD_SEALS, writer, F_SEAL_FUTURE_WRITE);
+    let nothing = call(SYS_FS_ADD_SEALS, writer, 0);
+    let by_reader = call(SYS_FS_ADD_SEALS, reader, F_SEAL_WRITE);
+    if unknown != code(KernelError::InvalidArgument)
+        || nothing != code(KernelError::InvalidArgument)
+        || by_reader != code(KernelError::NotPermitted)
+    {
+        serial_println!(
+            "[syscall]     an unknown bit {}, no bits {}, a read-only handle {}",
+            unknown,
+            nothing,
+            by_reader
+        );
+        return fail("a refusal answered wrongly", pid);
+    }
+    let sealed = call(SYS_FS_ADD_SEALS, writer, F_SEAL_WRITE | F_SEAL_GROW);
+    let read_back = call(SYS_FS_GET_SEALS, reader, 0);
+    let want = i64::try_from(F_SEAL_WRITE | F_SEAL_GROW).unwrap_or(-1);
+    let refused = crate::fs::Vfs::write_at(PATH, 0, b"x");
+    if sealed != want || read_back != want || refused != Err(KernelError::NotPermitted) {
+        serial_println!(
+            "[syscall]     sealed {}, read back {}, then a write {:?}",
+            sealed,
+            read_back,
+            refused
+        );
+        return fail("a seal through the door did not take, or did not bind", pid);
+    }
+
+    pcb::destroy(pid);
+    // The file's seals end with it.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   SYS_FS_ADD_SEALS/GET_SEALS (1124-1125): refusals, a seal by a writable \
+         handle, read back by another, binding the VFS: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_DEFER` / `SYS_FS_DEFER_LIST` / `SYS_FS_DEFER_CANCEL` (1126-1128)
+/// as a scratch process of uid 1000 calls them, its paths in its own memory
+/// (design-decisions 1529):
+///
+/// - without a `File` capability, `PermissionDenied`;
+/// - an unknown op or reason, an empty path, a rename with no destination
+///   and a delete with one are `InvalidArgument`;
+/// - a name on memfs is `NotSupported` (no UUID, no queue) and a missing one
+///   `NotFound`;
+/// - a listing of a volume with no queue is empty, and a cancel there
+///   `NotFound`.
+///
+/// On memfs because the call runs with interrupts off
+/// (`thread::self_test_in_process`) and must not wait on a disk. Queueing,
+/// listing, cancelling and replaying on ext4, each user's view and each
+/// rule, are `fs::deferred_ops::self_test`, through the same functions the
+/// door calls; this is the door.
+fn test_dispatch_deferred() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::cap::{ResourceType, Rights};
+    use crate::mm::user::copy_to_user_as;
+    use crate::proc::pcb::{self, ProcessCredentials};
+    use crate::proc::thread::{self, self_test_as_process};
+
+    const PRESENT: &[u8] = b"/tmp/_dfo_door";
+    const MISSING: &[u8] = b"/tmp/_dfo_door_missing";
+    const TMP: &[u8] = b"/tmp";
+    // Where each path sits in the process's page, and the listing buffer.
+    const AT_PRESENT: u64 = 0;
+    const AT_MISSING: u64 = 256;
+    const AT_TMP: u64 = 512;
+    const AT_LIST: u64 = 1024;
+    const LIST_LEN: u64 = 4096;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: deferred operations: {}", msg);
+        pcb::destroy(pid);
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove("/tmp/_dfo_door");
+        Err(KernelError::InternalError)
+    }
+    let code = |e: KernelError| i64::from(e.code());
+    let len = |p: &[u8]| u64::try_from(p.len()).unwrap_or(0);
+
+    let pid = pcb::create("defer-door", 0);
+    if pcb::set_credentials(pid, ProcessCredentials::new(1000, 1000)).is_err() {
+        return fail("could not give the scratch process its identity", pid);
+    }
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove("/tmp/_dfo_door");
+    if crate::fs::Vfs::write_file("/tmp/_dfo_door", b"door").is_err() {
+        return fail("could not create the scratch file", pid);
+    }
+    let map = self_test_as_process(pid, || {
+        dispatch(
+            SYS_MMAP,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0x4000,
+                arg2: MAP_READ | MAP_WRITE,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    });
+    let Ok(page) = u64::try_from(map) else {
+        return fail("could not map the scratch process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    for (at, path) in [(AT_PRESENT, PRESENT), (AT_MISSING, MISSING), (AT_TMP, TMP)] {
+        if copy_to_user_as(pml4, page.saturating_add(at), path).is_err() {
+            return fail("could not write a path into the scratch process", pid);
+        }
+    }
+    let call = |nr: u64, a: [u64; 6]| {
+        thread::self_test_in_process(pid, || {
+            dispatch(
+                nr,
+                &SyscallArgs {
+                    arg0: a[0],
+                    arg1: a[1],
+                    arg2: a[2],
+                    arg3: a[3],
+                    arg4: a[4],
+                    arg5: a[5],
+                },
+            )
+            .value
+        })
+        .unwrap_or(i64::MIN)
+    };
+    let present = page.saturating_add(AT_PRESENT);
+    let missing = page.saturating_add(AT_MISSING);
+    let tmp = page.saturating_add(AT_TMP);
+    let list_buf = page.saturating_add(AT_LIST);
+    let delete = |path: u64, path_len: u64, reason: u64| {
+        call(SYS_FS_DEFER, [1, path, path_len, 0, 0, reason])
+    };
+
+    let no_cap = delete(present, len(PRESENT), 1);
+    if no_cap != code(KernelError::PermissionDenied) {
+        serial_println!("[syscall]     without a File capability: {}", no_cap);
+        return fail("a process with no File capability was let in", pid);
+    }
+    if pcb::grant_capability(
+        pid,
+        ResourceType::File,
+        0,
+        Rights::READ | Rights::WRITE | Rights::DELETE,
+    )
+    .is_err()
+    {
+        return fail("could not grant the File capability", pid);
+    }
+
+    let refusals = [
+        (
+            "an unknown op",
+            call(SYS_FS_DEFER, [0, present, len(PRESENT), 0, 0, 1]),
+        ),
+        ("reason 0", delete(present, len(PRESENT), 0)),
+        ("reason 4", delete(present, len(PRESENT), 4)),
+        ("an empty path", delete(present, 0, 1)),
+        (
+            "a rename with no destination",
+            call(SYS_FS_DEFER, [2, present, len(PRESENT), 0, 0, 1]),
+        ),
+        (
+            "a delete with a destination",
+            call(SYS_FS_DEFER, [1, present, len(PRESENT), tmp, len(TMP), 1]),
+        ),
+    ];
+    for (what, got) in refusals {
+        if got != code(KernelError::InvalidArgument) {
+            serial_println!("[syscall]     {}: {}", what, got);
+            return fail("an argument the door should refuse was taken", pid);
+        }
+    }
+    let on_memfs = delete(present, len(PRESENT), 1);
+    let not_there = delete(missing, len(MISSING), 1);
+    let listed = call(SYS_FS_DEFER_LIST, [tmp, len(TMP), list_buf, LIST_LEN, 0, 0]);
+    let cancelled = call(SYS_FS_DEFER_CANCEL, [tmp, len(TMP), 1, 0, 0, 0]);
+    if on_memfs != code(KernelError::NotSupported)
+        || not_there != code(KernelError::NotFound)
+        || listed != 0
+        || cancelled != code(KernelError::NotFound)
+    {
+        serial_println!(
+            "[syscall]     memfs {}, missing {}, listing {}, cancel {}",
+            on_memfs,
+            not_there,
+            listed,
+            cancelled
+        );
+        return fail("the door answered a volume with no queue wrongly", pid);
+    }
+
+    pcb::destroy(pid);
+    // Best effort: this test's own scratch.
+    let _ = crate::fs::Vfs::remove("/tmp/_dfo_door");
+    serial_println!(
+        "[syscall]   SYS_FS_DEFER/_LIST/_CANCEL (1126-1128): the capability gate, refused \
+         arguments, a volume with no queue: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_RECORD_LOCK` (1093) as two scratch processes call it, with each
+/// one's `struct flock` in its own user memory
+/// (`requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`):
+///
+/// - an unknown op is `InvalidArgument`, a handle the caller does not hold
+///   `InvalidHandle`, and a `struct flock` in kernel memory `InvalidAddress`;
+/// - one process's write lock refuses the other's (`WouldBlock`), and the
+///   other's `F_GETLK` names the holder's pid and range, from byte 0;
+/// - the holder's `SYS_FS_CLOSE` releases its locks, POSIX's close rule, so
+///   the other can then take the range.
+///
+/// Waiting (`RECORD_LOCK_SET_WAIT`) and the rest of the rules are
+/// `fs::reclock::self_test` and `syscall::record_lock::self_test`; this is
+/// the door.
+fn test_dispatch_record_lock() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE, RECORD_LOCK_GET, RECORD_LOCK_SET};
+    use super::record_lock::{F_WRLCK, Flock, SEEK_SET};
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self, self_test_as_process};
+
+    const PATH: &str = "/tmp/record-lock-dispatch";
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: record lock: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let holder = pcb::create("reclock-holder", 0);
+    let other = pcb::create("reclock-other", 0);
+    let pids = [holder, other];
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"0123456789abcdef").is_err() {
+        return fail("could not create the scratch file", &pids);
+    }
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    let (Ok(h1), Ok(h2)) = (handle::open(PATH, rw), handle::open(PATH, rw)) else {
+        return fail("could not open the scratch file twice", &pids);
+    };
+    // Given to the processes as an open would give them; their teardown
+    // closes them.
+    pcb::register_ipc_handle(holder, ResourceType::File, h1);
+    pcb::register_ipc_handle(other, ResourceType::File, h2);
+
+    // A page of user memory in each process for its struct flock.
+    let map = |pid: ProcessId| {
+        self_test_as_process(pid, || {
+            dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+        })
+    };
+    let (Ok(buf1), Ok(buf2)) = (u64::try_from(map(holder)), u64::try_from(map(other))) else {
+        return fail("could not map the scratch processes' memory", &pids);
+    };
+    let (Some(pml1), Some(pml2)) = (
+        pcb::get_pml4(holder).filter(|&p| p != 0),
+        pcb::get_pml4(other).filter(|&p| p != 0),
+    ) else {
+        return fail("a scratch process has no address space", &pids);
+    };
+    // One call: the flock written to the caller's memory, the syscall made
+    // as the caller with its page tables loaded -- the door reads and writes
+    // the flock through them (`self_test_in_process`) -- and the flock read
+    // back.
+    let call = |pid: ProcessId, pml4: u64, buf: u64, h: u64, op: u64, f: Flock| {
+        if copy_to_user_as(pml4, buf, &f.to_bytes()).is_err() {
+            return (i64::MIN, None);
+        }
+        let r = thread::self_test_in_process(pid, || {
+            dispatch(SYS_FS_RECORD_LOCK, &args(h, op, buf)).value
+        })
+        .unwrap_or(i64::MIN);
+        let mut back = [0u8; Flock::SIZE];
+        let f = copy_from_user_as(pml4, buf, &mut back)
+            .ok()
+            .map(|()| Flock::from_bytes(back));
+        (r, f)
+    };
+    let write_0_10 = Flock::new(F_WRLCK, SEEK_SET, 0, 10);
+    let write_5_6 = Flock::new(F_WRLCK, SEEK_SET, 5, 1);
+
+    // The door's own refusals.
+    let unknown_op = call(holder, pml1, buf1, h1, 3, write_0_10).0;
+    let not_held = call(holder, pml1, buf1, h2, RECORD_LOCK_SET, write_0_10).0;
+    let kernel_flock = write_0_10.to_bytes();
+    let from_kernel = self_test_as_process(holder, || {
+        dispatch(
+            SYS_FS_RECORD_LOCK,
+            &args(h1, RECORD_LOCK_SET, kernel_flock.as_ptr() as u64),
+        )
+        .value
+    });
+    if unknown_op != code(KernelError::InvalidArgument)
+        || not_held != code(KernelError::InvalidHandle)
+        || from_kernel != code(KernelError::InvalidAddress)
+    {
+        serial_println!(
+            "[syscall]     op 3 {}, another's handle {}, kernel memory {}",
+            unknown_op,
+            not_held,
+            from_kernel
+        );
+        return fail("a refusal answered wrongly", &pids);
+    }
+
+    // The holder locks [0,10); the other is refused, and asks who holds it.
+    let taken = call(holder, pml1, buf1, h1, RECORD_LOCK_SET, write_0_10).0;
+    let refused = call(other, pml2, buf2, h2, RECORD_LOCK_SET, write_5_6).0;
+    let (asked, report) = call(other, pml2, buf2, h2, RECORD_LOCK_GET, write_5_6);
+    let want = write_0_10.with_pid(i32::try_from(holder).unwrap_or(-1));
+    if taken != 0 || refused != code(KernelError::WouldBlock) || asked != 0 || report != Some(want)
+    {
+        serial_println!(
+            "[syscall]     take {}, the other's {}, its F_GETLK {} -> {:?}",
+            taken,
+            refused,
+            asked,
+            report
+        );
+        return fail(
+            "a lock did not refuse another process, or was misreported",
+            &pids,
+        );
+    }
+
+    // The holder closes its handle; the close takes its locks with it.
+    let closed = self_test_as_process(holder, || dispatch(SYS_FS_CLOSE, &args(h1, 0, 0)).value);
+    let after = call(other, pml2, buf2, h2, RECORD_LOCK_SET, write_5_6).0;
+    if closed != 0 || after != 0 {
+        serial_println!(
+            "[syscall]     close {}, then the other's lock {}",
+            closed,
+            after
+        );
+        return fail("closing the handle did not release its locks", &pids);
+    }
+
+    for &p in &pids {
+        pcb::destroy(p);
+    }
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   SYS_FS_RECORD_LOCK (1093): refusals, conflicts, F_GETLK, close: OK"
+    );
+    Ok(())
+}
+
+/// The `flock` doors.
+///
+/// **`SYS_FS_FLOCK_HANDLE` (1094)**, as two scratch processes with an open
+/// each of one file, opened read-only, since `flock` needs no write access:
+/// - an op that is not one of the three is `InvalidArgument`, and a handle
+///   the caller does not hold `InvalidHandle`;
+/// - one description's exclusive lock refuses the other's shared one under
+///   `FLOCK_NB` (`WouldBlock`);
+/// - the holder's final close releases it.
+///
+/// **`SYS_FS_FLOCK` / `SYS_FS_FUNLOCK` (609/640) take their owner from the
+/// caller.** A lock taken "for" owner 12345 is not 12345's, and a release
+/// "for" 777 leaves 777's lock alone. Both were the caller's to name until
+/// 2026-10-01. These run on this kernel task, whose pointers pass the
+/// user-pointer checks; with no process, it is process 0's owner.
+fn test_dispatch_flock() -> KernelResult<()> {
+    use super::number::{FLOCK_EX, FLOCK_NB, FLOCK_SH};
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::fs::vfs::{LockType, flock_process_owner};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/flock-dispatch";
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: flock: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        crate::fs::Vfs::funlock_all(flock_process_owner(0));
+        crate::fs::Vfs::funlock_all(777);
+        crate::fs::Vfs::funlock_all(12345);
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let holder = pcb::create("flock-holder", 0);
+    let other = pcb::create("flock-other", 0);
+    let pids = [holder, other];
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"flock").is_err() {
+        return fail("could not create the scratch file", &pids);
+    }
+    let (Ok(h1), Ok(h2)) = (
+        handle::open(PATH, OpenFlags::READ),
+        handle::open(PATH, OpenFlags::READ),
+    ) else {
+        return fail("could not open the scratch file twice", &pids);
+    };
+    // Given to the processes as an open would give them; their teardown
+    // closes them.
+    pcb::register_ipc_handle(holder, ResourceType::File, h1);
+    pcb::register_ipc_handle(other, ResourceType::File, h2);
+    let call = |pid: ProcessId, h: u64, op: u64| {
+        self_test_as_process(pid, || {
+            dispatch(SYS_FS_FLOCK_HANDLE, &args(h, op, 0, 0)).value
+        })
+    };
+
+    let bad_op = call(holder, h1, FLOCK_SH | FLOCK_EX);
+    let not_held = call(holder, h2, FLOCK_EX | FLOCK_NB);
+    let taken = call(holder, h1, FLOCK_EX | FLOCK_NB);
+    let refused = call(other, h2, FLOCK_SH | FLOCK_NB);
+    let closed = self_test_as_process(holder, || dispatch(SYS_FS_CLOSE, &args(h1, 0, 0, 0)).value);
+    let after = call(other, h2, FLOCK_EX | FLOCK_NB);
+    if bad_op != code(KernelError::InvalidArgument)
+        || not_held != code(KernelError::InvalidHandle)
+        || taken != 0
+        || refused != code(KernelError::WouldBlock)
+        || closed != 0
+        || after != 0
+    {
+        serial_println!(
+            "[syscall]     SH|EX {}, another's handle {}, take {}, the other's {}, close {}, then {}",
+            bad_op,
+            not_held,
+            taken,
+            refused,
+            closed,
+            after
+        );
+        return fail("SYS_FS_FLOCK_HANDLE answered wrongly", &pids);
+    }
+    for &p in &pids {
+        pcb::destroy(p);
+    }
+
+    // The path-based doors: the owner is the caller's, whatever arg3 says.
+    let path = PATH.as_bytes();
+    let (ptr, len) = (path.as_ptr() as u64, path.len() as u64);
+    let named = dispatch(SYS_FS_FLOCK, &args(ptr, len, 1, 12345)).value;
+    let as_12345 = crate::fs::Vfs::flock(PATH, 12345, LockType::Exclusive);
+    crate::fs::Vfs::funlock_all(flock_process_owner(0));
+    crate::fs::Vfs::funlock_all(12345);
+    let theirs = crate::fs::Vfs::flock(PATH, 777, LockType::Exclusive);
+    let released = dispatch(SYS_FS_FUNLOCK, &args(ptr, len, 777, 0)).value;
+    let still = crate::fs::Vfs::lock_query(PATH);
+    crate::fs::Vfs::funlock_all(777);
+    if named != 0
+        || as_12345 != Err(KernelError::WouldBlock)
+        || theirs.is_err()
+        || released != 0
+        || !matches!(still, Ok(Some((LockType::Exclusive, 1))))
+    {
+        serial_println!(
+            "[syscall]     lock {} then owner 12345's {:?}; 777's {:?}, a release naming it {}, then {:?}",
+            named,
+            as_12345,
+            theirs,
+            released,
+            still
+        );
+        return fail("the path-based flock doors took a caller-chosen owner", &[]);
+    }
+
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   flock: SYS_FS_FLOCK_HANDLE (1094) per description; 609/640 owned by the caller: OK"
+    );
+    Ok(())
+}
+
+/// The native fs doors that skipped their gate (2026-10-01 audit), as a
+/// scratch process that holds no capability:
+///
+/// - `SYS_FS_SEEK_DATA` and `SYS_FS_SEEK_HOLE` refuse a handle the caller
+///   does not hold (`InvalidHandle`), as `SYS_FS_SEEK` does, and take one it
+///   does;
+/// - `SYS_FS_READDIR_AT` and `SYS_FS_FALLOCATE` ask for the File capability
+///   (`PermissionDenied` without it), as `SYS_FS_LIST_DIR` and
+///   `SYS_FS_TRUNCATE` do. The gate comes before the path is read, so the
+///   null path cannot be what refuses;
+/// - `SYS_FS_TMPFILE` asks for the File capability before it reads its
+///   path, as the others do (`PermissionDenied`). It answered
+///   `NotSupported` until it was built (b34de449c), and then read the null
+///   path first, so an unprivileged caller learned which arguments were
+///   bad -- caught by the first boot to run both (rq39).
+fn test_dispatch_fs_gates() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/fs-gates-dispatch";
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"seek data")?;
+    let h = handle::open(PATH, OpenFlags::READ)?;
+    let pid = pcb::create("fs-gates", 0);
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+
+    let data_unheld = as_pid(SYS_FS_SEEK_DATA, args(h, 0));
+    let hole_unheld = as_pid(SYS_FS_SEEK_HOLE, args(h, 0));
+    let readdir = as_pid(SYS_FS_READDIR_AT, args(0, 4));
+    let fallocate = as_pid(SYS_FS_FALLOCATE, args(0, 4));
+    let tmpfile = as_pid(SYS_FS_TMPFILE, args(0, 4));
+    // Given to the process as an open would give it; its teardown closes it.
+    pcb::register_ipc_handle(pid, ResourceType::File, h);
+    let data_held = as_pid(SYS_FS_SEEK_DATA, args(h, 0));
+    pcb::destroy(pid);
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if data_unheld != code(KernelError::InvalidHandle)
+        || hole_unheld != code(KernelError::InvalidHandle)
+        || data_held == code(KernelError::InvalidHandle)
+        || readdir != code(KernelError::PermissionDenied)
+        || fallocate != code(KernelError::PermissionDenied)
+        || tmpfile != code(KernelError::PermissionDenied)
+    {
+        serial_println!(
+            "[syscall]   FAIL: fs gates: seek-data {} / {} held, seek-hole {}, readdir-at {}, fallocate {}, tmpfile {}",
+            data_unheld,
+            data_held,
+            hole_unheld,
+            readdir,
+            fallocate,
+            tmpfile
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   fs gates: seek-data/hole possession, readdir-at/fallocate/tmpfile capability: OK"
+    );
+    Ok(())
+}
+
+/// The Secure Boot doors (1082-1084, design-decisions §978).
+///
+/// **ENROLL and REMOVE** change the table, so each is gated before it reads an
+/// argument. This runs on a kernel task, which has no process, so each must
+/// answer `NoSuchProcess` -- and is handed pointers a kernel task *could*
+/// read, so no argument error can explain the refusal. As with
+/// [`test_dispatch_brightness_gated`], the granted arm needs a ring-3 caller
+/// holding `ENROLL_SECUREBOOT`.
+///
+/// **VERIFY** needs no right, and a kernel task's pointers pass the
+/// user-pointer checks (`mm::user::validate_user_read`), so its whole path
+/// runs here, against a scratch table: the 16-byte answer for a hash in no
+/// list and then for one in `db`; the name kept as the bytes it was given,
+/// which here are not UTF-8; an output that cannot be written refused before
+/// anything is recorded. The verdicts themselves are
+/// `fs::secureboot::self_test`'s.
+/// `SYS_POWER_RELOAD` is gated on `RELOAD_KERNEL` before it acts. In kernel
+/// context no process holds the right, so the call is refused (NoSuchProcess or
+/// PermissionDenied) before the image arguments are read -- proving the syscall
+/// is registered and gated, not ungated or gated after its arguments. What the
+/// granted arm refuses it refuses in `handlers::reload_request`, before
+/// anything is flushed or stopped, and that is checked here directly: reserved
+/// arguments, a length without its pointer and the reverse, an image or a
+/// command line over its limit, and an image that is not a kernel; and `(0, 0)`
+/// for both is the running kernel's own image, which is one, with its command
+/// line less `kexec.selftest=1`. The restart itself is the kexec boot's to
+/// prove (`python scripts/guest.py kexec`).
+/// `SYS_MEMORY_ADVISE` is wired to the Linux ABI's `madvise`, answering in
+/// Linux errnos: an unknown advice is `-EINVAL` before anything else is
+/// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
+/// 0, and memory-failure injection is `-EPERM`. (Its effects need a process
+/// and are tested in ring 3: `spawn::self_test_linux_madvise_fork`.)
+fn test_dispatch_memory_advise() -> KernelResult<()> {
+    use super::linux::errno;
+    let call = |addr: u64, len: u64, advice: u64| {
+        let args = SyscallArgs {
+            arg0: addr,
+            arg1: len,
+            arg2: advice,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_MEMORY_ADVISE, &args).value
+    };
+    let cases: [(u64, u64, u64, i64, &str); 4] = [
+        (
+            0x1000,
+            4096,
+            9999,
+            -i64::from(errno::EINVAL),
+            "an unknown advice",
+        ),
+        (
+            0x1001,
+            4096,
+            0,
+            -i64::from(errno::EINVAL),
+            "a misaligned address",
+        ),
+        (0x1000, 0, 4, 0, "MADV_DONTNEED of length 0"),
+        (0x1000, 4096, 100, -i64::from(errno::EPERM), "MADV_HWPOISON"),
+    ];
+    for (addr, len, advice, want, what) in cases {
+        let got = call(addr, len, advice);
+        if got != want {
+            serial_println!(
+                "[syscall]   FAIL: SYS_MEMORY_ADVISE answered {} for {}, want {}",
+                got,
+                what,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   SYS_MEMORY_ADVISE is the Linux madvise, answering Linux errnos: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_POSIX_TIMER` and `SYS_PROCESS_DUMPABLE` are registered and answer in
+/// Linux errnos. In kernel context there is no process to own a timer or a
+/// flag: an unknown op is `-EINVAL`, a create that passes every check is
+/// `-ENOSYS` (the kernel owns no timers), a create on a clock with no timers
+/// is `-EOPNOTSUPP`, the per-timer ops find no timer (`-EINVAL`), and the
+/// dumpable call has no process (`-EINVAL`). (A process's calls are tested in
+/// ring 3: `spawn::self_test_linux_posix_timers` drives the same bodies
+/// through the Linux ABI.)
+fn test_dispatch_posix_timer() -> KernelResult<()> {
+    use super::linux::errno;
+    use super::number::{POSIX_TIMER_CREATE, POSIX_TIMER_DELETE, POSIX_TIMER_GETOVERRUN};
+    let call = |nr: u64, op: u64, a: u64, b: u64| {
+        let args = SyscallArgs {
+            arg0: op,
+            arg1: a,
+            arg2: b,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(nr, &args).value
+    };
+    let cases: [(u64, u64, u64, u64, i32, &str); 6] = [
+        (SYS_POSIX_TIMER, 99, 0, 0, errno::EINVAL, "an unknown op"),
+        (
+            SYS_POSIX_TIMER,
+            POSIX_TIMER_CREATE,
+            1,
+            0,
+            errno::ENOSYS,
+            "a create with no process",
+        ),
+        (
+            SYS_POSIX_TIMER,
+            POSIX_TIMER_CREATE,
+            4,
+            0,
+            errno::EOPNOTSUPP,
+            "CLOCK_MONOTONIC_RAW",
+        ),
+        (
+            SYS_POSIX_TIMER,
+            POSIX_TIMER_GETOVERRUN,
+            0,
+            0,
+            errno::EINVAL,
+            "no such timer",
+        ),
+        (
+            SYS_POSIX_TIMER,
+            POSIX_TIMER_DELETE,
+            0,
+            0,
+            errno::EINVAL,
+            "deleting no timer",
+        ),
+        (
+            SYS_PROCESS_DUMPABLE,
+            0,
+            0,
+            0,
+            errno::EINVAL,
+            "the dumpable flag of no process",
+        ),
+    ];
+    for (nr, op, a, b, want, what) in cases {
+        let got = call(nr, op, a, b);
+        if got != -i64::from(want) {
+            serial_println!(
+                "[syscall]   FAIL: {} answered {} for {}, want -{}",
+                if nr == SYS_POSIX_TIMER {
+                    "SYS_POSIX_TIMER"
+                } else {
+                    "SYS_PROCESS_DUMPABLE"
+                },
+                got,
+                what,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[syscall]   SYS_POSIX_TIMER / SYS_PROCESS_DUMPABLE: OK");
+    test_dispatch_getgroups()
+}
+
+/// `SYS_PROCESS_GETGROUPS` is registered, and with no process -- a kernel
+/// context -- is `NoSuchProcess`; a process's calls (the count, `EINVAL` for
+/// short room, the list) are driven by `proc::pcb`'s credentials, which
+/// `SYS_PROCESS_SETGROUPS` sets.
+fn test_dispatch_getgroups() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_PROCESS_GETGROUPS, &args);
+    if got.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+        serial_println!(
+            "[syscall]   FAIL: SYS_PROCESS_GETGROUPS from no process answered {}",
+            got.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_PROCESS_GETGROUPS: OK");
+
+    // SYS_MMAP_FILE answers Linux errnos; a handle nobody holds -- every
+    // handle, from a kernel context -- is EBADF.
+    let map = SyscallArgs {
+        arg0: 0,
+        arg1: 4096,
+        arg2: 1,
+        arg3: 2,
+        arg4: 0xDEAD,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_MMAP_FILE, &map).value;
+    if got != i64::from(super::linux::errno::EBADF).wrapping_neg() {
+        serial_println!(
+            "[syscall]   FAIL: SYS_MMAP_FILE of a handle not held answered {}",
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_MMAP_FILE: OK");
+
+    // SYS_MEMORY_LOCK answers Linux errnos: an unknown op and a bad
+    // mlockall are EINVAL, a range that wraps EINVAL too; from a kernel
+    // context there is nothing to lock, which is success.
+    let call = |op: u64, a: u64, b: u64| {
+        let args = SyscallArgs {
+            arg0: op,
+            arg1: a,
+            arg2: b,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_MEMORY_LOCK, &args).value
+    };
+    let einval = i64::from(super::linux::errno::EINVAL).wrapping_neg();
+    let checks = [
+        (call(99, 0, 0), einval),
+        (call(super::number::MEMORY_LOCK_ALL, 0, 0), einval),
+        (call(super::number::MEMORY_LOCK_ALL, 4, 0), einval),
+        (call(super::number::MEMORY_LOCK_ALL, 1, 0), 0),
+        (call(super::number::MEMORY_UNLOCK_ALL, 0, 0), 0),
+        (
+            call(
+                super::number::MEMORY_LOCK_RANGE,
+                0xFFFF_FFFF_FFFF_F000,
+                0x2000,
+            ),
+            einval,
+        ),
+        (call(super::number::MEMORY_UNLOCK_RANGE, 0x1000, 0), 0),
+    ];
+    if let Some((got, want)) = checks.iter().find(|(got, want)| got != want) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_MEMORY_LOCK answered {} where {} was due",
+            got,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_MEMORY_LOCK: OK");
+
+    test_dispatch_thread_scheduler()
+}
+
+/// `SYS_THREAD_SCHEDULER` as a process meets it: on a thread of a scratch
+/// process, called as that process (`thread::self_test_as_process`), so the
+/// rule is the one a program gets -- a real-time policy needs
+/// `RLIMIT_RTPRIO` or the IO_REALTIME right, a stranger and a kernel task are
+/// out of reach, and reading needs nothing. The rule itself, case by case, is
+/// `proc::priority`'s self-test.
+fn test_dispatch_thread_scheduler() -> KernelResult<()> {
+    use super::number::{SCHEDULER_GET, SCHEDULER_RR_INTERVAL, SCHEDULER_SET};
+    use crate::cap::{ResourceType, Rights};
+    use crate::proc::{pcb, thread};
+    use crate::sched::task::{RR_TIMESLICE_TICKS, rt_level};
+
+    extern "C" fn never_runs(_arg: u64) {}
+
+    let call = |op: u64, tid: u64, a: u64, b: u64| {
+        let args = SyscallArgs {
+            arg0: op,
+            arg1: tid,
+            arg2: a,
+            arg3: b,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_THREAD_SCHEDULER, &args).value
+    };
+    let neg = |n: i32| i64::from(n).wrapping_neg();
+    // SCHEDULER_GET's answer: the policy word, and the priority above it.
+    let word = |policy: i64, priority: i64| policy | priority.wrapping_shl(32);
+    let (einval, eperm, esrch) = (
+        neg(super::linux::errno::EINVAL),
+        neg(super::linux::errno::EPERM),
+        neg(super::linux::errno::ESRCH),
+    );
+
+    let owner = pcb::create("rt-door-owner", 0);
+    let stranger = pcb::create("rt-door-stranger", 0);
+    let mine = crate::sched::spawn_suspended(b"rt-door-mine", 16, never_runs, 0, 0)?;
+    let kernel_task = crate::sched::spawn_suspended(b"rt-door-kernel", 16, never_runs, 0, 0)?;
+    let outcome = thread::self_test_with_thread(mine, owner, || -> Result<(), &'static str> {
+        // From the kernel: an unknown op, no such thread, a bad policy.
+        if call(9, mine, 0, 0) != einval
+            || call(SCHEDULER_GET, u64::MAX - 3, 0, 0) != esrch
+            || call(SCHEDULER_SET, mine, 4, 0) != einval
+            || call(SCHEDULER_SET, mine, 1, 0) != einval
+        {
+            return Err("the kernel's refusals");
+        }
+        // As the owning process, with the default RLIMIT_RTPRIO of 0 and no
+        // right: real-time is refused, an ordinary policy is not.
+        let refused = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, mine, 1, 10) == eperm
+                && call(SCHEDULER_SET, mine, 3, 0) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == 3
+        });
+        if !refused {
+            return Err("real-time without RLIMIT_RTPRIO or the right was not EPERM");
+        }
+        // RLIMIT_RTPRIO 20: up to 20 and no further, and lowering is free.
+        if pcb::set_rlimit(owner, 14, 20, 20, pcb::LimitAuthority::MayRaiseHardLimit).is_err() {
+            return Err("could not set RLIMIT_RTPRIO");
+        }
+        let within = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, mine, 1, 20) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == word(1, 20)
+                && crate::sched::get_base_priority(mine) == Some(rt_level(20))
+                && call(SCHEDULER_SET, mine, 1, 30) == eperm
+                && call(SCHEDULER_SET, mine, 2, 5) == 0
+                && call(SCHEDULER_RR_INTERVAL, mine, 0, 0)
+                    == i64::from(RR_TIMESLICE_TICKS).saturating_mul(10_000_000)
+                // -1 keeps the policy, as sched_setparam.
+                && call(SCHEDULER_SET, mine, u64::from(u32::MAX), 3) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == word(2, 3)
+                // SCHED_RESET_ON_FORK may be set, but not cleared without
+                // the right.
+                && call(SCHEDULER_SET, mine, 0x4000_0002, 3) == 0
+                && call(SCHEDULER_SET, mine, 2, 3) == eperm
+                && call(SCHEDULER_GET, mine, 0, 0) == word(0x4000_0002, 3)
+        });
+        if !within {
+            return Err("RLIMIT_RTPRIO was not honoured as Linux's");
+        }
+        // A kernel task is out of reach; reading it is not.
+        let kernel = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, kernel_task, 0, 0) == eperm
+                && call(SCHEDULER_GET, kernel_task, 0, 0) == 0
+        });
+        if !kernel {
+            return Err("a process changed a kernel task's policy");
+        }
+        // A stranger may read, and may not set, even with the right.
+        if pcb::grant_capability(stranger, ResourceType::Thread, 0, Rights::IO_REALTIME).is_err() {
+            return Err("could not grant IO_REALTIME");
+        }
+        let strange = thread::self_test_as_process(stranger, || {
+            call(SCHEDULER_SET, mine, 2, 3) == eperm && call(SCHEDULER_GET, mine, 0, 0) != eperm
+        });
+        if !strange {
+            return Err("a stranger changed another process's thread");
+        }
+        // The right lifts the ceiling and the flag: the owner, granted it,
+        // reaches 99 and clears SCHED_RESET_ON_FORK.
+        if pcb::grant_capability(owner, ResourceType::Thread, 0, Rights::IO_REALTIME).is_err() {
+            return Err("could not grant the owner IO_REALTIME");
+        }
+        let lifted = thread::self_test_as_process(owner, || {
+            call(SCHEDULER_SET, mine, 1, 99) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == word(1, 99)
+                && crate::sched::get_base_priority(mine) == Some(0)
+                && call(SCHEDULER_RR_INTERVAL, mine, 0, 0) == 0
+                && call(SCHEDULER_SET, mine, 0, 0) == 0
+                && call(SCHEDULER_GET, mine, 0, 0) == 0
+        });
+        if !lifted {
+            return Err("IO_REALTIME did not lift RLIMIT_RTPRIO and the flag");
+        }
+        Ok(())
+    });
+    crate::sched::kill_task(mine);
+    crate::sched::kill_task(kernel_task);
+    crate::sched::reap_dead_tasks();
+    pcb::destroy(owner);
+    pcb::destroy(stranger);
+    if let Err(why) = outcome {
+        serial_println!("[syscall]   FAIL: SYS_THREAD_SCHEDULER: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_THREAD_SCHEDULER: OK");
+    test_dispatch_membarrier()
+}
+
+/// `SYS_MEMBARRIER` is the Linux call's body: `QUERY` answers every command,
+/// and a kernel caller's barriers and registrations succeed (this runs before
+/// the APs are up -- `cpusync::self_test` interrupts them later). The Linux
+/// ABI's own tests cover the gates.
+fn test_dispatch_membarrier() -> KernelResult<()> {
+    let membarrier = |cmd: u64, flags: u64| {
+        let args = SyscallArgs {
+            arg0: cmd,
+            arg1: flags,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_MEMBARRIER, &args).value
+    };
+    let einval = i64::from(super::linux::errno::EINVAL).wrapping_neg();
+    let checks = [
+        (membarrier(0, 0), 0x3FF),
+        (membarrier(1, 0), 0),
+        (membarrier(2, 0), 0),
+        (membarrier(8, 0), 0),
+        (membarrier(32, 0), 0),
+        (membarrier(128, 0), 0),
+        (membarrier(128, 1), 0),
+        (membarrier(256, 0), 0),
+        (membarrier(8, 1), einval),
+        (membarrier(1 << 12, 0), einval),
+    ];
+    if let Some((got, want)) = checks.iter().find(|(got, want)| got != want) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_MEMBARRIER answered {} where {} was due",
+            got,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_MEMBARRIER: OK");
+    test_dispatch_rseq()
+}
+
+/// `SYS_RSEQ` is the Linux call's body: its argument gates answer as Linux's
+/// do, before any user memory is looked at. (Registration itself, and what it
+/// does, the ring-3 test `spawn::self_test_linux_rseq` covers.)
+fn test_dispatch_rseq() -> KernelResult<()> {
+    const SIG: u64 = 0x5305_3053;
+    let rseq = |ptr: u64, len: u64, flags: u64| {
+        let args = SyscallArgs {
+            arg0: ptr,
+            arg1: len,
+            arg2: flags,
+            arg3: SIG,
+            arg4: 0,
+            arg5: 0,
+        };
+        dispatch(SYS_RSEQ, &args).value
+    };
+    let errno = |e: i32| i64::from(e).wrapping_neg();
+    let einval = errno(super::linux::errno::EINVAL);
+    let checks = [
+        // A length that is not `struct rseq`'s 32.
+        (rseq(0x1000, 16, 0), einval),
+        // An area that is not 32-byte aligned.
+        (rseq(0x1001, 32, 0), einval),
+        // No area at all.
+        (rseq(0, 32, 0), errno(super::linux::errno::EFAULT)),
+        // A flag that is not RSEQ_FLAG_UNREGISTER.
+        (rseq(0x1000, 32, 2), einval),
+        // Unregistering what was never registered.
+        (rseq(0x1000, 32, 1), einval),
+    ];
+    if let Some((got, want)) = checks.iter().find(|(got, want)| got != want) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_RSEQ answered {} where {} was due",
+            got,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_RSEQ: OK");
+    Ok(())
+}
+
+fn test_dispatch_power_reload() -> KernelResult<()> {
+    let probe = SyscallArgs {
+        arg0: 0x1000,
+        arg1: 64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let v = dispatch(SYS_POWER_RELOAD, &probe).value;
+    let refused = v == i64::from(KernelError::NoSuchProcess.code())
+        || v == i64::from(KernelError::PermissionDenied.code());
+    if !refused {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD answered {} with no RELOAD_KERNEL -- ungated, or gated after its arguments",
+            v
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_RELOAD gated on RELOAD_KERNEL (refused without it, before the image is read): OK"
+    );
+
+    use super::handlers::{RELOAD_CMDLINE_MAX, RELOAD_IMAGE_MAX, ReloadImage, reload_request};
+    let request = |a: [u64; 6]| {
+        reload_request(&SyscallArgs {
+            arg0: a[0],
+            arg1: a[1],
+            arg2: a[2],
+            arg3: a[3],
+            arg4: a[4],
+            arg5: a[5],
+        })
+        .map(|(image, cmdline)| (matches!(image, ReloadImage::Running(_)), cmdline))
+    };
+    let too_big = |max: usize| u64::try_from(max).map_or(u64::MAX, |m| m.saturating_add(1));
+    let refusals = [
+        ("a reserved argument", request([0, 0, 0, 0, 1, 0])),
+        ("the last reserved argument", request([0, 0, 0, 0, 0, 1])),
+        (
+            "an image length without its pointer",
+            request([0, 64, 0, 0, 0, 0]),
+        ),
+        (
+            "an image pointer without its length",
+            request([0x1000, 0, 0, 0, 0, 0]),
+        ),
+        (
+            "a command-line length without its pointer",
+            request([0, 0, 0, 3, 0, 0]),
+        ),
+        (
+            "an image over the limit",
+            request([0x1000, too_big(RELOAD_IMAGE_MAX), 0, 0, 0, 0]),
+        ),
+        (
+            "a command line over the limit",
+            request([0, 0, 0x1000, too_big(RELOAD_CMDLINE_MAX), 0, 0]),
+        ),
+    ];
+    if let Some((what, got)) = refusals
+        .iter()
+        .find(|(_, got)| !matches!(got, Err(KernelError::InvalidArgument)))
+    {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD's request with {} answered {:?}, not InvalidArgument",
+            what,
+            got.as_ref().map(|_| ())
+        );
+        return Err(KernelError::InternalError);
+    }
+    if crate::kexec::parse_kernel_elf(b"not a kernel, not even an ELF").is_ok() {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD would take bytes that are not a kernel"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // (0, 0) twice: the running kernel, which is a kernel, with its own command
+    // line less the word that asks a boot to reload itself.
+    let own_line =
+        crate::kexec::restart_cmdline(crate::boot::kernel_cmdline_bytes().unwrap_or_default());
+    match (crate::kexec::running_image(), request([0; 6])) {
+        (Some(_), Ok((true, line))) if line == own_line => {}
+        (None, Err(KernelError::NotSupported)) => {}
+        (_, got) => {
+            serial_println!(
+                "[syscall]   FAIL: SYS_POWER_RELOAD's (0, 0) request answered {:?}, not the running kernel and its command line",
+                got.map(|(running, line)| (running, line.len()))
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_RELOAD's request: each refusal before anything is stopped, (0, 0) the running kernel: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_POWER_OFF` and `SYS_POWER_REBOOT` are registered, and gated -- on
+/// `POWER_OFF` and `REBOOT` -- before they flush or switch anything. In kernel
+/// context no process holds either right, so both are refused (NoSuchProcess
+/// or PermissionDenied), flags and all; ungated, the first would have switched
+/// this boot off. The rights are distinct bits, and neither is the other's.
+fn test_dispatch_power_off_and_reboot() -> KernelResult<()> {
+    use crate::cap::Rights;
+    let refused = |v: i64| {
+        v == i64::from(KernelError::NoSuchProcess.code())
+            || v == i64::from(KernelError::PermissionDenied.code())
+    };
+    for (nr, name) in [
+        (SYS_POWER_OFF, "SYS_POWER_OFF"),
+        (SYS_POWER_REBOOT, "SYS_POWER_REBOOT"),
+    ] {
+        // Flags that mean nothing: the right is still asked for first.
+        let v = dispatch(
+            nr,
+            &SyscallArgs {
+                arg0: 0x8000,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value;
+        if !refused(v) {
+            serial_println!(
+                "[syscall]   FAIL: {} answered {} with no right -- ungated, or gated after its flags",
+                name,
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if Rights::POWER_OFF.contains(Rights::REBOOT)
+        || Rights::REBOOT.contains(Rights::POWER_OFF)
+        || Rights::POWER_OFF.contains(Rights::RELOAD_KERNEL)
+        || Rights::REBOOT.contains(Rights::RELOAD_KERNEL)
+    {
+        serial_println!("[syscall]   FAIL: POWER_OFF, REBOOT and RELOAD_KERNEL are not distinct");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_OFF and SYS_POWER_REBOOT gated on their own rights (refused without them): OK"
+    );
+    Ok(())
+}
+
+fn test_dispatch_secureboot_doors() -> KernelResult<()> {
+    use crate::fs::secureboot::{self, BootState, KeyType};
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: secure boot doors: {}", msg);
+        Err(KernelError::InternalError)
+    }
+    const NAME: &[u8] = b"probe-\xff.efi";
+    const HASH: &str = "SHA256:4444444444444444444444444444444444444444444444444444444444444444";
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5: 0,
+    };
+    let refused = |v: i64| {
+        v == i64::from(KernelError::NoSuchProcess.code())
+            || v == i64::from(KernelError::PermissionDenied.code())
+    };
+    let (name_ptr, name_len) = (NAME.as_ptr() as u64, NAME.len() as u64);
+    let (hash_ptr, hash_len) = (HASH.as_ptr() as u64, HASH.len() as u64);
+
+    secureboot::with_scratch_table(|| {
+        // `2` is db, a valid type, and both strings are readable here.
+        let enroll = dispatch(
+            SYS_SECUREBOOT_ENROLL,
+            &args(2, name_ptr, name_len, hash_ptr, hash_len),
+        )
+        .value;
+        if !refused(enroll) {
+            serial_println!("[syscall]   SYS_SECUREBOOT_ENROLL answered {}", enroll);
+            return fail(
+                "ENROLL was not refused for a caller with no process -- ungated, or gated after its arguments",
+            );
+        }
+        let remove = dispatch(SYS_SECUREBOOT_REMOVE, &args(1, 0, 0, 0, 0)).value;
+        if !refused(remove) {
+            serial_println!("[syscall]   SYS_SECUREBOOT_REMOVE answered {}", remove);
+            return fail(
+                "REMOVE was not refused for a caller with no process -- ungated, or gated after its argument",
+            );
+        }
+
+        let mut out = [u32::MAX; 4];
+        let r = dispatch(
+            SYS_SECUREBOOT_VERIFY,
+            &args(
+                name_ptr,
+                name_len,
+                hash_ptr,
+                hash_len,
+                out.as_mut_ptr() as u64,
+            ),
+        )
+        .value;
+        if r != 0 || out != [2, 0, 0, 1] {
+            serial_println!(
+                "[syscall]   SYS_SECUREBOOT_VERIFY answered {} with {:?}",
+                r,
+                out
+            );
+            return fail("a hash in no list, not enforcing, should answer 0 with [2, 0, 0, 1]");
+        }
+
+        let Ok(id) = secureboot::enroll_key(KeyType::SignatureDatabase, "dispatch probe", HASH)
+        else {
+            return fail("could not enrol the probe hash in the scratch table");
+        };
+        if secureboot::set_state(BootState::Enabled).is_err() {
+            return fail("could not make the scratch table enforce");
+        }
+        out = [u32::MAX; 4];
+        let r = dispatch(
+            SYS_SECUREBOOT_VERIFY,
+            &args(
+                name_ptr,
+                name_len,
+                hash_ptr,
+                hash_len,
+                out.as_mut_ptr() as u64,
+            ),
+        )
+        .value;
+        if r != 0 || out != [0, id, 1, 1] {
+            serial_println!(
+                "[syscall]   SYS_SECUREBOOT_VERIFY answered {} with {:?}, entry {}",
+                r,
+                out,
+                id
+            );
+            return fail("a hash in db, enforcing, should answer 0 with [0, entry, 1, 1]");
+        }
+        let records = secureboot::get_records(1);
+        if records.first().map(|rec| rec.image_name.as_slice()) != Some(NAME) {
+            return fail("the image name was not recorded as the bytes it was given");
+        }
+
+        let before = secureboot::stats().1;
+        let r = dispatch(
+            SYS_SECUREBOOT_VERIFY,
+            &args(name_ptr, name_len, hash_ptr, hash_len, 0),
+        )
+        .value;
+        if r != i64::from(KernelError::InvalidAddress.code()) {
+            serial_println!(
+                "[syscall]   SYS_SECUREBOOT_VERIFY with no output answered {}",
+                r
+            );
+            return fail("a null output should be refused as InvalidAddress");
+        }
+        if secureboot::stats().1 != before {
+            return fail("a verify refused for its output still left a record");
+        }
+        Ok(())
+    })?;
+
+    serial_println!(
+        "[syscall]   Secure Boot doors (1082-1084): enrol/remove gated first, verify answers and records bytes: OK"
+    );
+    Ok(())
+}
+
+/// A process that gives up root loses root's authority, keeps the rest, and
+/// cannot take root back
+/// (`requests/d-a-a-process-that-gives-up-root-keeps-roots-authority.md`).
+///
+/// A scratch process with root's identity and a spread of capabilities makes
+/// the native `SYS_PROCESS_SET_CREDENTIALS` call itself, through
+/// `thread::self_test_as_process`, to become uid 1000. The Linux `setuid`
+/// family reaches the same `pcb::change_credentials`.
+fn test_dispatch_dropping_root_is_one_way() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::proc::pcb::{self, ProcessCredentials, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pid: ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: dropping root: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let pid = pcb::create("drop-root", 0);
+    if pcb::set_credentials(pid, ProcessCredentials::root()).is_err() {
+        return fail("could not make the scratch process root", pid);
+    }
+    for (rt, id, rights) in [
+        (
+            ResourceType::Process,
+            0,
+            Rights::SET_CREDENTIALS | Rights::SET_HOSTNAME | Rights::WAIT | Rights::DEBUG,
+        ),
+        (ResourceType::Process, 5, Rights::DEBUG),
+        (ResourceType::SystemClock, 0, Rights::WRITE),
+        (
+            ResourceType::PrivilegedPort,
+            0,
+            Rights::READ | Rights::WRITE,
+        ),
+        (ResourceType::File, 0, Rights::READ | Rights::WRITE),
+        (
+            ResourceType::IoScheduler,
+            0,
+            Rights::READ | Rights::IO_REALTIME,
+        ),
+        (ResourceType::Thread, 0, Rights::IO_REALTIME),
+    ] {
+        if pcb::grant_capability(pid, rt, id, rights).is_err() {
+            return fail("could not grant the scratch process its capabilities", pid);
+        }
+    }
+    let set_uid = |uid: u64| SyscallArgs {
+        arg0: uid,
+        arg1: handlers::CREDENTIALS_KEEP,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    let became = self_test_as_process(pid, || {
+        dispatch(SYS_PROCESS_SET_CREDENTIALS, &set_uid(1000))
+    });
+    if became.value != 0 {
+        serial_println!("[syscall]   setuid(1000) as root answered {}", became.value);
+        return fail("root could not set its uid to 1000", pid);
+    }
+    let has = |rt, rights| pcb::has_capability_type(pid, rt, rights);
+    for (what, gone) in [
+        (
+            "SET_CREDENTIALS",
+            !has(ResourceType::Process, Rights::SET_CREDENTIALS),
+        ),
+        (
+            "SET_HOSTNAME",
+            !has(ResourceType::Process, Rights::SET_HOSTNAME),
+        ),
+        (
+            "class-wide DEBUG",
+            !pcb::has_capability_for(pid, ResourceType::Process, 0, Rights::DEBUG),
+        ),
+        ("the clock", !has(ResourceType::SystemClock, Rights::WRITE)),
+        (
+            "privileged ports",
+            !has(ResourceType::PrivilegedPort, Rights::READ),
+        ),
+        (
+            "realtime I/O",
+            !has(ResourceType::IoScheduler, Rights::IO_REALTIME),
+        ),
+        (
+            "raising priority (CAP_SYS_NICE)",
+            !has(ResourceType::Thread, Rights::IO_REALTIME),
+        ),
+    ] {
+        if !gone {
+            serial_println!("[syscall]   after setuid(1000), {} survived", what);
+            return fail("root's authority outlived the uid", pid);
+        }
+    }
+    for (what, kept) in [
+        (
+            "WAIT on processes",
+            has(ResourceType::Process, Rights::WAIT),
+        ),
+        (
+            "DEBUG over the one process granted",
+            pcb::has_capability_for(pid, ResourceType::Process, 5, Rights::DEBUG),
+        ),
+        (
+            "file access",
+            has(ResourceType::File, Rights::READ | Rights::WRITE),
+        ),
+        (
+            "ordinary I/O scheduling",
+            has(ResourceType::IoScheduler, Rights::READ),
+        ),
+    ] {
+        if !kept {
+            serial_println!("[syscall]   after setuid(1000), {} was lost", what);
+            return fail("dropping root took more than root's authority", pid);
+        }
+    }
+    let back =
+        self_test_as_process(pid, || dispatch(SYS_PROCESS_SET_CREDENTIALS, &set_uid(0))).value;
+    if back != i64::from(KernelError::PermissionDenied.code()) {
+        serial_println!("[syscall]   setuid(0) after leaving root answered {}", back);
+        return fail("a process that left root could take it back", pid);
+    }
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   dropping root: setuid(1000) takes root's authority and leaves the rest; setuid(0) is refused after: OK"
+    );
+    Ok(())
+}
+
+/// Channel and service-listener handles are usable only by the process that
+/// holds them (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`).
+///
+/// A handle's value is guessable -- a channel's is `(id << 1) | side`, ids
+/// counting from 1 -- so possession is what makes it a capability. A bare
+/// kernel task passes the possession check by design, so every call here is
+/// made as one of two scratch processes, through
+/// `thread::self_test_as_process`. Only calls decided before any user memory
+/// is touched are used: under a borrowed identity this task's pointers are
+/// kernel ones, which a process's syscall refuses.
+///
+/// What it shows:
+/// - a created channel's ends are registered to their creator;
+/// - another process naming them is refused `InvalidHandle` by every channel
+///   call, and its close closes nothing;
+/// - the owner's own calls pass, and its close deregisters;
+/// - the same refusal for every call on a pipe, socket pair, eventfd,
+///   completion port, timer and semaphore the owner made;
+/// - a completion port cannot watch another process's pipe or semaphore, and
+///   can its own process's;
+/// - a service listener is refused to another process and passes for its
+///   owner;
+/// - the owner's death releases the service name.
+///
+/// The listener is registered by `service::register` and recorded as
+/// `SYS_SERVICE_REGISTER` records it, because that syscall reads its name from
+/// user memory.
+fn test_dispatch_ipc_possession() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, live: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: IPC handle possession: {}", msg);
+        for &pid in live {
+            pcb::destroy(pid);
+        }
+        Err(KernelError::InternalError)
+    }
+    let a0 = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let invalid = i64::from(KernelError::InvalidHandle.code());
+
+    let owner = pcb::create("ipc-possess-own", 0);
+    let other = pcb::create("ipc-possess-oth", 0);
+    let live = [owner, other];
+
+    let created = self_test_as_process(owner, || dispatch(SYS_CHANNEL_CREATE, &a0(0)));
+    let (Ok(ep0), Ok(ep1)) = (u64::try_from(created.value), u64::try_from(created.value2)) else {
+        return fail("SYS_CHANNEL_CREATE failed for the owner", &live);
+    };
+    let owns = |pid, h| pcb::owns_ipc_handle(pid, ResourceType::Channel, h);
+    if !owns(owner, ep0) || !owns(owner, ep1) {
+        return fail(
+            "a created channel's ends were not registered to their creator",
+            &live,
+        );
+    }
+
+    for (name, nr, handle) in [
+        ("SYS_CHANNEL_SEND", SYS_CHANNEL_SEND, ep0),
+        ("SYS_CHANNEL_RECV", SYS_CHANNEL_RECV, ep1),
+        ("SYS_CHANNEL_TRY_RECV", SYS_CHANNEL_TRY_RECV, ep1),
+        ("SYS_CHANNEL_RECV_TIMEOUT", SYS_CHANNEL_RECV_TIMEOUT, ep1),
+        ("SYS_CHANNEL_SEND_TIMEOUT", SYS_CHANNEL_SEND_TIMEOUT, ep0),
+        ("SYS_CHANNEL_SEND_BLOCKING", SYS_CHANNEL_SEND_BLOCKING, ep0),
+        ("SYS_CHANNEL_SEND_CAPS", SYS_CHANNEL_SEND_CAPS, ep0),
+        ("SYS_CHANNEL_RECV_CAPS", SYS_CHANNEL_RECV_CAPS, ep1),
+        ("SYS_CHANNEL_PEER_CRED", SYS_CHANNEL_PEER_CRED, ep0),
+        ("SYS_CHANNEL_CLOSE", SYS_CHANNEL_CLOSE, ep0),
+    ] {
+        let got = self_test_as_process(other, || dispatch(nr, &a0(handle))).value;
+        if got != invalid {
+            serial_println!(
+                "[syscall]   {} on another process's channel answered {}, not InvalidHandle",
+                name,
+                got
+            );
+            return fail(
+                "a channel end was usable by a process that does not hold it",
+                &live,
+            );
+        }
+    }
+    if !owns(owner, ep0) {
+        return fail(
+            "another process's refused close deregistered the owner's end",
+            &live,
+        );
+    }
+
+    // The owner's own calls pass the gate, and the refused close closed
+    // nothing: had it closed ep0, a receive on ep1 would answer
+    // `ChannelClosed`, not 0 for "empty".
+    let empty = self_test_as_process(owner, || dispatch(SYS_CHANNEL_TRY_RECV, &a0(ep1))).value;
+    if empty != 0 {
+        serial_println!("[syscall]   the owner's try-receive answered {}", empty);
+        return fail(
+            "the owner's own empty channel did not answer 0 -- was it closed?",
+            &live,
+        );
+    }
+    for ep in [ep0, ep1] {
+        if self_test_as_process(owner, || dispatch(SYS_CHANNEL_CLOSE, &a0(ep))).value != 0 {
+            return fail("the owner could not close its own channel end", &live);
+        }
+    }
+    if owns(owner, ep0) || owns(owner, ep1) {
+        return fail(
+            "a closed channel end is still registered to its owner",
+            &live,
+        );
+    }
+
+    // The other handle types, the same way: what the owner made, another
+    // process naming it is refused by every call that takes it.
+    let pair = |r: SyscallResult| (u64::try_from(r.value).ok(), u64::try_from(r.value2).ok());
+    let one = |r: SyscallResult| u64::try_from(r.value).ok();
+    let (Some(pipe_r), Some(pipe_w)) = pair(self_test_as_process(owner, || {
+        dispatch(SYS_PIPE_CREATE, &a0(0))
+    })) else {
+        return fail("SYS_PIPE_CREATE failed for the owner", &live);
+    };
+    let (Some(sock), Some(_)) = pair(self_test_as_process(owner, || {
+        dispatch(SYS_SOCKETPAIR_CREATE, &a0(0))
+    })) else {
+        return fail("SYS_SOCKETPAIR_CREATE failed for the owner", &live);
+    };
+    let Some(efd) = one(self_test_as_process(owner, || {
+        dispatch(SYS_EVENTFD_CREATE, &a0(0))
+    })) else {
+        return fail("SYS_EVENTFD_CREATE failed for the owner", &live);
+    };
+    let Some(cp) = one(self_test_as_process(owner, || {
+        dispatch(SYS_CP_CREATE, &a0(0))
+    })) else {
+        return fail("SYS_CP_CREATE failed for the owner", &live);
+    };
+    // A minute: the process is destroyed, and the timer with it, long before.
+    let timer_args = SyscallArgs {
+        arg0: 60_000_000_000,
+        ..a0(0)
+    };
+    let Some(timer) = one(self_test_as_process(owner, || {
+        dispatch(SYS_TIMER_CREATE, &timer_args)
+    })) else {
+        return fail("SYS_TIMER_CREATE failed for the owner", &live);
+    };
+    let Some(sem) = one(self_test_as_process(owner, || {
+        dispatch(SYS_SEM_CREATE, &a0(0))
+    })) else {
+        return fail("SYS_SEM_CREATE failed for the owner", &live);
+    };
+    if !pcb::owns_ipc_handle(owner, ResourceType::Semaphore, sem) {
+        return fail(
+            "a created semaphore was not registered to its creator",
+            &live,
+        );
+    }
+    for (name, nr, handle) in [
+        ("SYS_PIPE_WRITE", SYS_PIPE_WRITE, pipe_w),
+        ("SYS_PIPE_READ", SYS_PIPE_READ, pipe_r),
+        ("SYS_PIPE_TRY_WRITE", SYS_PIPE_TRY_WRITE, pipe_w),
+        ("SYS_PIPE_TRY_READ", SYS_PIPE_TRY_READ, pipe_r),
+        ("SYS_PIPE_POLL", SYS_PIPE_POLL, pipe_r),
+        ("SYS_PIPE_READABLE_BYTES", SYS_PIPE_READABLE_BYTES, pipe_r),
+        ("SYS_PIPE_READ_TIMEOUT", SYS_PIPE_READ_TIMEOUT, pipe_r),
+        ("SYS_PIPE_WRITE_TIMEOUT", SYS_PIPE_WRITE_TIMEOUT, pipe_w),
+        ("SYS_PIPE_PEEK", SYS_PIPE_PEEK, pipe_r),
+        ("SYS_PIPE_WAIT_READABLE", SYS_PIPE_WAIT_READABLE, pipe_r),
+        ("SYS_PIPE_CLOSE", SYS_PIPE_CLOSE, pipe_w),
+        ("SYS_SOCKETPAIR_SEND", SYS_SOCKETPAIR_SEND, sock),
+        ("SYS_SOCKETPAIR_RECV", SYS_SOCKETPAIR_RECV, sock),
+        ("SYS_SOCKETPAIR_TRY_SEND", SYS_SOCKETPAIR_TRY_SEND, sock),
+        ("SYS_SOCKETPAIR_TRY_RECV", SYS_SOCKETPAIR_TRY_RECV, sock),
+        (
+            "SYS_SOCKETPAIR_SEND_TIMEOUT",
+            SYS_SOCKETPAIR_SEND_TIMEOUT,
+            sock,
+        ),
+        (
+            "SYS_SOCKETPAIR_RECV_TIMEOUT",
+            SYS_SOCKETPAIR_RECV_TIMEOUT,
+            sock,
+        ),
+        ("SYS_SOCKETPAIR_POLL", SYS_SOCKETPAIR_POLL, sock),
+        (
+            "SYS_SOCKETPAIR_READABLE_BYTES",
+            SYS_SOCKETPAIR_READABLE_BYTES,
+            sock,
+        ),
+        ("SYS_SOCKETPAIR_SHUTDOWN", SYS_SOCKETPAIR_SHUTDOWN, sock),
+        ("SYS_SOCKETPAIR_CLOSE", SYS_SOCKETPAIR_CLOSE, sock),
+        ("SYS_EVENTFD_WRITE", SYS_EVENTFD_WRITE, efd),
+        ("SYS_EVENTFD_READ", SYS_EVENTFD_READ, efd),
+        ("SYS_EVENTFD_TRY_READ", SYS_EVENTFD_TRY_READ, efd),
+        ("SYS_EVENTFD_READ_TIMEOUT", SYS_EVENTFD_READ_TIMEOUT, efd),
+        ("SYS_EVENTFD_WRITE_TIMEOUT", SYS_EVENTFD_WRITE_TIMEOUT, efd),
+        ("SYS_EVENTFD_HAS_VALUE", SYS_EVENTFD_HAS_VALUE, efd),
+        ("SYS_EVENTFD_CLOSE", SYS_EVENTFD_CLOSE, efd),
+        ("SYS_CP_REGISTER", SYS_CP_REGISTER, cp),
+        ("SYS_CP_UNREGISTER", SYS_CP_UNREGISTER, cp),
+        ("SYS_CP_WAIT", SYS_CP_WAIT, cp),
+        ("SYS_CP_TRY_WAIT", SYS_CP_TRY_WAIT, cp),
+        ("SYS_CP_NOTIFY", SYS_CP_NOTIFY, cp),
+        ("SYS_CP_CLOSE", SYS_CP_CLOSE, cp),
+        ("SYS_TIMER_CANCEL", SYS_TIMER_CANCEL, timer),
+        ("SYS_SEM_SIGNAL", SYS_SEM_SIGNAL, sem),
+        ("SYS_SEM_WAIT", SYS_SEM_WAIT, sem),
+        ("SYS_SEM_TRY_WAIT", SYS_SEM_TRY_WAIT, sem),
+        ("SYS_SEM_WAIT_TIMEOUT", SYS_SEM_WAIT_TIMEOUT, sem),
+        ("SYS_SEM_CLOSE", SYS_SEM_CLOSE, sem),
+    ] {
+        let got = self_test_as_process(other, || dispatch(nr, &a0(handle))).value;
+        if got != invalid {
+            serial_println!(
+                "[syscall]   {} on another process's handle answered {}, not InvalidHandle",
+                name,
+                got
+            );
+            return fail(
+                "an IPC handle was usable by a process that does not hold it",
+                &live,
+            );
+        }
+    }
+    // A completion port of the other process's own cannot watch the owner's
+    // pipe; the owner's port can.
+    let Some(other_cp) = one(self_test_as_process(other, || {
+        dispatch(SYS_CP_CREATE, &a0(0))
+    })) else {
+        return fail("SYS_CP_CREATE failed for the other process", &live);
+    };
+    let watch = |port: u64| SyscallArgs {
+        arg0: port,
+        arg1: 1, // source type: pipe, read end
+        arg2: pipe_r,
+        ..a0(0)
+    };
+    if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch(other_cp))).value != invalid
+    {
+        return fail(
+            "a completion port could watch another process's pipe",
+            &live,
+        );
+    }
+    if self_test_as_process(owner, || dispatch(SYS_CP_REGISTER, &watch(cp))).value != 0 {
+        return fail(
+            "the owner could not watch its own pipe from its own port",
+            &live,
+        );
+    }
+    let watch_sem = SyscallArgs {
+        arg0: other_cp,
+        arg1: 6, // source type: semaphore
+        arg2: sem,
+        ..a0(0)
+    };
+    if self_test_as_process(other, || dispatch(SYS_CP_REGISTER, &watch_sem)).value != invalid {
+        return fail(
+            "a completion port could watch another process's semaphore",
+            &live,
+        );
+    }
+
+    // A service listener: the owner's alone, and its name freed by its death.
+    const NAME: &[u8] = b"ipc-possession-selftest";
+    let Ok(listener) = crate::ipc::service::register(NAME) else {
+        return fail("could not register the test service", &live);
+    };
+    pcb::register_ipc_handle(owner, ResourceType::Service, listener.raw());
+    for (name, nr) in [
+        ("SYS_SERVICE_ACCEPT", SYS_SERVICE_ACCEPT),
+        ("SYS_SERVICE_TRY_ACCEPT", SYS_SERVICE_TRY_ACCEPT),
+        ("SYS_SERVICE_ACCEPT_TIMEOUT", SYS_SERVICE_ACCEPT_TIMEOUT),
+        ("SYS_SERVICE_UNREGISTER", SYS_SERVICE_UNREGISTER),
+    ] {
+        let got = self_test_as_process(other, || dispatch(nr, &a0(listener.raw()))).value;
+        if got != invalid {
+            serial_println!(
+                "[syscall]   {} on another process's listener answered {}, not InvalidHandle",
+                name,
+                got
+            );
+            return fail(
+                "a service listener was usable by a process that does not hold it",
+                &live,
+            );
+        }
+    }
+    let would_block = i64::from(KernelError::WouldBlock.code());
+    if self_test_as_process(owner, || {
+        dispatch(SYS_SERVICE_TRY_ACCEPT, &a0(listener.raw()))
+    })
+    .value
+        != would_block
+    {
+        return fail(
+            "the owner's try-accept with nothing pending did not answer WouldBlock",
+            &live,
+        );
+    }
+    pcb::destroy(owner);
+    match crate::ipc::service::register(NAME) {
+        Ok(again) => {
+            // Ours, made a line above; its unregistering cannot fail but for
+            // a bug the next boot's name clash would show.
+            if crate::ipc::service::unregister(again).is_err() {
+                return fail("could not unregister the test service", &[other]);
+            }
+        }
+        Err(_) => {
+            return fail("a dead process's service name was not released", &[other]);
+        }
+    }
+    pcb::destroy(other);
+
+    serial_println!(
+        "[syscall]   IPC possession: channel, listener, pipe, socket-pair, eventfd, completion-port, timer and semaphore handles refused to a process that does not hold them; a dead service's name released: OK"
+    );
     Ok(())
 }
 
@@ -2703,6 +6987,28 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
     if blocked_write != TtyAccessDecision::Allow {
         return fail(
             "a background write with SIGTTOU blocked should be allowed",
+            &cleanup,
+        );
+    }
+
+    // (3b) Ignore them instead, as bash ignores SIGTTOU, through the kernel's
+    //      record a native libc reports (`SYS_SIGNAL_SET_IGNORED`) -- given a
+    //      trampoline, so the job is a native process with its own handler
+    //      table, the case the kernel could not see until 2026-10-01. Same
+    //      answers as blocked: POSIX treats an ignored signal as discarded.
+    signal::register_trampoline(job, 0x4000);
+    let ignored = signal::set_ignored(job, ttin_bit | ttou_bit, false);
+    let ignored_read = tty_job_control_decide(job, SIGTTIN);
+    let ignored_write = tty_job_control_decide(job, SIGTTOU);
+    // An empty set names neither SIGKILL nor SIGSTOP, the only refusal.
+    let _ = signal::set_ignored(job, 0, false);
+    signal::register_trampoline(job, 0);
+    if ignored.is_err()
+        || ignored_read != TtyAccessDecision::Fail(KernelError::IoError)
+        || ignored_write != TtyAccessDecision::Allow
+    {
+        return fail(
+            "with SIGTTIN/SIGTTOU ignored, a background read should be EIO and a write allowed",
             &cleanup,
         );
     }
@@ -3301,10 +7607,10 @@ fn test_dispatch_wait_status_wpgid_and_wnowait() -> KernelResult<()> {
 /// `min(caller, kernel)` truncation and the zero-filled tail live in the
 /// wrapper and are covered from ring 3 by the userspace test fixture.
 ///
-/// The CPU-time check is the one worth stating twice: the counters are kept
-/// in USER_HZ ticks internally but this structure carries **microseconds**,
-/// so a `1` in must come out as `10_000`. A pass-through bug would look
-/// entirely plausible in a hex dump.
+/// The CPU-time check is the one worth stating twice: the usage is kept in
+/// nanoseconds but this structure carries **microseconds**, truncated, so
+/// 30 ms and a little must come out as `30_000`. A pass-through bug would
+/// look entirely plausible in a hex dump.
 fn test_dispatch_wait_info_layout() -> KernelResult<()> {
     use crate::proc::pcb::ExitInfo;
     use crate::proc::thread::ProcessUsage;
@@ -3320,18 +7626,15 @@ fn test_dispatch_wait_info_layout() -> KernelResult<()> {
         pid: 0x1234_5678,
         uid: 4242,
         usage: ProcessUsage {
-            user_ticks: 3,
-            sys_ticks: 7,
+            utime_ns: 30_000_999,
+            stime_ns: 70_000_001,
             min_flt: 101,
             maj_flt: 102,
             nvcsw: 103,
             nivcsw: 104,
         },
         // exit_code 66 → wstatus (66 << 8) = 0x4200, per `ExitInfo::to_wstatus`.
-        event: ChildEvent::Exited(ExitInfo {
-            exit_code: 66,
-            crash: None,
-        }),
+        event: ChildEvent::Exited(ExitInfo::exited(66)),
     };
     let img = wait_info_image(&found);
 
@@ -3347,8 +7650,8 @@ fn test_dispatch_wait_info_layout() -> KernelResult<()> {
         (0, 0x1234_5678, "pid@0"),
         (8, 4242, "uid@8 (+ zero pad @12)"),
         (16, 0x4200, "wstatus@16 (+ zero pad @20)"),
-        (24, 30_000, "utime_us@24 (3 ticks = 30ms)"),
-        (32, 70_000, "stime_us@32 (7 ticks = 70ms)"),
+        (24, 30_000, "utime_us@24 (30.000999 ms, truncated)"),
+        (32, 70_000, "stime_us@32 (70.000001 ms, truncated)"),
         (40, 101, "minflt@40"),
         (48, 102, "majflt@48"),
         (56, 103, "nvcsw@56"),
@@ -3403,8 +7706,8 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
     }
 
     let usage = ProcessUsage {
-        user_ticks: 3,
-        sys_ticks: 7,
+        utime_ns: 30_000_999,
+        stime_ns: 70_000_001,
         min_flt: 101,
         maj_flt: 102,
         nvcsw: 103,
@@ -3419,8 +7722,8 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
     };
 
     let expect: [(usize, u64, &str); 7] = [
-        (0, 30_000, "utime_us@0 (3 ticks = 30ms)"),
-        (8, 70_000, "stime_us@8 (7 ticks = 70ms)"),
+        (0, 30_000, "utime_us@0 (30.000999 ms, truncated)"),
+        (8, 70_000, "stime_us@8 (70.000001 ms, truncated)"),
         (16, 101, "minflt@16"),
         (24, 102, "majflt@24"),
         (32, 103, "nvcsw@32"),
@@ -3443,10 +7746,7 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
         pid: 1,
         uid: 0,
         usage,
-        event: crate::syscall::wait::ChildEvent::Exited(crate::proc::pcb::ExitInfo {
-            exit_code: 0,
-            crash: None,
-        }),
+        event: crate::syscall::wait::ChildEvent::Exited(crate::proc::pcb::ExitInfo::exited(0)),
     });
     for off in (0..48).step_by(8) {
         if rd64(&img, off) != rd64(&wi, off.saturating_add(24)) {
@@ -5033,12 +9333,14 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     // nothing -- which is what the first version of this did, passing a whole
     // boot while proving neither syscall existed.
     //
-    // `which != ITIMER_REAL` is rejected before the pid lookup, so this reaches
-    // the handler either way. It separates three outcomes a caller must be able
-    // to tell apart: `NoSuchSyscall` means the number is not registered at all,
-    // `InvalidArgument` means a registered handler ran and refused the
-    // argument, and success would mean the handler accepted a CPU-time request
-    // for a wall-clock timer.
+    // A `which` past ITIMER_PROF is rejected before the pid lookup, so this
+    // reaches the handler either way. It separates the outcomes a caller must
+    // be able to tell apart: `NoSuchSyscall` means the number is not
+    // registered at all, `InvalidArgument` means a registered handler ran and
+    // refused the argument. (ITIMER_VIRTUAL, 1, was the refused one until the
+    // CPU-time timers, design-decisions 1550, made it a timer of its own; this
+    // asked for its refusal until 2026-10-08, the first boot that reached it
+    // after.)
     let bad_which = SyscallResult::err(KernelError::InvalidArgument).value;
     let no_such = SyscallResult::err(KernelError::NoSuchSyscall).value;
     for (nr, name) in [
@@ -5048,7 +9350,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         let r = dispatch(
             nr,
             &SyscallArgs {
-                arg0: 1, // ITIMER_VIRTUAL
+                arg0: 3, // past ITIMER_PROF
                 arg1: 0,
                 arg2: 0,
                 arg3: 0,
@@ -5066,7 +9368,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         }
         if r.value != bad_which {
             serial_println!(
-                "[syscall]   FAIL: {} ({}) returned {} for ITIMER_VIRTUAL, expected InvalidArgument ({}). Accepting it would arm a wall-clock timer for a CPU-time request",
+                "[syscall]   FAIL: {} ({}) returned {} for which 3, expected InvalidArgument ({}): there is no fourth interval timer",
                 name,
                 nr,
                 r.value,
@@ -5089,36 +9391,40 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         // PASS printed above it.
         //
         // itimer's order is the REVERSE of setgroups' and chroot's, and asserting it
-        // is how that stays true. `sys_itimer_set` refuses `which != ITIMER_REAL`
-        // BEFORE the caller lookup, which the ITIMER_VIRTUAL case above covers. So
-        // this passes a VALID which (ITIMER_REAL = 0) and requires NoSuchProcess --
-        // the only way to reach the caller lookup, and the half the skip never ran.
+        // is how that stays true. `sys_itimer_set` refuses a `which` past
+        // ITIMER_PROF BEFORE the caller lookup, which the case above covers. So
+        // this passes VALID ones -- ITIMER_REAL (0), and ITIMER_VIRTUAL (1), a
+        // CPU-time timer -- and requires NoSuchProcess: the only way to reach the
+        // caller lookup, and the half the skip never ran.
         //
         // The divergence is defensible: setgroups withholds which COUNTS are
         // acceptable, and `which` is three public constants. But it is a divergence,
         // so it is pinned rather than assumed.
-        let probe = dispatch(
-            SYS_ITIMER_SET,
-            &SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            },
-        );
-        if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
-            serial_println!(
-                "[syscall]   FAIL: {} with no owning process returned {}, expected NoSuchProcess ({})",
+        for which in [0, 1] {
+            let probe = dispatch(
                 SYS_ITIMER_SET,
-                probe.value,
-                SyscallResult::err(KernelError::NoSuchProcess).value
+                &SyscallArgs {
+                    arg0: which,
+                    arg1: 0,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
             );
-            return Err(KernelError::InternalError);
+            if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+                serial_println!(
+                    "[syscall]   FAIL: {} (which {}) with no owning process returned {}, expected NoSuchProcess ({})",
+                    SYS_ITIMER_SET,
+                    which,
+                    probe.value,
+                    SyscallResult::err(KernelError::NoSuchProcess).value
+                );
+                return Err(KernelError::InternalError);
+            }
         }
         serial_println!(
-            "[syscall]   itimer (1069/1070): OK -- ITIMER_VIRTUAL refused, and a caller with no process is refused after the which check (the reverse of setgroups' order, pinned deliberately)"
+            "[syscall]   itimer (1069/1070): OK -- a which past ITIMER_PROF refused, and a caller with no process is refused after the which check, for the wall-clock and a CPU-time timer alike (the reverse of setgroups' order, pinned deliberately)"
         );
         return Ok(());
     }
@@ -5141,17 +9447,21 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         )
     };
 
-    // Look before touching: refuse to clobber a timer this test does not own.
-    let existing = call(SYS_ITIMER_GET, 0, 0, 0);
-    if existing.value != 0 || existing.value2 != 0 {
-        serial_println!(
-            "[syscall]   Dispatch itimer: SKIP (a timer is already armed on this \
-             process: {} ns remaining, interval {}) — refusing to clobber state \
-             this test does not own",
-            existing.value,
-            existing.value2
-        );
-        return Ok(());
+    // Look before touching: refuse to clobber a timer this test does not own --
+    // the wall-clock one or ITIMER_VIRTUAL, the two it arms.
+    for which in [0, 1] {
+        let existing = call(SYS_ITIMER_GET, which, 0, 0);
+        if existing.value != 0 || existing.value2 != 0 {
+            serial_println!(
+                "[syscall]   Dispatch itimer: SKIP (timer {} is already armed on this \
+                 process: {} ns remaining, interval {}) — refusing to clobber state \
+                 this test does not own",
+                which,
+                existing.value,
+                existing.value2
+            );
+            return Ok(());
+        }
     }
 
     // Take every reading first, disarm unconditionally, judge afterwards.
@@ -5159,7 +9469,12 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     let read = call(SYS_ITIMER_GET, 0, 0, 0);
     let disarmed = call(SYS_ITIMER_SET, 0, 0, 0);
     let after = call(SYS_ITIMER_GET, 0, 0, 0);
-    let virt = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+    // ITIMER_VIRTUAL: an hour of the process's user-mode CPU time, which this
+    // test cannot use up before it disarms it.
+    let v_armed = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+    let v_read = call(SYS_ITIMER_GET, 1, 0, 0);
+    let v_disarmed = call(SYS_ITIMER_SET, 1, 0, 0);
+    let v_after = call(SYS_ITIMER_GET, 1, 0, 0);
 
     let hour = i64::try_from(ONE_HOUR_NS).unwrap_or(i64::MAX);
 
@@ -5206,18 +9521,31 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if virt.value >= 0 {
+    if v_armed.value != 0
+        || v_armed.value2 != 0
+        || v_read.value <= 0
+        || v_read.value > hour
+        || v_disarmed.value <= 0
+        || v_after.value != 0
+        || v_after.value2 != 0
+    {
         serial_println!(
-            "[syscall]   FAIL: ITIMER_VIRTUAL returned {}, expected an error — \
-             accepting it would arm a wall-clock timer for a CPU-time request",
-            virt.value
+            "[syscall]   FAIL: ITIMER_VIRTUAL: set ({}, {}), get {}, disarm {}, then \
+             ({}, {}); expected (0, 0), a positive value no greater than the hour, \
+             the remainder, and (0, 0)",
+            v_armed.value,
+            v_armed.value2,
+            v_read.value,
+            v_disarmed.value,
+            v_after.value,
+            v_after.value2
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[syscall]   itimer (1069/1070: arm, read back armed, disarm reports the \
-         remainder, ITIMER_VIRTUAL refused): OK"
+         remainder, for ITIMER_REAL and ITIMER_VIRTUAL): OK"
     );
     Ok(())
 }

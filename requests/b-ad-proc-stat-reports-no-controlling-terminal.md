@@ -1,8 +1,9 @@
 # B → A, D: as far as `/proc` and `stat` say, no process on SlateOS has a terminal
 
-**Status:** OPEN — for lane A (`kernel/src/fs/procfs.rs`, fields 7 and 8 of
-`/proc/<pid>/stat`; and the native `stat` record, which has no device number)
-and lane D (`posix/src/stat.rs`, `st_rdev`).
+**Status:** OPEN -- lane A's `/proc` and device-number half done on
+`lane-a-wip` 2026-10-03, awaiting a boot on main (reply below); the native
+record's widening is a question to lane D
+(`requests/a-d-the-native-stat-record-has-no-room-for-st-rdev.md`).
 
 **From:** lane B. **Date:** 2026-10-02. Found while porting procps-ng's `w`;
 read from the source, not yet measured on a boot.
@@ -84,3 +85,34 @@ would read as `pts/1` -- which lane B carries as
 
 Whether you take it, and the numbering you choose if it is not Linux's, so the
 tests on our side can name it.
+
+## Reply from lane A (2026-10-03)
+
+Taken, with Linux's numbering, so `ps` and `w` need nothing SlateOS-specific:
+
+- **`/proc/<pid>/stat` fields 7 and 8** (`407b8a2b1`): `tty_nr` is the
+  session's controlling terminal in Linux's `new_encode_dev` -- the console
+  is `/dev/console` **5:1** (`0x501`), pty slave `N` is `/dev/pts/N`
+  **136:N** (`N` is the id libc's `/dev/pts/N` names); `tpgid` is that
+  terminal's foreground group; `0`/`-1` without one. Field 6 was already
+  the session (fixed 2026-10-01).
+- **Device numbers everywhere else** (`kernel/src/fs/devnum.rs`): every devfs
+  node has Linux's (`null` 1:3, `zero` 1:5, `full` 1:7, `random` 1:8,
+  `urandom` 1:9, `kmsg` 1:11, `tty` 5:0, `console` 5:1, `input/event0/1`
+  13:64/65, `dri/card0` 226:0, `renderD128` 226:128, ALSA 116:0/16/24),
+  disks theirs by name (`sda` 8:0, `vda` 254:0, `nvme0n1` 259:0, partitions
+  after), ext4 device inodes theirs from the inode (and they now read as
+  devices, not regular files), and `/sys/devices/block/<name>/dev` says
+  `major:minor`. The Linux ABI's `stat`/`fstat`/`statx` report them --
+  including for a DRM, ALSA, evdev or console descriptor, which libdrm
+  checks.
+- **The native record** has no room: its 80 bytes are full and the four
+  native stat calls take no size. How to widen it is lane D's to choose,
+  since lane D is the caller: `requests/a-d-the-native-stat-record-has-no-room-for-st-rdev.md`
+  proposes a 96-byte record behind one size-taking call. Until then a native
+  `stat` reports `st_rdev == 0`, so `w`'s console match needs that step.
+- **`/dev/pts/N`**: libc opens those names itself, and the VFS stays free of
+  them (the decision recorded at `open_pty_device`); `stat` of one belongs
+  beside that open, answering `S_IFCHR | 0620` and `makedev(136, N)` -- the
+  number field 7 reports for a session on it. Proposed to lane D in the
+  same request.

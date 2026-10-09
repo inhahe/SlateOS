@@ -67,7 +67,7 @@ pub const PROTO_TCP: u8 = 6;
 const IPV4_HEADER_SIZE: usize = 20;
 
 /// Default TTL for outgoing packets.
-const DEFAULT_TTL: u8 = 64;
+pub(crate) const DEFAULT_TTL: u8 = 64;
 
 /// Maximum Transmission Unit (Ethernet default).
 const MTU: usize = 1500;
@@ -728,7 +728,25 @@ fn send_ns_ecn(
 /// TCP uses `send_ns_ecn` which always sets DF (TCP relies on MSS
 /// to avoid fragmentation, and uses Path MTU Discovery).
 pub fn send_fragmentable(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
-    send_fragmentable_ns(crate::netns::ROOT_NS, dst, protocol, payload)
+    send_fragmentable_ns(crate::netns::ROOT_NS, dst, protocol, payload, DEFAULT_TTL)
+}
+
+/// [`send_fragmentable`] from network namespace `ns_id` -- its interface,
+/// address and firewall -- with time-to-live `ttl`: what a UDP socket sends,
+/// and to a multicast group with the socket's own multicast TTL
+/// (`udp::send_from`).
+///
+/// # Errors
+///
+/// The outbound firewall's refusal; address resolution's; the driver's.
+pub fn send_fragmentable_from(
+    ns_id: crate::netns::NetNsId,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+    ttl: u8,
+) -> KernelResult<()> {
+    send_fragmentable_ns(ns_id, dst, protocol, payload, ttl)
 }
 
 /// Send a fragmentable IPv4 packet within a specific network namespace.
@@ -738,6 +756,7 @@ fn send_fragmentable_ns(
     dst: Ipv4Addr,
     protocol: u8,
     payload: &[u8],
+    ttl: u8,
 ) -> KernelResult<()> {
     // Namespace-aware firewall outbound check.
     if !super::firewall::check_outbound_ns(ns_id, protocol, dst, payload) {
@@ -767,7 +786,7 @@ fn send_fragmentable_ns(
 
     if total_ip_len <= MTU {
         // Fits in one frame — send without DF (but no fragmentation needed).
-        let ip_packet = build_packet_no_df(our_ip, dst, protocol, payload, 0);
+        let ip_packet = build_packet_no_df(our_ip, dst, protocol, payload, 0, ttl);
         let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_packet);
         return super::send_frame_ns(ns_id, &frame);
     }
@@ -798,6 +817,7 @@ fn send_fragmentable_ns(
             ip_id,
             frag_offset_units,
             more_fragments,
+            ttl,
         );
         let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &frag_packet);
         super::send_frame_ns(ns_id, &frame)?;
@@ -819,6 +839,7 @@ fn build_packet_no_df(
     protocol: u8,
     payload: &[u8],
     ecn: u8,
+    ttl: u8,
 ) -> Vec<u8> {
     let total_len = IPV4_HEADER_SIZE + payload.len();
     let total_len_u16 = u16::try_from(total_len).unwrap_or(u16::MAX);
@@ -830,7 +851,7 @@ fn build_packet_no_df(
     pkt.extend_from_slice(&total_len_u16.to_be_bytes());
     pkt.extend_from_slice(&ip_id.to_be_bytes()); // Identification
     pkt.extend_from_slice(&0x0000u16.to_be_bytes()); // Flags=0 (no DF), offset=0
-    pkt.push(DEFAULT_TTL);
+    pkt.push(ttl);
     pkt.push(protocol);
     let cksum_off = pkt.len();
     pkt.extend_from_slice(&[0, 0]); // Checksum placeholder
@@ -858,6 +879,7 @@ fn build_fragment(
     ip_id: u16,
     frag_offset_units: u16,
     more_fragments: bool,
+    ttl: u8,
 ) -> Vec<u8> {
     let total_len = IPV4_HEADER_SIZE + payload.len();
     let total_len_u16 = u16::try_from(total_len).unwrap_or(u16::MAX);
@@ -876,7 +898,7 @@ fn build_fragment(
     pkt.extend_from_slice(&total_len_u16.to_be_bytes());
     pkt.extend_from_slice(&ip_id.to_be_bytes());
     pkt.extend_from_slice(&flags_frag.to_be_bytes());
-    pkt.push(DEFAULT_TTL);
+    pkt.push(ttl);
     pkt.push(protocol);
     let cksum_off = pkt.len();
     pkt.extend_from_slice(&[0, 0]); // Checksum placeholder
@@ -1127,9 +1149,14 @@ fn test_fragment_flags() -> KernelResult<()> {
 
     // Build a fragment with MF=1, offset=185 (1480 bytes / 8 = 185).
     let frag = build_fragment(
-        src, dst, PROTO_UDP, payload, 42,   // ip_id
+        src,
+        dst,
+        PROTO_UDP,
+        payload,
+        42,   // ip_id
         185,  // offset in 8-byte units
         true, // more_fragments
+        DEFAULT_TTL,
     );
     let parsed_frag = Ipv4Packet::parse(&frag)?;
 
@@ -1150,7 +1177,7 @@ fn test_fragment_flags() -> KernelResult<()> {
     }
 
     // Last fragment (MF=0, offset=370).
-    let last_frag = build_fragment(src, dst, PROTO_UDP, payload, 42, 370, false);
+    let last_frag = build_fragment(src, dst, PROTO_UDP, payload, 42, 370, false, DEFAULT_TTL);
     let parsed_last = Ipv4Packet::parse(&last_frag)?;
 
     if parsed_last.more_fragments() {

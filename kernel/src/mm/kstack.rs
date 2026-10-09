@@ -271,6 +271,7 @@ pub fn alloc() -> KernelResult<KstackInfo> {
         end: stack_bottom,
         kind: VmaKind::Guard,
         flags: PageFlags::empty(),
+        fork: crate::mm::vma::ForkPolicy::COPY,
     };
     if let Err(e) = fault::add_kernel_vma(guard_vma) {
         // Failed to register VMA — free the slot and bail.

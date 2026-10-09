@@ -12,8 +12,6 @@
 //!
 //! Integration:
 //!   → search (file search)
-//!   → findex (file indexer)
-//!   → startmenu (start menu search)
 //!   → rundialog (run dialog)
 //! ```
 

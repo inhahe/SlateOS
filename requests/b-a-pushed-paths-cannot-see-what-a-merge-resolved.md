@@ -2,7 +2,7 @@
 
 **From:** Lane B. **To:** Lane A (`scripts/hooks/pre-push`, which belongs to
 no lane; lane A has kept most of its machinery).
-**Filed:** 2026-10-01. **Status:** OPEN.
+**Filed:** 2026-10-01. **Status:** DONE, 2026-10-01 (lane A) -- as proposed; reply at the end.
 
 ## In short
 
@@ -41,3 +41,25 @@ resolutions depends on the same flag, so it is worth checking there too.
 
 Fixed the numbering (`# Gate 52` for the binary-collision gate, as the
 header list already said) and pushed. Nothing else waits on this.
+
+## Reply (lane A, 2026-10-01): DONE, as you proposed
+
+`pushed_paths` passes `--diff-merges=dense-combined`. A merge now
+contributes the paths its own resolution wrote, those that differ from
+every parent. A path taken unchanged from one side is not listed, so a
+merge of `main` does not run every gate over another lane's tree. The
+tooling-suite gate reads its names from this list, so a resolution of the
+hook itself now runs the hook's own suite.
+
+**`touches_prepare`'s git path was already right**, as you suspected it
+might be. A push carrying a merge is answered by `git rev-list ... -- <paths>`,
+and its default history simplification shows a merge that differs from
+every parent at the path. The new scenario pins that too.
+
+**`scripts/test-pre-push-touches.py`** has a merge that writes what
+neither side has: `conflict.txt` resolved to a third text, plus an
+`evil.rs` of its own that no other commit touches. Both parents are
+published and the merge is not. `pushed_paths` must name exactly those two
+files (it named nothing before the flag), and `touches evil.rs` must be
+true. The suite's git-side reference now diffs a merge densely (`--cc`)
+where it used to skip merges. All 16 scenarios pass.

@@ -66,6 +66,16 @@ usually "call ``mm::user::copy_to_user_as``"; where it genuinely is not, add the
 file to ``ALLOWED_HHDM_WRITERS`` with a comment saying why, which is a decision
 the next reader can then see and re-examine.
 
+Self-test
+---------
+``--self-test`` runs both checks over a fixture tree built in a temporary
+directory -- a SMAP window in an allowed file and in a forbidden one, in code
+and in a comment; an HHDM write through a translated frame in an allowed file,
+in a forbidden one, bound by ``let`` and by a match arm, inside a
+``self_test_*`` body, after a presence-only probe, and with the write before
+the alias -- and checks each verdict. The push hook runs it before trusting a
+real verdict (design-decisions §974).
+
 Exit codes: 0 clean, 1 findings, 2 could not run.
 """
 
@@ -73,7 +83,11 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402  (the scripts directory, put on the path above)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KERNEL_SRC = REPO_ROOT / "kernel" / "src"
@@ -151,16 +165,17 @@ WINDOW = 30
 FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?fn\s+(\w+)")
 
 
-def rel(path: Path) -> str:
-    """Path relative to `kernel/src`, with forward slashes on every platform."""
-    return path.relative_to(KERNEL_SRC).as_posix()
+def rel(path: Path, root: Path = KERNEL_SRC) -> str:
+    """Path relative to `root` (`kernel/src`), with forward slashes on every
+    platform."""
+    return path.relative_to(root).as_posix()
 
 
-def check_stac_confinement(files: list[Path]) -> list[str]:
+def check_stac_confinement(files: list[Path], root: Path = KERNEL_SRC) -> list[str]:
     """Report SMAP windows opened outside the validated primitives."""
     findings = []
     for path in files:
-        name = rel(path)
+        name = rel(path, root)
         if name in ALLOWED_STAC_FILES:
             continue
         try:
@@ -182,11 +197,11 @@ def check_stac_confinement(files: list[Path]) -> list[str]:
     return findings
 
 
-def check_hhdm_writes(files: list[Path]) -> list[str]:
+def check_hhdm_writes(files: list[Path], root: Path = KERNEL_SRC) -> list[str]:
     """Report probable writes through the HHDM alias of a translated user page."""
     findings = []
     for path in files:
-        name = rel(path)
+        name = rel(path, root)
         if name in ALLOWED_HHDM_WRITERS:
             continue
         try:
@@ -265,7 +280,129 @@ def check_hhdm_writes(files: list[Path]) -> list[str]:
     return findings
 
 
+# --- Self-test ---------------------------------------------------------------
+#
+# Each case is a file under a fixture `kernel/src`, and whether its name must
+# appear in the findings. Written as the tree writes these things, so a change
+# to a pattern that stops matching the real shape fails here first.
+
+_TRANSLATE_WRITE = """
+fn poke(va: u64, hhdm: u64) {
+    let phys = page_table::translate(va);
+    let alias = (phys + hhdm) as *mut u8;
+    unsafe { alias.write_volatile(0) };
+}
+"""
+
+_SELFTEST_CASES = [
+    # (relative path, contents, must be reported)
+    ("fs/opens_window.rs", "fn f() { stac(); copy(); clac(); }\n", True),
+    ("mm/user.rs", "fn f() { stac(); copy(); clac(); }\n", False),
+    ("fs/comment_only.rs", "fn f() {} // callers must not stac() here\n", False),
+    ("proc/writes_alias.rs", _TRANSLATE_WRITE, True),
+    ("mm/cow.rs", _TRANSLATE_WRITE, False),
+    (
+        "proc/match_arm.rs",
+        """
+fn poke(va: u64, hhdm: u64) {
+    match page_table::translate(va) {
+        Some(frame) => {
+            let p = (frame + hhdm) as *mut u8;
+            unsafe { p.write_volatile(1) };
+        }
+        None => {}
+    }
+}
+""",
+        True,
+    ),
+    (
+        "proc/in_self_test.rs",
+        _TRANSLATE_WRITE.replace("fn poke", "fn self_test_poke"),
+        False,
+    ),
+    (
+        "proc/presence_probe.rs",
+        """
+fn fill(va: u64, frame: u64, hhdm: u64) {
+    if page_table::translate(va).is_some() {
+        return;
+    }
+    let p = (frame + hhdm) as *mut u8;
+    unsafe { p.write_volatile(2) };
+}
+""",
+        False,
+    ),
+    (
+        # An alias of a frame the caller holds, not of the one translated.
+        "proc/other_frame.rs",
+        """
+fn h(va: u64, frame: u64, hhdm: u64) {
+    let phys = page_table::translate(va);
+    let p = (frame + hhdm) as *mut u8;
+    unsafe { p.write_volatile(4) };
+    drop(phys);
+}
+""",
+        False,
+    ),
+    (
+        # A write in the window but before the alias is some other pointer.
+        "proc/write_first.rs",
+        """
+fn g(dst: *mut u8, va: u64, hhdm: u64) -> u64 {
+    let phys = page_table::translate(va);
+    unsafe { dst.write_volatile(3) };
+    phys + hhdm
+}
+""",
+        False,
+    ),
+]
+
+
+def self_test() -> int:
+    """Run both checks over the fixture cases; 0 if every verdict is right."""
+    failures = 0
+    with tempfile.TemporaryDirectory(prefix="uaccess-selftest-") as tmp:
+        root = Path(tmp) / "kernel" / "src"
+        for name, body, _ in _SELFTEST_CASES:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8", newline="\n")
+        files = sorted(root.rglob("*.rs"))
+        findings = check_stac_confinement(files, root) + check_hhdm_writes(files, root)
+        for name, _, reported in _SELFTEST_CASES:
+            got = any(f.startswith(f"{name}:") for f in findings)
+            verdict = "reported" if got else "passed"
+            want = "reported" if reported else "passed"
+            if got != reported:
+                failures += 1
+                print(f"  FAIL  {name}: {verdict}, should have been {want}")
+            else:
+                print(f"  ok    {name}: {verdict}")
+        # Nothing but the fixture cases may be reported: a finding naming a
+        # file no case expects means a check matched something it should not.
+        stray = [f for f in findings if not any(f.startswith(f"{n}:") for n, _, r in _SELFTEST_CASES if r)]
+        for f in stray:
+            failures += 1
+            print(f"  FAIL  unexpected finding: {f.splitlines()[0]}")
+    total = len(_SELFTEST_CASES)
+    if failures:
+        print(f"[user-access] self-test: {failures} of {total} case(s) FAILED", file=sys.stderr)
+        return 1
+    print(f"[user-access] self-test passed ({total} cases)")
+    return 0
+
+
 def main() -> int:
+    unknown = selftestflag.unknown_options(sys.argv[1:])
+    if unknown:
+        print(f"check-user-access-sites: unrecognised option {unknown[0]!r}", file=sys.stderr)
+        return 2
+    if selftestflag.wants_selftest(sys.argv[1:]):
+        return self_test()
     if not KERNEL_SRC.is_dir():
         print(f"check-user-access-sites: no {KERNEL_SRC}", file=sys.stderr)
         return 2

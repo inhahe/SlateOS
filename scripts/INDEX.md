@@ -101,6 +101,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-option-stops.py` | Refuse a program that reports an unknown option and then keeps going. |
 | `scripts/check-overlay0-ink.py` | Refuse `overlay0` as the ink of text that is not in a disabled state. |
 | `scripts/check-pinned-target-build.py` | Compile every crate for the target it SHIPS to, when nothing else does. |
+| `scripts/check-program-catalogue.py` | Refuse a programs.md that is not what the workspace generates now. |
 | `scripts/check-query-status.py` | Guard the rule that answering a question is *not* reporting a failure. |
 | `scripts/check-ran-if.py` | Fail when a `RAN-IF` marker is not printed by the call it annotates. |
 | `scripts/check-read-defaults.py` | Find `.unwrap_or_default()` on a call that returns Option or Result to say |
@@ -223,6 +224,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
+| `scripts/gate-cache.py` | Replay a gate's passing verdict when nothing it read has changed. |
+| `scripts/gate-cost-report.py` | What each boot-test gate has cost, against what it has caught. |
+| `scripts/gatecache_site/sitecustomize.py` | Gate-cache bootstrap: trace this Python process when a cached gate runs it. |
+| `scripts/gatecache_tee.py` | Run one read-only git command for a traced gate, and record what it answered. |
+| `scripts/gatecache_trace.py` | Record everything a Python process reads, for the gate cache. |
 | `scripts/gather-notices.py` | Gather the third-party notices a SlateOS image must carry (design-decisions §1433). |
 | `scripts/gcc-spike/run.sh` | Cross-compile GCC's compilers (gcc, g++, cc1, cc1plus, ...) and link them against SlateOS's libc.a. |
 | `scripts/gdb-spike/run.sh` | Cross-compile upstream GDB, with GMP and MPFR, and link it against SlateOS's libc.a. |
@@ -242,6 +248,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gittree.py` | Read many blobs out of *one* git process instead of one process per blob. |
 | `scripts/grade-positional.py` | Grade the positional drift model against a *known* disturbance window. |
 | `scripts/grep-diff.sh` | Differential test: our grep against the host's GNU grep. |
+| `scripts/guest.py` | A SlateOS guest that stays up, and a way into it from the host. |
 | `scripts/hang-repro-loop.sh` | hang-repro-loop.sh — Repeatedly boot the (already-built) kernel to try to |
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
 | `scripts/hexdump-diff.sh` | Differential test: our `hexdump` against util-linux 2.39.3's. |
@@ -473,6 +480,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-check-boot-skips.py` | Regression tests for the never-running-self-test gate. |
 | `scripts/test-check-cp-diff-sees-nul.py` | Regression tests for `scripts/check-cp-diff-sees-nul.py`. |
 | `scripts/test-check-gated-selftests.py` | Regression tests for the never-ran-gated-self-test gate. |
+| `scripts/test-check-release-staleness.py` | Regression tests for `scripts/check-release-staleness.py`. |
 | `scripts/test-check-requests-not-deleted.py` | Regression tests for `scripts/check-requests-not-deleted.py`. |
 | `scripts/test-check-self-tests-wired.py` | Regression tests for the self-test wiring gate's `RAN-IF` markers. |
 | `scripts/test-checkers-honour-head.py` | Do the push gates' checkers judge the commit, or whatever is on the disk? |
@@ -482,9 +490,12 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
 | `scripts/test-docs-tools.py` | Tests for the shared-document tooling: doc_entries.py, docs_layout.py, |
 | `scripts/test-fastpy-slateos-bundle.py` | Regression tests for `scripts/fastpy-slateos-bundle.py`. |
+| `scripts/test-gate-cache.py` | Tests for the gate cache: `gate-cache.py`, `gatecache_trace.py`, `gatecache_tee.py`. |
+| `scripts/test-gate-cost-report.py` | Run `gate-cost-report.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-gather-notices.py` | The gate that keeps the image's third-party notices complete (design-decisions §1433). |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
+| `scripts/test-guest.py` | Tests for `guest.py`, the host's end of the guest agent's protocol. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
@@ -496,8 +507,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-fmt-gate.py` | Behavioural tests for pre-push gate 7 (rustfmt drift), and specifically for |
 | `scripts/test-pre-push-gates.py` | Structural tests for `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-identity-gate.py` | Behavioural tests for pre-push gate 10 (fixture-identity refusal). |
+| `scripts/test-pre-push-python-choice.py` | Tests for the interpreter `scripts/hooks/pre-push` runs its gates with. |
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
+| `scripts/test-pre-push-suites-scope.py` | Tests for which scripts a push counts as changed, in `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
+| `scripts/test-pre-push-tree-is-push.py` | Tests for `tree_is_push`, the precondition of pre-push gates 53-74. |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
 | `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
 | `scripts/test-program-catalogue.py` | The rule that every program is recorded: `programs.md` lists every binary. |
@@ -556,4 +570,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_546 scripts._
+_560 scripts._

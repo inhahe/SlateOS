@@ -299,6 +299,41 @@ pub fn online_count() -> usize {
     ONLINE_COUNT.load(Ordering::Acquire) as usize
 }
 
+/// The CPUs online now, as an affinity mask: bit N set when CPU N is
+/// [`is_online`]. What `sched_getaffinity` intersects a task's mask with, and
+/// what a new mask must overlap (`sched::set_affinity`).
+///
+/// `smp::MAX_CPUS` is at most 64 (asserted below), so one word holds every
+/// CPU.
+///
+/// Before [`init`] has run, the CPUs `smp` has brought up so far, which it
+/// numbers from 0 in order, the BSP first. Until 2026-10-08 this was empty
+/// then, which `sched::set_affinity` read as "not known yet" and so let any
+/// mask through: a ring-3 test, which runs before hotplug's `init`, pinned
+/// itself to a CPU 1 that a one-CPU machine does not have and was told it had
+/// moved (the first release boot of the rseq work, exit 0x36).
+#[must_use]
+pub fn online_mask() -> u64 {
+    const _: () = assert!(smp::MAX_CPUS <= 64, "an affinity mask is one u64");
+    if !INITIALIZED.load(Ordering::Acquire) {
+        let started = smp::cpu_count().clamp(1, smp::MAX_CPUS);
+        return u64::MAX
+            .checked_shr(u32::try_from(64usize.saturating_sub(started)).unwrap_or(63))
+            .unwrap_or(1);
+    }
+    let mut mask = 0u64;
+    for cpu in 0..smp::MAX_CPUS {
+        if is_online(cpu) {
+            // cpu < MAX_CPUS <= 64, so the shift is in range.
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                mask |= 1u64 << cpu;
+            }
+        }
+    }
+    mask
+}
+
 /// Offline a CPU — remove it from scheduling and park it.
 ///
 /// The CPU's tasks are migrated to other online CPUs before parking.

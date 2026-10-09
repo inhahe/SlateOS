@@ -404,6 +404,23 @@ pub type TtyId = u32;
 /// The physical keyboard-and-screen terminal.
 pub const CONSOLE: TtyId = 0;
 
+/// The device number of terminal `tty` ([`crate::fs::devnum`], Linux's
+/// numbering): the console is `/dev/console`, 5:1; pseudo-terminal slave `N`
+/// is `/dev/pts/N`, 136:N, where `N` is its id -- the number libc's
+/// `/dev/pts/N` names (`posix/src/file.rs`, `open_pty_device`). So a program
+/// that decodes a terminal's number (`ps`) or compares it with a device's
+/// `st_rdev` (`w`) needs no SlateOS knowledge
+/// (requests/b-ad-proc-stat-reports-no-controlling-terminal.md).
+#[must_use]
+pub const fn linux_dev(tty: TtyId) -> crate::fs::devnum::DevNum {
+    use crate::fs::devnum::{DevNum, TTYAUX_MAJOR, UNIX98_PTY_SLAVE_MAJOR};
+    if tty == CONSOLE {
+        DevNum::new(TTYAUX_MAJOR, 1)
+    } else {
+        DevNum::new(UNIX98_PTY_SLAVE_MAJOR, tty)
+    }
+}
+
 /// Where a terminal device's line discipline gets raw input bytes, and where
 /// its echo goes.
 ///
@@ -1826,7 +1843,11 @@ fn pty_wait_for<R>(
             }
             pty::insert_input_waiter(id, task);
         }
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::on(crate::wchan::WaitChannel::Terminal),
+        );
     };
 
     if let Some(t) = timer {
@@ -2237,6 +2258,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // termios round-trips losslessly through the 36-byte wire format.
     let back = Termios::from_bytes(&t.to_bytes());
     selftest::check_eq!(t, back, "termios round-trip");
+
+    // Terminal device numbers (the encoding itself is devnum's to test).
+    use crate::fs::devnum::DevNum;
+    selftest::check_eq!(linux_dev(CONSOLE), DevNum::new(5, 1), "the console is 5:1");
+    selftest::check_eq!(linux_dev(7), DevNum::new(136, 7), "pty 7 is pts/7, 136:7");
+    selftest::check_eq!(linux_dev(CONSOLE).linux_encode(), 0x501, "console's tty_nr");
     crate::serial_println!("[tty]   termios round-trip + defaults: OK");
 
     // Raw mode: clearing ICANON|ECHO survives serialisation.

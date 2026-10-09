@@ -5,6 +5,7 @@
 //! - **Channels** (primary): structured messages + capability transfer.
 //!   Async (buffered) by default, sync (rendezvous) as option.
 //! - **Pipes**: one-way byte streams with splice/vmsplice optimization.
+//! - **Named pipes** (FIFOs): pipes reached by a node in the filesystem.
 //! - **Shared memory**: direct memory sharing with ring buffer support,
 //!   futex signaling, and seqlocks.
 //! - **Eventfd counters**: lightweight wake-up notifications.
@@ -24,12 +25,14 @@ pub mod channel;
 pub mod completion;
 pub mod epoll;
 pub mod eventfd;
+pub mod fifo;
 pub mod futex;
 pub mod inotify;
 pub mod io_ring;
 pub mod memfd;
 pub mod multiwait;
 pub mod namespace;
+pub mod passed;
 pub mod pipe;
 pub mod semaphore;
 pub mod service;
@@ -40,6 +43,7 @@ pub mod stats;
 pub mod stream_socket;
 pub mod timer;
 pub mod timerfd;
+pub mod unix_socket;
 pub mod waiters;
 
 // Pipe splice/tee/vmsplice: the syscall-level transfers (sys_splice,
@@ -82,8 +86,28 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::Timer => {
                 timer::cancel(handle_raw);
             }
+            ResourceType::Semaphore => {
+                // Wakes any waiter, who gets `ChannelClosed`, as an explicit
+                // close does.
+                semaphore::close(semaphore::SemHandle::from_raw(handle_raw));
+            }
             ResourceType::StreamSocket => {
                 stream_socket::close(stream_socket::StreamSocketHandle::from_raw(handle_raw));
+            }
+            ResourceType::UnixSocket => {
+                // One holder fewer; the socket ends with its last, leaving its
+                // name leading nowhere.
+                unix_socket::close(unix_socket::UnixHandle::from_raw(handle_raw));
+            }
+            ResourceType::NativeSocket => {
+                // One holder fewer; the last closes the kernel TCP or UDP
+                // socket in order, as an exit closes every descriptor. A close
+                // that fails has still let go, and the process is gone
+                // either way.
+                let _ = crate::net::native_socket::release(
+                    handle_raw,
+                    crate::net::native_socket::Ending::Close,
+                );
             }
             ResourceType::MemFd => {
                 memfd::close(memfd::MemFdHandle::from_raw(handle_raw));
@@ -140,10 +164,36 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 // handle reaching this path was still open at exit.
                 let _ = crate::fs::handle::close(handle_raw);
             }
+            ResourceType::Namespace => {
+                // A handle on a namespace (`crate::nsfs`) -- the only
+                // `Namespace` entries a process's list holds; the authority to
+                // make and attach namespaces is a capability, gone with the
+                // capability table. One hold fewer; the namespace ends with
+                // its last holder.
+                crate::nsfs::release(handle_raw);
+            }
+            ResourceType::Service => {
+                // A service listener the process registered: unregistering
+                // frees the name for a restart and closes the connections
+                // nobody accepted. `InvalidHandle` means the process
+                // unregistered it already, which is no fault at exit.
+                if let Err(e) =
+                    service::unregister(service::ServiceListenerHandle::from_raw(handle_raw))
+                {
+                    if e != crate::error::KernelError::InvalidHandle {
+                        crate::serial_println!(
+                            "[ipc] cleanup: service listener {:#x} not unregistered: {:?}",
+                            handle_raw,
+                            e
+                        );
+                    }
+                }
+            }
             // No cleanup needed for these types — they're either
             // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw,
-            // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice) or
-            // managed by other subsystems (Socket, Service, Namespace).
+            // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice,
+            // CapBroker) or
+            // managed by other subsystems (Socket).
             //
             // BlockDevice is a token and not a handle because an open of
             // `/dev/vda` is an ordinary VFS open and registers an ordinary
@@ -167,13 +217,12 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::DeviceIrq
             | ResourceType::Socket
             | ResourceType::IoScheduler
-            | ResourceType::Service
             | ResourceType::NetRaw
             | ResourceType::SystemClock
             | ResourceType::PrivilegedPort
             | ResourceType::ResourceLimit
             | ResourceType::BlockDevice
-            | ResourceType::Namespace => {}
+            | ResourceType::CapBroker => {}
         }
     }
 }

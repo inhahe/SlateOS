@@ -1,0 +1,75 @@
+### [A] ptrace "Tier 2": attaching to a running program is not done, and five smaller gaps -- 2026-10-08
+
+**Status:** OPEN
+
+**What works** (design-decisions 1547): a debugger can start a program and
+debug it, threads and children included -- `PTRACE_TRACEME`; the exec,
+signal, exception, creation (`PTRACE_EVENT_CLONE`/`FORK`/`VFORK`/
+`VFORK_DONE`), exit (`PTRACE_EVENT_EXIT`) and system-call stops
+(`PTRACE_SYSCALL`, `SYSEMU`, `PTRACE_GET_SYSCALL_INFO`); new threads and
+children traced from their first instruction; a traced thread's end reported
+to its tracer's `wait`; the general, FPU, vector and debug registers
+(hardware breakpoints and watchpoints); memory (`PEEK`/`POKE`,
+`/proc/<pid>/mem`); `KILL`, `DETACH`, `EXITKILL` -- on both ABIs (Linux
+`ptrace`, native `SYS_PTRACE` 1149). That is lane D's Tier 1 and all of its
+Tier 2 but attaching
+(`requests/d-a-a-debugger-needs-ptrace-for-native-programs.md`).
+
+**What is missing,** each with where its fix goes:
+
+- **Attaching** (`PTRACE_ATTACH`, `SEIZE`, `INTERRUPT`, `LISTEN`): `EPERM`,
+  because the right to debug a process one did not start comes from
+  design-decisions 24's broker, which does not exist. Who should grant it
+  -- the user at a prompt, the program in advance, a debugger over its own
+  descendants, administrators -- is the operator's question A-Q25. The rest
+  is in place: `wait` already waits for a tracee that is not the caller's
+  child. `strace` tests `SEIZE` at its start and
+  uses `TRACEME` when it fails, so only `strace -p` and `gdb -p` need it.
+- **Exec from a thread that is not the first.** The exec ends every other
+  thread first, as Linux's `de_thread` does, but the thread that exec'd
+  keeps its own id, where Linux gives it the process's: `gettid` after such
+  an exec is not `getpid`, and a traced one's `PTRACE_EVENT_EXEC` message,
+  its former id, is its id still. The fix: the exec'ing thread takes the
+  leader's task id (`pcb::claim_leader_id`'s id), which needs the scheduler
+  to re-key a live task.
+- ~~**A traced child's end reaches its real parent at once.**~~ Fixed on
+  lane-a-wip 2026-10-08, awaiting a boot: a process traced by one that is
+  not its parent ends for its tracer first (`pcb::Process::exit_held`,
+  decided as it becomes a zombie); its parent's `wait` does not see it and
+  is sent no `SIGCHLD` until the tracer has waited for it or exited
+  (`thread::release_traced_exit`), as Linux's `wait_consider_task` and
+  `wait_task_zombie` do. A first thread that ends while its process has
+  threads left is reported with the process, once it has ended
+  (`delay_group_leader`). Checked by the tier-2 ring-3 test's sixth part.
+- ~~**`/proc/<pid>/mem` across an exec.**~~ Fixed on lane-a-wip
+  2026-10-08, awaiting a boot: an open of it is bound to its process's exec
+  generation (`Process::exec_gen`, the VFS's `open_binding` hook kept by the
+  handle), so after an exec it reads end-of-file and writes fail (`EIO`;
+  Linux writes nothing and answers 0), as Linux's, which holds the `mm` it
+  opened, does. That also keeps a descriptor to a process's own memory,
+  kept across its exec of a privileged program, from reaching the new
+  image (the Mempodipper hole). Checked by `procfs::self_test`.
+- **An untraced native program's `int3` or single step** is logged and the
+  program runs on: the native exception set has no breakpoint or trace code
+  (`proc::exception::ExceptionCode`). A Linux program, and any traced one,
+  gets `SIGTRAP`, as on Linux. (Until 2026-10-08 the IDT's breakpoint gate
+  had DPL 0, so a ring-3 `int3` was a #GP -- `SIGSEGV`, or a native
+  program killed -- and none of this ran; debug boot 13 of lane-a's ptrace
+  tier-2 test stopped with `SIGSEGV` at its breakpoint.)
+- **Small divergences, recorded so they are not rediscovered:** this
+  kernel's vfork does not hold the parent, so `PTRACE_EVENT_VFORK_DONE`
+  follows `PTRACE_EVENT_VFORK` at once; a single step over a `syscall`
+  instruction stops with `TRAP_TRACE` after the `SYSRET`, where Linux's
+  `user_single_step_report` says `TRAP_BRKPT` at the call's exit (both at
+  the next instruction; GDB treats both as the step); `PTRACE_PEEKSIGINFO`
+  lists a queue by signal number where Linux lists it in the order sent
+  (only the listing can tell: delivery always takes the lowest-numbered
+  signal first, `signal::peek_pending`). ~~`PTRACE_GETSIGMASK`,
+  `SETSIGMASK`, `PEEKSIGINFO` and `GET_RSEQ_CONFIGURATION` -- CRIU's -- are
+  `EIO`~~: done on lane-a-wip 2026-10-08, awaiting a boot, with
+  `OLDSETOPTIONS`, `GET`/`SET_SYSCALL_USER_DISPATCH_CONFIG` (always off:
+  syscall user dispatch is not offered) and `SECCOMP_GET_FILTER`/`METADATA`
+  (`EINVAL`: there are no filters); `INTERRUPT` and `LISTEN` are `EIO`, as
+  for any tracee not seized. Checked by the tier-2 ring-3 test's fifth part.
+
+**How to see it.** `PTRACE_ATTACH` from any program: `EPERM`.

@@ -24,8 +24,10 @@ use crate::mm::vma::{Vma, VmaKind};
 use crate::sched::task::TaskId;
 use crate::serial_println;
 use crate::sync::Mutex;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,10 +41,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// session.  PID 0 is the kernel, PID 1 is init.
 pub type ProcessId = u64;
 
-/// Counter for generating unique process IDs.
-/// Starts at 1 (PID 0 = kernel).
-static NEXT_PID: AtomicU64 = AtomicU64::new(1);
-
 /// Cumulative count of processes created since boot.
 ///
 /// Incremented once per successful process creation — both fresh
@@ -50,13 +48,17 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// counter (it never decrements when a process exits), which is exactly
 /// the semantics Linux's `/proc/stat` `processes` field reports.  It is
 /// distinct from the live process count (the size of `PROCESS_TABLE`):
-/// `NEXT_PID` also advances but is an implementation detail of PID
-/// allocation, so we keep a dedicated counter rather than deriving the
-/// value from it.
+/// the id counter also advances, for tasks as well as processes, so we keep
+/// a dedicated counter rather than deriving the value from it.
 static PROCESSES_CREATED: AtomicU64 = AtomicU64::new(0);
 
+/// A new process id, from the counter task ids come from
+/// ([`crate::sched::task::alloc_id`]): one id space, as Linux's. The
+/// process's first thread is then given this same number as its task id
+/// ([`claim_leader_id`]), so a process's id is its main thread's, and no
+/// task id is ever another process's id. Starts at 1: 0 is the kernel.
 fn alloc_pid() -> ProcessId {
-    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    crate::sched::task::alloc_id()
 }
 
 /// The PID [`alloc_pid`] would hand out next, without consuming it.
@@ -69,7 +71,7 @@ fn alloc_pid() -> ProcessId {
 /// side effect on the very sequence it is checking.
 #[must_use]
 pub fn peek_next_pid() -> ProcessId {
-    NEXT_PID.load(Ordering::Relaxed)
+    crate::sched::task::peek_next_id()
 }
 
 /// Cumulative number of processes created since boot.
@@ -96,42 +98,102 @@ pub fn processes_created() -> u64 {
 ///
 /// During early development, all processes run as uid=0 (root).
 /// The user/group model is enforced once a login service exists.
-#[derive(Debug, Clone)]
+///
+/// A process has four user ids and four group ids, as on Linux
+/// (`credentials(7)`): the **real** id says whom it acts for; the
+/// **effective** id decides what it may do -- `uid` and `gid` here, the
+/// fields every permission check has always read; the **saved** set-user-ID
+/// is one it may switch its effective id back to; and the **filesystem** id
+/// decides its file access and owns what it makes -- the effective id, unless
+/// `setfsuid` set it apart. `proc::setid` changes them by Linux's rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessCredentials {
-    /// User ID (0 = root/system).
+    /// Effective user ID (0 = root/system): what permission and authority
+    /// decisions use. Linux's `euid`.
     pub uid: u32,
-    /// Primary group ID.
+    /// Effective group ID. Linux's `egid`.
     pub gid: u32,
     /// Supplementary group IDs.
     pub groups: Vec<u32>,
+    /// Real user ID: whom the process acts for (`getuid`, a signal's
+    /// `si_uid`, per-user limits).
+    pub ruid: u32,
+    /// Saved set-user-ID: an id the effective one may return to without
+    /// privilege -- what lets root `seteuid(1000)` and later `seteuid(0)`.
+    pub suid: u32,
+    /// Filesystem user ID: whose files the process may open, and who owns
+    /// what it makes. Follows the effective id; `setfsuid` sets it apart.
+    pub fsuid: u32,
+    /// Real group ID.
+    pub rgid: u32,
+    /// Saved set-group-ID.
+    pub sgid: u32,
+    /// Filesystem group ID.
+    pub fsgid: u32,
 }
 
 impl ProcessCredentials {
     /// Create default (root) credentials.
     #[must_use]
     pub fn root() -> Self {
-        Self {
-            uid: 0,
-            gid: 0,
-            groups: Vec::new(),
-        }
+        Self::new(0, 0)
     }
 
-    /// Create credentials for a specific user/group.
-    #[allow(dead_code)] // Public API — used when login/user management is implemented.
+    /// Credentials for user `uid` and group `gid`: all four of each.
     #[must_use]
     pub fn new(uid: u32, gid: u32) -> Self {
         Self {
             uid,
             gid,
             groups: Vec::new(),
+            ruid: uid,
+            suid: uid,
+            fsuid: uid,
+            rgid: gid,
+            sgid: gid,
+            fsgid: gid,
         }
     }
 
-    /// Check if this process runs as root.
+    /// Check if this process runs as root (its effective user id is 0).
     #[must_use]
     pub fn is_root(&self) -> bool {
         self.uid == 0
+    }
+
+    /// Whether any of its real, effective and saved user ids is 0: root's
+    /// authority, put aside while the effective id is another, is within
+    /// reach (`change_credentials`).
+    #[must_use]
+    pub fn any_root_uid(&self) -> bool {
+        self.ruid == 0 || self.uid == 0 || self.suid == 0
+    }
+
+    /// Every user id -- real, effective, saved, filesystem -- `uid`: what a
+    /// privileged `setuid` and the native `SYS_PROCESS_SET_CREDENTIALS` do.
+    pub fn set_all_uids(&mut self, uid: u32) {
+        self.ruid = uid;
+        self.uid = uid;
+        self.suid = uid;
+        self.fsuid = uid;
+    }
+
+    /// Every group id `gid`, as [`set_all_uids`](Self::set_all_uids).
+    pub fn set_all_gids(&mut self, gid: u32) {
+        self.rgid = gid;
+        self.gid = gid;
+        self.sgid = gid;
+        self.fsgid = gid;
+    }
+
+    /// What an exec leaves: the saved and filesystem ids become the effective
+    /// ones, as Linux's exec sets them. No set-user-ID bit is honoured here,
+    /// so the effective ids stay as they were.
+    pub fn exec(&mut self) {
+        self.suid = self.uid;
+        self.fsuid = self.uid;
+        self.sgid = self.gid;
+        self.fsgid = self.gid;
     }
 }
 
@@ -148,6 +210,28 @@ pub enum ProcessState {
     Running,
     /// Process has exited (all threads done, waiting for parent to reap).
     Zombie,
+}
+
+/// What becomes of a process when it exits, decided at that moment from its
+/// parent's `SIGCHLD` disposition -- Linux's `do_notify_parent`.
+///
+/// A parent that sets `SIGCHLD` to `SIG_IGN`, or gives it `SA_NOCLDWAIT`, has
+/// said it will never `wait` for its children, and POSIX has the kernel reap
+/// them for it rather than leave zombies nobody will collect. Such a child is
+/// still published as a zombie for the instant its exit path takes to release
+/// it, so everything that runs at the zombie transition runs as before; every
+/// `wait` treats it as already gone, so the parent's last wait ends in
+/// `ECHILD` (see [`release_autoreaped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitNotice {
+    /// The default: a zombie for the parent's `wait`, and `SIGCHLD` sent.
+    Zombie,
+    /// The parent ignores `SIGCHLD`: reaped at once, and no signal sent.
+    ReapSilently,
+    /// The parent's `SIGCHLD` has `SA_NOCLDWAIT`: reaped at once, with the
+    /// signal still sent, as Linux does (it is the documented way to be told
+    /// of exits without collecting them).
+    ReapAndSignal,
 }
 
 /// A job-control state change that a parent's `wait()` has not yet consumed.
@@ -195,6 +279,22 @@ impl JobControlEvent {
                 w
             }
             Self::Continued => 0xffff,
+        }
+    }
+
+    /// This transition as `siginfo_t`'s `si_code` and `si_status`:
+    /// `CLD_STOPPED` and the stop signal, or `CLD_CONTINUED` and `SIGCONT`.
+    /// The sibling of [`ExitInfo::sigchld_code_and_status`], for the same
+    /// reason: one mapping for every report of the same change.
+    #[must_use]
+    pub fn sigchld_code_and_status(self) -> (i32, i32) {
+        use crate::proc::signal::{SIGCONT, si_code};
+        // Both values are below 256 (`& 0xff`; SIGCONT is 18), so neither
+        // cast can wrap.
+        #[allow(clippy::cast_possible_wrap)]
+        match self {
+            Self::Stopped(sig) => (si_code::CLD_STOPPED, (sig & 0xff) as i32),
+            Self::Continued => (si_code::CLD_CONTINUED, SIGCONT as i32),
         }
     }
 }
@@ -382,10 +482,36 @@ pub struct Process {
     pub sid: ProcessId,
     /// Thread IDs belonging to this process.
     pub threads: Vec<TaskId>,
+    /// The process's own id has been given to a thread, its first
+    /// ([`claim_leader_id`]). Never cleared: the id stays the leader's.
+    pub leader_id_claimed: bool,
+    /// The first thread's last scheduler snapshot, kept when it exits
+    /// ([`record_exited_leader`]), state `Dead`, so that `/proc/<pid>` goes on
+    /// describing it -- name, start time, CPU time -- for as long as the
+    /// process is in this table. Linux keeps the group leader's `task_struct`
+    /// as a zombie until the whole process is reaped, and its `stat`, `status`
+    /// and `comm` answer from it; the scheduler here frees a dead thread's
+    /// task at its next reap pass, whether or not the process has been
+    /// waited for. `None` while the first thread lives, and for a process
+    /// that never had one.
+    pub exited_leader: Option<crate::sched::TaskInfo>,
     /// Per-process capability table.
     pub cap_table: CapTable,
-    /// Exit code (set when all threads have exited).
+    /// Exit code (set when all threads have exited). For a death by signal
+    /// it reads as a shell's `$?` would, `128 + sig`; whether it *was* a
+    /// signal death is [`Self::term_signal`]'s to say, never this range's --
+    /// a program may exit with 128 to 255 itself.
     pub exit_code: Option<i32>,
+    /// The signal that ended the process, when one did: what a parent's
+    /// `wait` reports as `WIFSIGNALED`/`WTERMSIG`. Set with the exit code by
+    /// [`set_killed_by_signal`]; an explicit exit ([`set_exit_code`]) clears
+    /// it, so the two always describe the same ending.
+    pub term_signal: Option<u8>,
+    /// The process is ending as a whole -- a group exit (`exit_group`, the
+    /// native `SYS_EXIT`) or a fatal signal -- and its status is decided:
+    /// Linux's `SIGNAL_GROUP_EXIT`. A later group exit, fatal signal or
+    /// thread's `exit` does not change it ([`begin_group_exit`]).
+    pub group_exit: bool,
     /// Process credentials (uid, gid, supplementary groups).
     pub credentials: ProcessCredentials,
     /// PML4 physical address for this process's address space.
@@ -409,6 +535,29 @@ pub struct Process {
     /// the common case; concurrent waiters would race, which POSIX
     /// permits — one wins the reap, the other sees ECHILD/retries).
     pub wait_any_task: Option<TaskId>,
+    /// What becomes of this process at its exit ([`ExitNotice`]): decided
+    /// from the parent's `SIGCHLD` disposition when the last thread leaves,
+    /// and [`ExitNotice::Zombie`] until then.
+    pub exit_notice: ExitNotice,
+    /// A zombie whose end is its tracer's to report first: its first thread
+    /// is traced by a process that is not its parent
+    /// (`crate::proc::ptrace::holds_exit`). Until that tracer has waited for
+    /// it -- or let it go, by exiting -- its parent's `wait` does not see it
+    /// and the parent is sent no `SIGCHLD`; then [`release_exit_hold`] hands
+    /// it to the parent, as Linux's `EXIT_TRACE` does (`wait_task_zombie`).
+    /// Its [`ExitNotice`] is decided then, from the parent's disposition at
+    /// that moment.
+    pub exit_held: bool,
+    /// Threads of this process killed from elsewhere while some CPU was
+    /// still executing them ([`crate::sched::task_is_on_cpu`]).
+    ///
+    /// `kill_task` only marks such a thread `Dead`; its CPU runs it on, on
+    /// this process's page tables, until its next switch. Recorded by
+    /// `thread::on_thread_exit` before the zombie is published, and handed to
+    /// the teardown, which frees the address space only once every one of
+    /// them is off its CPU ([`free_address_space_when_unused`]). Empty for a
+    /// process whose threads all exited themselves, which is nearly all.
+    pub killed_on_cpu: Vec<TaskId>,
     /// Whether the process has signaled it is fully initialized.
     ///
     /// Set via `SYS_NOTIFY_READY` (508).  The init service manager
@@ -469,6 +618,20 @@ pub struct Process {
     /// `ipc_handles`, and the userspace `close()`/exit path releases each
     /// handle exactly once.  Consumed one-shot by the post-exec startup.
     pub exec_inherited_fds: Vec<(i32, u8, u64)>,
+    /// Handles to close when this process's next `exec` succeeds: those of
+    /// the descriptors libc drops as close-on-exec, as `(fd_handle_type,
+    /// handle)` (`SYS_PROCESS_SET_EXEC_CLOSE`). Without it, a dropped
+    /// descriptor's handle stayed open, unnamed, until the process exited,
+    /// so a close-on-exec pipe's reader saw no end-of-file for the life of
+    /// the new program
+    /// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+    ///
+    /// Every exec attempt takes it ([`take_exec_close_handles`]): a
+    /// successful one closes the handles and a failed one drops the list,
+    /// leaving them open as POSIX requires. So a stale list can never reach
+    /// a later exec, and libc sends it before each attempt, with the
+    /// kept-descriptor list.
+    pub exec_close_handles: Vec<(u8, u64)>,
     /// Initial command-line arguments for the child process.
     ///
     /// Each element is one argument as a byte string (NOT null-terminated
@@ -539,6 +702,13 @@ pub struct Process {
     /// in the sense of being rebuilt (a forked child shares the parent's
     /// already-constructed stack, so the copy is cloned verbatim).
     pub linux_saved_auxv: Option<alloc::vec::Vec<u8>>,
+    /// Where the main image's program headers are in this process
+    /// (`spawn::place_phdr_table`): what its C library reads to find its
+    /// thread-local storage template. Set at spawn and exec, for both ABIs
+    /// (a Linux-ABI process is told through `AT_PHDR` as well); a forked
+    /// child, with the same image, has the same. `None` before an image is
+    /// loaded, and for one with no program headers.
+    pub main_phdr: Option<crate::proc::spawn::MainPhdr>,
     /// Current working directory, stored as a canonical absolute path.
     ///
     /// Invariants maintained by [`set_cwd`]:
@@ -675,6 +845,11 @@ pub struct Process {
     /// (`membarrier_exec_mmap`); [`reset_linux_state_for_exec`] mirrors
     /// this, clearing the registration mask on every successful exec.
     pub membarrier_state: u32,
+    /// `mlockall(MCL_FUTURE)`: lock every mapping made from now on (and
+    /// fault it in, unless `MCL_ONFAULT`). `None` until asked; neither
+    /// inherited by `fork` nor kept by `exec`, as Linux's `mm->def_flags`
+    /// is not (`crate::mm::mlock`).
+    pub mlock_future: Option<crate::mm::mlock::FutureLock>,
     /// Linux `prctl(PR_SET_PDEATHSIG)` — signal to deliver to this
     /// process when its parent exits.  `0` means "disabled" (the
     /// default and what every freshly-forked process starts with).
@@ -684,53 +859,6 @@ pub struct Process {
     /// because we don't yet have user-signal infrastructure with the
     /// required lifecycle hooks.  See todo.txt entry for batch 61.
     pub linux_pdeathsig: u32,
-    /// Linux `sched_setscheduler(2)` policy ID for the process.
-    ///
-    /// Values match Linux's `SCHED_*` constants:
-    ///   - 0 = `SCHED_OTHER` (the default for every freshly-created
-    ///     task on Linux and what every shell-spawned process
-    ///     inherits)
-    ///   - 1 = `SCHED_FIFO` (real-time)
-    ///   - 2 = `SCHED_RR` (real-time)
-    ///   - 3 = `SCHED_BATCH`
-    ///   - 5 = `SCHED_IDLE`
-    ///   - 6 = `SCHED_DEADLINE`
-    ///   - 7 = `SCHED_EXT`
-    ///
-    /// We store the value purely for ABI round-trip — our actual
-    /// scheduler is a single priority-round-robin and does not honour
-    /// real-time policies.  Programs that query the policy after
-    /// setting it (and many do, as a sanity check) will at least see
-    /// their request reflected back, instead of always observing
-    /// `SCHED_OTHER`.  See todo.txt entry for batch 62.
-    pub linux_sched_policy: u32,
-    /// Static priority for the process, as set via
-    /// `sched_setscheduler` / `sched_setparam` and read via
-    /// `sched_getparam`.
-    ///
-    /// Range constraints are enforced at the syscall surface (the
-    /// pure helper `sched_priority_check_for_policy`):
-    ///   - `SCHED_FIFO` / `SCHED_RR`: 1..=99
-    ///   - everything else: must be exactly 0
-    ///
-    /// Storing it per-PCB lets the get-side report the value the
-    /// caller actually installed, instead of always 0.
-    pub linux_sched_priority: i32,
-    /// `SCHED_RESET_ON_FORK` bit, as requested via
-    /// `sched_setscheduler(pid, policy | 0x4000_0000, ...)` or
-    /// `sched_setattr` with `SCHED_FLAG_RESET_ON_FORK` (0x01) in
-    /// `sched_flags`.  Reported back by `sched_getscheduler`
-    /// (OR'd into the returned policy) and `sched_getattr`
-    /// (set in the returned `sched_flags`).
-    ///
-    /// Semantics mirror Linux v6.6 `__sched_fork`: a child of a task
-    /// that has this set does NOT inherit it — on fork the flag is
-    /// cleared and, if the parent had an RT/DL policy, the child's
-    /// policy is reset to `SCHED_NORMAL` with priority 0 (a negative
-    /// nice is also reset to 0).  Like the policy/priority fields this
-    /// is pure ABI bookkeeping — our scheduler is priority-round-robin
-    /// and does not act on it.
-    pub linux_sched_reset_on_fork: bool,
     /// Linux nice value, as set via `setpriority(2)` and reported via
     /// `getpriority(2)`.  Range -20..=19; default 0.
     ///
@@ -773,9 +901,10 @@ pub struct Process {
     /// semantics).  Linux *resets* dumpable to 1 on every successful
     /// `execve`, regardless of the prior value, unless the binary is
     /// setuid (then 2) or PR_SET_DUMPABLE(0) is "sticky" through
-    /// /proc/sys/fs/suid_dumpable — we don't model setuid binaries
-    /// and we don't have an exec hook for this yet, so the exec-time
-    /// reset is a known limitation tracked in todo.txt.
+    /// /proc/sys/fs/suid_dumpable — we don't model setuid binaries, so the
+    /// exec path resets it to 1 always (the exec-time reset of the Linux
+    /// per-process flags, below). One flag for both ABIs: native programs
+    /// read and set it with `SYS_PROCESS_DUMPABLE`.
     pub linux_dumpable: u32,
     /// Linux `prctl(PR_SET_NO_NEW_PRIVS)` sticky flag.  Once set to
     /// 1, execve(2) cannot grant privileges that the caller didn't
@@ -1137,24 +1266,35 @@ pub struct Process {
     /// Number of write-family syscalls issued (`syscw`).
     pub io_syscw: u64,
 
-    // --- Per-process CPU-time accounting (Linux tick-sampling model) ---
+    // --- Per-process CPU-time accounting ---
     //
-    // Live threads' CPU ticks are charged tick-by-tick on the scheduler
-    // (`Task::user_ticks`/`sys_ticks`).  When a thread exits it is removed
-    // from the scheduler, so its ticks would vanish; instead `on_thread_exit`
-    // folds the exiting thread's `(user_ticks, sys_ticks)` into these two
-    // accumulators.  A process's total CPU time is therefore
-    // `acct_user_ticks + Σ(live threads' user_ticks)` (and likewise for sys);
-    // see `proc::thread::process_cpu_ticks`.  This makes the self/thread CPU
-    // surfaces exact even for multi-threaded processes that have already
-    // reaped worker threads.  Reset to 0 for a freshly-forked child (Linux
-    // resets per-task CPU accounting on fork).
+    // Live threads' CPU time is kept on the scheduler: ticks charged
+    // tick-by-tick (`Task::user_ticks`/`sys_ticks`, Linux's tick sampling)
+    // and TSC cycles charged at each switch-out (`Task::total_cycles`). When
+    // a thread exits it is removed from the scheduler, so its time would
+    // vanish; instead `remove_thread` folds it into these accumulators, under
+    // this table's lock, in the same critical section that takes the thread
+    // off `threads`. A process's total is therefore the accumulator plus its
+    // live threads' (`process_cpu_sample`, which reads both under the same
+    // lock, so a thread's time is counted exactly once whichever side of its
+    // exit a reader falls). Reset to 0 for a freshly-forked child (Linux
+    // resets per-task CPU accounting on fork); kept across exec, as Linux's
+    // CPU clocks run on through it.
     /// Accumulated user-mode ticks from this process's already-exited
     /// threads (live threads are summed separately at query time).
     pub acct_user_ticks: u64,
     /// Accumulated kernel-mode ticks from this process's already-exited
     /// threads.
     pub acct_sys_ticks: u64,
+    /// Accumulated TSC cycles run by this process's already-exited threads
+    /// -- the precise counterpart of the two above, which the CPU-time
+    /// clocks read (`sched::CpuSample`).
+    pub acct_cycles: u64,
+    /// The running totals its CPU-time timers are checked against, which
+    /// every thread of it holds (`sched::ProcCpuAccount`): kept once such a
+    /// timer is armed ([`activate_cpu_account`]). A fork's child gets a new
+    /// one; exec keeps it, as Linux's CPU clocks and itimers run on.
+    pub cpu_account: Arc<crate::sched::ProcCpuAccount>,
 
     // --- Children CPU-time accounting (POSIX cutime/cstime) ---
     //
@@ -1166,11 +1306,26 @@ pub struct Process {
     // unreaped zombie's time is not yet visible to the parent), which is
     // exactly POSIX/Linux semantics.  Backs `times` `tms_cutime`/`tms_cstime`,
     // `getrusage(RUSAGE_CHILDREN)`, and `/proc/<pid>/stat` fields 16/17.
-    // Reset to 0 for a freshly-forked child.
-    /// Accumulated user-mode ticks of reaped descendant processes.
-    pub child_user_ticks: u64,
-    /// Accumulated kernel-mode ticks of reaped descendant processes.
-    pub child_sys_ticks: u64,
+    // Reset to 0 for a freshly-forked child. In nanoseconds: each child's
+    // run time split as `process_times` splits it (Linux's
+    // `thread_group_cputime_adjusted`), plus its own children's.
+    /// Accumulated user nanoseconds of reaped descendant processes.
+    pub child_utime_ns: u64,
+    /// Accumulated system nanoseconds of reaped descendant processes.
+    pub child_stime_ns: u64,
+    /// The user/system split of the process's run time last reported
+    /// (`process_times`), which keeps the next from going back -- Linux's
+    /// `signal->prev_cputime`.
+    pub prev_cputime: crate::sched::PrevCputime,
+    /// How many times the process has exec'd: the address space a
+    /// `/proc/<pid>/mem` opened before an exec reads is gone with it, and the
+    /// file reads end-of-file, as Linux's (which holds the `mm` it opened)
+    /// does (`fs::procfs`, [`note_exec`]).
+    pub exec_gen: u64,
+    /// The UTS namespace the process is in (`crate::utsns`): the host and
+    /// domain names it sees and sets. Holds one reference on it, given up
+    /// when the record goes (`finish_process`); inherited by fork and spawn.
+    pub uts_ns: crate::utsns::UtsNsId,
 
     // --- Per-process page-fault accounting (minflt/majflt) ---
     //
@@ -1325,18 +1480,26 @@ impl Process {
             pgid: pid,
             sid: pid,
             threads: Vec::new(),
+            leader_id_claimed: false,
+            exited_leader: None,
             cap_table: CapTable::new(),
             exit_code: None,
+            term_signal: None,
+            group_exit: false,
             credentials: ProcessCredentials::root(),
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
             wait_any_task: None,
+            exit_notice: ExitNotice::Zombie,
+            exit_held: false,
+            killed_on_cpu: Vec::new(),
             ready: false,
             vmas: Vec::new(),
             ipc_handles: Vec::new(),
             crash_info: None,
             initial_fds: Vec::new(),
             exec_inherited_fds: Vec::new(),
+            exec_close_handles: Vec::new(),
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
             // Persistent /proc snapshots — populated by set_initial_args
@@ -1346,6 +1509,7 @@ impl Process {
             abi_mode: AbiMode::Native,
             linux_fd_table: None,
             linux_saved_auxv: None,
+            main_phdr: None,
             // Every process starts at the filesystem root.  `chdir`
             // changes this; `fork_create` clones the parent's value.
             cwd: alloc::vec![b'/'],
@@ -1371,20 +1535,13 @@ impl Process {
             // A fresh mm has no membarrier registrations (Linux's
             // `mm->membarrier_state` starts at 0).
             membarrier_state: 0,
+            mlock_future: None,
             // PR_SET_PDEATHSIG default is "disabled".  Inherited
             // across fork as zero per Linux: see the explicit reset
             // in `kernel/copy_process` for the same reason
             // (children of a forked task do not inherit the
             // parent's death signal).
             linux_pdeathsig: 0,
-            // Default to SCHED_OTHER, priority 0 — what every freshly
-            // exec'd binary inherits on stock Linux.
-            linux_sched_policy: 0,
-            linux_sched_priority: 0,
-            // SCHED_RESET_ON_FORK defaults off for every freshly
-            // exec'd binary; it must be opted into via
-            // sched_setscheduler/sched_setattr.
-            linux_sched_reset_on_fork: false,
             // Default nice value is 0 on Linux for every freshly
             // exec'd binary that hasn't inherited a non-zero value.
             linux_nice: 0,
@@ -1449,8 +1606,13 @@ impl Process {
             // accounting for a freshly-forked child).
             acct_user_ticks: 0,
             acct_sys_ticks: 0,
-            child_user_ticks: 0,
-            child_sys_ticks: 0,
+            acct_cycles: 0,
+            cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
+            child_utime_ns: 0,
+            child_stime_ns: 0,
+            prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
+            exec_gen: 0,
+            uts_ns: crate::utsns::ROOT_UTS,
             acct_min_flt: 0,
             acct_maj_flt: 0,
             child_min_flt: 0,
@@ -1511,8 +1673,19 @@ pub const LINUX_PR_TSC_SIGSEGV: u32 = 2;
 /// name it if the exit/reap path wedges on it — this lock is on the suspected
 /// spawn/kill/reap hang path (`on_task_exit` → `get_crash_info`,
 /// `remove_thread`).
-static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
-    Mutex::named(BTreeMap::new(), b"PROCTBL");
+///
+/// **Boxed.** A `Process` is about 1.3 KiB, and a `BTreeMap` holding values
+/// inline passes the value by value through every level of an insert or a
+/// removal (`insert_recursing`, `split`, `slice_insert`; `remove_kv_tracking`,
+/// `bulk_steal_*`), each frame with its own copy in a debug build -- some
+/// 19 KiB of kernel stack for one process created, forked or reaped, and a
+/// 14 KiB node allocation per eleven processes. Boxed, the map moves pointers.
+/// The same pattern overran the stack in `proc::signal` on 2026-10-08
+/// (known-issues A-LARGE-KERNEL-STACK-FRAMES-REMAIN-IN-SELF-TESTS-AND-KSHELL).
+static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::named(BTreeMap::new(), b"PROCTBL");
+
+/// [`PROCESS_TABLE`]'s map: every process, boxed, by pid.
+type ProcessTable = BTreeMap<ProcessId, Box<Process>>;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1529,7 +1702,7 @@ static PROCESS_TABLE: Mutex<BTreeMap<ProcessId, Process>> =
 ///
 /// Returns the new process's PID.
 pub fn create(name: &str, parent: ProcessId) -> ProcessId {
-    let mut proc = Process::new(String::from(name), parent);
+    let mut proc = Box::new(Process::new(String::from(name), parent));
 
     // Allocate a per-process PML4 with kernel entries cloned.
     // If allocation fails, the process falls back to the kernel
@@ -1609,6 +1782,7 @@ pub fn fork_create(
         abi_mode,
         linux_fd_table,
         linux_saved_auxv,
+        main_phdr,
         cwd,
         root_dir,
         rlimits,
@@ -1618,8 +1792,6 @@ pub fn fork_create(
         linux_umask,
         linux_personality,
         membarrier_state,
-        linux_sched_policy,
-        linux_sched_priority,
         linux_nice,
         linux_dumpable,
         linux_no_new_privs,
@@ -1641,6 +1813,7 @@ pub fn fork_create(
         mmap_commit_policy,
         parent_pgid,
         parent_sid,
+        uts_ns,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1657,33 +1830,48 @@ pub fn fork_create(
             }
             copy
         });
-        // SCHED_RESET_ON_FORK (Linux v6.6 `__sched_fork`): a child never
-        // inherits the flag, and a parent that had it set forces the
-        // child's policy/priority/nice to be reset.  The reset rules
-        // live in the pure helper `sched_fork_child_params` so they can
-        // be unit-tested in isolation; the flag itself is always cleared
-        // in the child (hardcoded `false` in the Process literal below).
-        let (child_sched_policy, child_sched_priority, child_nice) = sched_fork_child_params(
-            parent.linux_sched_policy,
-            parent.linux_sched_priority,
-            parent.linux_nice,
-            parent.linux_sched_reset_on_fork,
-        );
+        // `madvise(MADV_DONTFORK)` regions are not the child's at all: no VMA
+        // (and `clone_address_space_cow` copied none of their pages). The
+        // child's address-space charge drops by their size, which is what a
+        // munmap of them would refund. A `wipe` region is kept: the child has
+        // the region, empty, and demand-zeroes it.
+        let dropped_bytes = parent
+            .vmas
+            .iter()
+            .filter(|v| v.fork.dont_copy)
+            .fold(0u64, |sum, v| {
+                sum.saturating_add(v.end.saturating_sub(v.start))
+            });
+        // Locks are not inherited, so the child's VMAs are not locked
+        // (and `clone_frame_group` clears the bit on its entries).
+        let child_vmas: Vec<Vma> = parent
+            .vmas
+            .iter()
+            .filter(|v| !v.fork.dont_copy)
+            .map(|v| Vma {
+                flags: crate::mm::page_table::PageFlags::from_bits(
+                    v.flags.bits() & !crate::mm::page_table::PageFlags::MLOCKED.bits(),
+                ),
+                ..*v
+            })
+            .collect();
         (
             parent.name.clone(),
             parent.cap_table.clone(),
             parent.credentials.clone(),
-            parent.vmas.clone(),
+            child_vmas,
             parent.abi_mode,
             cloned_fd_table,
             // A forked child shares the parent's already-built SysV
             // initial stack via CoW, so it carries the same auxv until
             // it execve's (which rebuilds it).
             parent.linux_saved_auxv.clone(),
+            // The same image, so the same program headers.
+            parent.main_phdr,
             parent.cwd.clone(),
             parent.root_dir.clone(),
             parent.rlimits,
-            parent.linux_as_bytes,
+            parent.linux_as_bytes.saturating_sub(dropped_bytes),
             // The child's address space mirrors the parent's, including its
             // heap, so it inherits the same brk floor and break.
             parent.brk_start,
@@ -1694,9 +1882,7 @@ pub fn fork_create(
             // memcpy, so a forked child inherits the parent's membarrier
             // registrations.
             parent.membarrier_state,
-            child_sched_policy,
-            child_sched_priority,
-            child_nice,
+            parent.linux_nice,
             parent.linux_dumpable,
             parent.linux_no_new_privs,
             parent.linux_thp_disable,
@@ -1726,31 +1912,33 @@ pub fn fork_create(
             // its own (unless it later calls setpgid/setsid).
             parent.pgid,
             parent.sid,
+            parent.uts_ns,
         )
     };
 
-    // Enforce RLIMIT_NPROC (resource index 6): per-uid count of live
-    // processes owned by `credentials.uid` must remain below the
-    // soft limit, else fork returns EAGAIN.  Linux exempts processes
-    // with CAP_SYS_RESOURCE / CAP_SYS_ADMIN; we don't have those caps
-    // wired up yet, so we exempt uid 0 (root) by convention — it's
-    // the same effective behaviour for the systems we run.
+    // Enforce RLIMIT_NPROC (resource index 6) as Linux's `copy_process`
+    // does: the processes whose *real* user id is the child's -- its
+    // parent's -- must stay within the soft limit, else fork returns
+    // EAGAIN. Exempt, as on Linux, the root user (a real id of 0,
+    // `INIT_USER`) and a caller with CAP_SYS_RESOURCE or CAP_SYS_ADMIN,
+    // which here is root's authority: an effective id of 0
+    // (`proc::setid`). Until 2026-10-08 the count and the exemption both
+    // read the effective id, so a `seteuid` moved a process's fork budget
+    // to another user's, and root with an effective id of 1000 was held to
+    // user 1000's limit.
     //
     // RLIM_INFINITY skips the check.  This runs against the just-
     // snapshotted parent rlimits and credentials; we already hold
     // the PROCESS_TABLE lock so the count is consistent with the
     // limit decision.
     let nproc_soft = rlimits[6].0;
-    if credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
-        let target_uid = credentials.uid;
+    if credentials.ruid != 0 && credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
+        let target_uid = credentials.ruid;
         let mut count: u64 = 0;
         for p in table.values() {
-            // Count only live processes (not Zombie/Exited): a zombie
-            // still occupies a PID slot until reaped, but Linux
-            // includes them in RLIMIT_NPROC since they still hold the
-            // uid quota.  We follow Linux and count all non-finalised
-            // processes regardless of state.
-            if p.credentials.uid == target_uid {
+            // Every process not yet reaped counts, zombies included: Linux
+            // gives a user's count back only when the process is released.
+            if p.credentials.ruid == target_uid {
                 count = count.saturating_add(1);
             }
         }
@@ -1774,7 +1962,7 @@ pub fn fork_create(
         .collect();
 
     let pid = alloc_pid();
-    let child = Process {
+    let child = Box::new(Process {
         pid,
         name,
         state: ProcessState::Creating,
@@ -1783,12 +1971,21 @@ pub fn fork_create(
         pgid: parent_pgid,
         sid: parent_sid,
         threads: Vec::new(),
+        leader_id_claimed: false,
+        // A fork child's first thread is its own, alive.
+        exited_leader: None,
         cap_table,
         exit_code: None,
+        term_signal: None,
+        group_exit: false,
         credentials,
         pml4_phys: child_pml4,
         wait_task: None,
         wait_any_task: None,
+        // Decided afresh at this child's own exit, from its own parent.
+        exit_notice: ExitNotice::Zombie,
+        exit_held: false,
+        killed_on_cpu: Vec::new(),
         ready: false,
         vmas,
         ipc_handles,
@@ -1797,6 +1994,7 @@ pub fn fork_create(
         // A fresh fork carries no pending exec fd-table snapshot; it is
         // populated only when this process later calls execve.
         exec_inherited_fds: Vec::new(),
+        exec_close_handles: Vec::new(),
         // argv/envp are not re-read by a forked child — its argument
         // vector already lives in its copy-on-write userspace memory.
         initial_argv: Vec::new(),
@@ -1814,6 +2012,7 @@ pub fn fork_create(
         abi_mode,
         linux_fd_table,
         linux_saved_auxv,
+        main_phdr,
         // POSIX: the child inherits the parent's cwd at the moment
         // of fork.  Subsequent chdirs in either process do not affect
         // the other (each owns its own Vec).
@@ -1846,26 +2045,19 @@ pub fn fork_create(
         // registrations.  Linux resets it on execve; we lack an exec-time
         // hook (see the field doc / todo.txt).
         membarrier_state,
+        // Not inherited: a child's memory is not locked (Linux).
+        mlock_future: None,
         // Linux: PR_SET_PDEATHSIG is reset across fork.  A parent
         // who has PDEATHSIG armed does not pass that arming to its
         // children; each child starts with no death signal and must
         // re-arm via prctl(PR_SET_PDEATHSIG) itself.  Same rule
         // applies across exec.  Match Linux exactly.
         linux_pdeathsig: 0,
-        // Linux: scheduling policy and priority are inherited verbatim
-        // across fork, UNLESS the parent had SCHED_RESET_ON_FORK set —
-        // in which case `__sched_fork` resets the child (RT/DL policy
-        // -> SCHED_NORMAL/prio 0, negative nice -> 0) and clears the
-        // flag.  `child_sched_policy` / `child_sched_priority` /
-        // `child_nice` (computed above) already encode that reset; the
-        // flag is unconditionally cleared here.
-        linux_sched_policy,
-        linux_sched_priority,
-        linux_sched_reset_on_fork: false,
         // Linux: nice value is inherited verbatim across fork and
-        // preserved across exec (the SCHED_RESET_ON_FORK reset above
-        // is the sole exception).  Forked children otherwise start
-        // with the same nice as their parent.
+        // preserved across exec. The one exception, a forking thread with
+        // SCHED_RESET_ON_FORK, is the fork's to apply (`proc::fork`), since
+        // the flag is the thread's (`sched::task::SchedAttr`), as are the
+        // policy and real-time priority, which lived here until 2026-10-07.
         linux_nice,
         // Linux: PR_SET_DUMPABLE state propagates verbatim across
         // fork.  Linux RESETS it to 1 on execve (unless the binary
@@ -1968,8 +2160,15 @@ pub fn fork_create(
         // time from this point, and has reaped no children of its own.
         acct_user_ticks: 0,
         acct_sys_ticks: 0,
-        child_user_ticks: 0,
-        child_sys_ticks: 0,
+        acct_cycles: 0,
+        cpu_account: Arc::new(crate::sched::ProcCpuAccount::new(pid)),
+        child_utime_ns: 0,
+        child_stime_ns: 0,
+        prev_cputime: crate::sched::PrevCputime { utime: 0, stime: 0 },
+        exec_gen: 0,
+        // The parent's UTS namespace, held once more below
+        // (`clone(CLONE_NEWUTS)` moves the child to a new one afterwards).
+        uts_ns,
         // Page-fault accounting also resets on fork.
         acct_min_flt: 0,
         acct_maj_flt: 0,
@@ -1989,11 +2188,18 @@ pub fn fork_create(
         // child runs the same image, so it honours the same commit policy
         // until it execs.
         mmap_commit_policy,
-    };
+    });
 
     table.insert(pid, child);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
+    // The child's hold on its UTS namespace. Under the process table, which
+    // `utsns` never takes: the order is one way only.
+    crate::utsns::retain(uts_ns);
     drop(table);
+    // Its parent's mount namespace (`crate::fs::mntns`, leaf locks only).
+    // The child has no thread yet, so nothing resolves a path for it before
+    // this. `clone(CLONE_NEWNS)` moves it to a copy afterwards.
+    crate::fs::mntns::inherit(parent_pid, pid);
 
     // Bump the backing-file reference for each file-backed VMA the child
     // inherited.  Done with the process-table lock released — the open-file
@@ -2001,6 +2207,12 @@ pub fn fork_create(
     for handle in fork_retain_handles {
         let _ = crate::fs::handle::dup_shared(handle);
     }
+
+    // The child inherits RLIMIT_CPU and RLIMIT_RTTIME, and is held to them
+    // by its own CPU time: arm the thresholds on its (fresh) clock. Its
+    // itimers are not inherited, as on Linux.
+    crate::proc::cputimer::rlimit_cpu_changed(pid);
+    crate::proc::cputimer::rlimit_rttime_changed(pid);
 
     Ok(pid)
 }
@@ -2016,30 +2228,106 @@ pub fn set_running(pid: ProcessId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Claim process `pid`'s own id for the thread about to be created: `true`
+/// the first time it is asked for a live process, `false` ever after (and
+/// for a process that is gone).
+///
+/// `proc::thread` asks before creating each thread and gives the claimed
+/// id to the first, so a process's id is its main thread's task id, as on
+/// Linux: `gettid() == getpid()` in the main thread, and `/proc/<pid>` --
+/// keyed by task id -- is the process. The id comes from the counter task
+/// ids come from ([`alloc_pid`]), so no other task can hold it.
+#[must_use]
+pub fn claim_leader_id(pid: ProcessId) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    match table.get_mut(&pid) {
+        Some(proc) if !proc.leader_id_claimed => {
+            proc.leader_id_claimed = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Add a thread to a process.
 pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.threads.push(task_id);
+    // The thread charges its process's running CPU-time totals from now on
+    // (`PROCESS_TABLE` -> `SCHED`, the documented order). Under the table's
+    // lock, so `activate_cpu_account` sees it either in `threads` or holding
+    // the account, never neither.
+    crate::sched::set_cpu_account(task_id, Arc::clone(&proc.cpu_account));
     Ok(())
 }
 
-/// Per-thread accounting totals captured at thread-exit time.
+/// Make process `pid`'s running CPU-time totals be kept, if they are not
+/// already -- a CPU-time timer is being armed against it -- and answer its
+/// account, or `None` if there is no such process.
 ///
-/// When a thread exits it is removed from the scheduler, so the
-/// per-task counters it carried (`Task::user_ticks`/`sys_ticks` and
-/// `Task::min_flt`/`maj_flt`) would otherwise vanish.  The caller
-/// (`proc::thread::on_thread_exit`) snapshots them from the scheduler
-/// while the task is still alive and passes them to [`remove_thread`],
-/// which folds them into the owning process's `acct_*` accumulators so
-/// a process's totals stay exact across thread reaping.
+/// Filled from the same snapshot [`process_counters`] reads, under the
+/// table's lock and then the scheduler's (`sched::activate_cpu_account`), so
+/// the totals agree with the process's clocks from the first tick.
+pub fn activate_cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuAccount>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    if !proc.cpu_account.is_active() {
+        let exited = crate::sched::CpuSample {
+            cycles: proc.acct_cycles,
+            user_ticks: proc.acct_user_ticks,
+            sys_ticks: proc.acct_sys_ticks,
+        };
+        crate::sched::activate_cpu_account(&proc.cpu_account, exited, &proc.threads);
+    }
+    Some(Arc::clone(&proc.cpu_account))
+}
+
+/// Process `pid` is exec'ing: the address space it had is about to go, and
+/// with it anything bound to it (`Process::exec_gen`). A no-op for a process
+/// that is not there.
+pub fn note_exec(pid: ProcessId) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        proc.exec_gen = proc.exec_gen.wrapping_add(1);
+    }
+}
+
+/// How many times process `pid` has exec'd ([`note_exec`]), or `None` if
+/// there is no such process.
+#[must_use]
+pub fn exec_generation(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exec_gen)
+}
+
+/// Process `pid`'s CPU-time account, active or not, or `None` if there is no
+/// such process.
+#[must_use]
+pub fn cpu_account(pid: ProcessId) -> Option<Arc<crate::sched::ProcCpuAccount>> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| Arc::clone(&p.cpu_account))
+}
+
+/// Per-thread accounting totals folded into a process as the thread leaves it.
+///
+/// When a thread exits it is removed from the scheduler, so the per-task
+/// counters it carried (`Task::user_ticks`/`sys_ticks`, `total_cycles`,
+/// `min_flt`/`maj_flt`, `nvcsw`/`nivcsw`) would otherwise vanish.
+/// [`remove_exiting_thread`] reads them from the scheduler itself, under the
+/// table's lock (see [`process_counters`] for why there); [`remove_thread`]
+/// folds the ones its caller gives -- zero for a thread that never ran, or a
+/// self-test's synthetic values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ThreadExitAccounting {
     /// User-mode (ring 3) CPU time of the exiting thread, in timer ticks.
     pub user_ticks: u64,
     /// Kernel-mode (ring 0) CPU time of the exiting thread, in timer ticks.
     pub sys_ticks: u64,
+    /// TSC cycles the exiting thread ran (`Task::total_cycles`, and those
+    /// since it was last switched in).
+    pub cycles: u64,
     /// Minor page faults charged to the exiting thread.
     pub min_flt: u64,
     /// Major page faults charged to the exiting thread.
@@ -2048,6 +2336,90 @@ pub struct ThreadExitAccounting {
     pub nvcsw: u64,
     /// Involuntary context switches charged to the exiting thread.
     pub nivcsw: u64,
+}
+
+impl From<crate::sched::TaskCounters> for ThreadExitAccounting {
+    fn from(c: crate::sched::TaskCounters) -> Self {
+        Self {
+            user_ticks: c.cpu.user_ticks,
+            sys_ticks: c.cpu.sys_ticks,
+            cycles: c.cpu.cycles,
+            min_flt: c.min_flt,
+            maj_flt: c.maj_flt,
+            nvcsw: c.nvcsw,
+            nivcsw: c.nivcsw,
+        }
+    }
+}
+
+/// What a parent's `SIGCHLD` disposition makes of a child that exits now --
+/// [`ExitNotice`].
+///
+/// Read from the kernel's record of the parent's signals, which both ABIs
+/// keep current: the native libc through `SYS_SIGNAL_SET_IGNORED`, the Linux
+/// shim at each `rt_sigaction`. A kernel parent (pid 0) is never told and
+/// never asks.
+///
+/// Called with `PROCESS_TABLE` held: it takes only the signal registry's
+/// lock, which never takes this one.
+fn exit_notice_for(parent: ProcessId) -> ExitNotice {
+    use crate::proc::signal;
+    if parent == 0 {
+        ExitNotice::Zombie
+    } else if signal::is_ignored(parent, signal::SIGCHLD) {
+        ExitNotice::ReapSilently
+    } else if signal::nocldwait(parent) {
+        ExitNotice::ReapAndSignal
+    } else {
+        ExitNotice::Zombie
+    }
+}
+
+/// Hand zombie `pid`, whose end its tracer held ([`Process::exit_held`]), to
+/// its parent: its tracer has waited for it, or has exited. Its
+/// [`ExitNotice`] is decided now, from the parent's `SIGCHLD` disposition as
+/// it is now, as Linux's `wait_task_zombie` asks `do_notify_parent` only
+/// then. Returns the waiters its end wakes -- a task waiting for `pid` itself
+/// and one of the parent's waiting for any child -- or `None` when it was not
+/// held (or is gone), and nothing changed: the caller then tells nobody.
+pub fn release_exit_hold(pid: ProcessId) -> Option<(Option<TaskId>, Option<TaskId>)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).filter(|p| p.exit_held)?;
+    proc.exit_held = false;
+    let parent = proc.parent;
+    if parent != pid {
+        proc.exit_notice = exit_notice_for(parent);
+    }
+    let wake = proc.wait_task.take();
+    let any = if parent == pid {
+        None
+    } else {
+        table.get_mut(&parent).and_then(|p| p.wait_any_task.take())
+    };
+    Some((wake, any))
+}
+
+/// The [`ExitNotice`] decided for `pid` when it became a zombie, or `None`
+/// if there is no such process.
+///
+/// For `thread::on_thread_exit`, which decides from it whether to send the
+/// parent `SIGCHLD` and whether to release the process itself. Nothing else
+/// can release a process whose notice is not [`ExitNotice::Zombie`] -- every
+/// `wait` treats it as gone -- so the answer stays good until that release.
+#[must_use]
+pub fn exit_notice(pid: ProcessId) -> Option<ExitNotice> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exit_notice)
+}
+
+/// Record that `task`, a thread of `pid`, was killed from elsewhere while a
+/// CPU was still executing it -- see [`Process::killed_on_cpu`]. A no-op if
+/// `pid` is gone.
+pub fn note_killed_on_cpu(pid: ProcessId, task: TaskId) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        if !proc.killed_on_cpu.contains(&task) {
+            proc.killed_on_cpu.push(task);
+        }
+    }
 }
 
 /// Remove a thread from a process.
@@ -2065,22 +2437,73 @@ pub struct ThreadExitAccounting {
 /// When a process becomes a zombie, all its living children are
 /// reparented to PID 1 (init) and registered as orphans so init
 /// can reap them when they eventually exit.
+///
+/// Folds the counters `acct` gives: zero for a thread that never ran, or a
+/// self-test's synthetic values. A thread that ran leaves through
+/// [`remove_exiting_thread`], which reads its counters from the scheduler.
 pub fn remove_thread(
     pid: ProcessId,
     task_id: TaskId,
     acct: ThreadExitAccounting,
 ) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
+    remove_thread_counting(pid, task_id, Some(acct)).map(|r| (r.zombie, r.wake, r.any_waiter))
+}
+
+/// What taking a thread off its process came to ([`remove_exiting_thread`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadRemoved {
+    /// It was the last: the process is a zombie now.
+    pub zombie: bool,
+    /// A task blocked waiting for this process, to wake.
+    pub wake: Option<TaskId>,
+    /// A task of the parent's blocked waiting for any child, to wake.
+    pub any_waiter: Option<TaskId>,
+    /// The zombie's end is its tracer's to report first
+    /// ([`Process::exit_held`]): the parent is told nothing now -- that is
+    /// [`release_exit_hold`]'s, later, exactly once -- and `wake` and
+    /// `any_waiter` are `None`, left registered for then.
+    pub held: bool,
+}
+
+/// [`remove_thread`] for a thread that has run and is exiting
+/// (`thread::on_thread_exit`): the counters folded into the process are the
+/// thread's own, read from the scheduler under this table's lock, in the same
+/// critical section that takes it off `threads` -- which is what lets
+/// [`process_counters`] count it exactly once. Its task must still be in the
+/// scheduler; the scheduler frees it later.
+pub fn remove_exiting_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<ThreadRemoved> {
+    remove_thread_counting(pid, task_id, None)
+}
+
+/// The body of [`remove_thread`] and [`remove_exiting_thread`]: `given` is
+/// the counters to fold, or `None` to read them from the scheduler.
+fn remove_thread_counting(
+    pid: ProcessId,
+    task_id: TaskId,
+    given: Option<ThreadExitAccounting>,
+) -> KernelResult<ThreadRemoved> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
+    let was_thread = proc.threads.contains(&task_id);
     proc.threads.retain(|&t| t != task_id);
 
     // Fold the exiting thread's per-task counters into the per-process
-    // accumulators so they survive the thread's removal from the scheduler.
-    // The caller captured these from the scheduler while the task was still
-    // alive (the scheduler frees the Task after this point).
+    // accumulators so they survive the thread's removal from the scheduler
+    // (which frees the Task after this point). Read here, under the lock
+    // and after the thread has left `threads`, so no reader of
+    // `process_counters` can see it both live and folded, or neither. Only
+    // a thread that was the process's: a stray id names someone else's task.
+    let acct = match given {
+        Some(acct) => acct,
+        None if was_thread => crate::sched::task_counters(task_id)
+            .map(ThreadExitAccounting::from)
+            .unwrap_or_default(),
+        None => ThreadExitAccounting::default(),
+    };
     proc.acct_user_ticks = proc.acct_user_ticks.saturating_add(acct.user_ticks);
     proc.acct_sys_ticks = proc.acct_sys_ticks.saturating_add(acct.sys_ticks);
+    proc.acct_cycles = proc.acct_cycles.saturating_add(acct.cycles);
     proc.acct_min_flt = proc.acct_min_flt.saturating_add(acct.min_flt);
     proc.acct_maj_flt = proc.acct_maj_flt.saturating_add(acct.maj_flt);
     proc.acct_nvcsw = proc.acct_nvcsw.saturating_add(acct.nvcsw);
@@ -2094,10 +2517,26 @@ pub fn remove_thread(
         // Capture the final exit code for the container layer (init-exit
         // notification) before the lock is dropped below.
         let zombie_exit_code = proc.exit_code.unwrap_or(0);
-        let wake = proc.wait_task.take();
         // Capture the parent before re-borrowing the table so we can
         // wake any `waitpid(-1)` waiter blocked in the parent.
         let parent_of_zombie = proc.parent;
+        // Traced by a process that is not its parent: its end goes to the
+        // tracer first (`Process::exit_held`), decided under this lock so
+        // that no `wait` of the parent's sees it in between. Its parent's
+        // waiters stay registered, to be woken when it is released.
+        proc.exit_held =
+            parent_of_zombie != pid && crate::proc::ptrace::holds_exit(pid, parent_of_zombie);
+        let held = proc.exit_held;
+        let wake = if held { None } else { proc.wait_task.take() };
+        // Whether the parent will ever collect this zombie, decided now and
+        // under this lock, so that no `wait` can see the process as a zombie
+        // its parent asked never to be left (`ExitNotice`). The parent's
+        // waiters are still woken below: one whose last child this was must
+        // learn there is nothing left (ECHILD). A held zombie's is decided
+        // when it is released.
+        if parent_of_zombie != pid && !held {
+            proc.exit_notice = exit_notice_for(parent_of_zombie);
+        }
 
         // Reparent living children to init (PID 1).
         //
@@ -2116,7 +2555,7 @@ pub fn remove_thread(
         // the parent re-registers on its next blocking wait if more
         // children remain.  Guard against a process being its own
         // parent (kernel pid 0 / pathological cases).
-        let any_waiter = if parent_of_zombie != pid {
+        let any_waiter = if parent_of_zombie != pid && !held {
             table
                 .get_mut(&parent_of_zombie)
                 .and_then(|p| p.wait_any_task.take())
@@ -2140,10 +2579,15 @@ pub fn remove_thread(
         // A no-op for ordinary (non-container-init) processes.
         crate::container::notify_init_exit(pid, zombie_exit_code);
 
-        return Ok((true, wake, any_waiter));
+        return Ok(ThreadRemoved {
+            zombie: true,
+            wake,
+            any_waiter,
+            held,
+        });
     }
 
-    Ok((false, None, None))
+    Ok(ThreadRemoved::default())
 }
 
 /// Grant a capability to a process.
@@ -2342,9 +2786,17 @@ pub fn inherit_caps_from(parent: ProcessId, child: ProcessId) -> usize {
         // child with most of its parent's authority is strictly better than a
         // process that could not start, and `insert_caps` above already
         // established that precedent for capability transfer over IPC.
+        // What the parent's entry has put aside goes with the copy, as with
+        // a fork's: the child's credentials decide, once they are set
+        // (`inherit_credentials`), whether it is ever given back.
         if proc
             .cap_table
-            .insert(entry.resource_type, entry.resource_id, entry.rights)
+            .insert_with_suspended(
+                entry.resource_type,
+                entry.resource_id,
+                entry.rights,
+                entry.suspended,
+            )
             .is_ok()
         {
             copied = copied.saturating_add(1);
@@ -2689,8 +3141,13 @@ pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
     //                      256-slot table and a 1 MiB path buffer sized
     //                      from it) — see known-issues.md.
     (linux_fd::MAX_FDS_U64, linux_fd::MAX_FDS_U64),
-    // 8  RLIMIT_MEMLOCK:    mlock()'d memory.  No tracker.
-    (RLIM_INFINITY, RLIM_INFINITY),
+    // 8  RLIMIT_MEMLOCK:    bytes in locked VMAs (`mm::mlock`). Linux's
+    //                      default since 5.16, 8 MiB, soft and hard: a
+    //                      process without the `MEMORY_LOCK` right may pin
+    //                      that much and no more. It was infinity while
+    //                      nothing was locked, which as a limit on real
+    //                      pinning would let any process hold every frame.
+    (8 * 1024 * 1024, 8 * 1024 * 1024),
     // 9  RLIMIT_AS:         address-space size.  No tracker.
     (RLIM_INFINITY, RLIM_INFINITY),
     // 10 RLIMIT_LOCKS:      fcntl(F_SETLK) lock count.  No tracker.
@@ -2699,9 +3156,13 @@ pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
     (65_536, 65_536),
     // 12 RLIMIT_MSGQUEUE:   POSIX message-queue bytes.  Linux default.
     (819_200, 819_200),
-    // 13 RLIMIT_NICE:       nice ceiling.  We don't support nice.
+    // 13 RLIMIT_NICE:       how far a process may raise its own nice
+    //                       (`proc::priority`).  Linux default: none.
     (0, 0),
-    // 14 RLIMIT_RTPRIO:     real-time priority ceiling.  No RT today.
+    // 14 RLIMIT_RTPRIO:     the real-time priority a process may give its
+    //                       threads without the IO_REALTIME right
+    //                       (`proc::priority::needs_the_right`).  Linux
+    //                       default: none.
     (0, 0),
     // 15 RLIMIT_RTTIME:     max contiguous RT CPU microseconds.
     (RLIM_INFINITY, RLIM_INFINITY),
@@ -2781,11 +3242,28 @@ const _: () = assert!(rlimit_defaults_are_ordered());
 
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource`.
 ///
+/// `RLIMIT_CPU`'s and `RLIMIT_RTTIME`'s soft limit read as far as a
+/// `SIGXCPU` has raised it, which the table records a moment later
+/// ([`crate::proc::cputimer::effective_limit`]): a `SIGXCPU` handler that
+/// asks is told the raised limit, as on Linux.
+///
 /// Returns `None` if `pid` is unknown or `resource >= NUM_RLIMITS`.
 /// Callers in kernel context (no live PCB) should use
 /// [`DEFAULT_RLIMITS`] directly rather than going through this lookup.
 #[must_use]
 pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
+    let stored = get_rlimit_stored(pid, resource)?;
+    // With the process table let go: the CPU-time limits take their own lock.
+    Some(crate::proc::cputimer::effective_limit(
+        pid, resource, stored,
+    ))
+}
+
+/// [`get_rlimit`] as the process table holds it, without a raise the
+/// CPU-time limits have made and not yet written back: for those limits'
+/// own bookkeeping (`crate::proc::cputimer`).
+#[must_use]
+pub fn get_rlimit_stored(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
     if resource >= NUM_RLIMITS {
         return None;
     }
@@ -2908,6 +3386,50 @@ pub fn set_rlimit(
         return Err(KernelError::PermissionDenied);
     }
     proc.rlimits[resource as usize] = (new_cur, new_max);
+    drop(table);
+    // RLIMIT_CPU is enforced by thresholds on the process's CPU time, armed
+    // from the limits (Linux's `update_rlimit_cpu`); after the table's lock,
+    // which arming takes.
+    if resource == crate::proc::cputimer::RLIMIT_CPU {
+        crate::proc::cputimer::rlimit_cpu_changed(pid);
+    }
+    // RLIMIT_RTTIME by the tick's count of a real-time thread's running,
+    // against the limits it reads from the process's CPU account.
+    if resource == crate::proc::cputimer::RLIMIT_RTTIME {
+        crate::proc::cputimer::rlimit_rttime_changed(pid);
+    }
+    Ok(())
+}
+
+/// Raise `pid`'s soft limit for `resource` to `new_cur`, as a `SIGXCPU`
+/// does: Linux's `check_thread_timers` and `check_process_timers` write
+/// `rlim_cur` directly, past none of [`set_rlimit`]'s checks -- so
+/// `RLIMIT_RTTIME`'s, which moves a second at a time in microseconds, passes
+/// a hard limit less than a second above it (100 ms soft and 300 ms hard read
+/// 1.1 s and 300 ms after the first `SIGXCPU`, and the hard limit's `SIGKILL`
+/// still comes at 300 ms). Only upward: a raise that arrives after a later
+/// one, or after the process set the limit itself, changes nothing. The
+/// enforcement already has the new threshold (`crate::proc::cputimer`), so
+/// nothing is re-armed.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a `resource` past the table, `NoSuchProcess` for a
+/// `pid` that is gone.
+pub fn raise_soft_rlimit(pid: ProcessId, resource: u32, new_cur: u64) -> KernelResult<()> {
+    if resource >= NUM_RLIMITS {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let limit = proc
+        .rlimits
+        .get_mut(resource as usize)
+        .ok_or(KernelError::InvalidArgument)?;
+    let (cur, max) = *limit;
+    if cur != RLIM_INFINITY && new_cur > cur {
+        *limit = (new_cur, max);
+    }
     Ok(())
 }
 
@@ -3177,36 +3699,57 @@ pub fn ctty_tty_of(pid: ProcessId) -> Option<u32> {
 /// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
 /// - [`KernelError::NotSupported`] (ENOTTY) if `pid`'s session has no
 ///   controlling terminal.
-/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
-/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
-///   in the caller's session.
+/// - [`KernelError::NoSuchProcess`] (ESRCH) if no live process is in group
+///   `pgid` -- 0 included, as Linux's `tiocspgrp` -- judged after the
+///   terminal.
+/// - [`KernelError::PermissionDenied`] (EPERM) if group `pgid` is in another
+///   session.
 pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
-    if pgid == 0 {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    // Resolve the caller's session and validate the destination group in one
+    // Resolve the caller's session and judge the destination group in one
     // pass over the process table, then drop it before locking the ctty map.
-    let (sid, group_ok) = {
+    let (sid, group) = {
         let table = PROCESS_TABLE.lock();
         let me = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
         let sid = me.sid;
-        let ok = table
-            .values()
-            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie);
-        (sid, ok)
+        (sid, judge_fg_group(&table, pgid, sid))
     };
 
     let mut map = CTTY_FG_PGRP.lock();
     // Check for the terminal before the group, so a process with no terminal
-    // at all gets ENOTTY rather than a permission verdict about a group it
-    // was never entitled to name.
+    // at all gets ENOTTY rather than a verdict about a group it was never
+    // entitled to name -- Linux's `tiocspgrp` order.
     let slot = map.get_mut(&sid).ok_or(KernelError::NotSupported)?;
-    if !group_ok {
-        return Err(KernelError::PermissionDenied);
-    }
+    group?;
     slot.fg_pgrp = pgid;
     Ok(())
+}
+
+/// Whether `pgid` may become the foreground group of a terminal held by
+/// session `sid`, in Linux `tiocspgrp`'s terms, checked after the terminal
+/// itself:
+/// - `NoSuchProcess` (ESRCH) when no live process is in group `pgid`, which
+///   includes group 0: there is none;
+/// - `PermissionDenied` (EPERM) when the group lives in another session;
+/// - `Ok` otherwise.
+///
+/// Until 2026-10-01 a 0 was refused up front with `InvalidArgument`, before
+/// the terminal checks, and a group that did not exist read the same as one
+/// in another session (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+fn judge_fg_group(table: &ProcessTable, pgid: ProcessId, sid: ProcessId) -> KernelResult<()> {
+    let mut exists = false;
+    for p in table.values() {
+        if p.pgid == pgid && pgid != 0 && p.state != ProcessState::Zombie {
+            if p.sid == sid {
+                return Ok(());
+            }
+            exists = true;
+        }
+    }
+    if exists {
+        Err(KernelError::PermissionDenied)
+    } else {
+        Err(KernelError::NoSuchProcess)
+    }
 }
 
 /// Set the foreground process group of terminal `tty`, whoever holds it.
@@ -3234,17 +3777,14 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
 /// the POSIX group rule.
 ///
 /// # Errors
-/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
 /// - [`KernelError::NotSupported`] (ENOTTY) if no session holds `tty` — a pty
 ///   whose slave has not yet run `TIOCSCTTY` has no foreground group to set,
 ///   and inventing one would be a value nothing consults.
-/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
-///   in the session holding `tty`.
+/// - [`KernelError::NoSuchProcess`] (ESRCH) if no live process is in group
+///   `pgid`, 0 included.
+/// - [`KernelError::PermissionDenied`] (EPERM) if group `pgid` is in a session
+///   other than the one holding `tty`.
 pub fn ctty_set_fg_pgrp_on(tty: u32, pgid: ProcessId) -> KernelResult<()> {
-    if pgid == 0 {
-        return Err(KernelError::InvalidArgument);
-    }
-
     // Three short critical sections rather than one, because the two locks may
     // never be held together (see the note on `CTTY_FG_PGRP`) and this needs
     // both: the ctty map to learn *which* session to validate against, then
@@ -3258,15 +3798,7 @@ pub fn ctty_set_fg_pgrp_on(tty: u32, pgid: ProcessId) -> KernelResult<()> {
     }
     .ok_or(KernelError::NotSupported)?;
 
-    let group_ok = {
-        let table = PROCESS_TABLE.lock();
-        table
-            .values()
-            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie)
-    };
-    if !group_ok {
-        return Err(KernelError::PermissionDenied);
-    }
+    judge_fg_group(&PROCESS_TABLE.lock(), pgid, sid)?;
 
     let mut map = CTTY_FG_PGRP.lock();
     let slot = map
@@ -3426,6 +3958,27 @@ pub fn set_pgid(caller: ProcessId, target: ProcessId, pgid: ProcessId) -> Kernel
     Ok(())
 }
 
+/// Put `child` in `parent`'s process group and session, as a spawned child
+/// with a parent starts (POSIX `posix_spawn`: the child is in its parent's
+/// group unless `POSIX_SPAWN_SETPGROUP` says otherwise, and its session
+/// unless `POSIX_SPAWN_SETSID` does) -- what [`fork_create`] gives a forked
+/// child. [`create`] makes every process lead a group and session of its
+/// own, which is right only for one the kernel starts.
+///
+/// # Errors
+/// [`KernelError::NoSuchProcess`] if either process is gone.
+pub fn inherit_job(child: ProcessId, parent: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let (pgid, sid) = table
+        .get(&parent)
+        .map(|p| (p.pgid, p.sid))
+        .ok_or(KernelError::NoSuchProcess)?;
+    let proc = table.get_mut(&child).ok_or(KernelError::NoSuchProcess)?;
+    proc.pgid = pgid;
+    proc.sid = sid;
+    Ok(())
+}
+
 /// `setsid()` core: make `pid` a new session and process-group leader.
 ///
 /// On success sets `sid = pgid = pid` and returns the new session ID
@@ -3476,6 +4029,21 @@ pub fn pids_in_group(pgid: ProcessId) -> Vec<ProcessId> {
     table
         .values()
         .filter(|p| p.pgid == pgid && p.state != ProcessState::Zombie)
+        .map(|p| p.pid)
+        .collect()
+}
+
+/// Collect the PIDs of all live (non-zombie) processes whose real uid is
+/// `uid` -- the processes `setpriority`/`getpriority`'s `PRIO_USER` names
+/// (`proc::priority`).
+///
+/// Returns an empty vector if no live process has that uid.
+#[must_use]
+pub fn pids_of_user(uid: u32) -> Vec<ProcessId> {
+    let table = PROCESS_TABLE.lock();
+    table
+        .values()
+        .filter(|p| p.credentials.ruid == uid && p.state != ProcessState::Zombie)
         .map(|p| p.pid)
         .collect()
 }
@@ -3652,103 +4220,6 @@ pub fn set_pdeathsig(pid: ProcessId, sig: u32) -> Option<u32> {
     Some(old)
 }
 
-/// Read the recorded `sched_setscheduler` policy for `pid`.
-///
-/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
-/// default (SCHED_OTHER) for every newly-created process that has
-/// not yet called `sched_setscheduler`.
-#[must_use]
-pub fn get_sched_policy(pid: ProcessId) -> Option<u32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_sched_policy)
-}
-
-/// Install a new scheduling policy for `pid`, returning the prior
-/// value.  Caller is responsible for policy validation (this helper
-/// stores whatever value it is given).  Returns `None` if `pid` is
-/// unknown.
-pub fn set_sched_policy(pid: ProcessId, policy: u32) -> Option<u32> {
-    let mut table = PROCESS_TABLE.lock();
-    let proc = table.get_mut(&pid)?;
-    let old = proc.linux_sched_policy;
-    proc.linux_sched_policy = policy;
-    Some(old)
-}
-
-/// Compute a forked child's `(policy, priority, nice)` from the parent's
-/// values and whether the parent had `SCHED_RESET_ON_FORK` set, per
-/// Linux v6.6 `__sched_fork`.  The child never inherits the flag itself
-/// (the caller stores `false`); this helper only resolves the reset of
-/// the scheduling triple:
-///
-/// - Parent flag clear: child inherits `(policy, priority, nice)`
-///   verbatim.
-/// - Parent flag set, RT (FIFO=1, RR=2) / DEADLINE (6): policy resets to
-///   `SCHED_NORMAL` (0), priority to 0, nice to 0
-///   (`static_prio = NICE_TO_PRIO(0)`).
-/// - Parent flag set, NORMAL/BATCH/IDLE: policy kept, priority kept
-///   (already 0 for these), and a *negative* nice is reset to 0 while a
-///   non-negative nice is preserved.
-#[must_use]
-pub fn sched_fork_child_params(
-    parent_policy: u32,
-    parent_priority: i32,
-    parent_nice: i32,
-    parent_reset_on_fork: bool,
-) -> (u32, i32, i32) {
-    if !parent_reset_on_fork {
-        return (parent_policy, parent_priority, parent_nice);
-    }
-    match parent_policy {
-        1 | 2 | 6 => (0, 0, 0),
-        other => (other, parent_priority, parent_nice.max(0)),
-    }
-}
-
-/// Read the recorded `SCHED_RESET_ON_FORK` flag for `pid`.
-///
-/// Returns `None` if `pid` is unknown; `Some(false)` is the default
-/// for a process that has never opted into the flag.
-#[must_use]
-pub fn get_sched_reset_on_fork(pid: ProcessId) -> Option<bool> {
-    PROCESS_TABLE
-        .lock()
-        .get(&pid)
-        .map(|p| p.linux_sched_reset_on_fork)
-}
-
-/// Set the `SCHED_RESET_ON_FORK` flag for `pid`, returning the prior
-/// value.  Returns `None` if `pid` is unknown.
-pub fn set_sched_reset_on_fork(pid: ProcessId, on: bool) -> Option<bool> {
-    let mut table = PROCESS_TABLE.lock();
-    let proc = table.get_mut(&pid)?;
-    let old = proc.linux_sched_reset_on_fork;
-    proc.linux_sched_reset_on_fork = on;
-    Some(old)
-}
-
-/// Read the recorded `sched_priority` for `pid`.
-///
-/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
-/// default (SCHED_OTHER demands priority 0).
-#[must_use]
-pub fn get_sched_priority(pid: ProcessId) -> Option<i32> {
-    PROCESS_TABLE
-        .lock()
-        .get(&pid)
-        .map(|p| p.linux_sched_priority)
-}
-
-/// Install a new sched priority for `pid`, returning the prior
-/// value.  Caller is responsible for range validation against the
-/// process's current policy.  Returns `None` if `pid` is unknown.
-pub fn set_sched_priority(pid: ProcessId, prio: i32) -> Option<i32> {
-    let mut table = PROCESS_TABLE.lock();
-    let proc = table.get_mut(&pid)?;
-    let old = proc.linux_sched_priority;
-    proc.linux_sched_priority = prio;
-    Some(old)
-}
-
 /// Read the recorded `setpriority` nice value for `pid`.
 ///
 /// Returns `None` if `pid` is unknown; `Some(0)` is the documented
@@ -3784,6 +4255,59 @@ pub fn set_nice(pid: ProcessId, nice: i32) -> Option<i32> {
 #[must_use]
 pub fn get_dumpable(pid: ProcessId) -> Option<u32> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_dumpable)
+}
+
+/// Whether `reader` may inspect `target`: read what `/proc/<pid>/` says
+/// of its environment, memory layout, I/O and waits. Linux's
+/// `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`, in this kernel's terms
+/// (design-decisions §1516).
+///
+/// `None` as the reader is the kernel, which may inspect anything; `None` as
+/// the target is a kernel task, which belongs to no process and only uid 0
+/// may inspect. Otherwise, any of:
+/// - the reader is the target;
+/// - the reader runs as uid 0, as Linux's `CAP_SYS_PTRACE`;
+/// - the reader's filesystem uid and gid are each of the target's real,
+///   effective and saved ids, and the target is dumpable (`PR_SET_DUMPABLE`
+///   left at 1, `SUID_DUMP_USER`) -- Linux's `__ptrace_may_access` for
+///   `PTRACE_MODE_FSCREDS`: a target that switched ids is no longer simply
+///   its user's;
+/// - the reader holds a `Process` capability for the target with `READ`.
+#[must_use]
+pub fn may_inspect(reader: Option<ProcessId>, target: Option<ProcessId>) -> bool {
+    may_access(reader, target, Rights::READ)
+}
+
+/// [`may_inspect`], with the capability path asking for `rights` instead of
+/// `READ` -- `WRITE` for a change to the target through `/proc` (its
+/// `oom_score_adj`). The identity paths are the same: the kernel, the target
+/// itself, uid 0, and the target's own user while it is dumpable.
+#[must_use]
+pub fn may_access(reader: Option<ProcessId>, target: Option<ProcessId>, rights: Rights) -> bool {
+    let Some(reader) = reader else {
+        return true;
+    };
+    let reader_creds = get_credentials(reader);
+    let is_root = reader_creds
+        .as_ref()
+        .is_some_and(ProcessCredentials::is_root);
+    let Some(target) = target else {
+        return is_root;
+    };
+    if reader == target || is_root {
+        return true;
+    }
+    let same_user = match (reader_creds, get_credentials(target)) {
+        (Some(r), Some(t)) => {
+            [t.ruid, t.uid, t.suid].iter().all(|&id| id == r.fsuid)
+                && [t.rgid, t.gid, t.sgid].iter().all(|&id| id == r.fsgid)
+        }
+        _ => false,
+    };
+    if same_user && get_dumpable(target) == Some(1) {
+        return true;
+    }
+    has_capability_for(reader, ResourceType::Process, target, rights)
 }
 
 /// Install a new dumpable flag for `pid`, returning the prior
@@ -4296,7 +4820,7 @@ pub fn try_get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 }
 
 /// Charge `bytes` to the process's Linux address-space accounting and
-/// enforce [`RLIMIT_AS`] (resource index 9).
+/// enforce `RLIMIT_AS` (resource index [`RLIMIT_AS_INDEX`], 9).
 ///
 /// Called from the Linux `mmap` translation layer with the *aligned*
 /// mapping size before delegating to the native mmap path.  Returns
@@ -4444,6 +4968,69 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.exit_code = Some(code);
+    // An exit status replaces any earlier death by signal: the last word on
+    // how the process ended is both fields' together.
+    proc.term_signal = None;
+    Ok(())
+}
+
+/// Record that `pid` is ending because of signal `sig`: its parent's `wait`
+/// will report `WIFSIGNALED` with `WTERMSIG == sig`, and its exit code reads
+/// `128 + sig`, the status a shell shows for such a death. Every kernel path
+/// that kills a process for a signal records the death through this, never
+/// as a bare exit code -- an exit code of 128 to 255 is an exit
+/// (requests/b-ad-an-exit-status-of-128-to-255-is-reported-as-a-signal-death.md).
+///
+/// # Errors
+///
+/// `NoSuchProcess` if `pid` is not in the process table.
+pub fn set_killed_by_signal(pid: ProcessId, sig: u8) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    // A process already ending as a whole keeps the status that began it
+    // (Linux's `complete_signal` makes a fatal signal a group exit only when
+    // none is under way).
+    if !proc.group_exit {
+        proc.exit_code = Some(128i32.saturating_add(i32::from(sig)));
+        proc.term_signal = Some(sig);
+        proc.group_exit = true;
+    }
+    Ok(())
+}
+
+/// Begin the group exit of process `pid` with exit status `code` (Linux's
+/// `do_group_exit`): `true` for the first, whose caller then ends the other
+/// threads; `false` if the process is already ending as a whole -- an earlier
+/// group exit, or a fatal signal -- whose status stands, or is gone.
+pub fn begin_group_exit(pid: ProcessId, code: i32) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    if proc.group_exit {
+        return false;
+    }
+    proc.group_exit = true;
+    proc.exit_code = Some(code);
+    proc.term_signal = None;
+    true
+}
+
+/// A thread's own `exit` (Linux's `exit`, not `exit_group`) with `code`: the
+/// process's status, as the last thread's code is when no group exit decided
+/// one (measured on Linux 6.6) -- unless one has. `NoSuchProcess` if `pid` is
+/// gone.
+///
+/// # Errors
+///
+/// `NoSuchProcess` if `pid` is not in the process table.
+pub fn set_thread_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    if !proc.group_exit {
+        proc.exit_code = Some(code);
+        proc.term_signal = None;
+    }
     Ok(())
 }
 
@@ -4470,7 +5057,7 @@ pub type JcWaiters = (Option<TaskId>, Option<TaskId>);
 /// pid (captured before the second mutable borrow).  Factored out so
 /// [`record_jc_stopped`] and [`record_jc_continued`] share identical wake
 /// semantics.
-fn take_jc_waiters(table: &mut BTreeMap<ProcessId, Process>, pid: ProcessId) -> JcWaiters {
+fn take_jc_waiters(table: &mut ProcessTable, pid: ProcessId) -> JcWaiters {
     let (wake, parent) = match table.get_mut(&pid) {
         Some(proc) => (proc.wait_task.take(), proc.parent),
         None => return (None, None),
@@ -4483,40 +5070,71 @@ fn take_jc_waiters(table: &mut BTreeMap<ProcessId, Process>, pid: ProcessId) -> 
     (wake, any)
 }
 
-/// Record that `pid` has been stopped by job-control signal `sig`.
+/// The waiters to wake when a thread of `tracee` stops for its tracer
+/// `tracer` (`crate::proc::ptrace`): a task blocked waiting for `tracee`
+/// itself, and one of the tracer's blocked waiting for any child -- taken, as
+/// [`take_jc_waiters`] takes a parent's.
+pub fn take_trace_waiters(tracee: ProcessId, tracer: ProcessId) -> JcWaiters {
+    let mut table = PROCESS_TABLE.lock();
+    let wake = table.get_mut(&tracee).and_then(|p| p.wait_task.take());
+    let any = if tracer == tracee {
+        None
+    } else {
+        table.get_mut(&tracer).and_then(|p| p.wait_any_task.take())
+    };
+    (wake, any)
+}
+
+/// Record that `pid` has been stopped by job-control signal `sig` -- if it
+/// was not stopped already.
 ///
-/// Sets the stopped flag and records a `Stopped(sig)` report for the
-/// parent's `wait()` to observe.  Because stop and continue are mutually
-/// exclusive transitions, this supersedes any not-yet-reported `Continued`
-/// (overwriting `jc_report`).  Returns the parent-side waiters to wake (see
-/// [`JcWaiters`]).
+/// For a running process: sets the stopped flag and records a
+/// `Stopped(sig)` report for the parent's `wait()` to observe, superseding
+/// any not-yet-reported `Continued` (stop and continue are mutually
+/// exclusive transitions), and returns the parent-side waiters to wake (see
+/// [`JcWaiters`]). For one already stopped, `None` and nothing recorded: a
+/// second stop signal is no second stop, and the parent, told once, is not
+/// told again (Linux leaves the signal pending until a `SIGCONT` discards
+/// it). The counterpart of [`record_jc_continued`].
 ///
 /// This only updates job-control bookkeeping — actually suspending the
 /// process's threads is the caller's responsibility (the signal-delivery
 /// path), keeping this module free of scheduler coupling.
 ///
 /// Returns `NoSuchProcess` if `pid` is unknown.
-pub fn record_jc_stopped(pid: ProcessId, sig: u32) -> KernelResult<JcWaiters> {
+pub fn record_jc_stopped(pid: ProcessId, sig: u32) -> KernelResult<Option<JcWaiters>> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    if proc.stopped {
+        return Ok(None);
+    }
     proc.stopped = true;
     proc.jc_report = Some(JobControlEvent::Stopped(sig));
-    Ok(take_jc_waiters(&mut table, pid))
+    Ok(Some(take_jc_waiters(&mut table, pid)))
 }
 
-/// Record that `pid` has been continued by `SIGCONT`.
+/// Record that `pid` has been continued by `SIGCONT` -- if it was stopped.
 ///
-/// Clears the stopped flag and records a `Continued` report, superseding any
-/// not-yet-reported `Stopped`.  Returns the parent-side waiters to wake (see
-/// [`JcWaiters`]).  Actually resuming the threads is the caller's job.
+/// For a stopped process: clears the stopped flag and records a `Continued`
+/// report, superseding any not-yet-reported `Stopped`, and returns the
+/// parent-side waiters to wake (see [`JcWaiters`]). For one that was not
+/// stopped, `None` and nothing recorded: a `SIGCONT` to a running process is
+/// no continue, and `waitpid(WCONTINUED)` reports none (Linux's
+/// `prepare_signal` marks a continue only when the process was stopped). The
+/// test and the record are one step under the table's lock, so of two racing
+/// `SIGCONT`s only one continues. Actually resuming the threads is the
+/// caller's job.
 ///
 /// Returns `NoSuchProcess` if `pid` is unknown.
-pub fn record_jc_continued(pid: ProcessId) -> KernelResult<JcWaiters> {
+pub fn record_jc_continued(pid: ProcessId) -> KernelResult<Option<JcWaiters>> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    if !proc.stopped {
+        return Ok(None);
+    }
     proc.stopped = false;
     proc.jc_report = Some(JobControlEvent::Continued);
-    Ok(take_jc_waiters(&mut table, pid))
+    Ok(Some(take_jc_waiters(&mut table, pid)))
 }
 
 /// Whether `pid` is currently stopped (threads suspended for job control).
@@ -4583,6 +5201,7 @@ pub fn jc_report_for_child(
     let mut table = PROCESS_TABLE.lock();
     let proc = table
         .get_mut(&child_pid)
+        .filter(|p| is_collectable(p))
         .ok_or(KernelError::NoSuchProcess)?;
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
@@ -4653,6 +5272,7 @@ fn jc_report_matching(
         if proc.parent == parent_pid
             && proc.pid != parent_pid
             && pgid_filter.is_none_or(|g| proc.pgid == g)
+            && is_collectable(proc)
         {
             has_child = true;
             if jc_event_matches(proc.jc_report, want_stopped, want_continued) {
@@ -4694,7 +5314,13 @@ pub fn set_crash_info(pid: ProcessId, info: CrashInfo) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
-    proc.exit_code = Some(crash_exit_code(info.exception_code));
+    // The crash ends the process as a whole -- unless it is ending already
+    // (a group exit, a fatal signal), whose status stands; the details are
+    // kept either way.
+    if !proc.group_exit {
+        proc.exit_code = Some(crash_exit_code(info.exception_code));
+        proc.group_exit = true;
+    }
     proc.crash_info = Some(info);
     Ok(())
 }
@@ -4716,24 +5342,53 @@ pub fn get_crash_info(pid: ProcessId) -> Option<CrashInfo> {
 #[derive(Debug, Clone)]
 pub struct ExitInfo {
     /// Process exit code.  Normal exit: >= 0.  Crash: < 0 (negated
-    /// exception code).
+    /// exception code).  Death by signal: `128 + sig`, as a shell shows it
+    /// -- but see [`Self::term_signal`], which alone says it was one.
     pub exit_code: i32,
     /// Crash details (exception code, faulting address, etc.).
     /// `None` for normal exits.
     pub crash: Option<CrashInfo>,
+    /// The signal that ended the process, if a signal did
+    /// ([`set_killed_by_signal`]).
+    pub term_signal: Option<u8>,
 }
 
 impl ExitInfo {
+    /// A normal exit with status `code`.
+    #[must_use]
+    pub const fn exited(code: i32) -> Self {
+        Self {
+            exit_code: code,
+            crash: None,
+            term_signal: None,
+        }
+    }
+
+    /// A death by signal `sig`, recorded as [`set_killed_by_signal`] does.
+    #[must_use]
+    pub const fn killed(sig: u8) -> Self {
+        Self {
+            // 128 + a u8 is at most 383, and the widening cast is exact.
+            exit_code: 128i32.saturating_add(sig as i32),
+            crash: None,
+            term_signal: Some(sig),
+        }
+    }
+
     /// Encode this termination as a POSIX `wstatus` word.
     ///
     /// * Crashed → `11` (SIGSEGV in the low 7 bits, so `WIFSIGNALED`).
     ///   This is "good enough" for the common case; a future refinement
     ///   could map exception codes (`DivideError` → SIGFPE, `InvalidOpcode`
     ///   → SIGILL, …) by consulting [`CrashInfo::exception_code`].
-    /// * Killed by signal → `(exit_code - 128) & 0x7f`, since the kernel
-    ///   convention for a signal death is `exit_code = 128 + sig`.
-    /// * Normal exit → `(exit_code & 0xff) << 8`, so `WIFEXITED` /
-    ///   `WEXITSTATUS`.
+    /// * Killed by signal ([`Self::term_signal`]) → the signal in the low 7
+    ///   bits, so `WIFSIGNALED` / `WTERMSIG`. No core bit: SlateOS writes no
+    ///   core files.
+    /// * Anything else is an exit → `(exit_code & 0xff) << 8`, so
+    ///   `WIFEXITED` / `WEXITSTATUS` -- *including* 128 to 255, which until
+    ///   2026-10-03 was read as a signal death: `exit(128)` reported a
+    ///   success, `exit(255)` a stop
+    ///   (requests/b-ad-an-exit-status-of-128-to-255-is-reported-as-a-signal-death.md).
     ///
     /// Lives here, next to [`JobControlEvent::to_wstatus`], because both
     /// ABIs must encode the same termination identically — see that
@@ -4743,31 +5398,75 @@ impl ExitInfo {
         if self.crash.is_some() {
             return 11; // SIGSEGV, low 7 bits of wstatus, WIFSIGNALED true.
         }
-        let code = self.exit_code;
-        if (128..=255).contains(&code) {
-            // The range check above is the proof: `code >= 128`, so the
-            // subtraction cannot underflow.
-            #[allow(clippy::arithmetic_side_effects)]
-            let sig = code - 128;
-            sig & 0x7f
+        if let Some(sig) = self.term_signal {
+            return i32::from(sig & 0x7f);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let lo = (self.exit_code as u32) & 0xff;
+        #[allow(clippy::cast_possible_wrap)]
+        let s = (lo << 8) as i32;
+        s
+    }
+
+    /// This termination as `siginfo_t`'s `si_code` and `si_status`, which
+    /// both the parent's `SIGCHLD` and `waitid` report: `CLD_EXITED` and the
+    /// exit status, `CLD_KILLED` and the signal, or `CLD_DUMPED` and the
+    /// signal when the status word's core bit is set.
+    ///
+    /// Read off [`Self::to_wstatus`] rather than decoded a second time, so a
+    /// child's `wait` status, its `waitid` record and its parent's `SIGCHLD`
+    /// cannot disagree about how it ended -- as `waitid`'s did until
+    /// 2026-10-01, calling a crash `CLD_DUMPED` while the status word said
+    /// killed, no core. A crash writes no core file, so killed is right.
+    #[must_use]
+    pub fn sigchld_code_and_status(&self) -> (i32, i32) {
+        use crate::proc::signal::si_code;
+        let wstatus = self.to_wstatus();
+        let termsig = wstatus & 0x7f;
+        if termsig == 0 {
+            (si_code::CLD_EXITED, (wstatus >> 8) & 0xff)
+        } else if wstatus & 0x80 != 0 {
+            (si_code::CLD_DUMPED, termsig)
         } else {
-            #[allow(clippy::cast_sign_loss)]
-            let lo = (code as u32) & 0xff;
-            #[allow(clippy::cast_possible_wrap)]
-            let s = (lo << 8) as i32;
-            s
+            (si_code::CLD_KILLED, termsig)
         }
     }
 }
 
-/// What [`try_reap`] carries out of the `PROCESS_TABLE` lock: the exit status
-/// to hand back, the address-space root to tear down, and the capabilities to
-/// release.
-///
-/// Named rather than written inline because the teardown must happen *outside*
-/// the lock — the tuple exists only to cross that boundary, and a three-element
-/// nested tuple written at the `let` gives no hint which element is which.
-type ReapedProcess = (ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>);
+impl Process {
+    /// How this process ended, as a parent's `wait` reports it: the one
+    /// place an [`ExitInfo`] is made from a process, so the exit code, the
+    /// crash and the signal travel together.
+    fn exit_info(&self) -> ExitInfo {
+        ExitInfo {
+            exit_code: self.exit_code.unwrap_or(0),
+            crash: self.crash_info,
+            term_signal: self.term_signal,
+        }
+    }
+}
+
+/// The wait status of process `pid`'s end as a whole -- a group exit, a fatal
+/// signal, a crash ([`begin_group_exit`]) -- or `None` while none has begun:
+/// what a thread of it reports when it is waited for apart from its process
+/// (`crate::proc::ptrace`), as Linux's `wait_task_zombie` reports the group's
+/// code for a thread of a process exiting as a whole.
+#[must_use]
+pub fn group_exit_wstatus(pid: ProcessId) -> Option<i32> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .filter(|p| p.group_exit)
+        .map(|p| p.exit_info().to_wstatus())
+}
+
+/// How process `pid` ended, if it has: its exit code, crash and terminating
+/// signal together (`None` for no such process). For reports made while the
+/// process is still in the table, such as the parent's `SIGCHLD`.
+#[must_use]
+pub fn exit_info(pid: ProcessId) -> Option<ExitInfo> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.exit_info())
+}
 
 /// Try to reap (wait for) a zombie child process.
 ///
@@ -4783,36 +5482,42 @@ type ReapedProcess = (ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>);
 ///
 /// The caller must be the parent of the child process (or PID 0 for
 /// kernel-spawned processes).
+///
+/// A zombie its parent asked never to be left ([`ExitNotice`]) is answered as
+/// `NoSuchProcess`: it is its own exit path's to release, not a waiter's.
 pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Option<ExitInfo>> {
-    // Phase 1: Under PROCESS_TABLE lock — verify state, extract
-    // process info, and remove from table.  We must extract all
-    // fields needed for cleanup before dropping the lock.
-    let reaped: Option<ReapedProcess>;
-
-    {
+    // Phase 1: Under PROCESS_TABLE lock — verify state, credit the parent,
+    // and take the record out of the table.
+    let (info, removed) = {
         let mut table = PROCESS_TABLE.lock();
         let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+        if proc.exit_notice != ExitNotice::Zombie {
+            return Err(KernelError::NoSuchProcess);
+        }
 
         // Verify parent relationship.
         if proc.parent != parent_pid {
             return Err(KernelError::PermissionDenied);
         }
 
-        if proc.state != ProcessState::Zombie {
-            return Ok(None); // Still running.
+        // Still running -- or ended, and its tracer's to report first.
+        if proc.state != ProcessState::Zombie || proc.exit_held {
+            return Ok(None);
         }
 
-        let exit_code = proc.exit_code.unwrap_or(0);
-        let crash = proc.crash_info;
-        let pml4_phys = proc.pml4_phys;
+        let info = proc.exit_info();
 
         // Capture the child's CPU time to credit the parent's children-time
         // accumulator (POSIX cutime/cstime).  The child is a zombie, so all
-        // its threads have already folded their ticks into `acct_*`; we also
-        // carry up the child's own children-time (its reaped grandchildren),
+        // its threads have already folded their time into `acct_*`; its run
+        // time is split as `process_times` splits it (against its own last
+        // split, so a wait that read its usage first credits the same), and
+        // its own children-time (its reaped grandchildren) is carried up,
         // mirroring Linux's `wait_task_zombie` accumulation.
-        let child_user = proc.acct_user_ticks.saturating_add(proc.child_user_ticks);
-        let child_sys = proc.acct_sys_ticks.saturating_add(proc.child_sys_ticks);
+        let mut prev = proc.prev_cputime;
+        let (own_utime, own_stime) = exited_counters(proc).cpu.adjusted(&mut prev);
+        let child_user = own_utime.saturating_add(proc.child_utime_ns);
+        let child_sys = own_stime.saturating_add(proc.child_stime_ns);
         // Same carry-up for page faults (ru_minflt/ru_majflt children).
         let child_min = proc.acct_min_flt.saturating_add(proc.child_min_flt);
         let child_maj = proc.acct_maj_flt.saturating_add(proc.child_maj_flt);
@@ -4820,40 +5525,92 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
         let child_nv = proc.acct_nvcsw.saturating_add(proc.child_nvcsw);
         let child_niv = proc.acct_nivcsw.saturating_add(proc.child_nivcsw);
 
-        // Extract the IPC handle list before removing.  `initial_fds` needs no
-        // extraction: its entries alias handles already accounted for here, and
-        // it dies with the table entry.
-        let mut removed = table.remove(&child_pid);
-        let ipc_handles = removed
-            .as_mut()
-            .map(|p| core::mem::take(&mut p.ipc_handles))
-            .unwrap_or_default();
+        let removed = table.remove(&child_pid);
 
         // Credit the parent's children-time accumulator now that the child
         // is removed (parent is a distinct table entry).  Absent for a
         // kernel-spawned child whose parent (pid 0) isn't in the table.
         if let Some(parent) = table.get_mut(&parent_pid) {
-            parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_user);
-            parent.child_sys_ticks = parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_utime_ns = parent.child_utime_ns.saturating_add(child_user);
+            parent.child_stime_ns = parent.child_stime_ns.saturating_add(child_sys);
             parent.child_min_flt = parent.child_min_flt.saturating_add(child_min);
             parent.child_maj_flt = parent.child_maj_flt.saturating_add(child_maj);
             parent.child_nvcsw = parent.child_nvcsw.saturating_add(child_nv);
             parent.child_nivcsw = parent.child_nivcsw.saturating_add(child_niv);
         }
 
-        let info = ExitInfo { exit_code, crash };
-        reaped = Some((info, pml4_phys, ipc_handles));
-    }
+        (info, removed)
+    };
     // PROCESS_TABLE lock dropped here.
 
-    if let Some((info, pml4_phys, ipc_handles)) = reaped {
-        // Phase 2: Cleanup without holding PROCESS_TABLE lock.
-        // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
-        destroy_process_resources(child_pid, pml4_phys, &ipc_handles);
-        Ok(Some(info))
-    } else {
-        Ok(None)
+    // Phase 2: Cleanup without holding PROCESS_TABLE lock.
+    // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
+    if let Some(proc) = removed {
+        finish_process(child_pid, proc);
     }
+    Ok(Some(info))
+}
+
+/// Release a zombie whose parent asked never to collect it -- one whose
+/// [`ExitNotice`] is not [`ExitNotice::Zombie`]. What [`try_reap`] does for a
+/// waiting parent, less the report and less the children-time credit: POSIX
+/// counts only waited-for children in `RUSAGE_CHILDREN`, and Linux credits
+/// none it reaps this way.
+///
+/// Called by `thread::on_thread_exit` once it has done everything the zombie
+/// transition does. Returns `false`, releasing nothing, for a process that is
+/// gone, not a zombie, or a zombie its parent will collect.
+pub fn release_autoreaped(pid: ProcessId) -> bool {
+    let removed = {
+        let mut table = PROCESS_TABLE.lock();
+        match table.get(&pid) {
+            Some(p) if p.state == ProcessState::Zombie && p.exit_notice != ExitNotice::Zombie => {}
+            _ => return false,
+        }
+        table.remove(&pid)
+    };
+    match removed {
+        Some(proc) => {
+            finish_process(pid, proc);
+            true
+        }
+        None => false,
+    }
+}
+
+/// End a process whose record has just left `PROCESS_TABLE`: everything
+/// [`destroy`], [`try_reap`] and [`release_autoreaped`] must each release.
+///
+/// One function because until 2026-10-01 there were two halves of it: `destroy`
+/// released the references the process's file mappings held and its session's
+/// claim on a terminal, and `try_reap` -- the path every process a parent waits
+/// for takes -- did neither. Each such process leaked one reference on every
+/// file it had mapped (a dynamically linked program, one per library), so the
+/// file's last close never came, and a session ended by `wait` kept its
+/// terminal until a recycled pid inherited it.
+///
+/// Must be called with no `PROCESS_TABLE` lock held: every step takes it or a
+/// lock ordered after it.
+fn finish_process(pid: ProcessId, mut proc: Box<Process>) {
+    // The open-file lock is ordered after the process table, which is why
+    // this waits until the record is out of it.
+    for vma in &proc.vmas {
+        vma_release_backing(vma);
+    }
+    // A zombie still counted as a member of its session; only now can the
+    // session be empty.
+    ctty_release_if_session_empty(proc.sid);
+    let ipc_handles = core::mem::take(&mut proc.ipc_handles);
+    let killed_on_cpu = core::mem::take(&mut proc.killed_on_cpu);
+    let pml4_phys = proc.pml4_phys;
+    // Its hold on its UTS namespace, which goes with the last.
+    crate::utsns::release(proc.uts_ns);
+    // And on its mount namespace (`crate::fs::mntns`), whose table goes with
+    // the last: no process-table lock is held here.
+    crate::fs::mntns::process_gone(pid);
+    // The rest of the record holds nothing that needs a lock to release.
+    drop(proc);
+    destroy_process_resources(pid, pml4_phys, &ipc_handles, killed_on_cpu);
 }
 
 // NOTE: `try_reap_any` / `try_reap_group` / `reap_any_matching` used to live
@@ -4881,18 +5638,28 @@ pub fn peek_exit(
     child_pid: ProcessId,
 ) -> KernelResult<Option<(ExitInfo, u32)>> {
     let table = PROCESS_TABLE.lock();
-    let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+    let proc = table
+        .get(&child_pid)
+        .filter(|p| is_collectable(p))
+        .ok_or(KernelError::NoSuchProcess)?;
     if proc.parent != parent_pid {
         return Err(KernelError::PermissionDenied);
     }
-    if proc.state != ProcessState::Zombie {
+    // Still running, or a zombie its tracer holds ([`Process::exit_held`]).
+    if proc.state != ProcessState::Zombie || proc.exit_held {
         return Ok(None);
     }
-    let info = ExitInfo {
-        exit_code: proc.exit_code.unwrap_or(0),
-        crash: proc.crash_info,
-    };
-    Ok(Some((info, proc.credentials.uid)))
+    Ok(Some((proc.exit_info(), proc.credentials.uid)))
+}
+
+/// Whether a `wait` may see `proc` at all: anything but a zombie its parent
+/// asked never to be left ([`ExitNotice`]), which is already as good as gone.
+///
+/// Every scan of a parent's children consults this, so that the last child
+/// of a parent that ignores `SIGCHLD` ends its `wait` in `ECHILD` rather than
+/// a report -- or, worse, a reap racing the child's own release.
+fn is_collectable(proc: &Process) -> bool {
+    proc.exit_notice == ExitNotice::Zombie
 }
 
 /// Non-destructively inspect *any* zombie child's exit status.
@@ -4931,14 +5698,13 @@ fn peek_exit_matching(
         if proc.parent == parent_pid
             && proc.pid != parent_pid
             && pgid_filter.is_none_or(|g| proc.pgid == g)
+            && is_collectable(proc)
         {
             has_child = true;
-            if proc.state == ProcessState::Zombie {
-                let info = ExitInfo {
-                    exit_code: proc.exit_code.unwrap_or(0),
-                    crash: proc.crash_info,
-                };
-                return Ok(Some((proc.pid, info, proc.credentials.uid)));
+            // A zombie its tracer holds is a child still, but not one to
+            // report ([`Process::exit_held`]).
+            if proc.state == ProcessState::Zombie && !proc.exit_held {
+                return Ok(Some((proc.pid, proc.exit_info(), proc.credentials.uid)));
             }
         }
     }
@@ -4955,13 +5721,14 @@ fn peek_exit_matching(
 /// process is not reaped, so the UID must be looked up separately.
 #[must_use]
 pub fn process_uid(pid: ProcessId) -> Option<u32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.uid)
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.ruid)
 }
 
-/// Read a process's real UID *and* primary GID together, or `None` if the
-/// PID is unknown.
+/// Read a process's effective UID *and* effective primary GID together, or
+/// `None` if the PID is unknown -- the identity a peer's credentials report
+/// (Linux's `SO_PEERCRED` gives the effective ids).
 ///
-/// One lookup rather than [`process_uid`] plus a second call, because the
+/// One lookup rather than two calls, because the
 /// caller is snapshotting an identity for `SYS_CHANNEL_PEER_CRED` and two
 /// separate reads can straddle a credential change — producing a pair that
 /// describes no state the process was ever in.  A service authorising on a
@@ -4972,6 +5739,17 @@ pub fn process_uid_gid(pid: ProcessId) -> Option<(u32, u32)> {
         .lock()
         .get(&pid)
         .map(|p| (p.credentials.uid, p.credentials.gid))
+}
+
+/// Process `pid`'s filesystem user and group ids -- whom its file accesses
+/// are decided for, and who owns what it makes -- or `None` if there is no
+/// such process.
+#[must_use]
+pub fn process_fs_ids(pid: ProcessId) -> Option<(u32, u32)> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.credentials.fsuid, p.credentials.fsgid))
 }
 
 /// Mark a process as "ready" (fully initialized and accepting requests).
@@ -5089,9 +5867,228 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
         .vmas
         .binary_search_by_key(&vma.start, |v| v.start)
         .unwrap_or_else(|p| p);
-    proc.vmas.insert(pos, vma);
+    let flags = future_lock_flags(proc, vma.flags);
+    proc.vmas.insert(pos, Vma { flags, ..vma });
 
     Ok(())
+}
+
+/// `flags`, locked if the process asked `mlockall(MCL_FUTURE)`: what every
+/// new mapping of it is made with.
+fn future_lock_flags(
+    proc: &Process,
+    flags: crate::mm::page_table::PageFlags,
+) -> crate::mm::page_table::PageFlags {
+    if proc.mlock_future.is_some() {
+        flags | crate::mm::page_table::PageFlags::MLOCKED
+    } else {
+        flags
+    }
+}
+
+/// `pid`'s `mlockall(MCL_FUTURE)`, if it asked.
+#[must_use]
+pub fn mlock_future(pid: ProcessId) -> Option<crate::mm::mlock::FutureLock> {
+    PROCESS_TABLE.lock().get(&pid).and_then(|p| p.mlock_future)
+}
+
+/// Set or clear `pid`'s `mlockall(MCL_FUTURE)`.
+pub fn set_mlock_future(pid: ProcessId, future: Option<crate::mm::mlock::FutureLock>) {
+    if let Some(p) = PROCESS_TABLE.lock().get_mut(&pid) {
+        p.mlock_future = future;
+    }
+}
+
+/// Bytes of `pid`'s VMAs that are locked, within `range` if one is given:
+/// Linux's `mm->locked_vm` (`VmLck`), and `count_mm_mlocked_page_nr` over a
+/// range.
+#[must_use]
+pub fn vma_locked_bytes(pid: ProcessId, range: Option<(u64, u64)>) -> u64 {
+    let (lo, hi) = range.unwrap_or((0, u64::MAX));
+    PROCESS_TABLE.lock().get(&pid).map_or(0, |p| {
+        p.vmas
+            .iter()
+            .filter(|v| v.flags.contains(crate::mm::page_table::PageFlags::MLOCKED))
+            .map(|v| v.end.min(hi).saturating_sub(v.start.max(lo)))
+            .fold(0u64, u64::saturating_add)
+    })
+}
+
+/// Bytes of all `pid`'s VMAs: what `mlockall(MCL_CURRENT)` would lock,
+/// which Linux compares with the limit (`mm->total_vm`).
+#[must_use]
+pub fn vma_total_bytes(pid: ProcessId) -> u64 {
+    PROCESS_TABLE.lock().get(&pid).map_or(0, |p| {
+        p.vmas
+            .iter()
+            .map(|v| v.end.saturating_sub(v.start))
+            .fold(0u64, u64::saturating_add)
+    })
+}
+
+/// Lock (`lock`) or unlock `pid`'s VMAs over `[start, end)`: split at the
+/// edges as [`protect_vma_range`] splits, the covered middle given or
+/// stripped [`PageFlags::MLOCKED`](crate::mm::page_table::PageFlags::MLOCKED),
+/// every other flag kept. The entries of the pages already present are
+/// `crate::mm::mlock`'s to change.
+pub fn set_vma_lock_range(pid: ProcessId, start: u64, end: u64, lock: bool) {
+    use crate::mm::page_table::PageFlags;
+    if end <= start {
+        return;
+    }
+    let mut retains: Vec<u64> = Vec::new();
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get_mut(&pid) else {
+            return;
+        };
+        let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len().saturating_add(2));
+        for vma in proc.vmas.drain(..) {
+            let locked_now = vma.flags.contains(PageFlags::MLOCKED);
+            if vma.end <= start || vma.start >= end || locked_now == lock {
+                kept.push(vma);
+                continue;
+            }
+            let mut pieces = 0u32;
+            if vma.start < start {
+                kept.push(vma_subrange(&vma, vma.start, start, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            let mid_start = core::cmp::max(start, vma.start);
+            let mid_end = core::cmp::min(end, vma.end);
+            let flags = if lock {
+                vma.flags | PageFlags::MLOCKED
+            } else {
+                PageFlags::from_bits(vma.flags.bits() & !PageFlags::MLOCKED.bits())
+            };
+            kept.push(vma_subrange(&vma, mid_start, mid_end, flags));
+            pieces = pieces.saturating_add(1);
+            if vma.end > end {
+                kept.push(vma_subrange(&vma, end, vma.end, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            // A file-backed VMA's one backing reference becomes one per piece.
+            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                for _ in 1..pieces {
+                    retains.push(handle);
+                }
+            }
+        }
+        kept.sort_unstable_by_key(|v| v.start);
+        proc.vmas = kept;
+    }
+    // Outside the process table, which the open-file lock never nests under.
+    for handle in retains {
+        // The pieces' extra references: a failure to take one leaves that
+        // piece's unmap releasing a reference the file no longer counts,
+        // which `dup_shared` cannot fail to give for a handle a VMA holds.
+        let _ = crate::fs::handle::dup_shared(handle);
+    }
+}
+
+/// Lock or unlock every VMA of `pid`: `mlockall(MCL_CURRENT)` and
+/// `munlockall`.
+pub fn set_all_vma_locks(pid: ProcessId, lock: bool) {
+    use crate::mm::page_table::PageFlags;
+    if let Some(p) = PROCESS_TABLE.lock().get_mut(&pid) {
+        for v in &mut p.vmas {
+            v.flags = if lock {
+                v.flags | PageFlags::MLOCKED
+            } else {
+                PageFlags::from_bits(v.flags.bits() & !PageFlags::MLOCKED.bits())
+            };
+        }
+    }
+}
+
+/// The parts of `[start, end)` that `pid`'s VMAs cover, in address order,
+/// each with how locking it faults it in ([`crate::mm::mlock::Populate`],
+/// Linux's `populate_vma_page_range`): a writable private mapping for
+/// writing, a read-only or shared one for reading, a `PROT_NONE` one or a
+/// guard not at all, and what the loader mapped whole needs nothing.
+#[must_use]
+pub fn vma_populate_parts(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+) -> Vec<(u64, u64, crate::mm::mlock::Populate)> {
+    use crate::mm::mlock::Populate;
+    use crate::mm::page_table::PageFlags;
+    PROCESS_TABLE.lock().get(&pid).map_or(Vec::new(), |p| {
+        p.vmas
+            .iter()
+            .filter(|v| v.end > start && v.start < end)
+            .map(|v| {
+                let how = match v.kind {
+                    VmaKind::Fixed => Populate::Present,
+                    VmaKind::Guard => Populate::Inaccessible,
+                    _ if !v.flags.contains(PageFlags::USER_ACCESSIBLE) => Populate::Inaccessible,
+                    _ if v.flags.contains(PageFlags::WRITABLE)
+                        && !v.flags.contains(PageFlags::SHARED) =>
+                    {
+                        Populate::Write
+                    }
+                    _ => Populate::Read,
+                };
+                (v.start.max(start), v.end.min(end), how)
+            })
+            .collect()
+    })
+}
+
+/// [`add_vma`], but when the VMA ending exactly at `vma.start` is the same
+/// kind of anonymous memory with the same flags and fork policy, extend that
+/// one instead of adding a neighbour -- what Linux's `vma_merge` does, and
+/// what keeps a heap grown by a thousand `brk` calls one region rather than
+/// a thousand.
+///
+/// Never merges file-backed VMAs (each owns a reference on its file and an
+/// offset that would have to agree) and never guard or fixed ones.
+///
+/// # Errors
+///
+/// As [`add_vma`].
+pub fn add_vma_merging(pid: ProcessId, vma: Vma) -> KernelResult<()> {
+    use crate::mm::page_table::VirtAddr;
+
+    let mergeable_kind = matches!(vma.kind, VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk);
+    let mut vma = vma;
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+        // Locked if `mlockall(MCL_FUTURE)` asks, before the flags are
+        // compared: heap grown under it is a locked VMA beside an unlocked
+        // heap, not more of the unlocked one (Linux's `def_flags` in
+        // `do_brk_flags`, which keeps such a VMA from merging).
+        vma.flags = future_lock_flags(proc, vma.flags);
+        if !VirtAddr::new(vma.start).is_hw_page_aligned()
+            || !VirtAddr::new(vma.end).is_hw_page_aligned()
+        {
+            return Err(KernelError::BadAlignment);
+        }
+        if vma.end <= vma.start {
+            return Err(KernelError::InvalidArgument);
+        }
+        if proc
+            .vmas
+            .iter()
+            .any(|existing| vma.start < existing.end && vma.end > existing.start)
+        {
+            return Err(KernelError::AlreadyExists);
+        }
+        if mergeable_kind {
+            if let Some(below) = proc.vmas.iter_mut().find(|v| {
+                v.end == vma.start
+                    && v.kind == vma.kind
+                    && v.flags == vma.flags
+                    && v.fork == vma.fork
+            }) {
+                below.end = vma.end;
+                return Ok(());
+            }
+        }
+    }
+    add_vma(pid, vma)
 }
 
 /// Snapshot a process's VMA list, sorted by start address.
@@ -5217,6 +6214,7 @@ pub fn reserve_unmapped_area(
         .vmas
         .binary_search_by_key(&base, |v| v.start)
         .unwrap_or_else(|p| p);
+    let flags = future_lock_flags(proc, flags);
     proc.vmas.insert(
         pos,
         Vma {
@@ -5224,6 +6222,7 @@ pub fn reserve_unmapped_area(
             end,
             kind,
             flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     );
     Some(base)
@@ -5382,6 +6381,9 @@ fn vma_subrange(
         end: new_end,
         kind,
         flags,
+        // A piece of a region is still that region: what fork does with it
+        // does not change because something else split it.
+        fork: orig.fork,
     }
 }
 
@@ -5509,6 +6511,166 @@ pub fn protect_vma_range(
         let _ = crate::fs::handle::dup_shared(handle);
     }
     Ok(())
+}
+
+/// A `madvise` change to what `fork` does with a range: one flag of
+/// [`crate::mm::vma::ForkPolicy`] set or cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkAdvice {
+    /// `MADV_WIPEONFORK`: the child gets the range zero-filled.
+    Wipe,
+    /// `MADV_KEEPONFORK`: undo [`ForkAdvice::Wipe`].
+    Keep,
+    /// `MADV_DONTFORK`: the child does not get the range at all.
+    DontCopy,
+    /// `MADV_DOFORK`: undo [`ForkAdvice::DontCopy`].
+    Copy,
+}
+
+impl ForkAdvice {
+    /// `policy` with this advice applied.
+    #[must_use]
+    pub const fn apply(self, policy: crate::mm::vma::ForkPolicy) -> crate::mm::vma::ForkPolicy {
+        let mut p = policy;
+        match self {
+            Self::Wipe => p.wipe = true,
+            Self::Keep => p.wipe = false,
+            Self::DontCopy => p.dont_copy = true,
+            Self::Copy => p.dont_copy = false,
+        }
+        p
+    }
+}
+
+/// Whether `vma` is private anonymous memory: what Linux allows
+/// [`ForkAdvice::Wipe`] and `MADV_FREE` on (`EINVAL` for a file or a shared
+/// mapping). A guard or fixed region -- the kernel's own stack guards, the
+/// copied program headers, shared memory -- is not that.
+#[must_use]
+pub fn is_private_anonymous(vma: &Vma) -> bool {
+    matches!(vma.kind, VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk)
+        && !vma.flags.contains(crate::mm::page_table::PageFlags::SHARED)
+}
+
+/// Change what `fork` does with `[start, end)` (4 KiB aligned) in every VMA
+/// of `pid` the range covers, splitting VMAs at its boundaries as
+/// [`protect_vma_range`] does. The work behind `madvise(MADV_WIPEONFORK,
+/// MADV_KEEPONFORK, MADV_DONTFORK, MADV_DOFORK)`.
+///
+/// [`ForkAdvice::Wipe`] is refused for the whole range if any VMA in it is
+/// not private anonymous memory (see [`is_private_anonymous`]), and then nothing
+/// changes -- Linux changes the VMAs before the first unsuitable one and
+/// stops, which leaves a half-applied request; refusing all of it is the
+/// version a caller can reason about.
+///
+/// Returns whether VMAs cover the whole range. Linux answers `ENOMEM` for a
+/// range with unmapped parts, but only after changing the mapped ones, and
+/// this does the same: the change is made to whatever is covered either way.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if the PID doesn't exist.
+/// - [`KernelError::InvalidArgument`] if `end <= start`, or `Wipe` over
+///   memory it does not apply to.
+pub fn set_fork_policy(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+    advice: ForkAdvice,
+) -> KernelResult<bool> {
+    if end <= start {
+        return Err(KernelError::InvalidArgument);
+    }
+    // A FileBacked VMA split into several pieces needs one owned backing
+    // reference per piece; taken after the table lock is released, as
+    // `protect_vma_range` does (the open-file lock must never nest under it).
+    let mut retains: Vec<u64> = Vec::new();
+    let covered = {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+        let in_range = |v: &&Vma| v.start < end && v.end > start;
+        if advice == ForkAdvice::Wipe
+            && !proc.vmas.iter().filter(in_range).all(is_private_anonymous)
+        {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Coverage over the sorted, non-overlapping list: walk the VMAs that
+        // intersect the range and look for a gap before, between or after.
+        let mut cursor = start;
+        let mut gap = false;
+        for v in proc.vmas.iter().filter(in_range) {
+            if v.start > cursor {
+                gap = true;
+            }
+            cursor = core::cmp::max(cursor, v.end);
+        }
+        let covered = !gap && cursor >= end;
+
+        let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len().saturating_add(2));
+        for vma in proc.vmas.drain(..) {
+            let new_policy = advice.apply(vma.fork);
+            if vma.end <= start || vma.start >= end || new_policy == vma.fork {
+                kept.push(vma);
+                continue;
+            }
+            let mut pieces = 0u32;
+            if vma.start < start {
+                kept.push(vma_subrange(&vma, vma.start, start, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            let mut middle = vma_subrange(
+                &vma,
+                core::cmp::max(start, vma.start),
+                core::cmp::min(end, vma.end),
+                vma.flags,
+            );
+            middle.fork = new_policy;
+            kept.push(middle);
+            pieces = pieces.saturating_add(1);
+            if vma.end > end {
+                kept.push(vma_subrange(&vma, end, vma.end, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                for _ in 1..pieces {
+                    retains.push(handle);
+                }
+            }
+        }
+        kept.sort_unstable_by_key(|v| v.start);
+        proc.vmas = kept;
+        covered
+    };
+    for handle in retains {
+        if let Err(e) = crate::fs::handle::dup_shared(handle) {
+            // Cannot fail while the split VMA holds its own reference -- the
+            // failures are an unknown handle and refcount overflow -- but if
+            // it ever does, the pieces share one reference, so say so.
+            serial_println!(
+                "[pcb] set_fork_policy: no reference for a piece of a split file mapping \
+                 (handle {handle}): {e:?}"
+            );
+        }
+    }
+    Ok(covered)
+}
+
+/// The ranges of `pid`'s address space whose pages a fork must not copy --
+/// VMAs marked [`crate::mm::vma::ForkPolicy::wipe`] or `dont_copy` -- in
+/// address order, for [`crate::mm::cow::clone_address_space_cow`]. Empty
+/// for nearly every process. `None` if there is no such process.
+#[must_use]
+pub fn fork_uncopied_ranges(pid: ProcessId) -> Option<Vec<(u64, u64)>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    Some(
+        proc.vmas
+            .iter()
+            .filter(|v| !v.fork.copies_pages())
+            .map(|v| (v.start, v.end))
+            .collect(),
+    )
 }
 
 /// Return the sub-ranges of `[start, end)` that are **not** covered by any
@@ -5647,11 +6809,24 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
         return;
     };
     proc.membarrier_state = 0;
+    proc.mlock_future = None;
     proc.linux_dumpable = 1; // SUID_DUMP_USER
     // Clear only SECBIT_KEEP_CAPS (bit 4); preserve the lock bit and all
     // other securebits, matching cap_bprm_creds_from_file.  This bit is the
     // single source of truth for PR_SET_KEEPCAPS (see get/set_keepcaps).
     proc.linux_securebits &= !LINUX_SECBIT_KEEP_CAPS;
+}
+
+/// Whether any 4 KiB sub-page of the 16 KiB frame at `frame_base` is mapped
+/// in `pml4_phys` -- for a not-present fault, whether the frame is *partly*
+/// present, since the faulting sub-page is not.
+#[allow(clippy::arithmetic_side_effects)]
+fn frame_partly_present(pml4_phys: u64, frame_base: u64) -> bool {
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, HW_PAGES_PER_FRAME, VirtAddr};
+    (0..HW_PAGES_PER_FRAME).any(|i| {
+        let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+        page_table::translate(pml4_phys, VirtAddr::new(sub_va)).is_some()
+    })
 }
 
 /// A per-4 KiB-subpage fill descriptor for [`resolve_subpaged_fault`].
@@ -5680,10 +6855,15 @@ struct SubpageFill {
 /// permissions and (for file-backed VMAs) its own file offset.
 ///
 /// The frame is allocated lazily on the first faulting subpage and *reused*
-/// by later faults on its siblings (found via [`page_table::translate`]).
-/// RSS accounting, reclaim registration, and the reverse map are keyed on
-/// the 16 KiB frame base and applied exactly once, matching the fast path's
-/// `map_frame`.
+/// by later faults on its siblings (found via
+/// [`crate::mm::page_table::translate`]) --
+/// when this address space alone holds it; see the body. RSS accounting,
+/// reclaim registration, and the reverse map are keyed on the 16 KiB frame
+/// base and applied exactly once, matching the fast path's `map_frame`.
+///
+/// Also the resolver for a frame one VMA covers but only some of whose
+/// sub-pages are present ([`frame_partly_present`]): it maps exactly the
+/// absent ones, which the whole-frame paths cannot.
 ///
 /// Returns `true` if at least one subpage of the frame is now mapped (the
 /// faulting subpage always is on success, so the instruction can retry).
@@ -5701,19 +6881,42 @@ fn resolve_subpaged_fault(
         None => return false,
     };
 
-    // Is a physical 16 KiB frame already backing any subpage of this frame?
-    // If so, reuse it (a sibling subpage was mapped by an earlier fault);
-    // otherwise allocate a fresh zeroed frame.  Physical address 0 is never
-    // a valid user frame, so it doubles as the "none found" sentinel.
+    // Is a physical 16 KiB frame already backing a subpage of this frame,
+    // which this address space alone holds? If so, reuse it (a sibling
+    // subpage was mapped by an earlier fault); otherwise allocate a fresh
+    // zeroed frame.  Physical address 0 is never a valid user frame, so it
+    // doubles as the "none found" sentinel.
+    //
+    // "Alone" is the whole point. The slice of the frame this fault zeroes
+    // and fills is unmapped *here*, which says nothing about anywhere else:
+    // after a fork the frame is copy-on-write-shared with the other process,
+    // which may map that very slice; a page-cache frame is shared by every
+    // process mapping the file; a `MAP_SHARED` one is shared by design.
+    // Until 2026-10-07 any present sibling's frame was reused, so a child
+    // that unmapped 4 KiB of an inherited group and mapped fresh memory there
+    // zeroed its parent's page in place, and a group first faulted in from
+    // the page cache and later partly overlaid (`ld.so`'s pattern) had file
+    // bytes written into the cache's frame. A shared sibling now gets a frame
+    // of its own beside it: sub-pages of one group in different frames is a
+    // shape the rest of the mm already handles (a partial copy-on-write
+    // break makes it).
     let mut base16: u64 = 0;
+    let mut sibling_present = false;
     for i in 0..HW_PAGES_PER_FRAME {
         #[allow(clippy::arithmetic_side_effects)]
-        let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
-        if let Some(phys4k) = page_table::translate(pml4_phys, VirtAddr::new(sub_va)) {
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                base16 = phys4k & !(FRAME_SIZE as u64 - 1);
-            }
+        let sub_va = VirtAddr::new(frame_base + (i as u64) * (HW_PAGE_SIZE as u64));
+        let Some(phys4k) = page_table::translate(pml4_phys, sub_va) else {
+            continue;
+        };
+        sibling_present = true;
+        #[allow(clippy::arithmetic_side_effects)]
+        let candidate = phys4k & !(FRAME_SIZE as u64 - 1);
+        let shared_by_design = page_table::translate_flags(pml4_phys, sub_va)
+            .is_some_and(|f| f.contains(PageFlags::SHARED));
+        let alone = !shared_by_design
+            && PhysFrame::from_addr(candidate).is_some_and(|f| frame::refcount(f) == 1);
+        if alone {
+            base16 = candidate;
             break;
         }
     }
@@ -5807,7 +7010,16 @@ fn resolve_subpaged_fault(
             // `free_frame` uncharges the cgroup via `FRAME_CGROUP`.
             let _ = unsafe { frame::free_frame(phys_frame) };
         }
-        return false;
+        // Every covered subpage present means another CPU's fault on this
+        // frame populated them first: resolved, and the access runs again.
+        // Until 2026-10-03 this was a failure, and the second of two threads
+        // touching the frame at once was sent SIGSEGV.
+        let covered_present = subpages.iter().enumerate().all(|(i, fill)| {
+            #[allow(clippy::arithmetic_side_effects)]
+            let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+            fill.is_none() || page_table::translate(pml4_phys, VirtAddr::new(sub_va)).is_some()
+        });
+        return covered_present && subpages.iter().any(Option::is_some);
     }
 
     // Flush the whole frame's TLB entries (cross-CPU shootdown).
@@ -5816,32 +7028,121 @@ fn resolve_subpaged_fault(
         page_table::flush_frame(VirtAddr::new(frame_base));
     }
 
-    if newly {
+    if newly && !sibling_present {
         // Account for the new 16 KiB frame and register it for reclaim and
         // reverse mapping — once, keyed on the frame base, mirroring the
         // fast path's `map_frame` + post-map bookkeeping.
         crate::mm::accounting::charge(pml4_phys, 1);
         crate::mm::swap::register_reclaimable(pml4_phys, frame_base, repr_flags);
         crate::mm::rmap::add(base16, pml4_phys, frame_base);
+    } else if newly {
+        // A second frame beside a shared sibling's (above): one more frame
+        // in this address space's RSS and its reverse mapping, exactly what a
+        // partial copy-on-write break records (`mm::cow::install_cow`). The
+        // group was registered for reclaim when its first frame came.
+        crate::mm::accounting::charge(pml4_phys, 1);
+        crate::mm::rmap::add(base16, pml4_phys, frame_base);
     }
 
     true
 }
 
-/// Resolve a user-space page fault against a process's VMA list.
-///
-/// Called from the page fault handler (IDT vector 14) when a user-mode
-/// fault occurs on a lazy-allocated region.  This function:
+/// What [`resolve_fault`] made of a page fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultOutcome {
+    /// The page is there now: run the access again.
+    Resolved,
+    /// Nothing the kernel can do: no region covers the address, or the
+    /// access is one it does not allow.
+    Unresolvable,
+    /// The process table was held elsewhere, and the caller asked not to
+    /// wait for it: nothing is known yet, so try again.
+    Busy,
+}
+
+/// Resolve a page fault in `pid`'s address space against its VMA list:
+/// break a copy-on-write share, or populate a committed page that is not
+/// there yet (demand paging), as the hardware fault would have.
 ///
 /// 1. Looks up the faulting address in the process's VMA list.
 /// 2. Checks permissions against the error code.
 /// 3. For Anonymous VMAs: allocates a frame, zeroes it, maps it.
 ///
-/// Uses `try_lock()` to avoid deadlock if the process table is already
-/// held (e.g., from a syscall that triggered a fault).
+/// **The process table being held is not an answer.** Both paths read
+/// the table, and another CPU holding it says nothing about the fault.
+/// Until 2026-10-03 the resolver only tried the lock and reported a
+/// busy table as an unresolvable fault, so a program could be killed
+/// with `SIGSEGV` for a copy-on-write write after `fork`, and a syscall
+/// given a fresh buffer could fail with `EFAULT`, whenever another CPU
+/// happened to hold the table.
 ///
-/// Returns `true` if the fault was resolved, `false` if not.
+/// - `wait`: wait for the table, unless the calling task holds it
+///   already (a kernel path that faulted under it), in which case
+///   waiting could never end and the fault is `Busy`. For callers in
+///   thread context ([`try_resolve_fault`]) and for the #PF handler on a
+///   user-mode fault, which runs with interrupts on.
+/// - not `wait`: `Busy` at once, for a caller with interrupts off, which
+///   must not wait for a holder that may be waiting for a TLB shootdown
+///   on it; it retries the access instead. The copy-on-write break and
+///   swap-in under it still wait for the address space's page-table lock
+///   (`mm::as_lock`), so such a caller must not reach them.
+pub fn resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64, wait: bool) -> FaultOutcome {
+    let mut busy = false;
+    if resolve_fault_inner(pid, fault_addr, error_code, wait, &mut busy) {
+        FaultOutcome::Resolved
+    } else if busy {
+        FaultOutcome::Busy
+    } else {
+        FaultOutcome::Unresolvable
+    }
+}
+
+/// [`resolve_fault`] for a caller in thread context: waits for the process
+/// table, and is `true` only if the fault was resolved.
 pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bool {
+    resolve_fault(pid, fault_addr, error_code, true) == FaultOutcome::Resolved
+}
+
+/// The process table, for [`resolve_fault`]: at once when it is free; with
+/// `wait`, after waiting for it, unless the calling task holds it already.
+/// `None` is "busy".
+fn lock_table_for_fault(wait: bool) -> Option<crate::sync::MutexGuard<'static, ProcessTable>> {
+    table_or_busy(
+        wait,
+        || PROCESS_TABLE.try_lock(),
+        || PROCESS_TABLE.held_by_current_task(),
+        || PROCESS_TABLE.lock(),
+    )
+}
+
+/// The decision [`lock_table_for_fault`] makes, apart from the lock it makes
+/// it about, so it can be tested without holding that lock (which
+/// `check-recursive-locks` would rightly refuse): taken at once if free;
+/// with `wait`, waited for unless the caller holds it already; else busy.
+fn table_or_busy<G>(
+    wait: bool,
+    try_take: impl FnOnce() -> Option<G>,
+    held_by_caller: impl FnOnce() -> bool,
+    take: impl FnOnce() -> G,
+) -> Option<G> {
+    if let Some(guard) = try_take() {
+        return Some(guard);
+    }
+    if wait && !held_by_caller() {
+        return Some(take());
+    }
+    None
+}
+
+/// [`resolve_fault`]'s body: `true` when resolved; `false` with `busy` set
+/// when the table could not be had (see [`lock_table_for_fault`]).
+fn resolve_fault_inner(
+    pid: ProcessId,
+    fault_addr: u64,
+    error_code: u64,
+    wait: bool,
+    busy: &mut bool,
+) -> bool {
     use crate::mm::fault::PageFaultError;
     use crate::mm::frame::{self, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
@@ -5858,7 +7159,8 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // A present page with the COW bit set means this page is shared
     // and needs to be copied on first write.
     if error.is_present() && error.is_write() {
-        let Some(table) = PROCESS_TABLE.try_lock() else {
+        let Some(table) = lock_table_for_fault(wait) else {
+            *busy = true;
             return false;
         };
         let Some(proc) = table.get(&pid) else {
@@ -5880,9 +7182,10 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
-    // Try to acquire the process table lock.  If it's already held,
-    // we can't resolve (avoid deadlock).
-    let Some(table) = PROCESS_TABLE.try_lock() else {
+    // The process table, for the VMA lookup (see `resolve_fault` on why a
+    // busy table is not an unresolvable fault).
+    let Some(table) = lock_table_for_fault(wait) else {
+        *busy = true;
         return false;
     };
     let Some(proc) = table.get(&pid) else {
@@ -5931,6 +7234,32 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
+    // A swapped-out frame comes back from swap, each 4 KiB part with the
+    // flags its entry kept (`mm::swap::swap_in_page`) -- never demand-paged
+    // anew over its swap entries, which replaced the data with zeros and
+    // leaked the slot. Until 2026-10-03 the #PF handler alone looked for swap
+    // first, and the kernel faulting a page in on a process's behalf (a
+    // syscall's buffer, `process_vm_readv`) came straight here.
+    let swapped = pml4_phys != 0 && {
+        // SAFETY: `pml4_phys` is the process's own PML4, read through the
+        // HHDM.
+        unsafe { crate::mm::swap::is_swapped(pml4_phys, VirtAddr::new(frame_base)) }
+    };
+    if swapped {
+        drop(table);
+        // SAFETY: as above; a part of the frame holds a swap entry.
+        return match unsafe { crate::mm::swap::swap_in_page(pml4_phys, VirtAddr::new(frame_base)) }
+        {
+            Ok(Some(kept)) => {
+                crate::mm::swap::register_reclaimable(pml4_phys, frame_base, kept);
+                true
+            }
+            // Another CPU brought it back first, and registered it.
+            Ok(None) => true,
+            Err(_) => false,
+        };
+    }
+
     // Decide how to populate the new frame.  Anonymous/Stack pages are
     // left zeroed; FileBacked pages are filled from the backing file.
     // Guard/Fixed faults are never resolvable here.
@@ -5953,7 +7282,16 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // shared-object segment packing), fall to the per-subpage resolver, which
     // backs all four 4 KiB subpages with one shared physical frame but gives
     // each its own PTE permissions and file backing.
-    if !(vma_start <= frame_base && vma_end >= frame_end) {
+    //
+    // So does a frame some of whose sub-pages are already present, even when
+    // one VMA covers it all -- what `madvise(MADV_DONTNEED)` leaves when it
+    // drops 4 KiB of a 16 KiB frame. The whole-frame paths below map all four
+    // sub-pages at once; `map_frame` would find the present ones and answer
+    // `AlreadyExists`, which they take as another CPU's fault having won, and
+    // the faulting sub-page -- never mapped -- would fault again, forever.
+    // The per-subpage resolver fills exactly the absent ones.
+    let partly_present = pml4_phys != 0 && frame_partly_present(pml4_phys, frame_base);
+    if partly_present || !(vma_start <= frame_base && vma_end >= frame_end) {
         use crate::mm::page_table::{HW_PAGE_SIZE, HW_PAGES_PER_FRAME};
         let mut subpages: [Option<SubpageFill>; HW_PAGES_PER_FRAME] = [None; HW_PAGES_PER_FRAME];
         for (i, slot) in subpages.iter_mut().enumerate() {
@@ -6110,13 +7448,35 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // Map the frame.
     // SAFETY: pml4_phys is the process's valid PML4, phys_frame is
     // freshly allocated, virt is within a VMA that permits this mapping.
-    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) };
+    //
+    // Under the address space's page-table lock (`mm::as_lock`): `map_frame`
+    // checks each entry is absent and then writes it, and two CPUs
+    // demand-paging the same page could otherwise both see it absent and
+    // both write, leaking one frame and losing what was written to it. The
+    // allocation and the file read above stay outside: they may block.
+    let map_result = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        // SAFETY: as above.
+        unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) }
+    };
 
-    if map_result.is_err() {
-        // Map failed — free the frame.
-        // SAFETY: phys_frame was just allocated and not exposed.
-        let _ = unsafe { frame::free_frame(phys_frame) };
-        return false;
+    match map_result {
+        Ok(()) => {}
+        Err(KernelError::AlreadyExists) => {
+            // Another CPU's fault populated the page first: this frame is not
+            // needed, and the access runs again on that one. Until 2026-10-03
+            // this was a failure, and the second of two threads touching a
+            // fresh page at once was sent SIGSEGV.
+            // SAFETY: phys_frame was just allocated and not exposed.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return true;
+        }
+        Err(_) => {
+            // Map failed — free the frame.
+            // SAFETY: phys_frame was just allocated and not exposed.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return false;
+        }
     }
 
     // Flush TLB so the CPU sees the new mapping.
@@ -6192,6 +7552,15 @@ fn resolve_file_cached(
 ) -> bool {
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
 
+    // The mapping's handle must be one that may read the file. `mmap` checks
+    // this (EACCES), but the cache below runs the fill -- and with it
+    // `read_at_uncached`'s own check -- only on a miss: a page another process
+    // had cached would otherwise be handed to a mapping of a write-only
+    // handle. Checked here too, so no path round `mmap` can do that.
+    if !crate::fs::handle::open_flags(handle).is_ok_and(|f| f.is_readable()) {
+        return false;
+    }
+
     // Obtain the shared frame (filling it from the file on a cache miss).
     // The fill closure runs only on a miss; a short read past EOF leaves
     // the frame's tail zero, matching Linux's page zero-fill semantics.
@@ -6214,14 +7583,29 @@ fn resolve_file_cached(
     };
 
     let virt = VirtAddr::new(frame_base);
-    // SAFETY: `pml4_phys` is the faulting process's valid PML4, `phys_frame`
-    // is a live cache frame holding our caller reference, and `virt` lies in
-    // a VMA that permits this (read-only) mapping.
-    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) };
-    if map_result.is_err() {
-        // Mapping failed — drop our caller reference on the cache frame.
-        crate::mm::page_cache::release(phys_frame);
-        return false;
+    // Under the address space's page-table lock, as the anonymous demand
+    // path installs (`mm::as_lock`): two CPUs mapping the same page must not
+    // both see it absent and both write.
+    let map_result = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        // SAFETY: `pml4_phys` is the faulting process's valid PML4,
+        // `phys_frame` is a live cache frame holding our caller reference,
+        // and `virt` lies in a VMA that permits this (read-only) mapping.
+        unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) }
+    };
+    match map_result {
+        Ok(()) => {}
+        Err(KernelError::AlreadyExists) => {
+            // Another CPU's fault mapped the page first; this reference is
+            // not needed, and the access runs again.
+            crate::mm::page_cache::release(phys_frame);
+            return true;
+        }
+        Err(_) => {
+            // Mapping failed — drop our caller reference on the cache frame.
+            crate::mm::page_cache::release(phys_frame);
+            return false;
+        }
     }
 
     // Flush the TLB so the CPU observes the new mapping.
@@ -6407,6 +7791,7 @@ fn destroy_process_resources(
     pid: ProcessId,
     pml4_phys: u64,
     ipc_handles: &[(crate::cap::ResourceType, u64)],
+    killed_on_cpu: Vec<TaskId>,
 ) {
     // Remove exception handler registration (if any).
     crate::proc::exception::remove_handler(pid);
@@ -6416,22 +7801,28 @@ fn destroy_process_resources(
     // Cancel any armed ITIMER_REAL so it can never fire SIGALRM into a dead
     // PID (the hrtimer handle would otherwise survive process teardown).
     crate::proc::itimer::cancel_real(pid);
+    // Delete its POSIX timers, so none can queue a signal for a dead PID.
+    crate::proc::posix_timer::process_exit(pid);
+    // And its CPU-time itimers and RLIMIT_CPU thresholds.
+    crate::proc::cputimer::process_exit(pid);
     // Drop any Linux per-signal sigaction state for this process.
     crate::syscall::linux::linux_sigaction_on_exit(pid);
 
     // Release any advisory file locks (flock) held by this process.
     // Locks are owner-keyed by PID; without this a crashed lock holder
     // would block every other waiter on that path until reboot.
-    crate::fs::Vfs::funlock_all(pid);
+    // As a process owner: a flock lock held through a handle belongs to the
+    // open file description and ends at its final close, not here.
+    crate::fs::Vfs::funlock_all(crate::fs::vfs::flock_process_owner(pid));
     // And the byte-range record locks (fcntl F_SETLK), which are a separate
     // table from flock because POSIX makes them separate lock spaces. Same
     // reason, same moment: a dead owner's write lock on a range would refuse
     // every live process that overlaps it, and nothing else clears one.
-    // Through `posix_owner`, not the bare pid: `reclock` owns the owner
-    // encoding, and a second place building the same value by hand is how
-    // the two silently stop matching. They agree today only because the
-    // mask clears a bit no real pid sets.
-    crate::fs::reclock::release_all(crate::fs::reclock::posix_owner(pid));
+    // `release_process` rather than a release by owner: `reclock` owns the
+    // owner encoding, and it also drops any wait entry a task of this
+    // process left behind, which would otherwise feed the deadlock search an
+    // edge from a process that no longer waits.
+    crate::fs::reclock::release_process(pid);
 
     // Close all IPC handles owned by this process.  In the normal exit
     // path these were already drained and closed at the zombie
@@ -6444,22 +7835,350 @@ fn destroy_process_resources(
     // during zombie transition, but safe to call again).
     crate::ipc::namespace::detach(pid);
 
-    // Free address space resources.
+    // Free address space resources -- now, or once a thread killed while it
+    // ran has left its CPU.
     if pml4_phys != 0 {
-        // Free DMA buffers allocated for this process before
-        // destroying the address space (DMA buffers are tracked
-        // separately from normal page table entries).
-        crate::mm::dma::free_all_for_process(pml4_phys);
+        free_address_space_when_unused(pml4_phys, killed_on_cpu);
+    }
+}
 
-        // Free the entire user address space (mapped frames,
-        // intermediate page tables, and the PML4 page).
-        // SAFETY: The process is being destroyed — no threads
-        // are running in this address space, and no CPU has
-        // this PML4 loaded in CR3.  All user-half pages were
-        // allocated specifically for this process.
-        unsafe {
-            crate::mm::page_table::destroy_user_address_space(pml4_phys);
+/// Address spaces whose teardown waits: on threads killed while they ran,
+/// or on a pin ([`AsPin`]). Each PML4 with the threads that may still be
+/// executing on it.
+///
+/// Leaf lock: nothing is taken while it is held ([`crate::sched::task_is_on_cpu`]
+/// reads atomics only).
+static DEFERRED_ADDRESS_SPACES: Mutex<Vec<(u64, Vec<TaskId>)>> = Mutex::new(Vec::new());
+
+/// The pins on process address spaces, by PML4 ([`AsPin`]), and which are
+/// being torn down in place by exec ([`ExecTeardown`]). A free waits until a
+/// space's pins are gone ([`free_address_space_when_unused`],
+/// [`free_deferred_address_spaces`]); an entry exists only while a space has
+/// pins or a teardown.
+///
+/// Taken under [`PROCESS_TABLE`] by [`pin_address_space`], and alone
+/// everywhere else; nothing is taken while it is held.
+static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, PinState>> =
+    Mutex::named(BTreeMap::new(), b"as_pins");
+
+/// One address space's entry in [`ADDRESS_SPACE_PINS`].
+#[derive(Default)]
+struct PinState {
+    /// How many [`AsPin`]s hold it.
+    pins: usize,
+    /// Exec is clearing its user half in place ([`ExecTeardown`]): no pin is
+    /// given out until it is done.
+    exec_teardown: bool,
+}
+
+/// A hold on a process's address space -- Linux's `mmget_not_zero`/`mmput`.
+/// While one lives, the page tables it names are not freed, whatever becomes
+/// of the process meanwhile. The process may exit, its address space be
+/// released at its zombie transition ([`release_address_space`]), or the
+/// process be reaped; and exec does not clear the user half under it
+/// ([`ExecTeardown`] waits for it).
+///
+/// For a caller that walks *another* process's page tables after letting
+/// go of the process table: `process_vm_readv`/`writev`. Until 2026-10-02
+/// that caller held the bare PML4, and a reap on another CPU could free
+/// the tables under its walk. A process's own threads need no pin: an
+/// address space is not freed while a thread of it can still run on it.
+///
+/// It keeps the tables, not what is mapped in them: the process may still
+/// unmap a page while the holder reads it. The frame under a page the holder
+/// touches is kept by `mm::frame`'s remote-copy windows instead
+/// (`mm::user::copy_from_user_as`), since 2026-10-03 (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
+#[must_use]
+pub struct AsPin {
+    pml4: u64,
+}
+
+impl AsPin {
+    /// The pinned address space's PML4, by physical address.
+    #[must_use]
+    pub fn pml4(&self) -> u64 {
+        self.pml4
+    }
+}
+
+impl Drop for AsPin {
+    fn drop(&mut self) {
+        let last = {
+            let mut pins = ADDRESS_SPACE_PINS.lock();
+            match pins.get_mut(&self.pml4) {
+                Some(state) if state.pins > 1 => {
+                    state.pins = state.pins.saturating_sub(1);
+                    false
+                }
+                Some(state) => {
+                    state.pins = 0;
+                    if !state.exec_teardown {
+                        pins.remove(&self.pml4);
+                    }
+                    true
+                }
+                // Every pin is counted before it exists (`try_pin`).
+                None => false,
+            }
+        };
+        // A free that waited for this pin can go now; if this runs before
+        // the free has queued itself, the idle loop's retry finds it.
+        if last {
+            free_deferred_address_spaces();
         }
+    }
+}
+
+/// Pin `pid`'s address space ([`AsPin`]). `None` for a process that is not
+/// in the table, or that has no address space: never given one, or
+/// released at its exit ([`release_address_space`]).
+///
+/// While exec is clearing the space in place ([`ExecTeardown`]) this waits,
+/// yielding, until it is done: the tables are being freed, and the pin that
+/// would keep them is what the teardown waited out before it began. The
+/// holder then sees the new image.
+pub fn pin_address_space(pid: ProcessId) -> Option<AsPin> {
+    loop {
+        match try_pin(pid) {
+            PinAttempt::Pinned(pin) => return Some(pin),
+            PinAttempt::NoAddressSpace => return None,
+            PinAttempt::ExecTeardown => crate::sched::yield_now(),
+        }
+    }
+}
+
+/// What one attempt at [`pin_address_space`] found.
+enum PinAttempt {
+    Pinned(AsPin),
+    NoAddressSpace,
+    ExecTeardown,
+}
+
+/// One attempt at [`pin_address_space`], which does not wait.
+fn try_pin(pid: ProcessId) -> PinAttempt {
+    let table = PROCESS_TABLE.lock();
+    let Some(pml4) = table.get(&pid).map(|p| p.pml4_phys).filter(|&p| p != 0) else {
+        return PinAttempt::NoAddressSpace;
+    };
+    // Counted before the table's lock is let go: a release or a reap takes
+    // the PML4 out of the table under that lock, and finds this pin after.
+    let mut pins = ADDRESS_SPACE_PINS.lock();
+    let state = pins.entry(pml4).or_default();
+    if state.exec_teardown {
+        return PinAttempt::ExecTeardown;
+    }
+    state.pins = state.pins.saturating_add(1);
+    PinAttempt::Pinned(AsPin { pml4 })
+}
+
+/// Whether any [`AsPin`] holds `pml4`, or exec is tearing it down.
+fn address_space_pinned(pml4: u64) -> bool {
+    ADDRESS_SPACE_PINS
+        .lock()
+        .get(&pml4)
+        .is_some_and(|state| state.pins > 0 || state.exec_teardown)
+}
+
+/// Exec's hold on its process's address space while it clears the user half
+/// in place (`proc::spawn::exec_process`): begun only once no [`AsPin`] holds
+/// the space ([`begin_exec_teardown`]), and no pin is given out while it
+/// lives. Dropped once the old image's tables are gone and the space is
+/// empty, which is a state a walker can meet safely.
+///
+/// A pin keeps the tables from being freed, but exec frees them without
+/// freeing the address space: it keeps the PML4 and clears everything under
+/// it. Until 2026-10-03 nothing kept that from happening under a
+/// `process_vm_readv` walking the same tables (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`). Linux gives the
+/// new image a new mm instead, and the old one goes when its last
+/// `mmget` does.
+#[must_use]
+pub struct ExecTeardown {
+    pml4: u64,
+}
+
+impl Drop for ExecTeardown {
+    fn drop(&mut self) {
+        let mut pins = ADDRESS_SPACE_PINS.lock();
+        if let Some(state) = pins.get_mut(&self.pml4) {
+            state.exec_teardown = false;
+            if state.pins == 0 {
+                pins.remove(&self.pml4);
+            }
+        }
+    }
+}
+
+/// Begin exec's in-place teardown of the address space at `pml4`
+/// ([`ExecTeardown`]): wait, yielding, until no pin holds it, then hold it
+/// against new ones. A pin lasts one `process_vm_readv`/`writev` call, so
+/// the wait is that long at most.
+pub fn begin_exec_teardown(pml4: u64) -> ExecTeardown {
+    loop {
+        if let Some(teardown) = try_begin_exec_teardown(pml4) {
+            return teardown;
+        }
+        crate::sched::yield_now();
+    }
+}
+
+/// One attempt at [`begin_exec_teardown`]: `None` while a pin holds `pml4`,
+/// or another teardown does.
+fn try_begin_exec_teardown(pml4: u64) -> Option<ExecTeardown> {
+    let mut pins = ADDRESS_SPACE_PINS.lock();
+    let state = pins.entry(pml4).or_default();
+    if state.pins > 0 || state.exec_teardown {
+        return None;
+    }
+    state.exec_teardown = true;
+    Some(ExecTeardown { pml4 })
+}
+
+/// Release `pid`'s address space as it becomes a zombie -- Linux's
+/// `exit_mm`. Its mappings' file references are dropped, and its page tables
+/// and frames freed as soon as no CPU and no [`AsPin`] can still be on them
+/// ([`free_address_space_when_unused`]). The PML4, the VMAs and the
+/// address-space charge leave the process record, so a zombie's
+/// `/proc/<pid>/maps`, `statm` and `stat` sizes read empty, as Linux's do.
+///
+/// Until 2026-10-02 none of it went until the reap ([`destroy`]): a zombie
+/// whose parent never waited kept every page it had
+/// (`TD-A-ZOMBIE-KEEPS-ITS-MEMORY-UNTIL-REAPED`). Nothing if `pid` is not a
+/// zombie, or has nothing left to release.
+///
+/// Called by `thread::on_thread_exit` after the zombie transition and after
+/// [`exit_close_fds`], so a handle whose close unmaps from these tables
+/// does it while they exist. Every thread of the process is off them by
+/// then, or recorded in [`Process::killed_on_cpu`].
+pub fn release_address_space(pid: ProcessId) {
+    let (pml4, vmas, killed_on_cpu) = {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(p) = table.get_mut(&pid) else {
+            return;
+        };
+        if p.state != ProcessState::Zombie {
+            return;
+        }
+        p.linux_as_bytes = 0;
+        p.brk_start = 0;
+        p.brk_current = 0;
+        (
+            core::mem::take(&mut p.pml4_phys),
+            core::mem::take(&mut p.vmas),
+            core::mem::take(&mut p.killed_on_cpu),
+        )
+    };
+    for vma in &vmas {
+        vma_release_backing(vma);
+    }
+    if pml4 != 0 {
+        free_address_space_when_unused(pml4, killed_on_cpu);
+    }
+}
+
+/// Free process address space `pml4_phys` -- its DMA buffers, mapped frames,
+/// page tables and the PML4 itself -- as soon as no CPU can still be running on
+/// it: now, unless one of `killed_on_cpu` ([`Process::killed_on_cpu`]) is still
+/// on a CPU, in which case it waits in [`DEFERRED_ADDRESS_SPACES`] for
+/// [`free_deferred_address_spaces`].
+///
+/// The wait is for that CPU's next switch, which reloads CR3 because the live
+/// one is no longer the incoming task's (`sched::load_address_space`). Until
+/// then the CPU is still executing the dead thread on these page tables, in
+/// user mode, and freeing them there is the `B-FORKEXEC-BOOT-HANG` failure
+/// from another CPU: the machine's next walk through the freed table decides
+/// what it runs. Freeing nothing until then costs at most one timer tick of
+/// memory. Each call first retries what earlier ones deferred.
+fn free_address_space_when_unused(pml4_phys: u64, killed_on_cpu: Vec<TaskId>) {
+    free_deferred_address_spaces();
+    if killed_on_cpu
+        .iter()
+        .any(|&task| crate::sched::task_is_on_cpu(task))
+    {
+        crate::serial_println!(
+            "[proc] address space {:#x} waits for killed thread(s) {:?} to leave their CPU",
+            pml4_phys,
+            killed_on_cpu
+        );
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .push((pml4_phys, killed_on_cpu));
+        return;
+    }
+    // No new pin can appear: the PML4 has already left the process table,
+    // which is where `pin_address_space` finds one.
+    if address_space_pinned(pml4_phys) {
+        crate::serial_println!(
+            "[proc] address space {:#x} waits for a cross-process reader's pin",
+            pml4_phys
+        );
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .push((pml4_phys, killed_on_cpu));
+        return;
+    }
+    free_address_space(pml4_phys);
+}
+
+/// Free every deferred address space ([`DEFERRED_ADDRESS_SPACES`]) whose
+/// killed threads have all left their CPUs and which no [`AsPin`] holds.
+/// Returns how many it freed.
+///
+/// Called before each new teardown, when an address space's last pin goes,
+/// and by the boot thread's idle loop at the
+/// cadence it reaps dead tasks, so a deferral is bounded by that loop even on a
+/// machine where nothing else exits.
+pub fn free_deferred_address_spaces() -> usize {
+    let ready: Vec<u64> = {
+        let mut deferred = DEFERRED_ADDRESS_SPACES.lock();
+        if deferred.is_empty() {
+            return 0;
+        }
+        let mut ready = Vec::new();
+        deferred.retain(|(pml4, threads)| {
+            let still_running = threads
+                .iter()
+                .any(|&task| crate::sched::task_is_on_cpu(task));
+            if !still_running {
+                ready.push(*pml4);
+            }
+            still_running
+        });
+        ready
+    };
+    // Pins are asked outside the list's lock, which is never held with
+    // theirs. A space still pinned goes back on the list; its last pin's
+    // drop, or the idle loop's next retry, frees it.
+    let mut freed = 0usize;
+    for pml4 in ready {
+        if address_space_pinned(pml4) {
+            DEFERRED_ADDRESS_SPACES.lock().push((pml4, Vec::new()));
+        } else {
+            free_address_space(pml4);
+            freed = freed.saturating_add(1);
+        }
+    }
+    freed
+}
+
+/// Free a process address space no CPU can be running on.
+fn free_address_space(pml4_phys: u64) {
+    // Free DMA buffers allocated for this process before destroying the
+    // address space (DMA buffers are tracked separately from normal page
+    // table entries).
+    crate::mm::dma::free_all_for_process(pml4_phys);
+
+    // Free the entire user address space (mapped frames, intermediate page
+    // tables, and the PML4 page).
+    // SAFETY: The process is gone from the process table, every thread of it
+    // has exited, and none can still be executing on these tables: a thread
+    // that exited itself moved onto the kernel PML4 before its process could
+    // be reaped (`sched::detach_address_space`), and one killed while a CPU
+    // ran it was waited for above until that CPU switched away, which
+    // reloads CR3. All user-half pages were allocated for this process.
+    unsafe {
+        crate::mm::page_table::destroy_user_address_space(pml4_phys);
     }
 }
 
@@ -6470,29 +8189,11 @@ fn destroy_process_resources(
 /// process's address space (mapped frames, intermediate page tables,
 /// and the PML4 itself), plus IPC handles and exception registrations.
 pub fn destroy(pid: ProcessId) {
-    // Extract the process from the table.
-    let removed;
-    {
-        let mut table = PROCESS_TABLE.lock();
-        removed = table.remove(&pid);
-    }
-    // PROCESS_TABLE lock dropped — safe to acquire other locks.
-
+    // Extract the process from the table, then release it with the lock
+    // dropped, as every end of a process does (`finish_process`).
+    let removed = PROCESS_TABLE.lock().remove(&pid);
     if let Some(proc) = removed {
-        // Release the backing-file reference each file-backed VMA owned.
-        // The process-table lock is already dropped, so taking the
-        // open-file lock here respects the lock ordering.
-        for vma in &proc.vmas {
-            vma_release_backing(vma);
-        }
-        // A controlling terminal belongs to a session, so it outlives the
-        // session *leader* but not the session itself. Once this process is
-        // gone, if nobody is left in its session the association would leak —
-        // and worse, a later process whose pid recycled into that sid would
-        // inherit a terminal it never acquired. Checked here rather than in
-        // the zombie transition because a zombie is still a session member.
-        ctty_release_if_session_empty(proc.sid);
-        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles);
+        finish_process(pid, proc);
     }
 }
 
@@ -6553,6 +8254,30 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
         {
             proc.ipc_handles.swap_remove(pos);
         }
+    }
+}
+
+/// Take one `(resource_type, handle_raw)` record out of `pid`'s list, saying
+/// whether there was one: a close that must give back exactly the hold the
+/// record stands for, and none when there is no record -- two threads closing
+/// one handle at once give it back once. (`deregister_ipc_handle` answers
+/// nothing, so a caller cannot tell.)
+#[must_use]
+pub fn take_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    match proc
+        .ipc_handles
+        .iter()
+        .position(|&(rt, h)| rt == resource_type && h == handle_raw)
+    {
+        Some(pos) => {
+            proc.ipc_handles.swap_remove(pos);
+            true
+        }
+        None => false,
     }
 }
 
@@ -6641,6 +8366,47 @@ pub fn set_exec_inherited_fds(pid: ProcessId, fds: Vec<(i32, u8, u64)>) {
     if let Some(proc) = table.get_mut(&pid) {
         proc.exec_inherited_fds = fds;
     }
+}
+
+/// Record the handles process `pid`'s next successful `exec` closes
+/// ([`Process::exec_close_handles`]); an empty list clears it.
+pub fn set_exec_close_handles(pid: ProcessId, handles: Vec<(u8, u64)>) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.exec_close_handles = handles;
+    }
+}
+
+/// What an exec does with the close-on-exec list libc named
+/// ([`take_exec_close_handles`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ExecCloseList {
+    /// The handles to close, as `close()` closes them.
+    pub close: Vec<(u8, u64)>,
+    /// Handles the exec also keeps under a descriptor
+    /// ([`Process::exec_inherited_fds`]). They stay open -- closing one would
+    /// close the kept descriptor's file -- but the dropped descriptor still
+    /// counts as closed for the rules that come with any close: the
+    /// process's record locks on the file go (POSIX).
+    pub shared: Vec<(u8, u64)>,
+}
+
+/// Take the close-on-exec handle list, for an exec attempt that is starting,
+/// split into the handles to close and those a kept descriptor shares
+/// ([`ExecCloseList`]). Taken under one lock, so the two lists are compared
+/// as they stand.
+pub fn take_exec_close_handles(pid: ProcessId) -> ExecCloseList {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return ExecCloseList::default();
+    };
+    let handles = core::mem::take(&mut proc.exec_close_handles);
+    let (shared, close) = handles.into_iter().partition(|&(ty, h)| {
+        proc.exec_inherited_fds
+            .iter()
+            .any(|&(_, kept_ty, kept_h)| kept_ty == ty && kept_h == h)
+    });
+    ExecCloseList { close, shared }
 }
 
 /// Take (move out) the exec-carried fd snapshot from a process's PCB.
@@ -6923,6 +8689,30 @@ pub fn linux_saved_auxv(pid: ProcessId) -> Option<alloc::vec::Vec<u8>> {
     proc.linux_saved_auxv.clone()
 }
 
+/// Record where `pid`'s main image's program headers are
+/// ([`Process::main_phdr`]): at spawn, and again at each exec.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not a live process.
+pub fn set_main_phdr(
+    pid: ProcessId,
+    phdr: Option<crate::proc::spawn::MainPhdr>,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.main_phdr = phdr;
+    Ok(())
+}
+
+/// Where `pid`'s main image's program headers are, or `None` (no such
+/// process, no image yet, or an image with none). `SYS_PROCESS_GET_PHDR`'s
+/// answer.
+#[must_use]
+pub fn main_phdr(pid: ProcessId) -> Option<crate::proc::spawn::MainPhdr> {
+    PROCESS_TABLE.lock().get(&pid)?.main_phdr
+}
+
 /// Drop `pid`'s saved Linux auxiliary vector, if any.
 ///
 /// Called on `execve` into a *native* image: a native process has no
@@ -6945,7 +8735,7 @@ pub fn clear_linux_saved_auxv(pid: ProcessId) {
 /// processes.  Called by `exec_process` when re-using an existing
 /// Linux fd table across an `execve()`.
 ///
-/// The returned list:
+/// [`ExecCloexec::to_close`]:
 /// - Excludes `HandleKind::Console` entries (no kernel resource).
 /// - Excludes any `(kind, raw_handle)` still referenced by a
 ///   non-cloexec fd left in the table (so the open file description
@@ -6953,12 +8743,15 @@ pub fn clear_linux_saved_auxv(pid: ProcessId) {
 /// - Is deduplicated by `(kind, raw_handle)` so that two cloexec fds
 ///   pointing at the same handle yield exactly one close.
 ///
-/// Returns an empty vector if `pid` has no Linux fd table (e.g. it
-/// was previously a Native-ABI process); the caller can then install
-/// a fresh stdio-only table via [`linux_fd_install_stdio`].  Returns
-/// `None` only if `pid` does not refer to a live process at all.
+/// [`ExecCloexec::removed`] is every resource-bearing entry taken out,
+/// referenced or not, for the rules that come with any descriptor's close.
+///
+/// Both lists are empty when no fd was close-on-exec. Returns `None` if
+/// `pid` does not refer to a live process, or has no Linux fd table (e.g.
+/// it was previously a Native-ABI process); the caller can then install a
+/// fresh stdio-only table via [`linux_fd_install_stdio`].
 #[must_use]
-pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<alloc::vec::Vec<super::linux_fd::FdEntry>> {
+pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<ExecCloexec> {
     use super::linux_fd::FdEntry;
 
     let mut table = PROCESS_TABLE.lock();
@@ -6968,29 +8761,42 @@ pub fn linux_fd_exec_cloexec(pid: ProcessId) -> Option<alloc::vec::Vec<super::li
     let taken = fd_table.take_cloexec_entries();
     fd_table.ensure_stdio();
 
-    // Build the to-close list: kernel-resource-bearing entries, not
-    // referenced by any remaining fd, deduplicated by (kind, raw).
-    let mut to_close: alloc::vec::Vec<FdEntry> = alloc::vec::Vec::new();
+    // Build both lists from the kernel-resource-bearing entries,
+    // deduplicated by (kind, raw); to-close keeps only those no remaining
+    // fd references.
+    let mut out = ExecCloexec {
+        to_close: alloc::vec::Vec::new(),
+        removed: alloc::vec::Vec::new(),
+    };
+    let same = |a: &FdEntry, b: &FdEntry| a.kind == b.kind && a.raw_handle == b.raw_handle;
     for entry in taken {
-        if !entry.kind.needs_kernel_close() {
+        if !entry.kind.needs_kernel_close() || out.removed.iter().any(|e| same(e, &entry)) {
             continue;
         }
-        let already_listed = to_close
-            .iter()
-            .any(|e| e.kind == entry.kind && e.raw_handle == entry.raw_handle);
-        if already_listed {
-            continue;
-        }
+        out.removed.push(entry);
         // `excluded_fd` is irrelevant here — the cloexec entries are
         // already gone from the table, so we just scan what remains.
         // Use -1 (never a valid fd) to mean "exclude nothing extra".
         let still_referenced = fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
         if !still_referenced {
-            to_close.push(entry);
+            out.to_close.push(entry);
         }
     }
 
-    Some(to_close)
+    Some(out)
+}
+
+/// What an exec's close-on-exec took out of a Linux fd table
+/// ([`linux_fd_exec_cloexec`]).
+pub struct ExecCloexec {
+    /// The kernel handles to release: referenced by no fd left in the
+    /// table, each `(kind, raw_handle)` once.
+    pub to_close: alloc::vec::Vec<super::linux_fd::FdEntry>,
+    /// Every resource-bearing entry removed, released or not, each
+    /// `(kind, raw_handle)` once. POSIX attaches some rules to the close of
+    /// any descriptor: a process's record locks on a file go with any
+    /// descriptor for it. Those cannot wait for the last one.
+    pub removed: alloc::vec::Vec<super::linux_fd::FdEntry>,
 }
 
 /// Look up `fd` in the Linux fd table.  Returns `None` if the process
@@ -7053,6 +8859,69 @@ pub fn linux_fd_install(
     Ok(fd)
 }
 
+/// Install a descriptor that came from another process -- `SCM_RIGHTS`,
+/// `pidfd_getfd` -- at the lowest free number, and say whether the process
+/// held its object already.
+///
+/// A process holds one reference per object however many of its
+/// descriptors name it, and `close` releases it with the last of them. So
+/// the caller keeps the reference it brought only when the object is new to
+/// the process -- this then records it in `ipc_handles`, for exit to release
+/// and fork to share -- and drops it when the answer is `true`. The check and
+/// the install are one step under the process table's lock: apart, another
+/// thread closing the process's other descriptor for the object in between
+/// would release the object while this one was installed as though still
+/// covered by it.
+///
+/// Enforces `RLIMIT_NOFILE` as [`linux_fd_install`] does.
+///
+/// # Errors
+///
+/// As [`linux_fd_install`].
+pub fn linux_fd_install_passed(
+    pid: ProcessId,
+    entry: super::linux_fd::FdEntry,
+) -> KernelResult<(i32, bool)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let nofile_soft = proc
+        .rlimits
+        .get(RLIMIT_NOFILE as usize)
+        .map_or(RLIM_INFINITY, |r| r.0);
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    let held = fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
+    let fd = fd_table.install_lowest_from(0, entry)?;
+    if nofile_soft != RLIM_INFINITY && u64::try_from(fd).unwrap_or(u64::MAX) >= nofile_soft {
+        // We installed it; we take it back out.
+        let _ = fd_table.take(fd);
+        return Err(KernelError::TooManyOpenFiles);
+    }
+    if !held && let Some(resource) = entry.kind.resource_type() {
+        proc.ipc_handles.push((resource, entry.raw_handle));
+    }
+    Ok((fd, held))
+}
+
+/// Take descriptor `fd` out of `pid`'s table and say whether it was the
+/// process's last for its object -- the one whose close releases it.
+///
+/// One step under the process table's lock: as two (take, then ask), two
+/// threads closing two descriptors for one object at once could each find
+/// the other's already gone, and release the process's one reference twice
+/// -- the second time a reference some other process holds.
+#[must_use]
+pub fn linux_fd_take_last(pid: ProcessId, fd: i32) -> Option<(super::linux_fd::FdEntry, bool)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let fd_table = proc.linux_fd_table.as_mut()?;
+    let entry = fd_table.take(fd)?;
+    let last = !fd_table.is_handle_referenced(entry.kind, entry.raw_handle, -1);
+    Some((entry, last))
+}
+
 /// Install `entry` at a specific `fd`, overwriting any existing entry.
 ///
 /// The caller is responsible for closing the previous handle if it held
@@ -7089,26 +8958,6 @@ pub fn linux_fd_take(pid: ProcessId, fd: i32) -> Option<super::linux_fd::FdEntry
     fd_table.take(fd)
 }
 
-/// Check whether any fd OTHER than `excluded_fd` references the same
-/// `(kind, raw_handle)`.  Used by `close()` to decide whether to
-/// release the underlying kernel resource.
-#[must_use]
-pub fn linux_fd_is_handle_referenced(
-    pid: ProcessId,
-    kind: super::linux_fd::HandleKind,
-    raw_handle: u64,
-    excluded_fd: i32,
-) -> bool {
-    let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
-        return false;
-    };
-    let Some(fd_table) = proc.linux_fd_table.as_ref() else {
-        return false;
-    };
-    fd_table.is_handle_referenced(kind, raw_handle, excluded_fd)
-}
-
 /// Duplicate `oldfd` onto the lowest free slot >= `min_fd`.
 ///
 /// Implements both `dup` (min_fd=0) and `fcntl(F_DUPFD, min_fd)`.
@@ -7130,9 +8979,12 @@ pub fn linux_fd_dup(pid: ProcessId, oldfd: i32, min_fd: i32) -> KernelResult<i32
     fd_table.dup_lowest(oldfd, min_fd)
 }
 
-/// Duplicate `oldfd` onto exactly `newfd`, returning `(newfd,
-/// previous_occupant)`.  The caller is responsible for closing the
-/// previous occupant (if `Some`) after dropping the lock.
+/// Duplicate `oldfd` onto exactly `newfd`, returning `newfd` and the
+/// previous occupant, if there was one, with whether it was the process's
+/// last descriptor for its object (decided in the same step as the
+/// displacement, as [`linux_fd_take_last`] decides it). The caller closes
+/// the previous occupant after dropping the lock -- releasing its object
+/// only when it was the last.
 ///
 /// # Errors
 ///
@@ -7145,14 +8997,21 @@ pub fn linux_fd_dup2(
     pid: ProcessId,
     oldfd: i32,
     newfd: i32,
-) -> KernelResult<(i32, Option<super::linux_fd::FdEntry>)> {
+) -> KernelResult<(i32, Option<(super::linux_fd::FdEntry, bool)>)> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     let fd_table = proc
         .linux_fd_table
         .as_mut()
         .ok_or(KernelError::InvalidHandle)?;
-    fd_table.dup2(oldfd, newfd)
+    let (fd, prev) = fd_table.dup2(oldfd, newfd)?;
+    Ok((
+        fd,
+        prev.map(|e| {
+            let last = !fd_table.is_handle_referenced(e.kind, e.raw_handle, -1);
+            (e, last)
+        }),
+    ))
 }
 
 /// Set `FD_CLOEXEC` (and any other future fd flags) for `fd`.
@@ -7340,6 +9199,49 @@ pub fn cap_entries(pid: ProcessId) -> Option<Vec<crate::cap::table::CapEntry>> {
     table.get(&pid).map(|p| p.cap_table.valid_entries())
 }
 
+/// The UTS namespace process `pid` is in, or `None` if there is no such
+/// process.
+#[must_use]
+pub fn uts_ns(pid: ProcessId) -> Option<crate::utsns::UtsNsId> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.uts_ns)
+}
+
+/// Put process `pid` in UTS namespace `id`, handing it the caller's hold on
+/// `id` and giving up its hold on the one it leaves -- `unshare`, `setns`,
+/// `clone(CLONE_NEWUTS)`, a container's `--hostname`. Without such a
+/// process the caller's hold is given up instead.
+///
+/// # Errors
+///
+/// `NoSuchProcess`.
+pub fn set_uts_ns(pid: ProcessId, id: crate::utsns::UtsNsId) -> KernelResult<()> {
+    let old = {
+        let mut table = PROCESS_TABLE.lock();
+        match table.get_mut(&pid) {
+            Some(p) => core::mem::replace(&mut p.uts_ns, id),
+            None => {
+                drop(table);
+                crate::utsns::release(id);
+                return Err(KernelError::NoSuchProcess);
+            }
+        }
+    };
+    crate::utsns::release(old);
+    Ok(())
+}
+
+/// Spawn: `child` goes in `parent`'s UTS namespace, as a fork's child does.
+/// A no-op when either is not there.
+pub fn inherit_uts_ns(parent: ProcessId, child: ProcessId) {
+    let Some(id) = uts_ns(parent) else {
+        return;
+    };
+    if crate::utsns::retain(id) {
+        // A child gone meanwhile: `set_uts_ns` gives the hold back itself.
+        let _ = set_uts_ns(child, id);
+    }
+}
+
 /// Get the credentials for a process.
 pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
     let table = PROCESS_TABLE.lock();
@@ -7351,13 +9253,153 @@ pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
 /// Only processes running as root (uid=0) or the kernel (PID 0
 /// caller) should call this.  The authorization check is the
 /// caller's responsibility.
-#[allow(dead_code)] // Public API — called when login/user management lands.
+///
+/// Sets the identity and nothing else: for spawn, whose capability list for the
+/// child is a deliberate choice of its own. A process changing its *own*
+/// identity goes through [`change_credentials`].
 pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.credentials = credentials;
     Ok(())
+}
+
+/// A process changes its own identity: as [`set_credentials`], and root's
+/// authority (`cap::rights_without_root`) follows its user ids in the same
+/// step, as Linux's capabilities follow them (`cap_emulate_setxuid`):
+///
+/// - every one of the real, effective and saved ids leaving 0 -- from a
+///   process that had one at 0 -- takes root's authority away for good, what
+///   was put aside included (Linux clears the permitted set);
+/// - the effective id leaving 0 while another stays puts it aside
+///   (`CapTable::suspend`; Linux clears the effective set): the process
+///   cannot use it, but can have it back;
+/// - the effective id returning to 0 gives back what was put aside.
+///
+/// Every credential-changing syscall comes here -- the native
+/// `SYS_PROCESS_SET_CREDENTIALS`, `SYS_PROCESS_SET_IDS` and the Linux
+/// `setuid` family alike -- so the rule holds whichever ABI asked. The
+/// identity and the capability table change under one lock: nothing can
+/// observe the new ids with the old authority.
+///
+/// Returns how many capability entries were narrowed, put aside or given
+/// back.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not in the table.
+pub fn change_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<usize> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    Ok(swap_credentials(proc, credentials))
+}
+
+/// [`change_credentials`], deciding the new credentials under the same lock:
+/// `change` is given the process's credentials and whether it holds the
+/// `SET_CREDENTIALS` right over processes, and answers the credentials to
+/// install -- or a refusal, which leaves everything as it was. Nothing can
+/// change the credentials between the decision and the change, so a
+/// `setuid` racing another in a second thread is decided against what it
+/// replaces (`proc::setid`).
+///
+/// `change` runs under the process table's lock: it must not call back into
+/// this module.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if `pid` is not in the table; whatever
+/// `change` answers.
+pub fn update_credentials(
+    pid: ProcessId,
+    change: impl FnOnce(&ProcessCredentials, bool) -> KernelResult<ProcessCredentials>,
+) -> KernelResult<usize> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let may_set = proc
+        .cap_table
+        .has_capability_type(ResourceType::Process, Rights::SET_CREDENTIALS);
+    let credentials = change(&proc.credentials, may_set)?;
+    Ok(swap_credentials(proc, credentials))
+}
+
+/// Install `credentials` in `proc`, root's authority following the user
+/// ids as [`change_credentials`] describes. Returns how many capability
+/// entries changed.
+fn swap_credentials(proc: &mut Process, credentials: ProcessCredentials) -> usize {
+    let old = core::mem::replace(&mut proc.credentials, credentials);
+    let new = &proc.credentials;
+    let without_root = |entry: &cap::table::CapEntry| {
+        cap::rights_without_root(entry.resource_type, entry.resource_id, entry.rights)
+    };
+    if old.any_root_uid() && !new.any_root_uid() {
+        // For good: nothing put aside comes back.
+        let narrowed = proc.cap_table.narrow_all(without_root);
+        return narrowed.saturating_add(proc.cap_table.drop_suspended());
+    }
+    if old.uid == 0 && new.uid != 0 {
+        return proc.cap_table.suspend(without_root);
+    }
+    if old.uid != 0 && new.uid == 0 {
+        return proc.cap_table.restore();
+    }
+    0
+}
+
+/// Process `pid` is exec'ing: its saved and filesystem ids become its
+/// effective ones ([`ProcessCredentials::exec`]), and root's authority put
+/// aside goes for good if no user id is 0 after that -- Linux's exec
+/// computes a non-root process's permitted capabilities afresh, from nothing.
+/// A no-op for a process that is not there.
+pub fn exec_credentials(pid: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return;
+    };
+    proc.credentials.exec();
+    if !proc.credentials.any_root_uid() {
+        proc.cap_table.drop_suspended();
+    }
+}
+
+/// Spawn: `child` takes `parent`'s credentials as a fork and an exec would
+/// leave them -- `posix_spawn`'s contract -- with what an exec does to the
+/// saved and filesystem ids ([`ProcessCredentials::exec`]), and, when no user
+/// id of its is 0, without the root rights its inherited capabilities had
+/// put aside.
+///
+/// Until 2026-10-08 a spawned child kept the root credentials every new
+/// process record starts with, whoever its parent was: a program a user
+/// spawned ran as uid 0, past every file's permission bits and free to
+/// `setuid` to anyone.
+///
+/// # Errors
+///
+/// [`KernelError::NoSuchProcess`] if either process is not in the table.
+pub fn inherit_credentials(parent: ProcessId, child: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let mut credentials = table
+        .get(&parent)
+        .ok_or(KernelError::NoSuchProcess)?
+        .credentials
+        .clone();
+    credentials.exec();
+    let proc = table.get_mut(&child).ok_or(KernelError::NoSuchProcess)?;
+    if !credentials.any_root_uid() {
+        proc.cap_table.drop_suspended();
+    }
+    proc.credentials = credentials;
+    Ok(())
+}
+
+/// How many of process `pid`'s capability entries have rights put aside
+/// (`CapTable::suspend`): 0 for none, or no such process.
+#[must_use]
+pub fn suspended_rights(pid: ProcessId) -> usize {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map_or(0, |p| p.cap_table.suspended_count())
 }
 
 /// Get the list of thread task IDs for a process.
@@ -7382,18 +9424,68 @@ pub fn process_acct_ticks(pid: ProcessId) -> Option<(u64, u64)> {
         .map(|p| (p.acct_user_ticks, p.acct_sys_ticks))
 }
 
-/// Get a process's accumulated children CPU ticks (from reaped descendants)
-/// as `(child_user_ticks, child_sys_ticks)`.  Returns `(0, 0)` if the
-/// process is unknown.
+/// What process `pid`'s threads have used and counted -- the exited ones'
+/// accumulators plus every live thread's [`crate::sched::TaskCounters`] --
+/// or `None` if the process is unknown. A zombie's is its final total.
+///
+/// One snapshot: the table's lock is held while the live threads are summed
+/// (`PROCESS_TABLE` → `SCHED`, the documented order), and [`remove_thread`]
+/// folds an exiting thread's counters into the accumulators and takes it off
+/// `threads` under the same lock. So each thread is counted exactly once,
+/// whichever side of its exit a reader falls -- read separately, a thread
+/// that exited between the two reads was missed entirely -- and a CPU-time
+/// clock read from it never runs backwards: what an exiting thread folds
+/// in is sampled at the fold, after anything a reader saw of it live.
+#[must_use]
+pub fn process_counters(pid: ProcessId) -> Option<crate::sched::TaskCounters> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    Some(exited_counters(proc).plus(crate::sched::counters_sum(&proc.threads)))
+}
+
+/// What `proc`'s exited threads left: its `acct_*` accumulators.
+fn exited_counters(proc: &Process) -> crate::sched::TaskCounters {
+    crate::sched::TaskCounters {
+        cpu: crate::sched::CpuSample {
+            cycles: proc.acct_cycles,
+            user_ticks: proc.acct_user_ticks,
+            sys_ticks: proc.acct_sys_ticks,
+        },
+        min_flt: proc.acct_min_flt,
+        maj_flt: proc.acct_maj_flt,
+        nvcsw: proc.acct_nvcsw,
+        nivcsw: proc.acct_nivcsw,
+    }
+}
+
+/// Process `pid`'s run time as `(user, system)` nanoseconds -- the precise
+/// total of [`process_counters`] split in the proportion its ticks saw,
+/// against the process's last split (`sched::CpuSample::adjusted`, Linux's
+/// `thread_group_cputime_adjusted`) -- or `None` if the process is unknown.
+/// What `getrusage(RUSAGE_SELF)`, `times`, the wait family and
+/// `/proc/<pid>/stat` report.
+#[must_use]
+pub fn process_times(pid: ProcessId) -> Option<(u64, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let sample = exited_counters(proc)
+        .plus(crate::sched::counters_sum(&proc.threads))
+        .cpu;
+    Some(sample.adjusted(&mut proc.prev_cputime))
+}
+
+/// Get a process's accumulated children CPU time (from reaped descendants)
+/// as `(user, system)` nanoseconds.  Returns `(0, 0)` if the process is
+/// unknown.
 ///
 /// Backs `times` `tms_cutime`/`tms_cstime`, `getrusage(RUSAGE_CHILDREN)`,
 /// and `/proc/<pid>/stat` fields 16/17.
 #[must_use]
-pub fn process_child_ticks(pid: ProcessId) -> (u64, u64) {
+pub fn process_child_times(pid: ProcessId) -> (u64, u64) {
     let table = PROCESS_TABLE.lock();
     table
         .get(&pid)
-        .map(|p| (p.child_user_ticks, p.child_sys_ticks))
+        .map(|p| (p.child_utime_ns, p.child_stime_ns))
         .unwrap_or((0, 0))
 }
 
@@ -7461,6 +9553,40 @@ pub fn count() -> usize {
     table.len()
 }
 
+/// The id of every process in the table, in any state -- one being created,
+/// running, or a zombie not yet waited for: the processes `/proc` lists, as
+/// Linux's lists every thread group until it is reaped.
+#[must_use]
+pub fn pids() -> Vec<ProcessId> {
+    PROCESS_TABLE.lock().keys().copied().collect()
+}
+
+/// Keep `leader`, the snapshot of `pid`'s first thread as it exits, as the
+/// process's [`Process::exited_leader`]. Its state is set to `Dead` and its
+/// wait cleared, which is what the thread is from here on. Nothing if `pid`
+/// is not in the table.
+///
+/// Called by `thread::on_thread_exit` while the thread's task still exists,
+/// before the scheduler can free it.
+pub fn record_exited_leader(pid: ProcessId, mut leader: crate::sched::TaskInfo) {
+    leader.state = crate::sched::task::TaskState::Dead;
+    leader.wait = crate::wchan::Wait::NONE;
+    if let Some(process) = PROCESS_TABLE.lock().get_mut(&pid) {
+        process.exited_leader = Some(leader);
+    }
+}
+
+/// `pid`'s [`Process::exited_leader`]: its first thread's last snapshot once
+/// that thread has exited; `None` while it lives, for a process that never
+/// had one, and for a pid that is not in the table.
+#[must_use]
+pub fn exited_leader(pid: ProcessId) -> Option<crate::sched::TaskInfo> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .and_then(|p| p.exited_leader.clone())
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -7473,6 +9599,12 @@ pub fn self_test() -> KernelResult<()> {
     test_destroy()?;
     test_reap_zombie()?;
     test_reap_any()?;
+    test_exit_notice()?;
+    test_inherit_job()?;
+    test_may_inspect()?;
+    test_deferred_address_space()?;
+    test_address_space_pin_and_release()?;
+    test_exec_teardown_holds_out_pins()?;
     test_cpu_time_accounting()?;
     test_io_accounting()?;
     test_job_control_state()?;
@@ -7483,6 +9615,11 @@ pub fn self_test() -> KernelResult<()> {
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
+    test_fork_policy()?;
+    test_subpage_fault_spares_a_shared_frame()?;
+    test_partly_present_frame_refills()?;
+    test_fault_with_the_table_held()?;
+    test_fault_swaps_in()?;
     test_rlimits()?;
     test_canonical_path()?;
 
@@ -7723,7 +9860,57 @@ fn test_rlimits() -> KernelResult<()> {
         return fail("the RLIMIT_NICE round trip did not read back");
     }
 
-    // (10) An unknown pid is NoSuchProcess, not a panic and not a silent
+    // (10) A SIGXCPU's raise (`raise_soft_rlimit`) is Linux's write of
+    //      `rlim_cur`: past the hard limit when that is where it lands,
+    //      only ever upward, never off an infinite limit -- and a setrlimit
+    //      still may not put the soft limit above the hard one.
+    let rttime = crate::proc::cputimer::RLIMIT_RTTIME;
+    if let Err(e) = set_rlimit(pid, rttime, 100_000, 300_000, LimitAuthority::Unprivileged) {
+        destroy(pid);
+        serial_println!("[proc]   (RLIMIT_RTTIME 100 ms / 300 ms gave {:?})", e);
+        return fail("RLIMIT_RTTIME 100 ms soft, 300 ms hard was refused");
+    }
+    if raise_soft_rlimit(pid, rttime, 1_100_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((1_100_000, 300_000))
+    {
+        destroy(pid);
+        return fail("a SIGXCPU's raise of RLIMIT_RTTIME did not pass the hard limit");
+    }
+    if raise_soft_rlimit(pid, rttime, 500_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((1_100_000, 300_000))
+    {
+        destroy(pid);
+        return fail("a late raise moved RLIMIT_RTTIME's soft limit down");
+    }
+    if set_rlimit(pid, rttime, 400_000, 300_000, LimitAuthority::Unprivileged)
+        != Err(KernelError::InvalidArgument)
+    {
+        destroy(pid);
+        return fail("setrlimit put a soft limit above the hard one");
+    }
+    if let Err(e) = set_rlimit(
+        pid,
+        rttime,
+        RLIM_INFINITY,
+        RLIM_INFINITY,
+        LimitAuthority::MayRaiseHardLimit,
+    ) {
+        destroy(pid);
+        serial_println!("[proc]   (RLIMIT_RTTIME back to infinity gave {:?})", e);
+        return fail("RLIMIT_RTTIME could not be put back to infinity");
+    }
+    if raise_soft_rlimit(pid, rttime, 1_100_000).is_err()
+        || get_rlimit_stored(pid, rttime) != Some((RLIM_INFINITY, RLIM_INFINITY))
+    {
+        destroy(pid);
+        return fail("a raise replaced an infinite soft limit");
+    }
+    if raise_soft_rlimit(pid, NUM_RLIMITS, 1) != Err(KernelError::InvalidArgument) {
+        destroy(pid);
+        return fail("raise_soft_rlimit accepted a resource >= NUM_RLIMITS");
+    }
+
+    // (11) An unknown pid is NoSuchProcess, not a panic and not a silent
     //      success.  Checked after the argument gates, matching `set_rlimit`'s
     //      documented order.
     destroy(pid);
@@ -7735,8 +9922,14 @@ fn test_rlimits() -> KernelResult<()> {
     if get_rlimit(pid, RLIMIT_NOFILE).is_some() {
         return fail("get_rlimit answered for a destroyed pid");
     }
+    if raise_soft_rlimit(pid, RLIMIT_NOFILE, 1) != Err(KernelError::NoSuchProcess) {
+        return fail("raise_soft_rlimit on a destroyed pid did not report NoSuchProcess");
+    }
 
-    serial_println!("[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute): OK");
+    serial_println!(
+        "[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute, a SIGXCPU's raise \
+         passes the hard limit): OK"
+    );
     Ok(())
 }
 
@@ -7786,6 +9979,7 @@ fn test_prot_none() -> KernelResult<()> {
             end,
             kind: VmaKind::Anonymous,
             flags: none_flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
         },
     ) {
         serial_println!("[proc]   FAIL: prot-none add_vma {:?}", e);
@@ -7847,6 +10041,588 @@ fn test_prot_none() -> KernelResult<()> {
 
     destroy(pid);
     serial_println!("[proc]   real PROT_NONE (resolver gate + mprotect round-trip): OK");
+    Ok(())
+}
+
+/// Test: `madvise`'s fork advice on the VMA list ([`set_fork_policy`]):
+/// 4 KiB-exact splits, the four changes and their independence, wipe's
+/// private-anonymous rule (refused whole, changing nothing), coverage, the
+/// ranges a fork leaves out ([`fork_uncopied_ranges`]), and a heap that grows
+/// without losing them ([`add_vma_merging`]).
+#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
+fn test_fork_policy() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+    use crate::mm::vma::ForkPolicy;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let hw = crate::mm::page_table::HW_PAGE_SIZE as u64;
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let wipe = ForkPolicy {
+        wipe: true,
+        dont_copy: false,
+    };
+    let dont = ForkPolicy {
+        wipe: false,
+        dont_copy: true,
+    };
+    let both = ForkPolicy {
+        wipe: true,
+        dont_copy: true,
+    };
+    let copy = ForkPolicy::COPY;
+
+    let pid = create("fork-policy-test", 0);
+    let fail = |what: &str| {
+        serial_println!("[proc]   FAIL: fork policy: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    };
+    if set_running(pid).is_err() {
+        return fail("could not start the test process");
+    }
+    // The policies of the VMAs in [lo, hi), as (start, end, policy).
+    let policies = |lo: u64, hi: u64| -> Vec<(u64, u64, ForkPolicy)> {
+        list_vmas(pid)
+            .unwrap_or_default()
+            .iter()
+            .filter(|v| v.start < hi && v.end > lo)
+            .map(|v| (v.start, v.end, v.fork))
+            .collect()
+    };
+    let anon = |start: u64, end: u64, flags: PageFlags| Vma {
+        start,
+        end,
+        kind: VmaKind::Anonymous,
+        flags,
+        fork: ForkPolicy::COPY,
+    };
+
+    // Private anonymous [base, base + 2 frames); shared anonymous memory two
+    // frames above it.
+    let base: u64 = 0x0000_0031_0000_0000;
+    let shared_at = base + 4 * frame;
+    if add_vma(pid, anon(base, base + 2 * frame, rw)).is_err()
+        || add_vma(
+            pid,
+            anon(shared_at, shared_at + frame, rw | PageFlags::SHARED),
+        )
+        .is_err()
+    {
+        return fail("could not add the test regions");
+    }
+
+    // 1. Wipe one 4 KiB page: three pieces, only the middle one marked.
+    if set_fork_policy(pid, base + hw, base + 2 * hw, ForkAdvice::Wipe) != Ok(true) {
+        return fail("wipe of a mapped page was refused");
+    }
+    if policies(base, base + 2 * frame)
+        != [
+            (base, base + hw, copy),
+            (base + hw, base + 2 * hw, wipe),
+            (base + 2 * hw, base + 2 * frame, copy),
+        ]
+    {
+        return fail("wipe did not split the region at 4 KiB");
+    }
+    if fork_uncopied_ranges(pid).as_deref() != Some(&[(base + hw, base + 2 * hw)][..]) {
+        return fail("a wiped page is not among the ranges fork leaves out");
+    }
+
+    // 2. DONTFORK over the wiped page and the next: the flags are independent.
+    if set_fork_policy(pid, base + hw, base + 3 * hw, ForkAdvice::DontCopy) != Ok(true) {
+        return fail("dontfork of mapped pages was refused");
+    }
+    if policies(base + hw, base + 3 * hw)
+        != [
+            (base + hw, base + 2 * hw, both),
+            (base + 2 * hw, base + 3 * hw, dont),
+        ]
+    {
+        return fail("dontfork did not combine with wipe page by page");
+    }
+
+    // 3. DOFORK clears only dont_copy: the wiped page is still wiped.
+    if set_fork_policy(pid, base + hw, base + 3 * hw, ForkAdvice::Copy) != Ok(true) {
+        return fail("dofork was refused");
+    }
+    if policies(base + hw, base + 3 * hw)
+        != [
+            (base + hw, base + 2 * hw, wipe),
+            (base + 2 * hw, base + 3 * hw, copy),
+        ]
+    {
+        return fail("dofork cleared more than dont_copy");
+    }
+
+    // 4. Wipe over shared memory is refused -- also when the range starts in
+    //    private memory -- and nothing changes.
+    let before = list_vmas(pid);
+    if set_fork_policy(pid, shared_at, shared_at + frame, ForkAdvice::Wipe)
+        != Err(KernelError::InvalidArgument)
+        || set_fork_policy(pid, base, shared_at + frame, ForkAdvice::Wipe)
+            != Err(KernelError::InvalidArgument)
+    {
+        return fail("wipe of shared memory was not refused");
+    }
+    if list_vmas(pid) != before {
+        return fail("a refused wipe changed the regions");
+    }
+
+    // 5. KEEPONFORK: nothing is left out any more.
+    if set_fork_policy(pid, base, base + 2 * frame, ForkAdvice::Keep) != Ok(true)
+        || fork_uncopied_ranges(pid).as_deref() != Some(&[][..])
+    {
+        return fail("keeponfork left something out of fork");
+    }
+
+    // 6. A range with a hole: the mapped part changes, and the answer says
+    //    the range was not all mapped (Linux's ENOMEM).
+    if set_fork_policy(pid, base + frame, base + 3 * frame, ForkAdvice::DontCopy) != Ok(false) {
+        return fail("a range with a hole was reported fully mapped");
+    }
+    if fork_uncopied_ranges(pid).as_deref() != Some(&[(base + frame, base + 2 * frame)][..]) {
+        return fail("the mapped part of a range with a hole was not changed");
+    }
+
+    // 7. The heap: a piece grows into its neighbour only when nothing tells
+    //    them apart, so a wiped piece keeps its policy as the heap grows.
+    let heap: u64 = 0x0000_0032_0000_0000;
+    let brk = |start: u64, end: u64| Vma {
+        start,
+        end,
+        kind: VmaKind::Brk,
+        flags: rw,
+        fork: ForkPolicy::COPY,
+    };
+    if add_vma_merging(pid, brk(heap, heap + frame)).is_err()
+        || add_vma_merging(pid, brk(heap + frame, heap + 2 * frame)).is_err()
+    {
+        return fail("could not grow the heap");
+    }
+    if policies(heap, heap + 4 * frame) != [(heap, heap + 2 * frame, copy)] {
+        return fail("two plain heap pieces did not merge");
+    }
+    if set_fork_policy(pid, heap, heap + frame, ForkAdvice::Wipe) != Ok(true)
+        || add_vma_merging(pid, brk(heap + 2 * frame, heap + 3 * frame)).is_err()
+    {
+        return fail("could not wipe or grow the heap");
+    }
+    if policies(heap, heap + 4 * frame)
+        != [
+            (heap, heap + frame, wipe),
+            (heap + frame, heap + 3 * frame, copy),
+        ]
+    {
+        return fail("growing the heap lost a wiped piece or did not merge");
+    }
+
+    destroy(pid);
+    serial_println!("[proc]   madvise fork advice on the region list: OK");
+    Ok(())
+}
+
+/// Test: the sub-page fault resolver never writes into a frame another
+/// address space holds, and still reuses one this address space alone holds.
+///
+/// The shape it guards: a group of four 4 KiB sub-pages mapped to one frame;
+/// one sub-page unmapped and mapped again as fresh memory, so the group
+/// straddles regions and its next fault there takes the sub-page path. Until
+/// 2026-10-07 that path zeroed and filled the slice of whatever frame a
+/// present sibling used -- a frame a fork child shares with its parent, or a
+/// page-cache frame, so the "fresh" page was carved out of someone else's
+/// memory. Here the test's own extra reference stands in for the other
+/// holder, and the slice it watches holds a marker that must survive.
+#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
+fn test_subpage_fault_spares_a_shared_frame() -> KernelResult<()> {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    use crate::mm::vma::ForkPolicy;
+
+    const USER_WRITE_NOT_PRESENT: u64 = (1 << 1) | (1 << 2);
+    const MARK: u8 = 0xA5;
+    let frame_size = FRAME_SIZE as u64;
+    let hw = HW_PAGE_SIZE as u64;
+    let mask = !(frame_size - 1);
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let Some(hhdm) = page_table::hhdm() else {
+        return Err(KernelError::NotSupported);
+    };
+
+    let pid = create("subpage-share-test", 0);
+    let fail = |what: &str| {
+        serial_println!("[proc]   FAIL: sub-page fault: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    };
+    if set_running(pid).is_err() {
+        return fail("could not start the test process");
+    }
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the test process has no address space");
+    };
+    let anon = |start: u64, end: u64| Vma {
+        start,
+        end,
+        kind: VmaKind::Anonymous,
+        flags: rw,
+        fork: ForkPolicy::COPY,
+    };
+
+    // Two groups, the first's frame held by someone else as well, the
+    // second's not.
+    for (g, shared) in [(0u64, true), (1u64, false)] {
+        let base = 0x0000_0033_0000_0000 + g * frame_size;
+        if add_vma(pid, anon(base, base + frame_size)).is_err() {
+            return fail("could not add the test region");
+        }
+        if !try_resolve_fault(pid, base, USER_WRITE_NOT_PRESENT) {
+            return fail("the first fault was not resolved");
+        }
+        let Some(old) = page_table::translate(pml4, VirtAddr::new(base)).map(|p| p & mask) else {
+            return fail("the first fault mapped nothing");
+        };
+        let Some(old_frame) = PhysFrame::from_addr(old) else {
+            return fail("the first fault mapped no frame");
+        };
+        // Mark sub-page 1, through the primitive every write into a
+        // process's pages uses (the frame is this process's alone so far).
+        if crate::mm::user::copy_to_user_as(pml4, base + hw, &[MARK; 16]).is_err() {
+            return fail("could not mark sub-page 1");
+        }
+        // Where to look for the marker later, after sub-page 1 is unmapped:
+        // the frame's own slice, through its HHDM alias.
+        let slice1 = (old + hw).wrapping_add(hhdm) as *const u8;
+        if shared {
+            // SAFETY: `old_frame` is live (mapped above); dropped below.
+            if unsafe { frame::ref_inc(old_frame) }.is_err() {
+                return fail("could not take a second reference");
+            }
+        }
+
+        // Sub-page 1 unmapped and mapped again as a region of its own.
+        crate::mm::user::unmap_user_range(pml4, base + hw, base + 2 * hw);
+        if remove_vma_range(pid, base + hw, base + 2 * hw).is_err()
+            || add_vma(pid, anon(base + hw, base + 2 * hw)).is_err()
+        {
+            return fail("could not remap sub-page 1");
+        }
+        if !try_resolve_fault(pid, base + hw, USER_WRITE_NOT_PRESENT) {
+            return fail("the sub-page fault was not resolved");
+        }
+        let now = page_table::translate(pml4, VirtAddr::new(base + hw)).map_or(0, |p| p & mask);
+        // SAFETY: as above -- `old` is still mapped by sub-pages 0, 2 and 3.
+        let kept = unsafe { core::slice::from_raw_parts(slice1, 16) }
+            .iter()
+            .all(|&b| b == MARK);
+        if shared {
+            // SAFETY: the reference taken above.
+            if unsafe { frame::free_frame(old_frame) }.is_err() {
+                return fail("could not drop the second reference");
+            }
+        }
+        if shared && (now == old || !kept) {
+            return fail("a fresh page was carved out of a frame another holder shares");
+        }
+        if !shared && now != old {
+            return fail("a frame this address space alone holds was not reused");
+        }
+    }
+
+    destroy(pid);
+    serial_println!("[proc]   sub-page fault: own frame reused, shared frame left alone: OK");
+    Ok(())
+}
+
+/// Test: a frame one VMA covers, with one 4 KiB sub-page dropped -- what
+/// `madvise(MADV_DONTNEED)` leaves -- faults that sub-page back in as zeros
+/// and leaves its siblings' bytes alone.
+///
+/// The whole-frame paths map all four sub-pages at once, so before the
+/// partly-present rule `map_frame` found the present ones, answered
+/// `AlreadyExists`, and the fault was reported resolved with nothing mapped
+/// -- the faulting access would have faulted forever. "Resolved" is
+/// therefore not the assertion; "mapped, and zero" is.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_partly_present_frame_refills() -> KernelResult<()> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    use crate::mm::vma::ForkPolicy;
+
+    const USER_WRITE_NOT_PRESENT: u64 = (1 << 1) | (1 << 2);
+    const MARK: u8 = 0x5A;
+    let frame_size = FRAME_SIZE as u64;
+    let hw = HW_PAGE_SIZE as u64;
+    let Some(hhdm) = page_table::hhdm() else {
+        return Err(KernelError::NotSupported);
+    };
+
+    let pid = create("partly-present-test", 0);
+    let fail = |what: &str| {
+        serial_println!("[proc]   FAIL: partly present frame: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    };
+    if set_running(pid).is_err() {
+        return fail("could not start the test process");
+    }
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the test process has no address space");
+    };
+    let base: u64 = 0x0000_0034_0000_0000;
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let vma = Vma {
+        start: base,
+        end: base + frame_size,
+        kind: VmaKind::Anonymous,
+        flags: rw,
+        fork: ForkPolicy::COPY,
+    };
+    if add_vma(pid, vma).is_err() || !try_resolve_fault(pid, base, USER_WRITE_NOT_PRESENT) {
+        return fail("could not fault in the test frame");
+    }
+    let Some(frame) = page_table::translate(pml4, VirtAddr::new(base)) else {
+        return fail("the first fault mapped nothing");
+    };
+    // Mark sub-pages 0 and 1, then drop sub-page 1 alone.
+    if crate::mm::user::copy_to_user_as(pml4, base, &alloc::vec![MARK; 2 * HW_PAGE_SIZE]).is_err() {
+        return fail("could not mark the test frame");
+    }
+    crate::mm::user::unmap_user_range(pml4, base + hw, base + 2 * hw);
+    if page_table::translate(pml4, VirtAddr::new(base + hw)).is_some() {
+        return fail("the dropped sub-page is still mapped");
+    }
+
+    let resolved = try_resolve_fault(pid, base + hw, USER_WRITE_NOT_PRESENT);
+    let Some(again) = page_table::translate(pml4, VirtAddr::new(base + hw)) else {
+        return fail(if resolved {
+            "the fault was reported resolved but nothing was mapped (the whole-frame loop)"
+        } else {
+            "the fault on the dropped sub-page was not resolved"
+        });
+    };
+    // SAFETY: `again` is the 4 KiB page now mapped at `base + hw` and `frame`
+    // the page still mapped at `base`, both read through the HHDM.
+    let (refilled, kept) = unsafe {
+        (
+            core::slice::from_raw_parts(again.wrapping_add(hhdm) as *const u8, HW_PAGE_SIZE),
+            core::slice::from_raw_parts(frame.wrapping_add(hhdm) as *const u8, HW_PAGE_SIZE),
+        )
+    };
+    if refilled.iter().any(|&b| b != 0) {
+        return fail("the refilled sub-page is not zero");
+    }
+    if kept.iter().any(|&b| b != MARK) {
+        return fail("the sibling sub-page lost its bytes");
+    }
+    destroy(pid);
+    serial_println!("[proc]   partly present frame: the dropped page comes back zero, alone: OK");
+    Ok(())
+}
+
+/// A fault met with the process table held is `Busy`, not `Unresolvable`
+/// ([`resolve_fault`]): the #PF handler retries it rather than killing the
+/// process, and a waiting caller that holds the table itself gets an answer
+/// rather than a self-deadlock.
+///
+/// Three parts, none holding `PROCESS_TABLE` across a call that takes it --
+/// which `check-recursive-locks` refuses, however safe the resolver makes it:
+/// - the decision ([`table_or_busy`]) with fakes: taken when free; busy
+///   without waiting; busy for a waiter that holds it; waited for otherwise;
+/// - the owner check it relies on (`sync::Mutex::held_by_current_task`), on
+///   a mutex of the test's own: true while held, false after;
+/// - a read fault on a committed page with the table free: `Resolved`.
+fn test_fault_with_the_table_held() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+
+    // The decision, with fakes: (wait, free, held by caller) -> taken?, and
+    // whether it waited.
+    let cases = [
+        // free: taken at once, whatever else is true
+        (false, true, false, true, false),
+        (true, true, true, true, false),
+        // held elsewhere, no waiting: busy
+        (false, false, false, false, false),
+        // held by the caller itself: busy, never a wait that cannot end
+        (true, false, true, false, false),
+        // held elsewhere, waiting: waited for, then taken
+        (true, false, false, true, true),
+    ];
+    for (wait, free, held_by_caller, want_taken, want_waited) in cases {
+        let mut waited = false;
+        let taken = table_or_busy(
+            wait,
+            || free.then_some(()),
+            || held_by_caller,
+            || waited = true,
+        )
+        .is_some();
+        if taken != want_taken || waited != want_waited {
+            serial_println!(
+                "[proc]   FAIL: busy-table decision: wait {} free {} held by caller {}: taken {} \
+                 waited {} (want {} {})",
+                wait,
+                free,
+                held_by_caller,
+                taken,
+                waited,
+                want_taken,
+                want_waited
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The owner check, on a mutex of the test's own.
+    let probe = crate::sync::Mutex::named((), b"fault_probe");
+    let held = probe.lock();
+    let while_held = probe.held_by_current_task();
+    drop(held);
+    let after = probe.held_by_current_task();
+    if !while_held || after {
+        serial_println!(
+            "[proc]   FAIL: held_by_current_task: while held {} after release {} \
+             (want true, false)",
+            while_held,
+            after
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // End to end, with the table free: a read fault on a committed anonymous
+    // frame resolves.
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pid = create("fault-busy-test", 0);
+    set_running(pid)?;
+    if get_pml4(pid).is_none_or(|p| p == 0) {
+        serial_println!("[proc]   FAIL: busy-table fault test process has no PML4");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    let base: u64 = 0x0000_0031_0000_0000; // clear of test_prot_none's window
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if let Err(e) = add_vma(
+        pid,
+        Vma {
+            start: base,
+            end: base.saturating_add(frame),
+            kind: VmaKind::Anonymous,
+            flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
+        },
+    ) {
+        serial_println!("[proc]   FAIL: busy-table fault add_vma {:?}", e);
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    let free = resolve_fault(pid, base, 1 << 2, false);
+    destroy(pid);
+    if free != FaultOutcome::Resolved {
+        serial_println!(
+            "[proc]   FAIL: busy-table fault: with the table free the fault was {:?}",
+            free
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   a fault that finds the process table held is retried or waited out, not \
+         refused; with it free it resolves: OK"
+    );
+    Ok(())
+}
+
+/// A page the kernel faults in on a process's behalf -- a syscall's buffer,
+/// `process_vm_readv` -- comes back from swap when it is there
+/// ([`resolve_fault`]), with its data. Until 2026-10-03 the resolver
+/// demand-paged a page of zeros over the swap entry, which only the #PF
+/// handler looked for.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn test_fault_swaps_in() -> KernelResult<()> {
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    fn fail(pid: ProcessId, what: &str) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: fault from swap: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pattern = |i: u64| (i % 241) as u8;
+
+    let pid = create("fault-swap-test", 0);
+    set_running(pid)?;
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail(pid, "the test process has no PML4");
+    };
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let base: u64 = 0x0000_0032_0000_0000; // clear of the other fault tests'
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if add_vma(
+        pid,
+        Vma {
+            start: base,
+            end: base + frame,
+            kind: VmaKind::Anonymous,
+            flags,
+            fork: crate::mm::vma::ForkPolicy::COPY,
+        },
+    )
+    .is_err()
+    {
+        return fail(pid, "add_vma");
+    }
+
+    // Populate the page, and fill it -- through `copy_to_user_as`, which
+    // checks the mapping is writable, as every write into a process's page
+    // must (`check-user-access-sites`).
+    if resolve_fault(pid, base, 1 << 2, true) != FaultOutcome::Resolved {
+        return fail(pid, "the first touch did not demand-page");
+    }
+    let fill: alloc::vec::Vec<u8> = (0..frame).map(pattern).collect();
+    if crate::mm::user::copy_to_user_as(pml4, base, &fill).is_err() {
+        return fail(pid, "the populated page could not be written");
+    }
+
+    // Out to swap; then the kernel faults it in for a read in its second part.
+    // SAFETY: the test process's own PML4, the page mapped.
+    if let Err(e) = unsafe { crate::mm::swap::swap_out_page(pml4, VirtAddr::new(base)) } {
+        serial_println!("[proc]   (swap-out gave {:?})", e);
+        return fail(pid, "swap-out");
+    }
+    let outcome = resolve_fault(pid, base + 5000, 1 << 2, true);
+    let back = page_table::translate(pml4, VirtAddr::new(base));
+    let data_ok = back.is_some_and(|phys| {
+        (0..frame).all(|i| {
+            // SAFETY: the frame swap-in mapped, through the HHDM, in bounds.
+            unsafe { ((phys + hhdm + i) as *const u8).read() == pattern(i) }
+        })
+    });
+    destroy(pid);
+    if outcome != FaultOutcome::Resolved || !data_ok {
+        serial_println!(
+            "[proc]   FAIL: fault from swap: resolved {:?}; data came back {}",
+            outcome,
+            data_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   a page the kernel faults in from swap comes back with its data, not \
+         zeros: OK"
+    );
     Ok(())
 }
 
@@ -8109,15 +10885,30 @@ fn test_job_control_state() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // A continue of a process that is not stopped is none: nothing recorded.
+    if record_jc_continued(pid)?.is_some() || peek_jc_report(pid).is_some() {
+        serial_println!("[proc]   FAIL: continuing a running process recorded a continue");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
     // Stop by SIGTSTP (20). No parent waiters registered → both None.
     let waiters = record_jc_stopped(pid, 20)?;
-    if waiters != (None, None) {
+    if waiters != Some((None, None)) {
         serial_println!("[proc]   FAIL: unexpected waiters on stop");
         destroy(pid);
         return Err(KernelError::InternalError);
     }
     if !is_stopped(pid) || peek_jc_report(pid) != Some(JobControlEvent::Stopped(20)) {
         serial_println!("[proc]   FAIL: stop did not record Stopped(20)");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    // A second stop of the stopped process is none: the first report stands.
+    if record_jc_stopped(pid, 19)?.is_some()
+        || peek_jc_report(pid) != Some(JobControlEvent::Stopped(20))
+    {
+        serial_println!("[proc]   FAIL: stopping a stopped process recorded a second stop");
         destroy(pid);
         return Err(KernelError::InternalError);
     }
@@ -8129,7 +10920,11 @@ fn test_job_control_state() -> KernelResult<()> {
     }
 
     // Continue supersedes the stop report and clears the stopped flag.
-    let _ = record_jc_continued(pid)?;
+    if record_jc_continued(pid)?.is_none() {
+        serial_println!("[proc]   FAIL: continuing a stopped process recorded nothing");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
     if is_stopped(pid) || peek_jc_report(pid) != Some(JobControlEvent::Continued) {
         serial_println!("[proc]   FAIL: continue did not supersede with Continued");
         destroy(pid);
@@ -8445,14 +11240,16 @@ fn test_controlling_terminal() -> KernelResult<()> {
         );
     }
 
-    // (4) Argument gates: pgid 0 is not a group, and handing the terminal to
-    //     a group with no live member would wedge it — nothing would be left
-    //     to hand it back.
-    if ctty_set_fg_pgrp(shell, 0) != Err(KernelError::InvalidArgument) {
-        return fail("tcsetpgrp(0) should be EINVAL", &[shell, job]);
+    // (4) A group that does not exist -- 0 among them -- is ESRCH, as in
+    //     Linux's `tiocspgrp`: handing the terminal to a group with no live
+    //     member would wedge it, with nothing left to hand it back. Until
+    //     2026-10-01 0 was EINVAL and an empty group EPERM, the answer that
+    //     belongs to another session's group (5).
+    if ctty_set_fg_pgrp(shell, 0) != Err(KernelError::NoSuchProcess) {
+        return fail("tcsetpgrp(0) should be ESRCH", &[shell, job]);
     }
-    if ctty_set_fg_pgrp(shell, 7_654_321) != Err(KernelError::PermissionDenied) {
-        return fail("tcsetpgrp to an empty group should be EPERM", &[shell, job]);
+    if ctty_set_fg_pgrp(shell, 7_654_321) != Err(KernelError::NoSuchProcess) {
+        return fail("tcsetpgrp to an empty group should be ESRCH", &[shell, job]);
     }
 
     // (5) Terminal theft: `stranger` leads its own session, so its group is
@@ -8530,9 +11327,9 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
-    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, 0) != Err(KernelError::InvalidArgument) {
+    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, 0) != Err(KernelError::NoSuchProcess) {
         return fail(
-            "terminal-keyed tcsetpgrp(0) should be EINVAL",
+            "terminal-keyed tcsetpgrp(0) should be ESRCH",
             &[shell, job, stranger],
         );
     }
@@ -8558,9 +11355,15 @@ fn test_controlling_terminal() -> KernelResult<()> {
     ctty_set_fg_pgrp(shell, job)?;
 
     // (6) A zombie group member does not keep the group eligible. Kill the
-    //     job's group off and confirm the terminal cannot be handed to it.
-    //     (The shell keeps the terminal it already holds — releasing it is
-    //     the shell's job, not the kernel's.)
+    //     job's group off and confirm the terminal cannot be handed to it:
+    //     a group whose members are all zombies has no live member, so it is
+    //     ESRCH, as (4)'s empty group is -- the rule `judge_fg_group` has kept
+    //     since lane D's request of 2026-10-01; this step still expected the
+    //     EPERM it used to give until the first boot that ran it (rq26).
+    //     (Linux would hand it over: a zombie stays on its group's list until
+    //     reaped. Refusing is deliberate -- a dead group could never hand the
+    //     terminal back.) The shell keeps the terminal it already holds --
+    //     releasing it is the shell's job, not the kernel's.
     add_thread(job, 91_010)?;
     let (became_zombie, _wake, _any) = remove_thread(job, 91_010, ThreadExitAccounting::default())?;
     if !became_zombie || state(job) != Some(ProcessState::Zombie) {
@@ -8569,9 +11372,9 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
-    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::PermissionDenied) {
+    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::NoSuchProcess) {
         return fail(
-            "tcsetpgrp to an all-zombie group should be EPERM",
+            "tcsetpgrp to an all-zombie group should be ESRCH",
             &[shell, job, stranger],
         );
     }
@@ -8986,11 +11789,28 @@ fn test_destroy() -> KernelResult<()> {
 ///   3. **Children-time carry-up** — reaping a zombie credits the
 ///      parent's `child_*` accumulator with the child's CPU time *plus*
 ///      the child's own children-time (POSIX cutime/cstime), mirroring
-///      Linux's `wait_task_zombie` → `signal->cutime`/`cstime`.
+///      Linux's `wait_task_zombie` → `signal->cutime`/`cstime`. The CPU
+///      time is the child's run time split by its tick ratio
+///      (`sched::CpuSample::adjusted`), in nanoseconds.
 fn test_cpu_time_accounting() -> KernelResult<()> {
     let parent = create("cputime-parent", 0);
     let child = create("cputime-child", parent);
     let grandchild = create("cputime-grandchild", child);
+    // Synthetic run times, 30 ms and 80 ms of cycles, and the splits they
+    // should be credited as: user and system in the proportion of the ticks.
+    let ms_cycles = crate::bench::tsc_freq().checked_div(1_000).unwrap_or(0);
+    let gc_cycles = ms_cycles.saturating_mul(30);
+    let c_cycles = ms_cycles.saturating_mul(80);
+    let split = |cycles: u64, user_ticks: u64, sys_ticks: u64| {
+        crate::sched::CpuSample {
+            cycles,
+            user_ticks,
+            sys_ticks,
+        }
+        .adjusted(&mut crate::sched::PrevCputime::default())
+    };
+    let gc_split = split(gc_cycles, 2, 1);
+    let c_split = split(c_cycles, 5, 3);
 
     // Bring the grandchild to life then make it a zombie, charging it
     // 2 user / 1 sys ticks and 3 minor / 1 major faults at thread-exit.
@@ -9002,6 +11822,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 2,
             sys_ticks: 1,
+            cycles: gc_cycles,
             min_flt: 3,
             maj_flt: 1,
             nvcsw: 6,
@@ -9073,7 +11894,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The child reaps the grandchild → child.child_* == (2, 1).
+    // The child reaps the grandchild → child.child_* == its split.
     set_running(child)?;
     add_thread(child, 971)?;
     match try_reap(child, grandchild)? {
@@ -9085,10 +11906,11 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if process_child_ticks(child) != (2, 1) {
+    if process_child_times(child) != gc_split {
         serial_println!(
-            "[proc]   FAIL: child children-time != (2,1): {:?}",
-            process_child_ticks(child)
+            "[proc]   FAIL: child children-time != {:?}: {:?}",
+            gc_split,
+            process_child_times(child)
         );
         destroy(child);
         destroy(parent);
@@ -9124,6 +11946,7 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         ThreadExitAccounting {
             user_ticks: 5,
             sys_ticks: 3,
+            cycles: c_cycles,
             min_flt: 4,
             maj_flt: 2,
             nvcsw: 7,
@@ -9144,10 +11967,15 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if process_child_ticks(parent) != (7, 4) {
+    let both = (
+        c_split.0.saturating_add(gc_split.0),
+        c_split.1.saturating_add(gc_split.1),
+    );
+    if process_child_times(parent) != both {
         serial_println!(
-            "[proc]   FAIL: parent children-time != (7,4): {:?}",
-            process_child_ticks(parent)
+            "[proc]   FAIL: parent children-time != {:?}: {:?}",
+            both,
+            process_child_times(parent)
         );
         destroy(parent);
         return Err(KernelError::InternalError);
@@ -9174,6 +12002,414 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     destroy(parent);
     serial_println!(
         "[proc]   CPU-time + fault + ctxsw accounting (exited-thread fold + children carry-up): OK"
+    );
+    Ok(())
+}
+
+/// Test: what a parent's `SIGCHLD` disposition makes of a child that exits
+/// ([`ExitNotice`]), and that a zombie its parent will not collect is
+/// invisible to every `wait`: peeked, reaped or scanned for, it is gone, and a
+/// parent with no other child is told `NoChildProcess` (ECHILD).
+/// [`release_autoreaped`] releases only such a zombie.
+fn test_exit_notice() -> KernelResult<()> {
+    use crate::proc::signal;
+    let sigchld_bit = 1u64 << (signal::SIGCHLD - 1);
+    let parent = create("notice-parent", 0);
+    let mut made = alloc::vec![parent];
+    let result = (|| -> KernelResult<()> {
+        let fail = |what: &str| {
+            serial_println!("[proc]   FAIL: {}", what);
+            Err(KernelError::InternalError)
+        };
+        // A child that runs, then exits under the parent's current
+        // disposition. Thread ids from 970 up, clear of the other tests'.
+        let mut next_task = 970u64;
+        let mut exit_child = |made: &mut alloc::vec::Vec<ProcessId>| -> KernelResult<ProcessId> {
+            let child = create("notice-child", parent);
+            made.push(child);
+            set_running(child)?;
+            add_thread(child, next_task)?;
+            let (zombie, _, _) = remove_thread(child, next_task, ThreadExitAccounting::default())?;
+            next_task = next_task.saturating_add(1);
+            if zombie {
+                Ok(child)
+            } else {
+                serial_println!("[proc]   FAIL: the child's last thread did not make it a zombie");
+                Err(KernelError::InternalError)
+            }
+        };
+
+        // SIGCHLD ignored: released at once, sent nothing.
+        signal::set_ignored(parent, sigchld_bit, false)?;
+        let ignored = exit_child(&mut made)?;
+        if exit_notice(ignored) != Some(ExitNotice::ReapSilently) {
+            return fail("SIGCHLD ignored: the notice is not ReapSilently");
+        }
+        if peek_exit(parent, ignored).err() != Some(KernelError::NoSuchProcess)
+            || try_reap(parent, ignored).err() != Some(KernelError::NoSuchProcess)
+            || jc_report_for_child(parent, ignored, true, true, false).err()
+                != Some(KernelError::NoSuchProcess)
+        {
+            return fail("a zombie its parent will not collect was visible to a wait");
+        }
+        if peek_exit_any(parent).err() != Some(KernelError::NoChildProcess)
+            || jc_report_any_child(parent, true, true, false).err()
+                != Some(KernelError::NoChildProcess)
+        {
+            return fail("its parent, with no other child, was not told ECHILD");
+        }
+        if !release_autoreaped(ignored) || state(ignored).is_some() {
+            return fail("release_autoreaped did not release it");
+        }
+
+        // SA_NOCLDWAIT: released too, though the signal is still sent.
+        signal::set_ignored(parent, 0, true)?;
+        let nocldwait = exit_child(&mut made)?;
+        if exit_notice(nocldwait) != Some(ExitNotice::ReapAndSignal) {
+            return fail("SA_NOCLDWAIT: the notice is not ReapAndSignal");
+        }
+        if !release_autoreaped(nocldwait) {
+            return fail("an SA_NOCLDWAIT child was not released");
+        }
+
+        // The default: a zombie for the parent, which release_autoreaped
+        // leaves alone and try_reap collects.
+        signal::set_ignored(parent, 0, false)?;
+        let collected = exit_child(&mut made)?;
+        if exit_notice(collected) != Some(ExitNotice::Zombie) {
+            return fail("the default notice is not Zombie");
+        }
+        if release_autoreaped(collected) || state(collected) != Some(ProcessState::Zombie) {
+            return fail("release_autoreaped released a zombie its parent will collect");
+        }
+        if !matches!(try_reap(parent, collected), Ok(Some(_))) {
+            return fail("an ordinary zombie could not be reaped");
+        }
+
+        // A kernel parent is never told and never asks.
+        if exit_notice_for(0) != ExitNotice::Zombie {
+            return fail("a kernel parent's child is not an ordinary zombie");
+        }
+        Ok(())
+    })();
+    signal::remove(parent);
+    for &pid in made.iter().rev() {
+        destroy(pid);
+    }
+    if result.is_ok() {
+        serial_println!(
+            "[proc]   exit notice: SIGCHLD ignored / SA_NOCLDWAIT reaped at exit, invisible to wait: OK"
+        );
+    }
+    result
+}
+
+/// [`may_inspect`] and [`may_access`], the rule `/proc` applies to who may
+/// read what of a process (design-decisions §1516): the kernel, the process
+/// itself, uid 0, its own user's processes while it is dumpable, and a holder
+/// of a `Process` capability for it -- nobody else, and no process but uid 0
+/// a kernel task.
+fn test_may_inspect() -> KernelResult<()> {
+    let root = create("inspect-root", 0);
+    let alice = create("inspect-alice", 0);
+    let alice2 = create("inspect-alice2", 0);
+    let bob = create("inspect-bob", 0);
+    let result = (|| -> Result<(), &'static str> {
+        for (pid, uid) in [(alice, 1000), (alice2, 1000), (bob, 1001)] {
+            set_credentials(pid, ProcessCredentials::new(uid, uid))
+                .map_err(|_| "set_credentials")?;
+        }
+        let checks = [
+            (may_inspect(None, Some(bob)), true, "the kernel"),
+            (
+                may_inspect(Some(alice), Some(alice)),
+                true,
+                "the process itself",
+            ),
+            (
+                may_inspect(Some(alice), Some(alice2)),
+                true,
+                "its own user's process",
+            ),
+            (
+                may_inspect(Some(alice), Some(bob)),
+                false,
+                "another user's process",
+            ),
+            (may_inspect(Some(root), Some(bob)), true, "uid 0"),
+            (
+                may_inspect(Some(alice), None),
+                false,
+                "a kernel task, to a user",
+            ),
+            (
+                may_inspect(Some(root), None),
+                true,
+                "a kernel task, to uid 0",
+            ),
+        ];
+        for (got, want, who) in checks {
+            if got != want {
+                serial_println!("[proc]   FAIL: may_inspect: {} gave {}", who, got);
+                return Err("a may_inspect answer");
+            }
+        }
+        // An undumpable process is closed to its own user, not to uid 0.
+        set_dumpable(alice2, 0);
+        let closed =
+            !may_inspect(Some(alice), Some(alice2)) && may_inspect(Some(root), Some(alice2));
+        set_dumpable(alice2, 1);
+        if !closed {
+            return Err("PR_SET_DUMPABLE 0 did not close the process to its own user");
+        }
+        // A capability opens another user's process -- READ to read; a READ
+        // capability does not let its holder write.
+        grant_capability(alice, ResourceType::Process, bob, Rights::READ)
+            .map_err(|_| "grant_capability")?;
+        if !may_inspect(Some(alice), Some(bob)) {
+            return Err("a READ capability did not open the process");
+        }
+        if may_access(Some(alice), Some(bob), Rights::WRITE) {
+            return Err("a READ capability let its holder write");
+        }
+        Ok(())
+    })();
+    for pid in [bob, alice2, alice, root] {
+        destroy(pid);
+    }
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[proc]   may_inspect: kernel, self, user, uid 0, dumpable, capability: OK"
+            );
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[proc]   FAIL: may_inspect: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// Test: [`inherit_job`] puts a child in its parent's group and session, and
+/// fails cleanly for a missing parent.
+fn test_inherit_job() -> KernelResult<()> {
+    let leader = create("job-leader", 0);
+    let member = create("job-member", leader);
+    let child = create("job-child", member);
+    let result = (|| -> KernelResult<()> {
+        // `member` is in `leader`'s group and session, as a forked child is.
+        inherit_job(member, leader)?;
+        inherit_job(child, member)?;
+        let (pgid, sid) = (get_pgid(child), get_sid(child));
+        if pgid != Some(leader) || sid != Some(leader) {
+            serial_println!(
+                "[proc]   FAIL: inherit_job: child pgid {:?} sid {:?}, expected {}",
+                pgid,
+                sid,
+                leader
+            );
+            return Err(KernelError::InternalError);
+        }
+        if inherit_job(child, 0xFFFF_FFF0) != Err(KernelError::NoSuchProcess) {
+            serial_println!("[proc]   FAIL: inherit_job from a missing parent did not fail");
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+    destroy(child);
+    destroy(member);
+    destroy(leader);
+    if result.is_ok() {
+        serial_println!("[proc]   inherit_job: a child takes its parent's group and session: OK");
+    }
+    result
+}
+
+/// Test: an address space whose process had a thread killed while a CPU ran
+/// it is freed only once that thread is off every CPU.
+///
+/// Stands the self-test's own task in for the killed thread -- it is, by
+/// definition, on a CPU -- with a throwaway PML4, so the deferral is observed
+/// rather than inferred.
+fn test_deferred_address_space() -> KernelResult<()> {
+    let Ok(pml4) = crate::mm::page_table::alloc_pml4() else {
+        serial_println!("[proc]   deferred address space: SKIP (no PML4 to spare)");
+        return Ok(());
+    };
+    let me = crate::sched::current_task_id();
+    let before = DEFERRED_ADDRESS_SPACES.lock().len();
+    free_address_space_when_unused(pml4, alloc::vec![me]);
+    let deferred = DEFERRED_ADDRESS_SPACES
+        .lock()
+        .iter()
+        .any(|(p, _)| *p == pml4);
+    // Freed only once the stand-in is off its CPU -- which, while this runs,
+    // it never is, so a drain now must keep it.
+    let kept_by_drain = {
+        free_deferred_address_spaces();
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .iter()
+            .any(|(p, _)| *p == pml4)
+    };
+    // Now let it go as the killed thread's switch would: name a task no CPU
+    // is running in its place.
+    {
+        let mut queue = DEFERRED_ADDRESS_SPACES.lock();
+        for entry in queue.iter_mut().filter(|(p, _)| *p == pml4) {
+            entry.1 = alloc::vec![u64::MAX - 7];
+        }
+    }
+    let freed = free_deferred_address_spaces();
+    let gone = !DEFERRED_ADDRESS_SPACES
+        .lock()
+        .iter()
+        .any(|(p, _)| *p == pml4);
+    if !(deferred && kept_by_drain && freed >= 1 && gone)
+        || DEFERRED_ADDRESS_SPACES.lock().len() > before
+    {
+        serial_println!(
+            "[proc]   FAIL: deferred address space: deferred {} kept {} freed {} gone {}",
+            deferred,
+            kept_by_drain,
+            freed,
+            gone
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   address space of a thread killed on a CPU: freed only after it leaves: OK"
+    );
+    Ok(())
+}
+
+/// [`release_address_space`] frees a process's address space at its zombie
+/// transition, and only then; an [`AsPin`] taken before holds it past the
+/// release, on [`DEFERRED_ADDRESS_SPACES`], until the pin goes; and a
+/// released space cannot be pinned again.
+fn test_address_space_pin_and_release() -> KernelResult<()> {
+    /// A task id no task has: the process's stand-in thread.
+    const STAND_IN: TaskId = 0x00A5_0000_0001;
+
+    fn queued(pml4: u64) -> bool {
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .iter()
+            .any(|(p, _)| *p == pml4)
+    }
+
+    let pid = create("as-pin-test", 0);
+    set_running(pid)?;
+    add_thread(pid, STAND_IN)?;
+    let Some(pin) = pin_address_space(pid) else {
+        serial_println!("[proc]   FAIL: address-space pin: a live process's could not be pinned");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    };
+    let pml4 = pin.pml4();
+
+    // Not a zombie yet: nothing is released.
+    release_address_space(pid);
+    let kept_while_live = get_pml4(pid) == Some(pml4);
+
+    // The last thread goes; the zombie's memory is released, but the pin
+    // holds the tables.
+    let (zombie, _wake, _any) = remove_thread(pid, STAND_IN, ThreadExitAccounting::default())?;
+    release_address_space(pid);
+    let released = get_pml4(pid) == Some(0)
+        && list_vmas(pid).is_some_and(|v| v.is_empty())
+        && linux_as_used(pid) == Some(0);
+    let held = queued(pml4);
+    let unpinnable = pin_address_space(pid).is_none();
+
+    // The last pin goes: the free happens now.
+    drop(pin);
+    let freed = !queued(pml4);
+    destroy(pid);
+
+    if !(kept_while_live && zombie && released && held && unpinnable && freed) {
+        serial_println!(
+            "[proc]   FAIL: address-space pin: kept while live {} zombie {} released {} \
+             held {} unpinnable {} freed {}",
+            kept_while_live,
+            zombie,
+            released,
+            held,
+            unpinnable,
+            freed
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   address space released at a zombie's exit, and a pin holds it until it \
+         goes: OK"
+    );
+    Ok(())
+}
+
+/// Exec's in-place teardown waits for the pins on its address space and
+/// gives out no new one while it lasts ([`ExecTeardown`]); while it lasts the
+/// space counts as held for a free, and a second teardown is refused. Once
+/// it ends, pins are given out again and the space's entry is gone.
+fn test_exec_teardown_holds_out_pins() -> KernelResult<()> {
+    let pid = create("exec-teardown-test", 0);
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        serial_println!("[proc]   FAIL: exec teardown: the test process got no address space");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    };
+
+    // A pin held: the teardown cannot begin.
+    let pin = match try_pin(pid) {
+        PinAttempt::Pinned(pin) => Some(pin),
+        PinAttempt::NoAddressSpace | PinAttempt::ExecTeardown => None,
+    };
+    let pinned_first = pin.is_some();
+    let waits_for_pin = try_begin_exec_teardown(pml4).is_none();
+    drop(pin);
+
+    // No pin: it begins, and holds pins out while it lives.
+    let teardown = try_begin_exec_teardown(pml4);
+    let began = teardown.is_some();
+    let holds_out = matches!(try_pin(pid), PinAttempt::ExecTeardown);
+    let counted = address_space_pinned(pml4);
+    let one_at_a_time = try_begin_exec_teardown(pml4).is_none();
+    drop(teardown);
+
+    // Ended: a pin is given out again, and when it goes the entry goes too.
+    let pinnable = matches!(try_pin(pid), PinAttempt::Pinned(_));
+    let entry_gone = !ADDRESS_SPACE_PINS.lock().contains_key(&pml4);
+    destroy(pid);
+
+    let all = [
+        pinned_first,
+        waits_for_pin,
+        began,
+        holds_out,
+        counted,
+        one_at_a_time,
+        pinnable,
+        entry_gone,
+    ];
+    if all.contains(&false) {
+        serial_println!(
+            "[proc]   FAIL: exec teardown: pinned {} waits for the pin {} began {} holds pins \
+             out {} counted as held {} one at a time {} pinnable after {} entry gone {}",
+            pinned_first,
+            waits_for_pin,
+            began,
+            holds_out,
+            counted,
+            one_at_a_time,
+            pinnable,
+            entry_gone
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   exec's in-place teardown waits for the pins on its space and gives out no \
+         new one until it ends: OK"
     );
     Ok(())
 }

@@ -115,6 +115,7 @@ pub fn classify(vector: usize) -> IrqType {
         IrqType::Device
     } else if vector == usize::from(crate::tlb::TLB_SHOOTDOWN_VECTOR)
         || vector == usize::from(crate::apic::RESCHEDULE_VECTOR)
+        || vector == usize::from(crate::cpusync::CPU_SYNC_VECTOR)
     {
         IrqType::Ipi
     } else if vector == usize::from(crate::apic::SPURIOUS_VECTOR) {
@@ -325,6 +326,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
     assert_eq!(
         classify(usize::from(crate::apic::RESCHEDULE_VECTOR)),
+        IrqType::Ipi
+    );
+    assert_eq!(
+        classify(usize::from(crate::cpusync::CPU_SYNC_VECTOR)),
         IrqType::Ipi
     );
     crate::serial_println!("  [2/6] timer is not IRQ 0: OK");

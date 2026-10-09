@@ -578,20 +578,9 @@ fn diag_services() -> (u32, u32, Vec<DiagIssue>) {
         passed += 1; // Not initialized is fine at this stage
     }
 
-    // Test 3: application registry populated
-    tests += 1;
-    let (app_count, _, _, _) = crate::fs::appregistry::stats();
-    if app_count > 0 {
-        passed += 1;
-    } else {
-        issues.push(make_issue(
-            DiagCategory::Services,
-            Severity::Info,
-            "No applications registered",
-            "Application registry is empty.",
-            "Register applications via appregistry.",
-        ));
-    }
+    // No check that programs are installed: the list of installed programs is
+    // userspace's (`gui/programs`, design-decisions 1425), which the kernel
+    // neither reads nor grades.
 
     (tests, passed, issues)
 }

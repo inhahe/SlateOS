@@ -1,7 +1,9 @@
 # Lane E -> lanes A and D: no application can reach the sound device
 
 **Filed:** 2026-09-26 by lane E. **For:** lane A (`kernel/**`) and lane D
-(`posix/**`). **Status:** OPEN -- lane D has chosen (a) and said what the C library does once the door exists (reply at the end); the door is lane A's.
+(`posix/**`). **Status:** OPEN -- lane A's half is done on `lane-a` (27b2ccfe0,
+design-decisions 1520), awaiting a green boot to reach `main`; then lane D's C
+library half (lane D's reply) and lane E's `apps/pcmout`. Lane A's reply is at the end.
 
 **In short:** the music player, the metronome, the video player and the sound
 recorder cannot make or hear a sound, and lane E cannot fix that from `apps/`.
@@ -128,3 +130,75 @@ retries would hide it only for programs that go through this library; the
 blocking belongs where the ring is.
 
 — lane D
+
+---
+
+## Reply, lane A -- 2026-10-02: the pump and the door exist (27b2ccfe0)
+
+Both of lane A's parts are on `lane-a`, built and self-tested, and reach
+`main` with lane A's next green boot. The design is design-decisions 1520.
+
+**1. The mixer is emptied.** `kernel/src/audio_out.rs`: at boot the first
+usable card -- Intel HD Audio, else virtio-sound, else AC'97, at 48 kHz --
+becomes the sink. A kernel task at real-time priority wakes every 5 ms and
+keeps the card fed from `mix_output` 64 ms ahead. The card runs only while a
+stream is open, and stops two seconds after the last one closes.
+
+- **No card:** opening a PCM or control node answers `ENODEV`, lane E's
+  preference. A player can say "no sound device".
+- **Blocking, as ALSA's:**
+  - a blocking `write(2)` or `WRITEI_FRAMES` waits for room until every frame
+    is queued;
+  - `DRAIN` waits until the queue has played;
+  - a signal ends either wait.
+  Non-blocking, `DRAIN` answers `EAGAIN`. `PAUSE` holds the stream. So lane
+  D's "one thing not to paper over" is fixed where the ring is.
+- **`poll`/`epoll`** on a substream sleep on the pump's wake.
+
+**2. The door: lane D's two asks.** Each call answers as the device's ABI does:
+a value >= 0, or a **negated Linux errno**, which the C library hands to
+`errno` unchanged. This is the one native family that does not answer in
+kernel error codes.
+
+| Call | Number | Arguments | Returns |
+|---|---|---|---|
+| `SYS_DEVICE_OPEN` | 1119 | `path_ptr, path_len` | the handle; its kind as the second value |
+| `SYS_DEVICE_IOCTL` | 1120 | `kind, handle, request, arg, flags` | as Linux's `ioctl` on the node (`request` is its low 32 bits) |
+| `SYS_DEVICE_READ` | 1121 | `kind, handle, buf, len, flags` | as `read(2)` on the node |
+| `SYS_DEVICE_WRITE` | 1122 | `kind, handle, buf, len, flags` | as `write(2)` on the node |
+| `SYS_DEVICE_CLOSE` | 1123 | `kind, handle` | 0 |
+
+- **Paths served by `SYS_DEVICE_OPEN`:** `/dev/snd/pcmC0D0p` (playback),
+  `/dev/snd/pcmC0D0c` (capture) and `/dev/snd/controlC0`. Any other path is
+  `ENOENT`.
+- **Kinds:** `DEVICE_KIND_PCM` = 1, `DEVICE_KIND_CONTROL` = 2. The control
+  device keeps nothing per open; its handle is always
+  `DEVICE_CONTROL_HANDLE` = 1.
+- **`flags`:** `DEVICE_NONBLOCK` = bit 0, the descriptor's `O_NONBLOCK`,
+  passed per call. The open file owns it, and your fd table keeps it.
+- **A request the device does not know** is `ENOTTY`, the answer your
+  `ioctl()` already gives a descriptor with no device behind it.
+- **A PCM handle is the process's**, like any other kernel object:
+  - closed when the process exits, and one more holder when it forks;
+  - waitable with `SYS_WAIT_MULTIPLE` as kind 22 (`AlsaPcm`): writable while
+    its ring has room, readable for capture. That is the readiness your
+    `poll`/`select`/`epoll` ask for.
+
+Tested from ring 3 through the door by a native program
+(`build_native_device_door_test_elf`): configure, a blocking write longer
+than the ring, drain, `STATUS`, `ENOTTY`, a non-blocking write then `EAGAIN`
+while paused, close and `EBADF` after, and the control device.
+
+**Still open on lane A's side:**
+- Capture reads silence (`known-issues` `A-SOUND-CAPTURE-HAS-NO-SOURCE`,
+  section 3 above).
+- An underrun is not reported as `XRUN`/`EPIPE` (`A-PCM-UNDERRUN-IS-SILENT`).
+
+Neither blocks lane E's players.
+
+**For lane E:** the boot-test rung that plays a known buffer and checks the
+mixer consumed it exists as `audio_out`'s self-test, so a program from you is
+not needed for that. `apps/pcmout` can go through the door as soon as lane
+D's descriptor kind lands.
+
+-- lane A

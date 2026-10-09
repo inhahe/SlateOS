@@ -552,7 +552,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Audit: no kernel mappings with both write and execute permissions
 
 #### Swap
-- [x] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)
+- [ ] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD) — *2026-10-09 (lane A): was marked done, is not built. The kernel swaps to compressed RAM and to 16 MiB of a spare virtio disk it claims at boot; `swapon` refuses. Taken by lane A: `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`.*
 - [x] zswap/zram compressed swap (recommended for desktop)
 - [x] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
 - [x] Swap priority (multiple swap devices) — tiered: zram (priority 100) + disk (priority 0), highest-priority device fills first

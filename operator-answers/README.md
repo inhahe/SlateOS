@@ -1,10 +1,11 @@
 # Operator answers
 
 **In short:** the operator answers the questions in `open-questions/` by
-writing a plain text file at the root of the integration tree
+writing a plain text file in the integration tree
 (`E:/visual studio projects/os`): `open-questions-answers.txt`, then
-`open-questions-answers.2.txt`, one paragraph per question, keyed by its id or
-its title. That file is untracked -- on no branch, in no lane's worktree -- so
+`open-questions-answers.2.txt` at its root, then `open-questions/answers.txt`
+beside the questions, one paragraph per question, keyed by its id or its
+title. That file is untracked -- on no branch, in no lane's worktree -- so
 this directory is where it becomes part of the project, and where anyone can
 see which answers went where.
 
@@ -17,7 +18,8 @@ see which answers went where.
 
 `python scripts/check-lane-signals.py` -- which every lane runs at the start
 of a task and on every wakeup -- hashes each `open-questions-answers*.txt` at
-the root of the integration tree, any suffix, and reports a file whose hash is
+the root of the integration tree, any suffix, and each `*answers*.txt` in its
+`open-questions/`, and reports a file whose hash is
 in `LEDGER.md` on no lane's branch: a new file, or a new version of an old one.
 It names the question ids in it, the reader's own lane's first. What to do
 then is in `CLAUDE.md`, under "When the operator answers".

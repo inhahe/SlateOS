@@ -447,8 +447,17 @@ pub fn self_test() -> KernelResult<()> {
     for _ in 0..4 {
         queued = queued.saturating_add(audio_mixer::write_pcm(sid, &block).unwrap_or(0));
     }
+    // Wait for both: the ring empty, and the pump's count caught up with
+    // what it took. The count lags the ring by up to a round: virtio-sound's
+    // `stream_fill` takes the ring's last bytes through `mix_output` and the
+    // pump adds them to `BYTES_PUMPED` only once the fill returns. With the
+    // pump on another CPU this thread saw the ring empty in between, and read
+    // 12288 of 16384 bytes pumped (2 of 3 two-CPU boots, 2026-10-09).
+    let pumped_since = || stats().0.saturating_sub(pumped_before);
     let deadline = crate::hrtimer::now_ns().saturating_add(2_000_000_000);
-    while audio_mixer::buffered(sid) > 0 && crate::hrtimer::now_ns() < deadline {
+    while (audio_mixer::buffered(sid) > 0 || pumped_since() < queued as u64)
+        && crate::hrtimer::now_ns() < deadline
+    {
         crate::sched::sleep_ms(10);
     }
     let left = audio_mixer::buffered(sid);

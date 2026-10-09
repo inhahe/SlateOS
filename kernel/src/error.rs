@@ -161,10 +161,6 @@ kernel_errors! {
         Overflow = -303,
         /// A kernel resource limit has been reached (too many objects).
         ResourceExhausted = -304,
-        /// The sender's user has more descriptors in flight -- sent in Unix
-        /// socket messages and not yet received -- than its `RLIMIT_NOFILE`
-        /// (Linux's `ETOOMANYREFS`), so a send carrying more is refused.
-        TooManyReferences = -305,
 
         // --- Capability (400 - 499) ---
         /// The caller lacks the required capability for this operation.
@@ -322,7 +318,6 @@ impl KernelError {
             Self::MessageTooLarge => "message too large",
             Self::Overflow => "counter overflow",
             Self::ResourceExhausted => "resource limit reached",
-            Self::TooManyReferences => "too many descriptors in flight",
             Self::PermissionDenied => "permission denied",
             Self::InvalidCapability => "invalid capability",
             Self::NotPermitted => "operation not permitted",

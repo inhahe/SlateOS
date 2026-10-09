@@ -1585,7 +1585,6 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::MessageTooLarge => errno::E2BIG,
         KernelError::Overflow => errno::EOVERFLOW,
         KernelError::ResourceExhausted => errno::ENFILE,
-        KernelError::TooManyReferences => errno::ETOOMANYREFS,
         KernelError::PermissionDenied => errno::EACCES,
         KernelError::InvalidCapability => errno::EPERM,
         KernelError::NotPermitted => errno::EPERM,

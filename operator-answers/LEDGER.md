@@ -10,6 +10,56 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## open-questions/answers.txt
+
+- **Written:** 2026-10-09, as `open-questions/answers.txt` in the integration
+  tree (not at its root, where the first two were).
+- **Processed:** 2026-10-09 by lane A, the same hour: lane A's answers written
+  up; every other lane sent its answers and questions by notice.
+- **Copy:** `operator-answers/2026-10-09-open-questions-answers.txt`
+- **Content:** sha256 `6302a9fc6df72bd6bcc87acf588378e75fb974ac3525522bea8ffaaebac2f63c`
+- **Also left in the integration tree that day:** `xor.png` (C-Q28's logo),
+  and an untracked `LICENSE` (MIT, dated 2026-09-16) that no question asked
+  for -- lane A asked the operator whether it is to be committed.
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| F-Q1 | F | -- | relayed 2026-10-09 (B) |
+| C-Q31 | C | the paragraph is in `CLAUDE.md`, added by lane A under the operator's permission in this answer | relayed 2026-10-09 for lane C's decision entry |
+| B-Q24 | B | -- | relayed 2026-10-09 (answered twice, "Claude's recommendation" and "A", which agree: A) |
+| A-Q22 | A | §1564 | recorded |
+| A-Q23 | A | §1565 | recorded |
+| A-Q24 | A | §1566 | recorded |
+| A-Q25 | A | §1567 | recorded |
+| A-Q26 | A | §1568 (B, and the operator's "Allow" for this run only) | recorded |
+| B-Q22 | B | -- | relayed 2026-10-09 (a design of the operator's, with questions) |
+| B-Q25 | B | -- | relayed 2026-10-09 (A) |
+| C-Q28 | C | -- | relayed 2026-10-09 (`xor.png` is at the integration tree's root) |
+| C-Q29 | C | -- | relayed 2026-10-09 (A, with questions) |
+| C-Q32 | C | -- | relayed 2026-10-09 (A) |
+| C-Q33 | C | -- | relayed 2026-10-09 (C if startup programs depend on each other, else A) |
+| C-Q34 | C | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
+| D-Q3 | D | -- | relayed 2026-10-09; **concerns raised, no option chosen yet** |
+| D-Q4 | D | -- | relayed 2026-10-09 (B) |
+| D-Q5 | D | -- | relayed 2026-10-09 (B) |
+| D-Q6 | D | -- | relayed 2026-10-09 (B) |
+| D-Q7 | D | -- | relayed 2026-10-09 (Claude's recommendation) |
+| D-Q8 | D | -- | relayed 2026-10-09 (B, with a question about swap files) |
+| E-Q1 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
+| E-Q2 | E | -- | relayed 2026-10-09 (Claude's recommendation, with three changes) |
+| E-Q3 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
+| E-Q4 | E | -- | relayed 2026-10-09 (Claude's recommendation, with a question) |
+| E-Q5 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
+| F-Q3 | F | -- | relayed 2026-10-09 (Claude's recommendation, with three choices for a capture) |
+| F-Q4 | F | -- | relayed 2026-10-09 (A) |
+| F-Q5 | F | -- | relayed 2026-10-09 (A, with a note) |
+| F-Q6 | F | -- | relayed 2026-10-09 (B, with additions) |
+| F-Q7 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
+| F-Q8 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
+| F-Q9 | F | -- | relayed 2026-10-09; **questions back to the operator, no option chosen yet** |
+| F-Q10 | F | -- | relayed 2026-10-09 (A, with a question) |
+| B-Q23 | B | -- | **not answered** in this file; the first "B-Q24" line may have been meant for it -- lane A asked the operator |
+
 ## open-questions-answers.2.txt
 
 - **Written:** 2026-09-27, at the root of the integration tree.

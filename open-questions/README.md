@@ -18,12 +18,14 @@ This directory is distinct from:
 
 ### How an answer actually arrives — read this before assuming nobody replied
 
-The operator answers this queue by writing a plain text file at the root of
-the integration tree (`E:/visual studio projects/os`):
-**`open-questions-answers*.txt`, with any suffix** -- `open-questions-answers.txt`
-(2026-09-07), then `open-questions-answers.2.txt` (2026-09-27) -- one paragraph
-per question, keyed by its id or by its title. Or in chat, in one lane's
-session, which then holds every lane's answers.
+The operator answers this queue by writing a plain text file in the
+integration tree (`E:/visual studio projects/os`):
+**`open-questions-answers*.txt` at its root, with any suffix** --
+`open-questions-answers.txt` (2026-09-07), then `open-questions-answers.2.txt`
+(2026-09-27) -- **or `answers*.txt` in this directory**
+(`open-questions/answers.txt`, 2026-10-09), one paragraph per question, keyed
+by its id or by its title. Or in chat, in one lane's session, which then holds
+every lane's answers.
 
 - The file is **untracked**: on no branch, in no lane's worktree. No merge of
   `origin/main` will show it to you.

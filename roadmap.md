@@ -6053,6 +6053,19 @@ _Port ext4 first. Don't write a custom filesystem._
   `scripts/pmap-diff.sh`: 328 cases agree and 3 differ on purpose, over
   static targets -- so no shared library's pages move the `Pss` column --
   mapping long paths, odd ones, deleted files and System V segments);
+  `skill` and `snice` (2026-10-09, procps-ng 4.0.4's `skill.c` -- new,
+  nothing here had them: one program, which it is by its name; the signal or
+  priority taken out of the arguments before `getopt`, a word a process id
+  when `strtol` reads all of it and a command name when not, `-n`, `-v`,
+  `-i`'s questions, `-d`'s lists, `-l`/`-L`, `--ns` -- which, as upstream's,
+  only `--nslist` makes count, and `--nslist` takes any name since
+  `procps_ns_get_id` never answers the -1 it is tested for -- and no
+  `close_stdout`, so the status is 0 whatever became of the output; the new
+  `libcall::priority`, and `procps::signals` gained the listings and
+  `skill_sig_option`; `scripts/skill-diff.sh`: 118 cases agree and 3 differ
+  on purpose, each safe by construction -- `-n`, signal 0, STOP and CONT,
+  or renicing upwards -- on targets the harness starts under names nothing
+  else has);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -6082,6 +6095,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ps: procps-ng 4.0.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/ps-diff.sh`, 590 cases)
   - [x] pwdx: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pwdx-diff.sh`, 120 cases)
   - [x] pmap: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pmap-diff.sh`, 331 cases)
+  - [x] skill/snice: procps-ng 4.0.4's, coreutils programs since 2026-10-09 (see the coreutils item; `scripts/skill-diff.sh`, 121 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)

@@ -72,6 +72,7 @@ pub mod glob;
 pub mod inotify;
 pub mod lock;
 pub mod netdb;
+pub mod priority;
 pub mod process;
 pub mod pty;
 pub mod shm;

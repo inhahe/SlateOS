@@ -59116,6 +59116,28 @@ is already waiting, not whether the setter exists.
   sends the description's flags in native `OpenFlags` bits; `write` keeps its
   `SEEK_END` only where the call answered `ENOSYS`.
 
+## Lane B — what waits on lane A's next publish (2026-10-09)
+
+- **Done 2026-10-09: SCRIPT_OWNERS rows for lane B's new scripts.** The
+  table reached main with lane A's publish of b083cfeca, which carried rows
+  for `tic-diff.sh`, `gen-terminfo-captab.py`, `systemd-cat-diff.sh` and
+  `patch-merge-fuzz.py`; lane B added the other six (`journalfwd-diff.sh`,
+  `journalfwd-walltest.py`, `pwdx-diff.sh`, `procps-close-diff.sh`,
+  `pmap-diff.sh`, `skill-diff.sh`) after merging it. From here a row goes in
+  the commit that creates its script; `which-lane.py --check-all` holds it.
+- **Open: switching off and restarting, from userland.** Lane A's notice of
+  2026-10-09 07:39Z: `SYS_POWER_OFF` (1167) and `SYS_POWER_REBOOT` (1168),
+  each gated by a Process right (`Rights::POWER_OFF`, `Rights::REBOOT`), and
+  Linux `reboot(2)` through them; on lane-a-wip (d0907aa5e), reaching main with
+  lane A's publish after next. Lane B's half: libcall wrappers for both,
+  `powerctl`'s direct fallback calling them instead of `/proc/acpi/power`
+  (which does not exist), the rights' names in the capability projection
+  (`CAP_SYS_BOOT` <- POWER_OFF|REBOOT|RELOAD_KERNEL), and whatever comes to
+  provide org.slateos.ServiceManager ending PowerOff/Reboot with them
+  (known-issues b-org.slateos.servicemanager-has-two-clients-and-no-provider).
+  **Trigger:** `SYS_POWER_OFF` in `origin/main`'s
+  `kernel/src/syscall/number.rs`.
+
 ## Lane A — kexec / power.reload: the load-and-jump mechanism (2026-10-03)
 
 Fulfils `requests/c-ab-a-restart-that-keeps-the-computer-on.md` (lane C's

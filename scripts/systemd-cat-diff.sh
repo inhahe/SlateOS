@@ -69,8 +69,15 @@ seq 1 1000 > "$work/many"
 
 # Inside the namespace: our /var/log, the case, then the helpers' end.
 inns=$DIFF_TMP/inns.sh
+# Ours forwards an `emerg` line to every logged-in user's terminal, as
+# journald does (`userspace/journalfwd`): a private /run puts the system's
+# utmp out of its reach, so no case of ours can broadcast. The reference
+# cannot be fenced in that way -- it is WSL's own journald -- so no case here
+# may file a line at `emerg`; scripts/journalfwd-diff.sh measures that
+# instead, where both sides are fenced in.
 cat > "$inns" <<'EOF'
 mount --bind "$1" /var/log || exit 99
+mount -t tmpfs tmpfs /run || exit 99
 cd "$2" || exit 99
 bash -c "$3"
 rc=$?

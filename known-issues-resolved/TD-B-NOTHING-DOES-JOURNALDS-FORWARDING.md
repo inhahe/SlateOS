@@ -1,6 +1,21 @@
-## TD-B-NOTHING-DOES-JOURNALDS-FORWARDING (lane B, 2026-10-09)
+## TD-B-NOTHING-DOES-JOURNALDS-FORWARDING (lane B, 2026-10-09) — RESOLVED
 
-**Status:** OPEN — not started.
+**Status:** RESOLVED 2026-10-09
+
+**Resolved the same day.** journald's default forwarding is ported: an `emerg`
+message is broadcast to every logged-in user's terminal (`ForwardToWall`).
+The new crate `userspace/journalfwd` holds systemd 255's `wall()` and
+journald's `server_forward_wall`. `syslogd` calls it for each `/dev/log`
+datagram and `systemd-cat`'s helper for each line, before the record is
+filed, as journald orders it. Both now also name a writer as journald's
+`pid_get_comm` does, escaped. `scripts/journalfwd-diff.sh` holds the
+broadcast to systemd's own `wall()` from `libsystemd-shared`, each side in
+namespaces whose terminals are the harness's own: 31 cases agree.
+
+**What is left** is the three switches a stream's header can turn on: copying
+lines to a syslog daemon, the kernel log and the console. They are now
+`TD-B-A-STREAMS-FORWARDING-SWITCHES-ARE-READ-AND-IGNORED`. The entry below is
+kept as written.
 
 **In short:** on Linux, systemd-journald does more with a message than store
 it. With its default settings it also writes any message at the most urgent

@@ -504,6 +504,9 @@
 //!   signal that ended its command, and coreutils' `operand2sig.c`, for
 //!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
 //!   report from inside a signal handler.
+//! - [`skill`] — procps-ng's `skill` and `snice`, one program that is either
+//!   by the name it is started under; `bin/skill.rs` and `bin/snice.rs` both
+//!   run it.
 //! - [`utmp`] — gnulib's `readutmp`: which login records `who`, `users` and
 //!   `pinky` are given, the boot entry made up when a Linux utmp has none, and
 //!   the readings of a record's fields the three share.
@@ -565,6 +568,7 @@ pub mod remove;
 pub mod rename;
 pub mod setfields;
 pub mod sig2str;
+pub mod skill;
 // Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
 // it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
 // whose `--more-help` runs `$PAGER`) runs its pager the same way.

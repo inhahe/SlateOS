@@ -244,7 +244,7 @@ fn run_main() -> ExitCode {
             ExitCode::FAILURE
         }
     };
-    stdfd::close_stdout("vmstat", out, status)
+    stdfd::close_stdout_procps(b"vmstat", out, status)
 }
 
 fn run(argv: &[OsString], out: &mut Stream) -> Result<(), Stop> {

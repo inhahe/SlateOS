@@ -5514,7 +5514,9 @@ _Port ext4 first. Don't write a custom filesystem._
   newline, a NUL or 48 KiB, its trimming and `<N>` prefixes, each line filed
   under the process that wrote it from the socket's credentials, the writer
   named as journald's context cache names it -- plus systemd's own log for
-  its messages, every `SYSTEMD_LOG_*` setting and its colours; through new
+  its messages, every `SYSTEMD_LOG_*` setting and its colours, and an
+  `emerg` line broadcast to every logged-in terminal as journald's
+  `ForwardToWall` does (`userspace/journalfwd`); through new
   `libcall::socket` and `libcall::fd`; `scripts/systemd-cat-diff.sh`: 100
   cases agree and 1 differs on purpose, ours in namespaces of its own with a
   private `/var/log`, the reference's records read back from WSL's journald);
@@ -5530,6 +5532,45 @@ _Port ext4 first. Don't write a custom filesystem._
   260 cases agree and 3 differ on purpose, comparing the whole tree each
   side leaves, its last case 300 random merges by
   `scripts/patch-merge-fuzz.py`; design-decisions §1068);
+  `pwdx` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: a
+  process number read as `strtol` reads it, so ` 12` and `+12` pass and then
+  name no process; a bad one ends the run after delivering what came before
+  it, as `error()` does, while a process it cannot read is reported *ahead*
+  of the answers still buffered, as the bare `fprintf (stderr)` upstream uses
+  is (the new `stdfd::diag_bytes_ahead_of_stdout`); standard output closed as
+  procps' own `close_stdout` closes it, silent for a reader that has gone
+  (`stdfd::close_stdout_procps`); `scripts/pwdx-diff.sh`: 111 cases agree and
+  9 differ on purpose, over sleepers in awkward directories, a deleted one and
+  a zombie. `free`, `uptime`, `vmstat`, `w`, `sysctl`, `pgrep` and `pkill`
+  close through `close_stdout_procps` too since the same day -- under
+  `trap '' PIPE` they had said `write error: Broken pipe` and exited 1 where
+  procps says nothing -- and `free` keeps `/proc/meminfo` open as the library
+  does, which decides what `free >&-` says; `scripts/procps-close-diff.sh`
+  holds the whole family to procps' close: 44 cases agree);
+  `pmap` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  default, `-x`, `-d` and `-X`/`-XX` formats, the rc file `-c`/`-C` read and
+  `-n`/`-N` write, `-A` ranges, `-p`, `-q`; each map read with `fgets` into
+  1024 bytes, so a mapping whose path makes its line longer arrives in
+  pieces and the second is scanned as a line of its own, as upstream does;
+  `-X`'s two passes over `smaps` and its field list kept from one process to
+  the next; shared memory named by its id, learned from a segment of its own
+  through the new `libcall::shm`; `procps::scanf` gained `%x` and scansets;
+  `scripts/pmap-diff.sh`: 328 cases agree and 3 differ on purpose, over
+  static targets -- so no shared library's pages move the `Pss` column --
+  mapping long paths, odd ones, deleted files and System V segments);
+  `skill` and `snice` (2026-10-09, procps-ng 4.0.4's `skill.c` -- new,
+  nothing here had them: one program, which it is by its name; the signal or
+  priority taken out of the arguments before `getopt`, a word a process id
+  when `strtol` reads all of it and a command name when not, `-n`, `-v`,
+  `-i`'s questions, `-d`'s lists, `-l`/`-L`, `--ns` -- which, as upstream's,
+  only `--nslist` makes count, and `--nslist` takes any name since
+  `procps_ns_get_id` never answers the -1 it is tested for -- and no
+  `close_stdout`, so the status is 0 whatever became of the output; the new
+  `libcall::priority`, and `procps::signals` gained the listings and
+  `skill_sig_option`; `scripts/skill-diff.sh`: 118 cases agree and 3 differ
+  on purpose, each safe by construction -- `-n`, signal 0, STOP and CONT,
+  or renicing upwards -- on targets the harness starts under names nothing
+  else has);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5557,6 +5598,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fw: firewall rule management (allow/deny by port/IP, policy, logging, persistence, JSON output)
   - [x] diskutil: disk management (list/info/format/verify/repair/TRIM, benchmark, S.M.A.R.T., partitions)
   - [x] ps: procps-ng 4.0.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/ps-diff.sh`, 590 cases)
+  - [x] pwdx: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pwdx-diff.sh`, 120 cases)
+  - [x] pmap: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pmap-diff.sh`, 331 cases)
+  - [x] skill/snice: procps-ng 4.0.4's, coreutils programs since 2026-10-09 (see the coreutils item; `scripts/skill-diff.sh`, 121 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)
@@ -5637,7 +5681,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pgrep/pkill: procps-ng 4.0.4's, coreutils programs since 2026-10-03 (see the coreutils item; `scripts/pgrep-diff.sh`, 437 cases); `pidwait` waits on the native `pidfd_open`
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
   - [x] logger: util-linux 2.39.3 port (local/RFC 3164/RFC 5424 headers, structured data, octet counting, prio-prefix, Unix/UDP/TCP delivery, `--journald`, root `--id` credentials; `/dev/log` messages become journal records while SlateOS has no Unix-domain sockets — design-decisions §1033; checked by `scripts/logger-diff.sh`)
-  - [-] syslogd: the `/dev/log` reader (step 2 of known-issues `TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES`) -- each datagram filed as systemd-journald files it: the local form taken apart as journald takes it, the rest kept, bytes that are not text kept as bytes, the sender's credentials (design-decisions §1063); `journalctl` reads byte-valued fields; `scripts/syslogd-diff.sh` holds it to a private journald. Works on Linux; on SlateOS it waits for path-bound `AF_UNIX` sockets (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`, lanes A and D), then for its line in the image's `/etc/startup.conf` (lane D)
+  - [-] syslogd: the `/dev/log` reader (step 2 of known-issues `TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES`) -- each datagram filed as systemd-journald files it: the local form taken apart as journald takes it, the rest kept, bytes that are not text kept as bytes, the sender's credentials (design-decisions §1063); an `emerg` message broadcast to every logged-in user's terminal as journald's default `ForwardToWall` does (`userspace/journalfwd`, shared with `systemd-cat`; `scripts/journalfwd-diff.sh` holds it to systemd's own `wall()`, 31 cases); `journalctl` reads byte-valued fields; `scripts/syslogd-diff.sh` holds it to a private journald. Works on Linux; on SlateOS it waits for path-bound `AF_UNIX` sockets (`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`, lanes A and D), then for its line in the image's `/etc/startup.conf` (lane D)
   - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)
   - [x] ftp: interactive FTP client (USER/PASS login, PORT/PASV data, ASCII/binary transfer, mget/mput with glob, resume, progress)
   - [x] chroot: change root directory (root check, --userspec, --groups, user/group resolution, privilege drop)

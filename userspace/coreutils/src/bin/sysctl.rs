@@ -348,7 +348,7 @@ fn run_main() -> ExitCode {
     let rc = run(&argv, &mut out);
     // `return rc` from `main`: the status is its low eight bits.
     let status = ExitCode::from(rc.to_le_bytes().first().copied().unwrap_or(0));
-    stdfd::close_stdout("sysctl", out, status)
+    stdfd::close_stdout_procps(b"sysctl", out, status)
 }
 
 /// `main`, to the value it returns.

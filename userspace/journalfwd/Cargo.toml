@@ -1,0 +1,19 @@
+[package]
+name = "journalfwd"
+version = "0.1.0"
+edition = "2024"
+description = "What systemd-journald does with a message besides storing it: the broadcast of an emerg one to every logged-in terminal"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The utmp records, read as glibc's `getutxent` reads them: who is logged in,
+# and on which terminal.
+utmpfile = { path = "../../utmpfile" }
+# The host name, `isatty`, `poll` and a terminal's name -- the stateful calls,
+# through the one C library a program links (design-decisions §768).
+libcall = { path = "../../libcall" }
+# The banner's date, in the local zone with its abbreviation, as systemd's
+# `format_timestamp` prints it.
+localtime = { path = "../localtime" }

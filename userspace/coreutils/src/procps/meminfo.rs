@@ -109,15 +109,44 @@ fn read_once(file: &mut File) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// The file at `path` as the library reads it: opened, then read once as
-/// [`read_once`] does. For a program that reads the file afresh for every
-/// report (`free`), where [`MemInfo`] keeps it open.
+/// The file as `free` reads it: opened at the first report and kept open
+/// until the process ends, then read from its start for each report as
+/// [`read_once`] reads it -- the descriptor `procps_meminfo_new` opens, which
+/// `free` never gives back. ([`MemInfo`] is the same file for `vmstat`, which
+/// wants the figures derived rather than the text.)
 ///
-/// # Errors
-///
-/// The file could not be opened or read, or read empty (`EIO`).
-pub fn read(path: &str) -> io::Result<Vec<u8>> {
-    read_once(&mut File::open(path)?)
+/// Which descriptor it is can be seen. With standard output closed, the file
+/// is given number 1; the reports are then written into it and refused
+/// (`EBADF`: it is open only for reading), and at exit closing descriptor 1
+/// *succeeds*, so procps' `close_stdout` has no reason to give --
+/// `free >&-` says a bare `free: write error`. Opening the file afresh for
+/// each report, as this did until 2026-10-09, left descriptor 1 closed at
+/// exit and said `write error: Bad file descriptor`.
+#[derive(Debug, Default)]
+pub struct MemFile {
+    file: Option<File>,
+}
+
+impl MemFile {
+    /// Nothing opened yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { file: None }
+    }
+
+    /// The file's text, as [`read_once`] reads it; `path` is opened the
+    /// first time and only then.
+    ///
+    /// # Errors
+    ///
+    /// The file could not be opened or read, or read empty (`EIO`).
+    pub fn read(&mut self, path: &str) -> io::Result<Vec<u8>> {
+        let file = match &mut self.file {
+            Some(file) => file,
+            None => self.file.insert(File::open(path)?),
+        };
+        read_once(file)
+    }
 }
 
 /// The keys read straight out of the file, before any derivation.
@@ -365,16 +394,43 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let empty = dir.join("empty");
         std::fs::write(&empty, b"").unwrap();
-        let e = read(empty.to_str().unwrap()).unwrap_err();
+        let e = MemFile::new().read(empty.to_str().unwrap()).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(5));
         // 8191 bytes are read; the key that starts past them is not seen.
         let long = dir.join("long");
         let mut text = vec![b'x'; 8190];
         text.extend_from_slice(b"\nMemTotal: 5 kB\n");
         std::fs::write(&long, &text).unwrap();
-        let got = read(long.to_str().unwrap()).unwrap();
+        let got = MemFile::new().read(long.to_str().unwrap()).unwrap();
         assert_eq!(got.len(), 8191);
         assert_eq!(parse(&got).mem_total, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The file is opened once and kept: each read starts from its beginning
+    /// and sees what it holds now, and it is still read after its name is
+    /// gone. A path that cannot be opened is an error, and nothing is kept.
+    #[test]
+    fn the_file_is_opened_once_and_read_from_its_start_each_time() {
+        let dir = std::env::temp_dir().join(format!("meminfo-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meminfo");
+        let name = path.to_str().unwrap();
+
+        let mut file = MemFile::new();
+        assert!(file.read(name).is_err(), "not there yet");
+        std::fs::write(&path, b"MemTotal: 5 kB\n").unwrap();
+        assert_eq!(parse(&file.read(name).unwrap()).mem_total, 5);
+        std::fs::write(&path, b"MemTotal: 7 kB\n").unwrap();
+        assert_eq!(parse(&file.read(name).unwrap()).mem_total, 7);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            parse(&file.read(name).unwrap()).mem_total,
+            7,
+            "the descriptor outlives the name"
+        );
+
+        drop(file);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

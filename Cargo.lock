@@ -669,6 +669,7 @@ dependencies = [
  "fnmatch",
  "getoptlong",
  "gnubase64",
+ "journalfwd",
  "journalio",
  "journalrec",
  "libcall",
@@ -1864,6 +1865,15 @@ dependencies = [
  "journalrec",
  "quoting",
  "scratchdir",
+]
+
+[[package]]
+name = "journalfwd"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "localtime",
+ "utmpfile",
 ]
 
 [[package]]
@@ -4151,6 +4161,7 @@ name = "syslogd"
 version = "0.1.0"
 dependencies = [
  "errmsg",
+ "journalfwd",
  "journalio",
  "journalrec",
  "quoting",

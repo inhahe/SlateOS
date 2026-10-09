@@ -230,6 +230,65 @@ impl<'a> Scan<'a> {
         }
         Some(())
     }
+
+    /// `%x`, `%lx` and `%llx`: glibc's hexadecimal conversion. Whitespace is
+    /// skipped, then a sign, a `0x` or `0X`, and digits, and the number is
+    /// what `strtoul` makes of them at base 16 -- a minus negating in
+    /// `unsigned long`, too many digits saturating. A `0x` with no digit
+    /// after it is the number 0, the `x` taken with it, as `vfscanf` takes
+    /// it. No digit at all fails.
+    pub fn hex(&mut self) -> Option<u64> {
+        if self.failed {
+            return None;
+        }
+        self.ws();
+        let rest = self.rest();
+        let signed = matches!(rest.first(), Some(b'-' | b'+'));
+        let mut i = usize::from(signed);
+        let mut zero = false;
+        if rest.get(i) == Some(&b'0') {
+            zero = true;
+            i = i.saturating_add(1);
+            if matches!(rest.get(i), Some(b'x' | b'X')) {
+                i = i.saturating_add(1);
+            }
+        }
+        let digits_from = i;
+        while rest.get(i).is_some_and(u8::is_ascii_hexdigit) {
+            i = i.saturating_add(1);
+        }
+        if i == digits_from && !zero {
+            return self.fail();
+        }
+        // What glibc collects and hands to `strtoul`: the sign, the `0`, and
+        // the digits -- never the `x`.
+        let mut text = Vec::with_capacity(i);
+        if signed {
+            text.extend_from_slice(rest.get(..1).unwrap_or_default());
+        }
+        if zero {
+            text.push(b'0');
+        }
+        text.extend_from_slice(rest.get(digits_from..i).unwrap_or_default());
+        self.at = self.at.saturating_add(i);
+        Some(cstrtol::strtoull(&text, 16).0)
+    }
+
+    /// `%N[...]`: at most `max` bytes the set takes, with no whitespace
+    /// skipped first -- a scanset reads a blank as it reads anything else.
+    /// None at all fails.
+    pub fn scanset(&mut self, max: usize, takes: impl Fn(u8) -> bool) -> Option<&'a [u8]> {
+        if self.failed {
+            return None;
+        }
+        let rest = self.rest();
+        let n = rest.iter().take(max).take_while(|&&b| takes(b)).count();
+        if n == 0 {
+            return self.fail();
+        }
+        self.at = self.at.saturating_add(n);
+        rest.get(..n)
+    }
 }
 
 /// `strtoull(s, &end, 16)`: the value, how many bytes it took, and whether
@@ -250,6 +309,43 @@ pub fn strtoull_hex(s: &[u8]) -> (u64, usize, bool) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_and_scansets_read_as_glibc_scanf_reads_them() {
+        let mut s = Scan::new(b"7f00-7f1a rw-p 0x10 -1 0xg");
+        assert_eq!(s.hex(), Some(0x7f00));
+        assert_eq!(s.lit(b"-"), Some(()));
+        assert_eq!(s.hex(), Some(0x7f1a));
+        assert_eq!(s.word(31), Some(&b"rw-p"[..]));
+        assert_eq!(s.hex(), Some(0x10), "a 0x prefix");
+        assert_eq!(s.hex(), Some(u64::MAX), "a minus negates");
+        assert_eq!(s.hex(), Some(0), "0x with nothing after it is 0");
+        assert_eq!(s.ch(), Some(b'g'), "and the x went with it");
+        assert_eq!(Scan::new(b"zz").hex(), None);
+        assert_eq!(
+            Scan::new(b"ffffffffffffffffffff/x").hex(),
+            Some(u64::MAX),
+            "too many digits saturate"
+        );
+        let mut s = Scan::new(b" ab:cd rest");
+        assert_eq!(
+            s.scanset(10, |c| c != b':'),
+            Some(&b" ab"[..]),
+            "no blank skipped"
+        );
+        assert_eq!(s.lit(b":"), Some(()));
+        assert_eq!(
+            s.scanset(1, |c| c.is_ascii_lowercase()),
+            Some(&b"c"[..]),
+            "at most max"
+        );
+        assert_eq!(
+            s.scanset(5, |c| c.is_ascii_digit()),
+            None,
+            "none taken fails"
+        );
+        assert_eq!(s.ch(), None, "and the scan has stopped");
+    }
 
     #[test]
     fn strtoull_hex_reads_what_glibc_reads() {

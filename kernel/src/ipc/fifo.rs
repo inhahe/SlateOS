@@ -37,10 +37,16 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::path::Path;
 use crate::fs::vfs::{FileHold, FileId};
 use crate::ipc::pipe::{self, FifoAccess, PipeHandle};
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 
 /// Each FIFO node that has a pipe, by identity: the pipe's number.
-static FIFOS: Mutex<BTreeMap<FileId, u64>> = Mutex::new(BTreeMap::new());
+///
+/// Watched, not a `PreemptSpinMutex`: the pipe table's lock is taken under
+/// it (`pipe::fifo_alive`, `pipe::fifo_create`), and a lock with another
+/// taken under it is the deadlock detector's to watch (design-decisions
+/// 975, A-Q16). Taken when a FIFO is opened or forgotten, never on a read
+/// or a write.
+static FIFOS: Mutex<BTreeMap<FileId, u64>> = Mutex::named(BTreeMap::new(), b"FIFOS");
 
 /// Open the FIFO at `path` -- already resolved, the final component
 /// followed or not as the caller's open asked -- for `access`, waiting for

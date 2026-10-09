@@ -103,7 +103,11 @@ struct MixScratch {
 ///
 /// Lock order is `MIX_SCRATCH` -> `StreamSlot::ring`, never the reverse.
 /// `write_pcm` and friends take a ring and nothing else, so no cycle exists.
-static MIX_SCRATCH: PreemptSpinMutex<MixScratch> = PreemptSpinMutex::named(
+/// Watched, not a `PreemptSpinMutex`, for that nesting: a lock with another
+/// taken under it is the deadlock detector's to check, not a comment's
+/// (design-decisions 975, A-Q16). Once per mixing period, which the tracking
+/// cost (tens of nanoseconds) does not notice.
+static MIX_SCRATCH: crate::sync::Mutex<MixScratch> = crate::sync::Mutex::named(
     MixScratch {
         acc: [0; MIX_BUFFER_SIZE / 2],
         stage: [0; MIX_BUFFER_SIZE],

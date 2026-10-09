@@ -35,7 +35,7 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -146,7 +146,10 @@ impl SessionTable {
     }
 }
 
-static TABLE: Mutex<SessionTable> = Mutex::new(SessionTable::new());
+/// Watched, not a `PreemptSpinMutex`: making a session takes another lock
+/// under it, and a lock with another taken under it is the deadlock
+/// detector's to watch (design-decisions 975, A-Q16).
+static TABLE: Mutex<SessionTable> = Mutex::named(SessionTable::new(), b"TERMSESSION");
 
 // ---------------------------------------------------------------------------
 // Initialization

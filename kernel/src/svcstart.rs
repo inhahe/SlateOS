@@ -50,7 +50,7 @@
 
 #![allow(dead_code)]
 
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -361,7 +361,11 @@ impl State {
     }
 }
 
-static STATE: Mutex<State> = Mutex::new(State::new());
+// A watched lock, not a `PreemptSpinMutex`: it is held while an event is
+// logged, so another lock -- the event log's -- is taken under it, and
+// a lock with another taken under it is the deadlock detector's to watch
+// (design-decisions 975, A-Q16). Taken on no hot path.
+static STATE: Mutex<State> = Mutex::named(State::new(), b"SVCSTART_STATE");
 
 // ---------------------------------------------------------------------------
 // Initialization

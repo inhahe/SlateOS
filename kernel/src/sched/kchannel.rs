@@ -555,14 +555,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             crate::sched::yield_now();
         }
 
-        // Close and let consumer finish.
+        // Close, and wait by the clock for the consumer to take all five and
+        // see the close: a fixed number of yields waited for it only on one
+        // CPU, where a yield runs it (`selftest::wait_until`).
         TEST_CH.close();
-        for _ in 0..20 {
-            crate::sched::yield_now();
-        }
+        let consumer_done = tid.is_ok_and(|tid| {
+            crate::selftest::wait_until(5_000, || {
+                matches!(
+                    crate::sched::task_state(tid),
+                    None | Some(crate::sched::task::TaskState::Dead)
+                )
+            })
+        });
 
         // Sum should be 1+2+3+4+5 = 15.
-        assert_eq!(SUM.load(AOrdering::Relaxed), 15);
+        if !consumer_done || SUM.load(AOrdering::Relaxed) != 15 {
+            serial_println!(
+                "[kchannel]   FAIL: the consumer summed {} of 15 (finished {})",
+                SUM.load(AOrdering::Relaxed),
+                consumer_done
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
     }
     serial_println!("[kchannel]   Multi-task producer-consumer: OK");
 

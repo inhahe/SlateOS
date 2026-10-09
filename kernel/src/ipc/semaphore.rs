@@ -504,20 +504,37 @@ use core::sync::atomic::{AtomicBool, Ordering as AtOrd};
 /// Flag for signal-wake test.
 static SEM_TEST_ACQUIRED: AtomicBool = AtomicBool::new(false);
 
+/// What [`sem_close_waiter_task`]'s wait returned: 0 not yet, 1
+/// `ChannelClosed` (the close woke it), 2 anything else.
+static SEM_CLOSE_OUTCOME: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// Task entry: blocks on sem wait, expects ChannelClosed.
 extern "C" fn sem_close_waiter_task(h_raw: u64) {
     let handle = SemHandle::from_raw(h_raw);
-    match wait(handle) {
-        Err(KernelError::ChannelClosed) => {
-            // Expected — woken by close.
-        }
+    let outcome = match wait(handle) {
+        // Expected — woken by close.
+        Err(KernelError::ChannelClosed) => 1,
         other => {
             serial_println!(
                 "[sem]   FAIL: waiter got {:?} instead of ChannelClosed",
                 other
             );
+            2
         }
-    }
+    };
+    SEM_CLOSE_OUTCOME.store(outcome, AtOrd::Release);
+}
+
+/// For the self-test: wait, by the clock, until task `tid` is blocked
+/// (`want_blocked`) or has ended. A fixed number of yields waits for another
+/// task only on one CPU, where a yield runs it (`selftest::wait_until`).
+fn sem_test_wait_for(tid: TaskId, want_blocked: bool) -> bool {
+    use crate::sched::task::TaskState;
+    crate::selftest::wait_until(5_000, || match crate::sched::task_state(tid) {
+        Some(TaskState::Blocked) => want_blocked,
+        None | Some(TaskState::Dead) => !want_blocked,
+        Some(_) => false,
+    })
 }
 
 /// Task entry: blocks on sem wait, sets ACQUIRED flag.
@@ -602,21 +619,35 @@ pub fn self_test() -> KernelResult<()> {
     {
         use crate::sched;
 
+        SEM_CLOSE_OUTCOME.store(0, AtOrd::Release);
         let h = create(0, 10);
 
         // Spawn a task that will block on wait.
-        let _ = sched::spawn(b"sem-close-test", 16, sem_close_waiter_task, h.raw(), 0);
+        let Ok(tid) = sched::spawn(b"sem-close-test", 16, sem_close_waiter_task, h.raw(), 0) else {
+            close(h);
+            serial_println!("[sem]   FAIL: could not spawn the close-test waiter");
+            return Err(KernelError::InternalError);
+        };
+        if !sem_test_wait_for(tid, true) {
+            close(h);
+            serial_println!("[sem]   FAIL: the waiter never blocked on an empty semaphore");
+            return Err(KernelError::InternalError);
+        }
 
-        // Give the waiter time to block.
-        sched::yield_now();
-        sched::yield_now();
-
-        // Close should wake the waiter.
+        // Close should wake the waiter, with ChannelClosed.
         close(h);
-
-        // Wait for the waiter task to exit.
-        for _ in 0..10 {
-            sched::yield_now();
+        let woken =
+            crate::selftest::wait_until(5_000, || SEM_CLOSE_OUTCOME.load(AtOrd::Acquire) != 0);
+        // Gone before the next test, which may be handed the same handle
+        // number: a waiter still running could take that test's signal.
+        let ended = sem_test_wait_for(tid, false);
+        if !woken || SEM_CLOSE_OUTCOME.load(AtOrd::Acquire) != 1 || !ended {
+            serial_println!(
+                "[sem]   FAIL: close did not wake the waiter with ChannelClosed (outcome {}, ended {})",
+                SEM_CLOSE_OUTCOME.load(AtOrd::Acquire),
+                ended
+            );
+            return Err(KernelError::InternalError);
         }
         serial_println!("[sem]   Close wakes waiter: OK");
     }
@@ -630,25 +661,32 @@ pub fn self_test() -> KernelResult<()> {
         let h = create(0, 10);
 
         // Spawn a task that blocks on wait.
-        let _ = sched::spawn(b"sem-signal-test", 16, sem_signal_waiter_task, h.raw(), 0);
-
-        // Yield to let waiter block.
-        sched::yield_now();
-        sched::yield_now();
-
-        // Signal should wake the waiter.
-        let _ = signal(h, 1);
-        for _ in 0..10 {
-            sched::yield_now();
-        }
-
-        if !SEM_TEST_ACQUIRED.load(AtOrd::Acquire) {
-            serial_println!("[sem]   FAIL: waiter not woken by signal");
+        let Ok(tid) = sched::spawn(b"sem-signal-test", 16, sem_signal_waiter_task, h.raw(), 0)
+        else {
             close(h);
+            serial_println!("[sem]   FAIL: could not spawn the signal-test waiter");
+            return Err(KernelError::InternalError);
+        };
+        if !sem_test_wait_for(tid, true) {
+            close(h);
+            serial_println!("[sem]   FAIL: the signal-test waiter never blocked");
             return Err(KernelError::InternalError);
         }
 
+        // Signal should wake the waiter.
+        signal(h, 1)?;
+        let acquired =
+            crate::selftest::wait_until(5_000, || SEM_TEST_ACQUIRED.load(AtOrd::Acquire));
         close(h);
+        let ended = sem_test_wait_for(tid, false);
+        if !acquired || !ended {
+            serial_println!(
+                "[sem]   FAIL: waiter not woken by signal (acquired {}, ended {})",
+                acquired,
+                ended
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!("[sem]   Signal wakes waiter: OK");
     }
 

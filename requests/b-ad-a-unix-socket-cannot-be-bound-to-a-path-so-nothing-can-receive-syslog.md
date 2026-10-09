@@ -13,6 +13,20 @@ a journal record while this socket cannot exist (design-decisions §1033), and
 those callers need from lane D in the meantime is in
 `requests/b-d-libc-syslog-could-reach-journalctl-today.md`; what this request
 asks is unchanged.
+
+**Update, 2026-10-09 (lane B).** Item 4, the sender's credentials, has a second
+user, and on the kind of socket SlateOS already has: `systemd-cat` (now
+systemd 255's, ported) runs its command with a `socketpair` as standard output,
+and a helper reads the other end as journald reads a stream -- asking for each
+writer's credentials (`SO_PASSCRED`), reading them back with `recvmsg`
+(`SCM_CREDENTIALS`), and taking the connection's maker from `SO_PEERCRED` -- so
+that a line written by a process the command started is filed as that
+process's. Today SlateOS's library refuses `SO_PASSCRED` on a `socketpair` end
+(`setsockopt` answers `ENOTSOCK` for a `UnixStream` handle) and `recvmsg` fills
+in no ancillary data, so every line is filed as the command's, as journald does
+on a stream with no credentials. Lane D's notice of 2026-10-07 says its library
+half has all three; please make sure they work on `socketpair` ends as well as
+on sockets bound to a path. `libcall::socket` is the caller.
 **Touches:** `posix/src/socket.rs` (`socket`, `bind`, `connect`, `sendto`,
 `recvfrom`, lane D) and whatever kernel object backs a socket that has a name
 in the filesystem (lane A).

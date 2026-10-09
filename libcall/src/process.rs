@@ -1,6 +1,6 @@
 //! Making, replacing and waiting for processes, the process group they run
 //! in, and the root and credentials they run with: `fork`, `execvp`,
-//! `waitpid`, `setpgid`, `prctl (PR_SET_DUMPABLE)`, `_exit`, `chroot`,
+//! `waitpid`, `setpgid`, `setsid`, `prctl (PR_SET_DUMPABLE)`, `_exit`, `chroot`,
 //! `setgroups`, `setgid` and `setuid`. The last four are what GNU `chroot`
 //! changes before it becomes its command.
 //!
@@ -51,6 +51,7 @@ mod sys {
         pub fn setuid(uid: u32) -> i32;
         pub fn getpgrp() -> i32;
         pub fn getsid(pid: i32) -> i32;
+        pub fn setsid() -> i32;
         pub fn pidfd_open(pid: i32, flags: u32) -> i32;
     }
 }
@@ -222,6 +223,40 @@ fn wait_nohang_one(pid: i32) -> Result<Option<WaitStatus>, i32> {
 
 #[cfg(not(unix))]
 fn wait_nohang_one(_pid: i32) -> Result<Option<WaitStatus>, i32> {
+    Err(ENOSYS)
+}
+
+/// Wait for the child `pid` to finish, and reap it: `waitpid (pid, &status,
+/// 0)`.
+///
+/// One child only, as [`wait_nohang`] is, and for its reason.
+///
+/// # Errors
+///
+/// `EINVAL` when `pid` does not name a single process, `ECHILD` when it is not
+/// an unreaped child of this one, `EINTR` when a signal's handler ran first --
+/// the caller's to retry -- and [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn wait(pid: i32) -> Result<WaitStatus, i32> {
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    wait_one(pid)
+}
+
+#[cfg(unix)]
+fn wait_one(pid: i32) -> Result<WaitStatus, i32> {
+    let mut status = 0i32;
+    // SAFETY: `status` is a live `int` that the call writes at most once.
+    let rc = unsafe { sys::waitpid(pid, &raw mut status, 0) };
+    if rc > 0 {
+        Ok(WaitStatus(status))
+    } else {
+        Err(last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_one(_pid: i32) -> Result<WaitStatus, i32> {
     Err(ENOSYS)
 }
 
@@ -423,6 +458,34 @@ fn session_of_one(pid: i32) -> Result<i32, i32> {
 
 #[cfg(not(unix))]
 fn session_of_one(_pid: i32) -> Result<i32, i32> {
+    Err(ENOSYS)
+}
+
+/// Make this process the leader of a new session, and of a new process group
+/// in it, with no controlling terminal: `setsid`. Returns the new session's
+/// id, which is this process's.
+///
+/// What a process does to stand apart from the terminal and the job it was
+/// started in -- `systemd-cat`'s helper, which must outlive a Ctrl-C at that
+/// terminal for as long as the command it serves does.
+///
+/// # Errors
+///
+/// `EPERM` when this process already leads a process group (a group leader
+/// cannot leave its group); [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn start_session() -> Result<i32, i32> {
+    start_session_one()
+}
+
+#[cfg(unix)]
+fn start_session_one() -> Result<i32, i32> {
+    // SAFETY: no arguments; the call changes only this process's session.
+    let sid = unsafe { sys::setsid() };
+    if sid < 0 { Err(last_errno()) } else { Ok(sid) }
+}
+
+#[cfg(not(unix))]
+fn start_session_one() -> Result<i32, i32> {
     Err(ENOSYS)
 }
 

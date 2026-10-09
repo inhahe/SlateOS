@@ -1,5 +1,14 @@
 ## B-INOTIFYWAIT-REPORTS-FILESYSTEM-EVENTS-THAT-NEVER-HAPPENED (lane B, 2026-09-12)
 
+**Status:** FIXED 2026-09-12 (`3f94c02c4`, the same day; this entry was not
+updated until 2026-10-09). `inotifywait` and `inotifywatch` read the kernel's
+events -- `inotify_init1`, an `inotify_add_watch` per path, then the event
+stream parsed from the descriptor (`watch_once`) -- and where the calls answer
+`ENOSYS` (a development host) they say they cannot watch. `generate_simulated_events`
+and the test that asserted its inventions are gone. On `main`, boot-tested with
+`0c2886e3c`; moved to `known-issues-resolved/`. (Still a program written here
+rather than a port of inotify-tools; that is the subject of no entry yet.)
+
 `userspace/inotify` provides `inotifywait` and `inotifywatch`. Both call
 `generate_simulated_events`, which invents them:
 
@@ -57,6 +66,6 @@ itself is `struct inotify_event { wd, mask, cookie, len, name[len] }`,
 which is a pure parse over bytes and is where the tests belong: variable
 length names, NUL padding, and a buffer holding several events.
 
-**Not started.** Recorded now because the diagnosis is complete and the
+**Not started** (when written). Recorded then because the diagnosis is complete and the
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.

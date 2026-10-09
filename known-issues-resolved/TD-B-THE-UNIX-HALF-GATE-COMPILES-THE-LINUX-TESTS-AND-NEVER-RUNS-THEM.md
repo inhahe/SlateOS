@@ -1,7 +1,12 @@
 ## TD-B-THE-UNIX-HALF-GATE-COMPILES-THE-LINUX-TESTS-AND-NEVER-RUNS-THEM (lane B, 2026-10-03)
 
-**Status:** OPEN -- the fix is a one-flag change to `scripts/hooks/pre-push`,
-held back only because it reaches other lanes' pushes; see "What to do".
+**Status:** FIXED 2026-10-08. Step 2 first: every crate gate 12 can take
+into scope -- the 81 with a platform-conditional arm, `posix` among them --
+was run through `coreutils-check.sh --only linux` with its tests, one at a
+time, and all 81 were green (`posix` alone: 9385 passed, 1 ignored). Then
+steps 1 and 3: gate 12 runs `coreutils-check.sh --only linux $_uh_scope`
+without `--no-test`, its refusal text reproduces that, and the comment above
+the call says why the tests run and what was checked before they did.
 
 **In short:** Before a push, gate 12 builds every changed crate for Linux
 through WSL, so code that only compiles on Unix cannot go in broken. It does

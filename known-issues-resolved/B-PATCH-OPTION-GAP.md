@@ -1,4 +1,29 @@
-## B-PATCH-OPTION-GAP (lane B, 2026-09-12) — partly closed, and the rest is named
+## B-PATCH-OPTION-GAP (lane B, 2026-09-12) — FIXED
+
+**Status:** FIXED 2026-10-09
+
+**Closed by the port (2026-10-09).** `patch` is no longer a from-scratch
+implementation gaining one option at a time: it is GNU patch 2.7.6 with
+Debian's fifteen patches, ported whole into `userspace/coreutils/src/bin/patch/`
+(design-decisions §1068). Every option upstream has is there, because upstream
+is there. That includes the ones this entry still listed as missing or inert:
+`-Z` and `-T` set times, `-o`, `-E`, `-v` and `--verbose` work, and so does
+everything the entry never reached:
+
+- ed scripts
+- git-style diffs (renames, copies, modes, symlinks)
+- `--merge`, `-m`, `-D`
+- every `-V` backup style, `-B`, `-Y`, `-z`
+- `--reject-format`
+- `--read-only`
+- `--quoting-style`
+- `-x`
+- `Prereq:`
+
+`scripts/patch-diff.sh` now snapshots modification times too, which is what
+this entry said it could not see. It covers all of these and agrees with
+Ubuntu's binary on every case but `--version`. The history below is kept as
+written.
 
 `patch-diff.sh`: 3 passed / 62 differed this morning, **42 / 23** now.
 

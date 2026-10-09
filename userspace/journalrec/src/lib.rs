@@ -121,6 +121,51 @@ pub fn priority_name(spec: &str) -> Option<&'static str> {
     PRIORITY_NAMES.get(index).copied()
 }
 
+/// glibc's `facilitynames`, by number: the name a record's `facility` field
+/// carries. The first of two names for one number, so 4 is `auth`, not its
+/// alias `security`; 24 is `mark`, glibc's `INTERNAL_MARK`. Twelve to
+/// fifteen have no name there, nor does anything past 24 -- which a `<PRI>`
+/// or a stream's header can still say, since journald does not check.
+const FACILITY_NAMES: [Option<&str>; 25] = [
+    Some("kern"),
+    Some("user"),
+    Some("mail"),
+    Some("daemon"),
+    Some("auth"),
+    Some("syslog"),
+    Some("lpr"),
+    Some("news"),
+    Some("uucp"),
+    Some("cron"),
+    Some("authpriv"),
+    Some("ftp"),
+    None,
+    None,
+    None,
+    None,
+    Some("local0"),
+    Some("local1"),
+    Some("local2"),
+    Some("local3"),
+    Some("local4"),
+    Some("local5"),
+    Some("local6"),
+    Some("local7"),
+    Some("mark"),
+];
+
+/// The name glibc gives facility number `facility` (not shifted: `daemon` is
+/// 3), if it gives one. Shared by every writer that files a facility --
+/// `logger`, `syslogd`, `systemd-cat` -- so that one number is not two names.
+#[must_use]
+pub fn facility_name(facility: u32) -> Option<&'static str> {
+    usize::try_from(facility)
+        .ok()
+        .and_then(|i| FACILITY_NAMES.get(i))
+        .copied()
+        .flatten()
+}
+
 /// One journal record, in the fields `journalctl` reads.
 #[derive(Debug, Clone)]
 pub struct Record {
@@ -223,6 +268,19 @@ mod tests {
     use super::*;
     use alloc::string::ToString;
     use alloc::vec;
+
+    #[test]
+    fn facility_names_are_glibcs() {
+        assert_eq!(facility_name(0), Some("kern"));
+        assert_eq!(facility_name(3), Some("daemon"));
+        assert_eq!(facility_name(4), Some("auth"), "not its alias, security");
+        assert_eq!(facility_name(10), Some("authpriv"));
+        assert_eq!(facility_name(12), None);
+        assert_eq!(facility_name(23), Some("local7"));
+        assert_eq!(facility_name(24), Some("mark"));
+        assert_eq!(facility_name(25), None);
+        assert_eq!(facility_name(u32::MAX), None);
+    }
 
     /// The reason this is one function and not two. A message is
     /// attacker-shaped text: a bare quote ends the field and a bare newline

@@ -67,6 +67,7 @@ pub mod clock;
 pub mod conf;
 pub mod crypt;
 pub mod epoll;
+pub mod fd;
 pub mod glob;
 pub mod inotify;
 pub mod lock;
@@ -74,6 +75,7 @@ pub mod netdb;
 pub mod process;
 pub mod pty;
 pub mod signal;
+pub mod socket;
 pub mod termios;
 pub mod utmp;
 

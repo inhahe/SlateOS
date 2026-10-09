@@ -669,6 +669,8 @@ dependencies = [
  "fnmatch",
  "getoptlong",
  "gnubase64",
+ "journalio",
+ "journalrec",
  "libcall",
  "localtime",
  "md5",
@@ -4186,8 +4188,6 @@ dependencies = [
 name = "systemctl"
 version = "0.1.0"
 dependencies = [
- "journalio",
- "journalrec",
  "procinfo",
  "quoting",
  "scratchdir",

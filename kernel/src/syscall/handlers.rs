@@ -16997,36 +16997,45 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     let peek = (flags & MSG_PEEK) != 0;
     let dontwait = (flags & MSG_DONTWAIT) != 0;
 
-    let data = if peek {
-        // MSG_PEEK: copy data without consuming it.
-        match crate::net::tcp::peek(handle, buf_cap) {
-            Ok(d) => d,
-            Err(e) => return SyscallResult::err(e),
+    // A blocking receive waits for as long as it takes -- for data, the end
+    // of the stream, a reset, or a signal (`Interrupted`) -- and then reads
+    // or peeks as a non-blocking one would. Until 2026-10-09 it gave up after
+    // five seconds with `WouldBlock`, which a blocking call must never answer
+    // (known-issues `A-NATIVE-TCP-RECV-BLOCKING-RETURNS-EAGAIN-AFTER-5S`); and
+    // a peek did not wait at all, though Linux's `MSG_PEEK` does.
+    //
+    // A zero-length receive answers 0 at once, as Linux's does: there is
+    // nothing it could wait for.
+    if buf_cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    let data = loop {
+        if !dontwait {
+            if let Err(e) = crate::net::tcp::wait_readable(handle) {
+                return SyscallResult::err(e);
+            }
         }
-    } else if dontwait {
-        // MSG_DONTWAIT: non-blocking read — return immediately.
-        match crate::net::tcp::read_up_to(handle, buf_cap) {
-            Ok(d) => d,
-            Err(e) => return SyscallResult::err(e),
-        }
-    } else {
-        // Normal blocking read with a generous timeout (~5 seconds).
-        match crate::net::tcp::read_blocking(handle, 500, buf_cap) {
-            Ok(d) => d,
+        let data = if peek {
+            // MSG_PEEK: copy data without consuming it.
+            crate::net::tcp::peek(handle, buf_cap)
+        } else {
+            crate::net::tcp::read_up_to(handle, buf_cap)
+        };
+        match data {
+            // Woken for data another reader of the socket took first: the
+            // stream has not ended, so wait again -- an empty answer here
+            // would read as end of file.
+            Ok(d) if d.is_empty() && !dontwait && !crate::net::tcp::is_remote_closed(handle) => {}
+            Ok(d) => break d,
             Err(e) => return SyscallResult::err(e),
         }
     };
 
     if data.is_empty() {
-        // No data available.  Two cases:
-        // 1. Connection closed (remote FIN received): return 0 (EOF).
-        // 2. Connection still open but no data arrived (blocking timeout
-        //    expired, or non-blocking with nothing queued): return WouldBlock
-        //    so the POSIX layer can retry or propagate EAGAIN.
-        //
-        // The old code only returned WouldBlock for MSG_DONTWAIT, causing
-        // blocking reads to spuriously report EOF when the 5-second kernel
-        // poll expired on an active connection.
+        // Nothing read: the end of the stream (the peer's FIN, or this side
+        // shut for reading) is 0, end of file; otherwise a non-blocking call
+        // with nothing queued yet, `WouldBlock` (EAGAIN). A blocking call
+        // reaches here only at the end of the stream.
         if crate::net::tcp::is_remote_closed(handle) {
             return SyscallResult::ok(0);
         }
@@ -17037,8 +17046,9 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     if copy_len > 0 {
         // SAFETY: `data` is a live kernel-owned `Vec` of at least `copy_len`
         // bytes.  `copy_to_user` re-validates the destination, which is the
-        // check that matters: the read above blocks for up to five seconds, so
-        // a peer thread has ample opportunity to unmap the buffer meanwhile.
+        // check that matters: the wait above can be as long as the peer
+        // likes, so a peer thread has ample opportunity to unmap the buffer
+        // meanwhile.
         if let Err(e) = unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
         {
             return SyscallResult::err(e);

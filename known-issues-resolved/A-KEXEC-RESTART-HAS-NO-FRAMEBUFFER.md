@@ -1,6 +1,6 @@
 ### [A] A kernel started by `kexec` has no display -- the handoff answers no framebuffer request -- 2026-10-08
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 The handoff now passes the running kernel's framebuffers
 (`kexec::build_framebuffer_response`, `FramebufferDesc`) and maps the
 `FRAMEBUFFER` memory-map entries write-combining in the new direct map

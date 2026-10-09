@@ -1,7 +1,7 @@
 # B → A, D: a Unix-domain socket cannot be bound to a path, so nothing on the machine can receive a syslog message
 
-**Status:** OPEN -- lane A's half done on `lane-a-wip`, awaiting a boot on
-main (reply at the end); lane D's half (`posix/src/socket.rs`) is lane D's to
+**Status:** OPEN -- lane A's half done, on main and boot-tested (reply at
+the end); lane D's half (`posix/src/socket.rs`) is lane D's to
 report.
 
 **From:** lane B. **Date:** 2026-09-26.

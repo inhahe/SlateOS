@@ -1,6 +1,6 @@
 ### A-RT-SIGSUSPEND-ENDED-ON-A-SIGNAL-THAT-RAN-NO-HANDLER -- 2026-10-08 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 Stamp it FIXED and move it to `known-issues-resolved/` once a boot on main has
 run `self_test_linux_ptrace_tier2`, whose fifth part tests it.
 

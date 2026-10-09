@@ -1028,6 +1028,11 @@ SHARED_DOCUMENT_DIRS: dict[str, str] = {
     "open-questions/": "rule 3: one file per open question with your lane's letter",
     "open-questions-resolved/": "rule 3: one record file per lane, your lane's own",
     "deferred-questions/": "rule 3: one file per deferred question, your lane's own",
+    "operator-answers/": (
+        "operator-answers/README.md: the operator's answers files, copied in "
+        "verbatim and never edited, and LEDGER.md, where each lane fills in "
+        "the rows for its own answers"
+    ),
 }
 
 #: The baseline `docs-carry-forward.py` writes for the lane that carried its

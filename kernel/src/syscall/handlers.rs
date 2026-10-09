@@ -9639,29 +9639,181 @@ pub fn sys_unix_connect(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 /// `SYS_UNIX_SEND` (1110).
 pub fn sys_unix_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
+    let sent = unix_send_common(
+        args.arg0,
+        args.arg1,
+        args.arg2,
+        args.arg3,
+        args.arg4,
+        args.arg5,
+        || Ok(None),
+    );
+    match sent {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// The body of [`sys_unix_send`] and [`sys_unix_sendmsg`]: send `len` bytes
+/// at `buf` on socket `handle` -- down its connection, or with `name_ptr` a
+/// datagram to that name -- carrying what `rights` gives. `rights` is asked
+/// last, after the handle, the size and the name, as Linux's
+/// `unix_attach_fds` comes after them: a reference taken is a reference to
+/// give back, so nothing is taken for a send refused on its arguments.
+fn unix_send_common(
+    handle: u64,
+    buf: u64,
+    len: u64,
+    name_ptr: u64,
+    name_len: u64,
+    flags: u64,
+    rights: impl FnOnce() -> KernelResult<Option<crate::ipc::passed::Bundle>>,
+) -> KernelResult<usize> {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
-    let sent = (|| {
-        let h = unix_held(args.arg0)?;
-        let len = usize::try_from(args.arg2).unwrap_or(usize::MAX);
-        let call_max = match unix_socket::kind(h) {
-            Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
-            Some(Kind::Dgram | Kind::SeqPacket) if len > MAX_DGRAM => {
-                return Err(KernelError::MsgSize);
+    let h = unix_held(handle)?;
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    let call_max = match unix_socket::kind(h) {
+        Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
+        Some(Kind::Dgram | Kind::SeqPacket) if len > MAX_DGRAM => {
+            return Err(KernelError::MsgSize);
+        }
+        Some(Kind::Dgram | Kind::SeqPacket) => len,
+        None => return Err(KernelError::InvalidHandle),
+    };
+    if buf == 0 && len > 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let data = read_call_buffer(buf, len, call_max)?;
+    let nonblocking = flags & super::number::UNIX_NONBLOCK != 0;
+    let name = if name_ptr == 0 {
+        None
+    } else {
+        Some(unix_target_of(&unix_name_arg(name_ptr, name_len, flags)?)?)
+    };
+    let rights = rights()?;
+    match name {
+        None => unix_socket::send_as(h, &data, None, rights, nonblocking),
+        Some(name) => unix_socket::send_to_as(h, &data, &name, None, rights, nonblocking),
+    }
+}
+
+/// `SYS_UNIX_RECV` (1111).
+pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let got = unix_recv_common(args.arg0, args.arg1, args.arg2, args.arg3, args.arg4).map(
+        |(n, rights)| {
+            // A plain receive takes no descriptors: released, as a Linux
+            // receive without room for them releases them. `SYS_UNIX_RECVMSG`
+            // takes them.
+            if rights.is_some() {
+                drop(rights);
+                crate::ipc::passed::drain();
             }
-            Some(Kind::Dgram | Kind::SeqPacket) => len,
-            None => return Err(KernelError::InvalidHandle),
-        };
-        if args.arg1 == 0 && len > 0 {
-            return Err(KernelError::InvalidArgument);
+            n
+        },
+    );
+    match got {
+        Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// The body of [`sys_unix_recv`] and [`sys_unix_recvmsg`]: receive on socket
+/// `handle` into the `cap` bytes at `buf`, writing the info record at
+/// `info_ptr` if not 0; answers the bytes copied and the descriptors the
+/// message carried, for the caller to take or release.
+fn unix_recv_common(
+    handle: u64,
+    buf: u64,
+    cap: u64,
+    info_ptr: u64,
+    flags: u64,
+) -> KernelResult<(usize, Option<crate::ipc::passed::Bundle>)> {
+    use super::number::{UNIX_ADDR_LEN, UNIX_NONBLOCK, UNIX_PEEK, UNIX_RECV_INFO_LEN};
+    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    let h = unix_held(handle)?;
+    let call_max = match unix_socket::kind(h) {
+        Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
+        Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
+        None => return Err(KernelError::InvalidHandle),
+    };
+    let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+    if buf == 0 && cap > 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    if info_ptr != 0 {
+        // Checked before anything is taken, so a bad pointer loses no
+        // datagram.
+        crate::mm::user::validate_user_write(info_ptr, UNIX_RECV_INFO_LEN)?;
+    }
+    let nonblocking = flags & UNIX_NONBLOCK != 0;
+    let peek = flags & UNIX_PEEK != 0;
+    let mut info = None;
+    let n = with_call_out_buf(buf, cap, call_max, |out| {
+        let r = unix_socket::recv(h, out, nonblocking, peek)?;
+        let len = r.len;
+        info = Some(r);
+        Ok(len)
+    })?;
+    let rights = info.as_mut().and_then(|r| r.rights.take());
+    if info_ptr != 0
+        && let Some(r) = info
+    {
+        let mut rec = [0u8; UNIX_RECV_INFO_LEN];
+        rec[..8].copy_from_slice(&u64::try_from(r.full_len).unwrap_or(u64::MAX).to_le_bytes());
+        if let Some(c) = r.cred {
+            rec[8..16].copy_from_slice(&c.pid.to_le_bytes());
+            rec[16..20].copy_from_slice(&c.uid.to_le_bytes());
+            rec[20..24].copy_from_slice(&c.gid.to_le_bytes());
+            rec[24..28].copy_from_slice(&1u32.to_le_bytes());
         }
-        let data = read_call_buffer(args.arg1, len, call_max)?;
-        let nonblocking = args.arg5 & super::number::UNIX_NONBLOCK != 0;
-        if args.arg3 == 0 {
-            unix_socket::send(h, &data, nonblocking)
-        } else {
-            let name = unix_target_of(&unix_name_arg(args.arg3, args.arg4, args.arg5)?)?;
-            unix_socket::send_to(h, &data, &name, nonblocking)
+        rec[28..28 + UNIX_ADDR_LEN].copy_from_slice(&unix_addr_record(&r.from));
+        // SAFETY: `rec` is UNIX_RECV_INFO_LEN initialised bytes; the
+        // destination was validated above and copy_to_user re-checks.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), info_ptr, UNIX_RECV_INFO_LEN) }
+        {
+            drop(rights);
+            crate::ipc::passed::drain();
+            return Err(e);
         }
+    }
+    Ok((n, rights))
+}
+
+/// `SYS_UNIX_SENDMSG` (1169): [`sys_unix_send`], carrying descriptors the
+/// caller holds. See [`SYS_UNIX_SENDMSG`](super::number::SYS_UNIX_SENDMSG).
+pub fn sys_unix_sendmsg(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use super::number::{UNIX_RIGHT_LEN, UNIX_SENDMSG_LEN};
+    let sent = (|| {
+        let msg = read_le_u64s::<{ UNIX_SENDMSG_LEN / 8 }>(args.arg1)?;
+        let [buf, len, name_ptr, name_len, rights_ptr, rights_count] = msg;
+        unix_send_common(args.arg0, buf, len, name_ptr, name_len, args.arg2, || {
+            let count = usize::try_from(rights_count).map_err(|_| KernelError::InvalidArgument)?;
+            if count == 0 {
+                return Ok(None);
+            }
+            if count > crate::ipc::passed::MAX_PER_MESSAGE {
+                return Err(KernelError::InvalidArgument);
+            }
+            let bytes = crate::mm::user::read_user_vec(
+                rights_ptr,
+                count.saturating_mul(UNIX_RIGHT_LEN),
+                crate::ipc::passed::MAX_PER_MESSAGE.saturating_mul(UNIX_RIGHT_LEN),
+            )?;
+            let rights: alloc::vec::Vec<crate::ipc::native_rights::NativeRight> = bytes
+                .chunks_exact(UNIX_RIGHT_LEN)
+                .map(|c| crate::ipc::native_rights::NativeRight {
+                    handle: le_u64_at(c, 0),
+                    kind: u8::try_from(le_u32_at(c, 8)).unwrap_or(u8::MAX),
+                    status_flags: le_u32_at(c, 12),
+                })
+                .collect();
+            let pid = caller_pid().ok_or(KernelError::NoSuchProcess)?;
+            let uid = pcb::process_uid(pid).unwrap_or(u32::MAX);
+            crate::ipc::native_rights::take(pid, uid, &rights)
+        })
     })();
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
@@ -9669,59 +9821,37 @@ pub fn sys_unix_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
     }
 }
 
-/// `SYS_UNIX_RECV` (1111).
-pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+/// `SYS_UNIX_RECVMSG` (1170): [`sys_unix_recv`], taking the descriptors the
+/// message carries. See [`SYS_UNIX_RECVMSG`](super::number::SYS_UNIX_RECVMSG).
+pub fn sys_unix_recvmsg(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use super::number::{UNIX_ADDR_LEN, UNIX_NONBLOCK, UNIX_PEEK, UNIX_RECV_INFO_LEN};
-    use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
+    use super::number::{UNIX_RECVMSG_IN_LEN, UNIX_RECVMSG_LEN, UNIX_RIGHT_LEN};
     let got = (|| {
-        let h = unix_held(args.arg0)?;
-        let call_max = match unix_socket::kind(h) {
-            Some(Kind::Stream) => UNIX_STREAM_CALL_MAX,
-            Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
-            None => return Err(KernelError::InvalidHandle),
-        };
-        let cap = usize::try_from(args.arg2).unwrap_or(usize::MAX);
-        if args.arg1 == 0 && cap > 0 {
-            return Err(KernelError::InvalidArgument);
+        let msg_ptr = args.arg1;
+        let [buf, cap, info_ptr, rights_ptr, rights_cap] =
+            read_le_u64s::<{ UNIX_RECVMSG_IN_LEN / 8 }>(msg_ptr)?;
+        // The words the kernel writes back, and the room for the
+        // descriptors: checked before anything is taken, so a bad pointer
+        // loses no message.
+        let out_ptr = msg_ptr
+            .checked_add(UNIX_RECVMSG_IN_LEN as u64)
+            .ok_or(KernelError::InvalidAddress)?;
+        crate::mm::user::validate_user_write(out_ptr, UNIX_RECVMSG_LEN - UNIX_RECVMSG_IN_LEN)?;
+        let room = usize::try_from(rights_cap)
+            .unwrap_or(usize::MAX)
+            .min(crate::ipc::passed::MAX_PER_MESSAGE);
+        if room > 0 {
+            crate::mm::user::validate_user_write(rights_ptr, room.saturating_mul(UNIX_RIGHT_LEN))?;
         }
-        if args.arg3 != 0 {
-            // Checked before anything is taken, so a bad pointer loses no
-            // datagram.
-            crate::mm::user::validate_user_write(args.arg3, UNIX_RECV_INFO_LEN)?;
-        }
-        let nonblocking = args.arg4 & UNIX_NONBLOCK != 0;
-        let peek = args.arg4 & UNIX_PEEK != 0;
-        let mut info = None;
-        let n = with_call_out_buf(args.arg1, cap, call_max, |buf| {
-            let r = unix_socket::recv(h, buf, nonblocking, peek)?;
-            let len = r.len;
-            info = Some(r);
-            Ok(len)
-        })?;
-        // A native receive cannot take descriptors yet (known-issues
-        // A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS): released, as a Linux
-        // receive without room for them releases them.
-        if let Some(r) = info.as_mut()
-            && r.rights.take().is_some()
-        {
-            crate::ipc::passed::drain();
-        }
-        if args.arg3 != 0
-            && let Some(r) = info
-        {
-            let mut rec = [0u8; UNIX_RECV_INFO_LEN];
-            rec[..8].copy_from_slice(&u64::try_from(r.full_len).unwrap_or(u64::MAX).to_le_bytes());
-            if let Some(c) = r.cred {
-                rec[8..16].copy_from_slice(&c.pid.to_le_bytes());
-                rec[16..20].copy_from_slice(&c.uid.to_le_bytes());
-                rec[20..24].copy_from_slice(&c.gid.to_le_bytes());
-                rec[24..28].copy_from_slice(&1u32.to_le_bytes());
+        let pid = caller_pid().ok_or(KernelError::NoSuchProcess)?;
+        let (n, rights) = unix_recv_common(args.arg0, buf, cap, info_ptr, args.arg2)?;
+        match rights {
+            None => unix_recvmsg_publish(out_ptr, rights_ptr, &[], false)?,
+            Some(bundle) => {
+                crate::ipc::native_rights::land(pid, bundle, room, |landed| {
+                    unix_recvmsg_publish(out_ptr, rights_ptr, &landed.rights, landed.truncated)
+                })?;
             }
-            rec[28..28 + UNIX_ADDR_LEN].copy_from_slice(&unix_addr_record(&r.from));
-            // SAFETY: `rec` is UNIX_RECV_INFO_LEN initialised bytes; the
-            // destination was validated above and copy_to_user re-checks.
-            unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg3, UNIX_RECV_INFO_LEN) }?;
         }
         Ok(n)
     })();
@@ -9729,6 +9859,64 @@ pub fn sys_unix_recv(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// Tell the program what a [`sys_unix_recvmsg`] brought: each descriptor's
+/// record at `rights_ptr`, then the count and the flags at `out_ptr`.
+fn unix_recvmsg_publish(
+    out_ptr: u64,
+    rights_ptr: u64,
+    rights: &[crate::ipc::native_rights::NativeRight],
+    truncated: bool,
+) -> KernelResult<()> {
+    use super::number::{UNIX_MSG_CTRUNC, UNIX_RIGHT_LEN};
+    let mut at = rights_ptr;
+    for r in rights {
+        let mut rec = [0u8; UNIX_RIGHT_LEN];
+        rec[..8].copy_from_slice(&r.handle.to_le_bytes());
+        rec[8..12].copy_from_slice(&u32::from(r.kind).to_le_bytes());
+        rec[12..].copy_from_slice(&r.status_flags.to_le_bytes());
+        crate::mm::user::write_user_value(at, rec)?;
+        at = at
+            .checked_add(UNIX_RIGHT_LEN as u64)
+            .ok_or(KernelError::InvalidAddress)?;
+    }
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(
+        &u64::try_from(rights.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    let flags = if truncated { UNIX_MSG_CTRUNC } else { 0 };
+    out[8..].copy_from_slice(&flags.to_le_bytes());
+    crate::mm::user::write_user_value(out_ptr, out)
+}
+
+/// `N` little-endian `u64`s read from `ptr` in the caller's memory: a record
+/// a call takes by pointer.
+fn read_le_u64s<const N: usize>(ptr: u64) -> KernelResult<[u64; N]> {
+    let bytes = crate::mm::user::read_user_vec(ptr, N.saturating_mul(8), N.saturating_mul(8))?;
+    let mut out = [0u64; N];
+    for (i, word) in out.iter_mut().enumerate() {
+        *word = le_u64_at(&bytes, i.saturating_mul(8));
+    }
+    Ok(out)
+}
+
+/// The little-endian `u64` at `at` in `bytes`, 0 past its end.
+fn le_u64_at(bytes: &[u8], at: usize) -> u64 {
+    bytes
+        .get(at..at.saturating_add(8))
+        .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+/// The little-endian `u32` at `at` in `bytes`, 0 past its end.
+fn le_u32_at(bytes: &[u8], at: usize) -> u32 {
+    bytes
+        .get(at..at.saturating_add(4))
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(0, u32::from_le_bytes)
 }
 
 /// `SYS_UNIX_NAME` (1112).
@@ -16997,36 +17185,45 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     let peek = (flags & MSG_PEEK) != 0;
     let dontwait = (flags & MSG_DONTWAIT) != 0;
 
-    let data = if peek {
-        // MSG_PEEK: copy data without consuming it.
-        match crate::net::tcp::peek(handle, buf_cap) {
-            Ok(d) => d,
-            Err(e) => return SyscallResult::err(e),
+    // A blocking receive waits for as long as it takes -- for data, the end
+    // of the stream, a reset, or a signal (`Interrupted`) -- and then reads
+    // or peeks as a non-blocking one would. Until 2026-10-09 it gave up after
+    // five seconds with `WouldBlock`, which a blocking call must never answer
+    // (known-issues `A-NATIVE-TCP-RECV-BLOCKING-RETURNS-EAGAIN-AFTER-5S`); and
+    // a peek did not wait at all, though Linux's `MSG_PEEK` does.
+    //
+    // A zero-length receive answers 0 at once, as Linux's does: there is
+    // nothing it could wait for.
+    if buf_cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    let data = loop {
+        if !dontwait {
+            if let Err(e) = crate::net::tcp::wait_readable(handle) {
+                return SyscallResult::err(e);
+            }
         }
-    } else if dontwait {
-        // MSG_DONTWAIT: non-blocking read — return immediately.
-        match crate::net::tcp::read_up_to(handle, buf_cap) {
-            Ok(d) => d,
-            Err(e) => return SyscallResult::err(e),
-        }
-    } else {
-        // Normal blocking read with a generous timeout (~5 seconds).
-        match crate::net::tcp::read_blocking(handle, 500, buf_cap) {
-            Ok(d) => d,
+        let data = if peek {
+            // MSG_PEEK: copy data without consuming it.
+            crate::net::tcp::peek(handle, buf_cap)
+        } else {
+            crate::net::tcp::read_up_to(handle, buf_cap)
+        };
+        match data {
+            // Woken for data another reader of the socket took first: the
+            // stream has not ended, so wait again -- an empty answer here
+            // would read as end of file.
+            Ok(d) if d.is_empty() && !dontwait && !crate::net::tcp::is_remote_closed(handle) => {}
+            Ok(d) => break d,
             Err(e) => return SyscallResult::err(e),
         }
     };
 
     if data.is_empty() {
-        // No data available.  Two cases:
-        // 1. Connection closed (remote FIN received): return 0 (EOF).
-        // 2. Connection still open but no data arrived (blocking timeout
-        //    expired, or non-blocking with nothing queued): return WouldBlock
-        //    so the POSIX layer can retry or propagate EAGAIN.
-        //
-        // The old code only returned WouldBlock for MSG_DONTWAIT, causing
-        // blocking reads to spuriously report EOF when the 5-second kernel
-        // poll expired on an active connection.
+        // Nothing read: the end of the stream (the peer's FIN, or this side
+        // shut for reading) is 0, end of file; otherwise a non-blocking call
+        // with nothing queued yet, `WouldBlock` (EAGAIN). A blocking call
+        // reaches here only at the end of the stream.
         if crate::net::tcp::is_remote_closed(handle) {
             return SyscallResult::ok(0);
         }
@@ -17037,8 +17234,9 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     if copy_len > 0 {
         // SAFETY: `data` is a live kernel-owned `Vec` of at least `copy_len`
         // bytes.  `copy_to_user` re-validates the destination, which is the
-        // check that matters: the read above blocks for up to five seconds, so
-        // a peer thread has ample opportunity to unmap the buffer meanwhile.
+        // check that matters: the wait above can be as long as the peer
+        // likes, so a peer thread has ample opportunity to unmap the buffer
+        // meanwhile.
         if let Err(e) = unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
         {
             return SyscallResult::err(e);

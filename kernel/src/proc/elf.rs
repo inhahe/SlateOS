@@ -21701,6 +21701,12 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 ///   close(w7); read(d1, buf, 16)                  ; 1, else 0x1D
 ///   read(r4, ...)                                 ; 0 (end of file), else 0x1E
 ///   sendmsg(d0, {"x", SCM_RIGHTS [999]})          ; -EBADF, else 0x1F
+///   ; the order of refusals, as Linux's: each message's descriptors looked
+///   ; up as the control is read, before the size or a later message
+///   sendmsg(d0, {1 MiB, SCM_RIGHTS [999]})        ; -EBADF, not -EMSGSIZE, else 0x26
+///   sendmsg(d0, {"x", SCM_RIGHTS [999], SCM_RIGHTS [254 more]})
+///                                                 ; -EBADF, not -EINVAL, else 0x27
+///   sendmsg(d0, {"x", SCM_RIGHTS [254]})          ; -EINVAL, else 0x28
 ///   ; sequenced packets: each send whole, the peer's close the end
 ///   socketpair(AF_UNIX, SOCK_SEQPACKET, 0, [q0, q1])  ; 0, else 0x20
 ///   write(q0, "abcd", 4); write(q0, "ef", 2)      ; 4, 2, else 0x21
@@ -21717,7 +21723,9 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 /// the stretch the descriptors rode on, a received object the process held
 /// already kept as one reference, `MSG_CTRUNC` with the surplus released, a
 /// plain `read` releasing what it cannot hand on, `EBADF` for a descriptor
-/// not open, and `SOCK_SEQPACKET`'s whole messages and end of file -- and, by
+/// not open -- ahead of a datagram's size and of a later message's count, as
+/// Linux orders them -- and `SOCK_SEQPACKET`'s whole messages and end of file
+/// -- and, by
 /// every pipe's end of file arriving exactly
 /// when its last writer closes, that no reference leaked or was released
 /// twice. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
@@ -21767,7 +21775,11 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
     const CTL_IN: u32 = 0xA0; // the receive's, 32 bytes
     const MSG: u32 = 0xC0; // the send's struct msghdr, 56 bytes
     const RMSG: u32 = 0x100; // the receive's
-    const FRAME: u32 = 0x140;
+    const CTL_BIG: u32 = 0x140; // a send's control past 253 descriptors, 1088 bytes
+    const FRAME: u32 = 0x580;
+    /// Descriptors one `SCM_RIGHTS` message may not reach: Linux's
+    /// `SCM_MAX_FD` is 253.
+    const TOO_MANY: u32 = 254;
     /// "abcd", little-endian.
     const ABCD: u32 = 0x6463_6261;
     /// "ef", little-endian, as the low half of a dword.
@@ -21893,6 +21905,33 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
         store_ptr(c, RMSG + 32, CTL_IN);
         store_imm64(c, RMSG + 40, room);
         store_imm64(c, RMSG + 48, 0);
+    };
+    // The send's msghdr over CTL_BIG: one byte of data, and control that is
+    // -- when `bad_first` -- an SCM_RIGHTS message naming 999 (24 bytes,
+    // aligned), then one whose length claims TOO_MANY descriptors. That one's
+    // numbers are whatever the frame holds: nothing may read them.
+    let big_control = |c: &mut alloc::vec::Vec<u8>, bad_first: bool| {
+        store_ptr(c, IOV, BYTES + 6);
+        store_imm64(c, IOV + 8, 1);
+        let mut at = CTL_BIG;
+        if bad_first {
+            store_imm64(c, at, 20);
+            store_imm(c, at + 8, 1); // SOL_SOCKET
+            store_imm(c, at + 12, 1); // SCM_RIGHTS
+            store_imm(c, at + 16, 999);
+            at += 24;
+        }
+        let over = 16 + 4 * TOO_MANY;
+        store_imm64(c, at, over);
+        store_imm(c, at + 8, 1);
+        store_imm(c, at + 12, 1);
+        store_imm64(c, MSG, 0);
+        store_imm64(c, MSG + 8, 0);
+        store_ptr(c, MSG + 16, IOV);
+        store_imm64(c, MSG + 24, 1);
+        store_ptr(c, MSG + 32, CTL_BIG);
+        store_imm64(c, MSG + 40, at - CTL_BIG + over);
+        store_imm64(c, MSG + 48, 0);
     };
     let close_fd = |c: &mut alloc::vec::Vec<u8>, fd: u32| {
         mov_edi_mem(c, fd);
@@ -22083,6 +22122,27 @@ pub fn build_linux_scm_rights_test_elf() -> alloc::vec::Vec<u8> {
     sendmsg(&mut code, D0);
     cmp_rax(&mut code, -9); // EBADF
     jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x1F);
+
+    // --- the order of refusals, as Linux's: each message's descriptors are
+    // looked up as its control is read (`__scm_send`), before the size, the
+    // address or any message after it is judged ---
+    // Too big a datagram, carrying a descriptor not open: EBADF, not EMSGSIZE.
+    send_msg(&mut code, 6, 1, &[P4 + 4]);
+    store_imm64(&mut code, IOV + 8, 0x0010_0000); // 1 MiB: past any datagram
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, -9); // EBADF
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x26);
+    // A descriptor not open, then a message past 253 in all: EBADF, from the
+    // first message, not EINVAL from the second.
+    big_control(&mut code, true);
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, -9); // EBADF
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x27);
+    // That second message alone: EINVAL, before any number in it is read.
+    big_control(&mut code, false);
+    sendmsg(&mut code, D0);
+    cmp_rax(&mut code, -22); // EINVAL
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0x28);
 
     // --- sequenced packets: each send whole, the peer's close the end ---
     mov_edi_imm(&mut code, 1);

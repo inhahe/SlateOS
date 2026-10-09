@@ -214,6 +214,36 @@ pub fn skip() -> bool {
     yes
 }
 
+/// Wait until `done()` holds, yielding between looks, for at most
+/// `timeout_ms` milliseconds; answer whether it held.
+///
+/// For a self-test that has handed work to another task -- woken it, sent it
+/// a message -- and must see that work finished before it checks the result.
+/// A fixed number of yields is not that wait. On one CPU the woken task runs
+/// inside them, so it looked like one; on more than one, the wake can place
+/// the task on another CPU (or another CPU can steal it), the yields return
+/// at once with nothing else to run here, and the check runs while the task
+/// is still starting. The futex PI-timeout and service blocking-accept tests
+/// failed exactly so on the first two-CPU boot with every self-test on
+/// (2026-10-09).
+///
+/// Bounded by the clock, not by a count of yields, since a yield's length
+/// is whatever the other tasks make it: a task that never finishes is a test
+/// failure at the deadline, never a hung boot. Yields rather than sleeps, so
+/// it works with interrupts off too, and on one CPU costs only the switches
+/// the old fixed yields cost.
+pub fn wait_until(timeout_ms: u64, done: impl Fn() -> bool) -> bool {
+    let start = crate::hrtimer::now_ns();
+    let limit = timeout_ms.saturating_mul(1_000_000);
+    while !done() {
+        if crate::hrtimer::now_ns().saturating_sub(start) > limit {
+            return done();
+        }
+        crate::sched::yield_now();
+    }
+    true
+}
+
 /// Whether the kernel command line sets the boolean `key`: a word that is
 /// `key`, or `key=` followed by `1`, `yes`, `true` or nothing -- the values
 /// `fs::kernparam::is_set` takes. Read here rather than there because the

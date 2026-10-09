@@ -479,7 +479,13 @@ pub fn new_filesystem(
     let device = source.strip_prefix("/dev/").unwrap_or(source);
     let fs: Box<dyn vfs::FileSystem> = match fstype {
         "ext4" => Box::new(ext4::vfs_impl::Ext4Fs::open(device)?),
-        "tmpfs" | "memfs" | "ramfs" => Box::new(memfs::MemFs::new()),
+        // tmpfs's defaults (half of memory); `new_filesystem_with_data` takes
+        // its options. ramfs, as Linux's, has no limit at all.
+        "tmpfs" | "memfs" => Box::new(memfs::MemFs::new()),
+        "ramfs" => Box::new(memfs::MemFs::with_limits(
+            memfs::MemFsLimit::Unlimited,
+            memfs::MemFsLimit::Unlimited,
+        )),
         "iso9660" | "iso" | "cd9660" => Box::new(iso9660::Iso9660Fs::open(device)?),
         // Read-only drivers: a mount asked for read-write gets one that
         // refuses each write, as before.
@@ -495,4 +501,33 @@ pub fn new_filesystem(
         _ => return Err(crate::error::KernelError::NotSupported),
     };
     Ok(fs)
+}
+
+/// [`new_filesystem`], with the options `mount(2)`'s `data` passes. Only
+/// tmpfs reads them today -- `size=`, `nr_blocks=`, `nr_inodes=`, `mode=`,
+/// `uid=`, `gid=` ([`memfs::MemFs::from_mount_data`]) -- and refuses one it
+/// does not take, as Linux's does; every other type is made as
+/// [`new_filesystem`] makes it.
+///
+/// # Errors
+///
+/// Those of [`new_filesystem`], and `InvalidArgument` for a tmpfs option it
+/// does not take or a value it refuses.
+pub fn new_filesystem_with_data(
+    fstype: &str,
+    source: &str,
+    data: &[u8],
+) -> crate::error::KernelResult<alloc::boxed::Box<dyn vfs::FileSystem>> {
+    match fstype {
+        "tmpfs" | "memfs" => Ok(alloc::boxed::Box::new(memfs::MemFs::from_mount_data(data)?)),
+        _ => new_filesystem(fstype, source),
+    }
+}
+
+/// Whether `fstype` reads the options `mount(2)`'s `data` passes
+/// ([`new_filesystem_with_data`]), so that `mount(2)` copies them in as a
+/// string only for a type that will read one.
+#[must_use]
+pub fn reads_mount_data(fstype: &str) -> bool {
+    matches!(fstype, "tmpfs" | "memfs")
 }

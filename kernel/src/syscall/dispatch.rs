@@ -125,7 +125,8 @@ use super::number::{
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
     SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
-    SYS_UNIX_RECV, SYS_UNIX_SEND, SYS_UNIX_SET_OPTION, SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
+    SYS_UNIX_RECV, SYS_UNIX_RECVMSG, SYS_UNIX_SEND, SYS_UNIX_SENDMSG, SYS_UNIX_SET_OPTION,
+    SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -612,6 +613,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_UNIX_POLL as usize] = Some(handlers::sys_unix_poll);
     handlers[SYS_UNIX_SET_OPTION as usize] = Some(handlers::sys_unix_set_option);
     handlers[SYS_UNIX_GET_OPTION as usize] = Some(handlers::sys_unix_get_option);
+    handlers[SYS_UNIX_SENDMSG as usize] = Some(handlers::sys_unix_sendmsg);
+    handlers[SYS_UNIX_RECVMSG as usize] = Some(handlers::sys_unix_recvmsg);
 
     // The device door (1119-1123): the Linux device ABI -- today the sound
     // card's -- reached natively, answering in Linux errnos.
@@ -1137,6 +1140,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_process_get_phdr()?;
     test_dispatch_channel_peer_has_key()?;
     test_dispatch_unix_sockets()?;
+    test_dispatch_unix_rights()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
     test_dispatch_native_socket_possession()?;
@@ -3251,6 +3255,303 @@ fn test_dispatch_unix_sockets() -> KernelResult<()> {
         }
         Err(why) => {
             serial_println!("[syscall]   FAIL: unix sockets: {}", why);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_UNIX_SENDMSG`/`SYS_UNIX_RECVMSG` (1169/1170), the native half of
+/// `SCM_RIGHTS`, through the syscall layer with every record in the calling
+/// process's own memory:
+///
+/// - refusals that send nothing: a handle the sender does not hold
+///   (`InvalidHandle`, from either end), a type that cannot travel
+///   (`NotSupported`), more than 253 (`InvalidArgument`);
+/// - a pipe's write end, sent by the process holding it, received by
+///   another: one record back, naming the handle -- now the receiver's own
+///   -- its type and its status flags;
+/// - a receive with no room releases what came and says so
+///   (`UNIX_MSG_CTRUNC`); a message carrying none reports none; a plain
+///   `SYS_UNIX_RECV` releases them;
+/// - and once both processes are gone the pipe's read end sees its end:
+///   every reference the calls took went back.
+#[allow(clippy::too_many_lines)] // one linear script
+fn test_dispatch_unix_rights() -> KernelResult<()> {
+    use super::number::{
+        MAP_READ, MAP_WRITE, UNIX_MSG_CTRUNC, UNIX_NONBLOCK, UNIX_RECVMSG_IN_LEN, UNIX_RIGHT_LEN,
+    };
+    use crate::cap::ResourceType;
+    use crate::ipc::{passed, pipe, unix_socket};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::spawn::fd_handle_type;
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    /// `O_NONBLOCK`: a status flag, to see it travel.
+    const NONBLOCK_FLAG: u32 = 0o4000;
+    /// More than a message may carry (Linux's `SCM_MAX_FD` is 253).
+    const TOO_MANY: u64 = 254;
+
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    // A page of `pid`'s memory, and the page tables it is in.
+    let page_of = |pid: ProcessId| -> Option<(u64, u64)> {
+        let mapped = self_test_as_process(pid, || {
+            dispatch(
+                SYS_MMAP,
+                &SyscallArgs {
+                    arg0: 0,
+                    arg1: 0x4000,
+                    arg2: MAP_READ | MAP_WRITE,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
+            )
+            .value
+        });
+        let page = u64::try_from(mapped).ok()?;
+        Some((page, pcb::get_pml4(pid).filter(|&p| p != 0)?))
+    };
+    let record = |words: [u64; 7]| {
+        let mut r = [0u8; 56];
+        for (slot, w) in r.chunks_exact_mut(8).zip(words) {
+            slot.copy_from_slice(&w.to_le_bytes());
+        }
+        r
+    };
+    let right = |handle: u64, kind: u8, flags: u32| {
+        let mut r = [0u8; UNIX_RIGHT_LEN];
+        r[..8].copy_from_slice(&handle.to_le_bytes());
+        r[8..12].copy_from_slice(&u32::from(kind).to_le_bytes());
+        r[12..].copy_from_slice(&flags.to_le_bytes());
+        r
+    };
+
+    let sender = pcb::create("rights-send", 0);
+    let receiver = pcb::create("rights-recv", 0);
+    let (rd, wr) = pipe::create();
+    pcb::register_ipc_handle(sender, ResourceType::Pipe, wr.raw());
+    let pair = unix_socket::pair(unix_socket::Kind::Stream);
+    if let Ok((s0, s1)) = pair {
+        // Each process's exit closes its end.
+        pcb::register_ipc_handle(sender, ResourceType::UnixSocket, s0.raw());
+        pcb::register_ipc_handle(receiver, ResourceType::UnixSocket, s1.raw());
+    }
+
+    /// What a receive brought: its return, the first three bytes, the first
+    /// descriptor record, and the two words the kernel wrote back.
+    struct Received {
+        n: Option<i64>,
+        data: [u8; 3],
+        first: [u8; UNIX_RIGHT_LEN],
+        got: u64,
+        flags: u64,
+    }
+
+    let result = (|| -> Result<(), &'static str> {
+        let (s0, s1) = pair.map_err(|_| "no socket pair")?;
+        let (s0, s1) = (s0.raw(), s1.raw());
+        let (sp, spml4) = page_of(sender).ok_or("could not map the sender's memory")?;
+        let (rp, rpml4) = page_of(receiver).ok_or("could not map the receiver's memory")?;
+        // The sender's page: rights at 0, the message record at 64, the data
+        // at 256, a receive buffer at 512. The receiver's: room for four
+        // rights at 0, the message record at 128, the data at 256, and a
+        // send of its own at 1024 (its right), 1040 (its data) and 1088 (its
+        // record).
+        let at = |page: u64, off: u64| page.saturating_add(off);
+        let (s_rights, s_msg, s_data, s_buf) = (sp, at(sp, 64), at(sp, 256), at(sp, 512));
+        let (r_rights, r_msg, r_data) = (rp, at(rp, 128), at(rp, 256));
+        let put = |pml4: u64, to: u64, bytes: &[u8]| {
+            copy_to_user_as(pml4, to, bytes).map_err(|_| "could not write a process's memory")
+        };
+        put(spml4, s_data, b"fds")?;
+        // The sender's send, of whatever its record at `s_msg` says.
+        let send = || {
+            self_test_in_process(sender, || {
+                dispatch(SYS_UNIX_SENDMSG, &args(s0, s_msg, UNIX_NONBLOCK)).value
+            })
+        };
+        // Set that record: the three bytes, carrying `count` rights.
+        let set_send = |count: u64| {
+            put(
+                spml4,
+                s_msg,
+                record([s_data, 3, 0, 0, s_rights, count, 0])
+                    .get(..48)
+                    .unwrap_or(&[]),
+            )
+        };
+        // A receive with room for `room` rights.
+        let receive = |room: u64| -> Result<Received, &'static str> {
+            put(rpml4, r_msg, &record([r_data, 8, 0, r_rights, room, 0, 0]))?;
+            put(rpml4, r_rights, &[0u8; UNIX_RIGHT_LEN])?;
+            let n = self_test_in_process(receiver, || {
+                dispatch(SYS_UNIX_RECVMSG, &args(s1, r_msg, UNIX_NONBLOCK)).value
+            });
+            let mut got = Received {
+                n,
+                data: [0; 3],
+                first: [0; UNIX_RIGHT_LEN],
+                got: u64::MAX,
+                flags: u64::MAX,
+            };
+            let mut out = [0u8; 16];
+            if copy_from_user_as(rpml4, r_data, &mut got.data).is_err()
+                || copy_from_user_as(rpml4, r_rights, &mut got.first).is_err()
+                || copy_from_user_as(rpml4, at(r_msg, UNIX_RECVMSG_IN_LEN as u64), &mut out)
+                    .is_err()
+            {
+                return Err("could not read the receiver's memory");
+            }
+            let [w0, w1] = [&out[..8], &out[8..]]
+                .map(|b| <[u8; 8]>::try_from(b).map_or(u64::MAX, u64::from_le_bytes));
+            got.got = w0;
+            got.flags = w1;
+            Ok(got)
+        };
+        let pipe_end = right(wr.raw(), fd_handle_type::PIPE, NONBLOCK_FLAG);
+
+        // --- refusals, none of which sends anything ---
+        put(spml4, s_rights, &right(rd.raw(), fd_handle_type::PIPE, 0))?;
+        set_send(1)?;
+        if send() != Some(code(KernelError::InvalidHandle)) {
+            return Err("a pipe end the sender does not hold was not InvalidHandle");
+        }
+        put(
+            spml4,
+            s_rights,
+            &right(wr.raw(), fd_handle_type::TCP_SOCKET, 0),
+        )?;
+        if send() != Some(code(KernelError::NotSupported)) {
+            return Err("a kernel TCP socket was not NotSupported");
+        }
+        put(spml4, s_rights, &pipe_end)?;
+        set_send(TOO_MANY)?;
+        if send() != Some(code(KernelError::InvalidArgument)) {
+            return Err("more than 253 descriptors was not InvalidArgument");
+        }
+        // The receiver names the write end, which it does not hold, from
+        // its own memory.
+        let (f_right, f_data, f_msg) = (at(rp, 1024), at(rp, 1040), at(rp, 1088));
+        put(rpml4, f_right, &pipe_end)?;
+        put(
+            rpml4,
+            f_msg,
+            record([f_data, 0, 0, 0, f_right, 1, 0])
+                .get(..48)
+                .unwrap_or(&[]),
+        )?;
+        let foreign = self_test_in_process(receiver, || {
+            dispatch(SYS_UNIX_SENDMSG, &args(s1, f_msg, UNIX_NONBLOCK)).value
+        });
+        if foreign != Some(code(KernelError::InvalidHandle)) {
+            return Err("the receiver sent a pipe end it does not hold");
+        }
+        let nothing = receive(4)?;
+        let plain_recv = |pid: ProcessId, h: u64, buf: u64| {
+            self_test_in_process(pid, || {
+                dispatch(
+                    SYS_UNIX_RECV,
+                    &SyscallArgs {
+                        arg0: h,
+                        arg1: buf,
+                        arg2: 8,
+                        arg3: 0,
+                        arg4: UNIX_NONBLOCK,
+                        arg5: 0,
+                    },
+                )
+                .value
+            })
+        };
+        let back = plain_recv(sender, s0, s_buf);
+        let would_block = Some(code(KernelError::WouldBlock));
+        if nothing.n != would_block || back != would_block {
+            return Err("a refused send sent something");
+        }
+
+        // --- the write end, from one process to the other ---
+        set_send(1)?;
+        if send() != Some(3) {
+            return Err("a send carrying a held pipe end failed");
+        }
+        let one = receive(4)?;
+        if one.n != Some(3) || one.data != *b"fds" {
+            return Err("the bytes did not arrive with their descriptor");
+        }
+        if one.got != 1 || one.flags != 0 || one.first != pipe_end {
+            return Err("the receive did not report the write end, its type and its flags");
+        }
+        if !pcb::owns_ipc_handle(receiver, ResourceType::Pipe, wr.raw()) {
+            return Err("the write end did not become the receiver's own");
+        }
+
+        // --- no room: released, and said ---
+        if send() != Some(3) {
+            return Err("a second send failed");
+        }
+        let no_room = receive(0)?;
+        if no_room.n != Some(3) || no_room.got != 0 || no_room.flags != UNIX_MSG_CTRUNC {
+            return Err("a receive with no room did not release and say so");
+        }
+
+        // --- none carried: none reported ---
+        set_send(0)?;
+        if send() != Some(3) {
+            return Err("a send carrying nothing failed");
+        }
+        let none = receive(4)?;
+        if none.n != Some(3) || none.got != 0 || none.flags != 0 {
+            return Err("a message carrying nothing reported something");
+        }
+
+        // --- a plain receive releases what came ---
+        set_send(1)?;
+        if send() != Some(3) {
+            return Err("a third send failed");
+        }
+        let plain = plain_recv(receiver, s1, r_data);
+        if plain != Some(3) {
+            return Err("a plain receive of a message carrying a descriptor failed");
+        }
+        Ok(())
+    })();
+    // Each process's exit releases what it holds: its socket end, and the
+    // write end -- the sender's own and the one the receiver was given.
+    pcb::destroy(sender);
+    pcb::destroy(receiver);
+    passed::drain();
+    // With every reference gone, the read end sees the pipe's end; a leaked
+    // one would leave it waiting.
+    let mut byte = [0u8; 1];
+    let ended = pipe::try_read(rd, &mut byte);
+    pipe::close(rd);
+    let result = result.and_then(|()| {
+        if ended == Ok(0) {
+            Ok(())
+        } else {
+            Err("a reference to the write end leaked: the read end never saw it close")
+        }
+    });
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   SYS_UNIX_SENDMSG/RECVMSG (1169-1170): unheld, untravelling and too \
+                 many refused unsent; a pipe end passed between processes with its flags; no \
+                 room said; none reported; a plain receive releases; nothing leaked: OK"
+            );
+            Ok(())
+        }
+        Err(why) => {
+            serial_println!("[syscall]   FAIL: unix rights: {}", why);
             Err(KernelError::InternalError)
         }
     }

@@ -1,7 +1,6 @@
-### A-TIMING-SELF-TESTS-READ-A-HOST-STALL-AS-A-KERNEL-BUG -- 2026-10-07 -- OPEN (lane A)
+### A-TIMING-SELF-TESTS-READ-A-HOST-STALL-AS-A-KERNEL-BUG -- 2026-10-07 -- FIXED 2026-10-09 (lane A)
 
-**Status:** OPEN (lane A) -- fixed on lane-a-wip 2026-10-07, awaiting a boot on
-`main`.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-07, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 
 **In short:** three of the kernel's start-up self-tests timed how long
 something took inside the virtual machine and failed the boot when it took too

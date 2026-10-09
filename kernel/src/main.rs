@@ -1847,6 +1847,20 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("Unix-domain sockets", selftest::Severity::Integrity, || {
                 ipc::unix_socket::self_test()
             });
+            // Descriptors passed by native programs (the native half of
+            // SCM_RIGHTS): a pipe end from one process to another.
+            selftest::dispatch_debug(
+                "native descriptor passing",
+                selftest::Severity::Integrity,
+                ipc::native_rights::self_test,
+            );
+            // A received descriptor whose number cannot be written back is
+            // taken back, not left open where its process cannot see it.
+            selftest::dispatch_debug(
+                "SCM_RIGHTS take-back",
+                selftest::Severity::Integrity,
+                syscall::linux::self_test_install_rights_take_back,
+            );
             // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
             selftest::dispatch_debug("page-cache", selftest::Severity::Diagnostic, || {
                 mm::page_cache::self_test()

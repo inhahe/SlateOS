@@ -1,6 +1,6 @@
-### A-RLIMIT-NPROC-COUNTED-BY-EFFECTIVE-UID -- 2026-10-08 -- OPEN (lane A)
+### A-RLIMIT-NPROC-COUNTED-BY-EFFECTIVE-UID -- 2026-10-08 -- FIXED 2026-10-09 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 
 **In short:** the limit on how many processes one user may have
 (`RLIMIT_NPROC`, what `ulimit -u` sets) counted a process as belonging to

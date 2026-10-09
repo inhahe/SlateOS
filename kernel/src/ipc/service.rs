@@ -1377,9 +1377,9 @@ fn test_blocking_accept() -> KernelResult<()> {
     let msg = channel::Message::from_bytes(b"async connect")?;
     channel::send(client_ep, msg)?;
 
-    // Yield to let the accept task process.
-    sched::yield_now();
-    sched::yield_now();
+    // Wait for the accept task to take the connection and the message -- on
+    // whichever CPU it runs (`selftest::wait_until`).
+    crate::selftest::wait_until(2000, || ACCEPT_TEST_RESULT.load(Ordering::SeqCst) == 1);
 
     let result = ACCEPT_TEST_RESULT.load(Ordering::SeqCst);
     if result != 1 {

@@ -7126,6 +7126,72 @@ pub const UNIX_ADDR_LEN: usize = 116;
 pub const UNIX_RECV_INFO_LEN: usize = 28 + UNIX_ADDR_LEN;
 
 // ---------------------------------------------------------------------------
+// Unix-domain sockets carrying descriptors (1169-1170)
+//
+// The native half of `SCM_RIGHTS` (known-issues
+// `A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS`). A native program's descriptor
+// table lives in its C library, so the kernel knows a descriptor as the pair
+// the library keeps for it -- a type, the codes a spawn's `fd_map` uses
+// (`proc::spawn::fd_handle_type`), and a handle the process holds -- plus the
+// open file description's status flags, which travel with it. Each is one
+// [`UNIX_RIGHT_LEN`]-byte record: handle (u64), type (u32), status flags
+// (u32).
+//
+// A descriptor sent this way travels as a Linux program's does, so either
+// kind of program can receive what the other sent. The kinds that can travel
+// are files, pipes, the console, eventfds and Unix sockets; a native send of
+// any other type is `NotSupported`, and a Linux descriptor of a kind the
+// native library has no type for arrives dropped, reported as
+// [`UNIX_MSG_CTRUNC`].
+// ---------------------------------------------------------------------------
+
+/// `SYS_UNIX_SENDMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_SEND`], carrying
+/// descriptors. `msg_ptr` points at [`UNIX_SENDMSG_LEN`] bytes, six u64s:
+/// `buf`, `len`, `name_ptr`, `name_len` (as `SYS_UNIX_SEND` takes them),
+/// `rights_ptr`, `rights_count` -- that many [`UNIX_RIGHT_LEN`]-byte records,
+/// each a descriptor the caller holds. `flags` as `SYS_UNIX_SEND`'s. Returns
+/// bytes sent; the descriptors go with them, all or none.
+///
+/// The descriptors are taken last, after every other argument is checked,
+/// and each reference is held for the message until it is received or the
+/// socket closes. Errors beyond `SYS_UNIX_SEND`'s: `InvalidArgument` for more
+/// than 253 (Linux's `SCM_MAX_FD`), `NotSupported` for a type that cannot
+/// travel, `InvalidHandle` for one the caller does not hold, and
+/// `TooManyReferences` (`ETOOMANYREFS`) when the caller's user, not root,
+/// already has more descriptors in flight than its `RLIMIT_NOFILE`.
+pub const SYS_UNIX_SENDMSG: u64 = 1169;
+/// `SYS_UNIX_RECVMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_RECV`], taking
+/// the descriptors the message carries. `msg_ptr` points at
+/// [`UNIX_RECVMSG_LEN`] bytes, seven u64s: `buf`, `cap`, `info_ptr` (as
+/// `SYS_UNIX_RECV` takes them), `rights_ptr`, `rights_cap` -- room for that
+/// many [`UNIX_RIGHT_LEN`]-byte records -- then two the kernel writes:
+/// `rights_got`, the records written at `rights_ptr`, and `msg_flags`
+/// ([`UNIX_MSG_CTRUNC`]). `flags` as `SYS_UNIX_RECV`'s; a peek
+/// ([`UNIX_PEEK`]) takes copies, and leaves the message's own for the
+/// receive.
+///
+/// Each descriptor received is a handle the caller now holds, released by
+/// its close or the caller's exit -- unless the caller held that object
+/// already, when the record names the handle it had and no second reference
+/// is taken. Those beyond `rights_cap`, or of a kind with no native type,
+/// are released, and `msg_flags` says so. Returns bytes copied.
+pub const SYS_UNIX_RECVMSG: u64 = 1170;
+/// Bytes of one descriptor record: handle (u64), type (u32), status flags
+/// (u32).
+pub const UNIX_RIGHT_LEN: usize = 16;
+/// Bytes [`SYS_UNIX_SENDMSG`] reads at `msg_ptr`.
+pub const UNIX_SENDMSG_LEN: usize = 6 * 8;
+/// Bytes of [`SYS_UNIX_RECVMSG`]'s record the kernel reads: the five words
+/// the caller fills.
+pub const UNIX_RECVMSG_IN_LEN: usize = 5 * 8;
+/// Bytes of [`SYS_UNIX_RECVMSG`]'s whole record: the five the caller fills
+/// and the two the kernel writes.
+pub const UNIX_RECVMSG_LEN: usize = 7 * 8;
+/// `msg_flags` bit: descriptors the message carried were released -- no room
+/// for them, or no native type (Linux's `MSG_CTRUNC`).
+pub const UNIX_MSG_CTRUNC: u64 = 1 << 0;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

@@ -1,6 +1,6 @@
-### A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME -- 2026-10-03 -- OPEN (lane A)
+### A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME -- 2026-10-03 -- FIXED 2026-10-09 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip (8c3e25af6), awaiting a boot on main
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip (8c3e25af6), on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264)
 
 **In short:** two of the kernel's three network-card drivers tell the card to
 throw away every multicast frame (one addressed to a group of machines rather

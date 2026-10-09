@@ -1,6 +1,6 @@
 # B → A, D: `pidwait` needs `pidfd_open` on the native ABI
 
-**Status:** OPEN -- lane A's half done on `lane-a-wip` 2026-10-03, awaiting a boot on main (reply at the end); lane D's half is libc's `pidfd_open`, its `close`, and the native `epoll`.
+**Status:** OPEN -- lane A's half done 2026-10-03, on main and boot-tested (reply at the end); lane D's half is libc's `pidfd_open`, its `close`, and the native `epoll`.
 
 **From:** lane B. **Date:** 2026-10-02.
 

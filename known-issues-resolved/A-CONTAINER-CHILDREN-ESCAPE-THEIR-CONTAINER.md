@@ -1,6 +1,6 @@
-### A-CONTAINER-CHILDREN-ESCAPE-THEIR-CONTAINER -- 2026-10-08 -- OPEN (lane A)
+### A-CONTAINER-CHILDREN-ESCAPE-THEIR-CONTAINER -- 2026-10-08 -- FIXED 2026-10-09 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip 2026-10-08, awaiting a boot on main.
+**Status:** FIXED 2026-10-09 -- fixed on lane-a-wip 2026-10-08, on main since b083cfeca (lane A's publish of 2026-10-09, boot-tested green at 3d83e0264).
 
 **In short:** a container's first program was confined to the container (its
 own root directory, its volumes, its hostname, its network). Every program

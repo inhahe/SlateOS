@@ -1983,6 +1983,14 @@ extern "C" fn kernel_main() -> ! {
         || lockdep::self_test_lock_context(),
     );
 
+    // The heap lock is held with interrupts off (design-decisions §1563): here,
+    // where there is an "on" for it to turn off and give back.
+    selftest::dispatch(
+        "Heap lock interrupt state",
+        selftest::Severity::Integrity,
+        || mm::heap::self_test_lock_irqs(),
+    );
+
     // The boot runs in task 0, at the idle level: two tasks that never block
     // would keep it off the CPU for good, but for the booster, which lifts it
     // until `idle_loop` (`sched::BOOT_TASK_WORKING`). Here, because the

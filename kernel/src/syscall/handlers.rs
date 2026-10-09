@@ -8461,23 +8461,82 @@ fn require_secureboot_right() -> Result<(), KernelError> {
     }
 }
 
-/// The caller holds `(Process, RELOAD_KERNEL)`, checked before the image is read
-/// so an unauthorised caller cannot even cause it to be copied.
-fn require_power_reload_right() -> Result<(), KernelError> {
+/// The caller holds `(Process, right)`, class-wide: the gate of the power
+/// calls, checked before anything is read, flushed or switched.
+/// `NoSuchProcess` for a kernel task, `PermissionDenied` for a process
+/// without it.
+fn require_process_class_right(right: crate::cap::Rights) -> Result<(), KernelError> {
     use crate::proc::thread;
 
     let Some(pid) = thread::owner_process(sched::current_task_id()) else {
         return Err(KernelError::NoSuchProcess);
     };
-    if pcb::has_capability_type(
-        pid,
-        ResourceType::Process,
-        crate::cap::Rights::RELOAD_KERNEL,
-    ) {
+    if pcb::has_capability_type(pid, ResourceType::Process, right) {
         Ok(())
     } else {
         Err(KernelError::PermissionDenied)
     }
+}
+
+/// The caller holds `(Process, RELOAD_KERNEL)`, checked before the image is read
+/// so an unauthorised caller cannot even cause it to be copied.
+fn require_power_reload_right() -> Result<(), KernelError> {
+    require_process_class_right(crate::cap::Rights::RELOAD_KERNEL)
+}
+
+/// Say who asked for a power change, before it happens: the serial line, and
+/// the structured log (`roadmap-detailed` §1.5 has every power transition
+/// audit-logged with who asked).
+fn note_power_request(what: &str) {
+    let pid = caller_pid().unwrap_or(0);
+    let name = pcb::name(pid).unwrap_or_default();
+    serial_println!("[power] {} requested by process {} ({})", what, pid, name);
+    crate::klog!(
+        Info,
+        "power",
+        "power change requested: what={}, pid={}, name={}",
+        what,
+        pid,
+        name
+    );
+}
+
+/// `SYS_POWER_OFF` (1167) -- flush every filesystem and switch the machine
+/// off. See [`SYS_POWER_OFF`](crate::syscall::number::SYS_POWER_OFF).
+///
+/// Gated on [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF) before
+/// anything else. Returns only when no way of switching off worked:
+/// `NotSupported`, with the machine running on.
+pub fn sys_power_off(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_process_class_right(crate::cap::Rights::POWER_OFF) {
+        return SyscallResult::err(e);
+    }
+    if args.arg0 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    note_power_request("power off");
+    crate::power::try_power_off();
+    // Still here: the machine could not be switched off.
+    serial_println!("[power] no way of switching off worked; the machine runs on");
+    SyscallResult::err(KernelError::NotSupported)
+}
+
+/// `SYS_POWER_REBOOT` (1168) -- flush every filesystem and restart the
+/// machine through the firmware. See
+/// [`SYS_POWER_REBOOT`](crate::syscall::number::SYS_POWER_REBOOT).
+///
+/// Gated on [`Rights::REBOOT`](crate::cap::Rights::REBOOT) before anything
+/// else. Does not return once past the gate: the last of the reset methods, a
+/// triple fault, always resets.
+pub fn sys_power_reboot(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_process_class_right(crate::cap::Rights::REBOOT) {
+        return SyscallResult::err(e);
+    }
+    if args.arg0 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    note_power_request("restart");
+    crate::power::reboot()
 }
 
 /// `SYS_POWER_RELOAD` -- replace the running kernel without a firmware reset

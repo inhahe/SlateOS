@@ -7074,6 +7074,37 @@ pub const SYS_NAMESPACE_CLOSE: u64 = 1165;
 /// `InvalidAddress` for a buffer that cannot be written.
 pub const SYS_NAMESPACE_INFO: u64 = 1166;
 
+// ---------------------------------------------------------------------------
+// Switching the machine off and restarting it (1167-1168)
+//
+// The kernel's part of a shutdown or a restart: every mounted filesystem
+// flushed (`Vfs::sync`), then the switch -- ACPI S5 for off, the ACPI reset
+// register, the keyboard controller or a triple fault for a restart. The
+// orderly part before it -- asking services and programs to stop, unmounting
+// what userspace mounted -- is the caller's (`powerctl`, the service
+// manager). Until these, nothing in userspace could switch the machine off
+// at all (known-issues `b-org.slateos.servicemanager-has-two-clients-and-no-
+// provider`: `powerctl`'s "direct" fallback found no way).
+//
+// Each is its own right on a `Process` capability -- `power.shutdown` and
+// `power.reboot` in `roadmap-detailed` §1.5 -- checked before anything is
+// flushed, so a caller without it changes nothing. `flags` must be 0
+// (`InvalidArgument`): no bit means anything yet.
+// ---------------------------------------------------------------------------
+
+/// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
+/// off. Does not return on success. Requires a `Process` capability carrying
+/// [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF): `PermissionDenied`
+/// without it. `NotSupported` -- and the machine still running, interrupts on
+/// again -- when no way of switching off worked (no ACPI S5 and no emulator
+/// port answered).
+pub const SYS_POWER_OFF: u64 = 1167;
+/// `SYS_POWER_REBOOT(flags)` -- flush every filesystem and restart the machine
+/// through the firmware. Does not return: the last of its methods, a triple
+/// fault, always resets. Requires [`Rights::REBOOT`](crate::cap::Rights::REBOOT):
+/// `PermissionDenied` without it.
+pub const SYS_POWER_REBOOT: u64 = 1168;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

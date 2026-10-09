@@ -25,7 +25,12 @@
 //!
 //! - ACPI init stores the FADT data via `set_power_info()`.
 //! - Kshell provides `shutdown` and `reboot` commands.
-//! - The kernel panic handler can call `emergency_reboot()`.
+//! - Programs reach both through `SYS_POWER_OFF` and `SYS_POWER_REBOOT`
+//!   (each gated by its own right), and Linux programs through `reboot(2)`.
+//! - [`shutdown`] and [`reboot`] flush every filesystem first; the orderly
+//!   stop of services before them is the caller's.
+//! - The kernel panic handler can call `emergency_reboot()`, which flushes
+//!   nothing: a panicking kernel's filesystems are not to be trusted.
 //!
 //! ## References
 //!
@@ -128,19 +133,45 @@ pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire)
 }
 
+/// Flush every mounted filesystem before the machine changes power state --
+/// the kernel's last chance to put what programs wrote on the disk. A failure
+/// is said and the switch goes ahead: refusing to switch off over a disk that
+/// will not flush would leave the machine on with nothing able to fix it.
+/// Needs interrupts on (the block drivers' completions), so it runs before
+/// either switch disables them.
+fn flush_filesystems() {
+    if let Err(e) = crate::fs::Vfs::sync() {
+        serial_println!(
+            "[power] WARNING: flushing the filesystems failed ({:?}); switching anyway",
+            e
+        );
+    }
+}
+
 /// Attempt to shut down the system (enter ACPI S5 state).
 ///
 /// This function tries multiple methods and does not return if successful.
 /// If all methods fail, it enters a halt loop (system frozen but not off).
 pub fn shutdown() -> ! {
-    serial_println!("[power] Initiating system shutdown...");
+    try_power_off();
+    serial_println!("[power] All shutdown methods failed — halting CPU");
+    halt_loop()
+}
 
-    // Flush any buffered I/O.
-    // (Future: call VFS sync here.)
+/// Flush the filesystems, then try every way of switching the machine off.
+///
+/// Returns only when none worked, with interrupts as the caller had them: for
+/// a caller that can say so (`SYS_POWER_OFF` answers `NotSupported` and the
+/// machine runs on). [`shutdown`] halts instead.
+pub fn try_power_off() {
+    serial_println!("[power] Initiating system shutdown...");
+    flush_filesystems();
 
     // Disable interrupts — we don't want anything interfering.
+    let were_on = crate::cpu::interrupts_enabled();
     // SAFETY: We're shutting down — disabling interrupts prevents any ISR
-    // from interfering with the power transition sequence.
+    // from interfering with the power transition sequence. Set again below if
+    // nothing switched the machine off.
     unsafe {
         crate::cpu::cli();
     }
@@ -187,9 +218,14 @@ pub fn shutdown() -> ! {
     }
     io_delay();
 
-    // Method 4: Nothing worked — halt loop.
-    serial_println!("[power] All shutdown methods failed — halting CPU");
-    halt_loop()
+    // Nothing worked: the machine is still on. Give the caller back its
+    // interrupts, so it can carry on and say so.
+    if were_on {
+        // SAFETY: interrupts were on when this began; the IDT is loaded.
+        unsafe {
+            crate::cpu::sti();
+        }
+    }
 }
 
 /// Attempt to reboot the system.
@@ -198,6 +234,7 @@ pub fn shutdown() -> ! {
 /// Falls back to triple fault which should always trigger a hardware reset.
 pub fn reboot() -> ! {
     serial_println!("[power] Initiating system reboot...");
+    flush_filesystems();
 
     // Disable interrupts.
     // SAFETY: We're rebooting — no ISRs should fire during reset.
@@ -434,6 +471,11 @@ fn triple_fault() -> ! {
 
 /// Infinite halt loop — CPU stops executing (interrupts disabled).
 fn halt_loop() -> ! {
+    // SAFETY: the terminal state: nothing may interrupt it (`try_power_off`
+    // hands interrupts back on failure, so they may be on here).
+    unsafe {
+        crate::cpu::cli();
+    }
     loop {
         // SAFETY: hlt stops the CPU; with interrupts disabled this is
         // the intended "system frozen" terminal state.

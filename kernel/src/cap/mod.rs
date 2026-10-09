@@ -621,7 +621,11 @@ const ROOT_PROCESS_RIGHTS: Rights = Rights::SET_CREDENTIALS
     // Replacing the kernel (kexec) is root's, as Linux's CAP_SYS_BOOT is, and is
     // dropped with the rest when uid leaves 0 -- a non-root process must not be
     // able to load a new kernel.
-    .union(Rights::RELOAD_KERNEL);
+    .union(Rights::RELOAD_KERNEL)
+    // So are switching the machine off and restarting it, the rest of
+    // CAP_SYS_BOOT.
+    .union(Rights::POWER_OFF)
+    .union(Rights::REBOOT);
 
 /// The rights a capability keeps when its process's uid leaves 0.
 ///

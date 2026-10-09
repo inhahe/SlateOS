@@ -236,13 +236,31 @@ impl Rights {
     /// rights -- granting "may set the keyboard layout" must not grant it.
     pub const RELOAD_KERNEL: Self = Self(1 << 24);
 
+    /// May switch the machine off: `SYS_POWER_OFF`, and Linux's `reboot(2)`
+    /// with `LINUX_REBOOT_CMD_POWER_OFF` or `_HALT`.
+    ///
+    /// Its own bit, and not one with [`REBOOT`](Self::REBOOT): `roadmap-detailed`
+    /// §1.5 lists `power.shutdown` and `power.reboot` apart, because a program
+    /// allowed to restart the machine for an update has no business leaving it
+    /// off. Neither implies [`RELOAD_KERNEL`](Self::RELOAD_KERNEL), which chooses
+    /// the next kernel. The orderly part -- asking services and programs to
+    /// stop -- is the caller's (`powerctl`, the service manager); the kernel's is
+    /// the flush and the switch.
+    pub const POWER_OFF: Self = Self(1 << 25);
+
+    /// May restart the machine through the firmware: `SYS_POWER_REBOOT`, and
+    /// Linux's `reboot(2)` with `LINUX_REBOOT_CMD_RESTART` or `_RESTART2`.
+    ///
+    /// See [`POWER_OFF`](Self::POWER_OFF) for why it is a bit of its own.
+    pub const REBOOT: Self = Self(1 << 26);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 19] = [
+    const DISTINCT: [Self; 21] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -262,6 +280,8 @@ impl Rights {
         Self::SET_BRIGHTNESS,
         Self::ENROLL_SECUREBOOT,
         Self::RELOAD_KERNEL,
+        Self::POWER_OFF,
+        Self::REBOOT,
     ];
 
     /// Every declared right and no other bit: the union of the distinct
@@ -363,7 +383,14 @@ impl Rights {
             // larger change (the authbroker that hands one tool a right its
             // parent lacks). `powerctl` reaches it as a root descendant until
             // then.
-            | Self::RELOAD_KERNEL.0,
+            | Self::RELOAD_KERNEL.0
+            // Switching the machine off and restarting it: init holds both, for
+            // the reason it holds RELOAD_KERNEL -- withheld, the doors would be
+            // syscalls nobody can invoke, and nothing could switch the machine
+            // off at all (it could not before them). `powerctl` and the service
+            // manager reach them as root descendants until authbroker lands.
+            | Self::POWER_OFF.0
+            | Self::REBOOT.0,
     );
 
     /// What the init process is granted on [`ResourceType::File`].
@@ -405,7 +432,9 @@ impl Rights {
             // and 930 rejected narrowing as a separate, larger change.
             | Self::SET_KEYLAYOUT.0
             | Self::ENROLL_SECUREBOOT.0
-            | Self::RELOAD_KERNEL.0,
+            | Self::RELOAD_KERNEL.0
+            | Self::POWER_OFF.0
+            | Self::REBOOT.0,
     );
 
     /// What the init process is granted on [`ResourceType::Socket`].
@@ -431,7 +460,9 @@ impl Rights {
             // Per 930, as for `INIT_FILE` above.
             | Self::SET_KEYLAYOUT.0
             | Self::ENROLL_SECUREBOOT.0
-            | Self::RELOAD_KERNEL.0,
+            | Self::RELOAD_KERNEL.0
+            | Self::POWER_OFF.0
+            | Self::REBOOT.0,
     );
 
     /// No rights.
@@ -557,7 +588,23 @@ const _: () = {
 /// mechanism. `design-decisions.md` §928.
 const _: () = {
     assert!(
-        // 19 as of 2026-10-03: RELOAD_KERNEL was added for SYS_POWER_RELOAD
+        // 21 as of 2026-10-09: POWER_OFF and REBOOT were added for
+        // SYS_POWER_OFF and SYS_POWER_REBOOT, the first way any program could
+        // switch the machine off or restart it. The decision this pin demands,
+        // for each of the two:
+        //
+        //   INIT_PROCESS  yes
+        //   INIT_FILE     yes
+        //   INIT_SOCKET   yes
+        //
+        // As RELOAD_KERNEL is, and for its reason: a right nobody holds is a
+        // door nobody can open, and `powerctl` and the service manager reach
+        // them as root descendants until `authbroker` can hand one tool a right
+        // its parent lacks. Also added to ROOT_PROCESS_RIGHTS, so a process that
+        // drops root drops them (Linux's CAP_SYS_BOOT is root's). Claude's call
+        // within the operator's scope, to revisit when authbroker lands.
+        //
+        // 19 (2026-10-03): RELOAD_KERNEL was added for SYS_POWER_RELOAD
         // (kexec -- replace the running kernel without the firmware). The
         // decision this pin demands:
         //
@@ -598,7 +645,7 @@ const _: () = {
         // This pin did its job then: the right was added, committed and
         // pushed before the build was run, and the const assertion is what
         // caught it rather than a boot two hours later.
-        Rights::DISTINCT.len() == 19,
+        Rights::DISTINCT.len() == 21,
         "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
          CLASSES init is granted, whether it should hold the new right: add it \
          to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \

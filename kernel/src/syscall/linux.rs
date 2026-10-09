@@ -31224,21 +31224,107 @@ fn sys_swapoff(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `reboot(magic1, magic2, cmd, arg)`.
+/// `reboot(magic1, magic2, cmd, arg)`, answered as Linux's
+/// `kernel/reboot.c::SYSCALL_DEFINE4(reboot)` answers it:
 ///
-/// Linux's `kernel/reboot.c::SYSCALL_DEFINE4(reboot)` checks
-/// `capable(CAP_SYS_BOOT)` *before* validating the magic numbers, so
-/// an unprivileged caller passing `magic1=0` sees -EPERM, not -EINVAL.
-/// This kernel exposes no path to acquiring `CAP_SYS_BOOT` from
-/// userspace, so every caller is unprivileged: the truthful, Linux-
-/// shaped answer is EPERM unconditionally.
+/// 1. **Authority first.** Linux checks `capable(CAP_SYS_BOOT)` before the
+///    magic numbers, so an unprivileged caller passing `magic1 = 0` sees
+///    `EPERM`, not `EINVAL`, and learns nothing more. `CAP_SYS_BOOT` is a
+///    `Process` capability carrying
+///    [`Rights::POWER_OFF`](crate::cap::Rights::POWER_OFF) or
+///    [`Rights::REBOOT`](crate::cap::Rights::REBOOT) here; with neither, `EPERM`.
+/// 2. **The magic numbers.** `magic1` must be `0xfee1dead` and `magic2` one
+///    of Linux's four (Torvalds' and his daughters' birthdays); `EINVAL`
+///    otherwise.
+/// 3. **The command**, each against its own right -- stricter than Linux,
+///    whose one capability covers all of them, and the same split as
+///    `SYS_POWER_OFF` and `SYS_POWER_REBOOT`:
 ///
-/// Pre-batch-143 we returned EINVAL when `magic1 != 0xfee1dead`, which
-/// leaked the magic-number sanity check to unprivileged callers — a
-/// deviation from Linux's intentional design of denying that
-/// information to non-root.  Now matches Linux exactly.
-fn sys_reboot(_args: &SyscallArgs) -> SyscallResult {
-    linux_err(errno::EPERM)
+/// | `cmd` | here |
+/// |---|---|
+/// | `RESTART`, `RESTART2` | needs `REBOOT`: flush and restart; does not return (`RESTART2`'s command string is not read) |
+/// | `POWER_OFF`, `HALT` | needs `POWER_OFF`: flush and switch off; `ENOSYS` if nothing could |
+/// | `CAD_ON`, `CAD_OFF` | 0: what Ctrl-Alt-Del does is the desktop's, not the kernel's |
+/// | `KEXEC` | `EINVAL`: no image is loaded (`kexec_load` loads none), Linux's answer then |
+/// | `SW_SUSPEND`, anything else | `EINVAL`, as Linux built without hibernation answers |
+///
+/// `HALT` switches the machine off rather than stopping it powered: a halt
+/// that left the other CPUs running their tasks would be no halt, and there is
+/// no stopping them all yet. Linux itself halts instead of powering off only
+/// when it has no power-off method -- the case `ENOSYS` reports here.
+///
+/// Until 2026-10-09 every caller got `EPERM`: no process could hold
+/// `CAP_SYS_BOOT`, and there was no switch behind it anyway.
+fn sys_reboot(args: &SyscallArgs) -> SyscallResult {
+    match reboot_decision(caller_pid(), args) {
+        Err(code) => linux_err(code),
+        Ok(RebootAction::Nothing) => SyscallResult::ok(0),
+        Ok(RebootAction::Restart) => {
+            crate::serial_println!(
+                "[power] restart requested through reboot(2) by process {}",
+                caller_pid().unwrap_or(0)
+            );
+            crate::power::reboot()
+        }
+        Ok(RebootAction::PowerOff) => {
+            crate::serial_println!(
+                "[power] power off requested through reboot(2) by process {}",
+                caller_pid().unwrap_or(0)
+            );
+            crate::power::try_power_off();
+            // Still here: nothing could switch the machine off.
+            linux_err(errno::ENOSYS)
+        }
+    }
+}
+
+/// What [`sys_reboot`] does once it has decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebootAction {
+    /// Flush and restart.
+    Restart,
+    /// Flush and switch off.
+    PowerOff,
+    /// Answer 0 and do nothing (`CAD_ON`, `CAD_OFF`).
+    Nothing,
+}
+
+/// [`sys_reboot`]'s decision for process `pid` (`None`: a kernel task, which
+/// holds nothing), apart from acting on it, so the granted arms can be
+/// checked without restarting the machine: the action, or the errno to
+/// answer. The order is Linux's -- authority, then the magic numbers, then
+/// the command -- as [`sys_reboot`] describes.
+fn reboot_decision(pid: Option<pcb::ProcessId>, args: &SyscallArgs) -> Result<RebootAction, i32> {
+    const MAGIC1: u64 = 0xfee1_dead;
+    const MAGIC2: [u64; 4] = [672_274_793, 85_072_278, 369_367_448, 537_993_216];
+    const CMD_RESTART: u32 = 0x0123_4567;
+    const CMD_HALT: u32 = 0xCDEF_0123;
+    const CMD_CAD_ON: u32 = 0x89AB_CDEF;
+    const CMD_CAD_OFF: u32 = 0x0000_0000;
+    const CMD_POWER_OFF: u32 = 0x4321_FEDC;
+    const CMD_RESTART2: u32 = 0xA1B2_C3D4;
+    use crate::cap::{ResourceType, Rights};
+
+    let pid = pid.ok_or(errno::EPERM)?;
+    let holds = |right: Rights| pcb::has_capability_type(pid, ResourceType::Process, right);
+    if !holds(Rights::POWER_OFF) && !holds(Rights::REBOOT) {
+        return Err(errno::EPERM);
+    }
+    // Linux reads the magics as `int`s: the low 32 bits.
+    let magic1 = args.arg0 & 0xffff_ffff;
+    let magic2 = args.arg1 & 0xffff_ffff;
+    if magic1 != MAGIC1 || !MAGIC2.contains(&magic2) {
+        return Err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation)] // Linux's `unsigned int cmd`
+    let cmd = args.arg2 as u32;
+    match cmd {
+        CMD_RESTART | CMD_RESTART2 if holds(Rights::REBOOT) => Ok(RebootAction::Restart),
+        CMD_POWER_OFF | CMD_HALT if holds(Rights::POWER_OFF) => Ok(RebootAction::PowerOff),
+        CMD_RESTART | CMD_RESTART2 | CMD_POWER_OFF | CMD_HALT => Err(errno::EPERM),
+        CMD_CAD_ON | CMD_CAD_OFF => Ok(RebootAction::Nothing),
+        _ => Err(errno::EINVAL),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -86079,6 +86165,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             serial_println!("[syscall/linux]   reboot EPERM ordering: OK");
+
+            // The granted arms, decided without acting (`reboot_decision`): a
+            // synthetic process holding REBOOT alone, then POWER_OFF too.
+            {
+                use crate::cap::{ResourceType, Rights};
+                let args = |m1: u64, m2: u64, cmd: u64| SyscallArgs {
+                    arg0: m1,
+                    arg1: m2,
+                    arg2: cmd,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let m1 = 0xfee1_dead;
+                let m2 = 672_274_793;
+                let pid = pcb::create("reboot-decision-test", 0);
+                let outcome = (|| -> Result<(), &'static str> {
+                    if reboot_decision(Some(pid), &args(m1, m2, 0x0123_4567)) != Err(errno::EPERM) {
+                        return Err("a process holding neither right was not EPERM");
+                    }
+                    pcb::grant_capability(pid, ResourceType::Process, 0, Rights::REBOOT)
+                        .map_err(|_| "granting REBOOT failed")?;
+                    let cases: [(u64, u64, u64, Result<RebootAction, i32>); 9] = [
+                        (m1, m2, 0x0123_4567, Ok(RebootAction::Restart)),
+                        (m1, 537_993_216, 0xA1B2_C3D4, Ok(RebootAction::Restart)),
+                        // The other right's commands: refused.
+                        (m1, m2, 0x4321_FEDC, Err(errno::EPERM)),
+                        (m1, m2, 0xCDEF_0123, Err(errno::EPERM)),
+                        // Ctrl-Alt-Del's switch is the desktop's: 0, nothing done.
+                        (m1, m2, 0x89AB_CDEF, Ok(RebootAction::Nothing)),
+                        (m1, m2, 0, Ok(RebootAction::Nothing)),
+                        // No image loaded; no hibernation.
+                        (m1, m2, 0x4558_4543, Err(errno::EINVAL)),
+                        (m1, m2, 0xD000_FCE2, Err(errno::EINVAL)),
+                        // A holder now sees the magic numbers checked.
+                        (0xdead, m2, 0x0123_4567, Err(errno::EINVAL)),
+                    ];
+                    for (a, b, c, want) in cases {
+                        if reboot_decision(Some(pid), &args(a, b, c)) != want {
+                            return Err("a REBOOT holder's command was not decided as Linux would");
+                        }
+                    }
+                    pcb::grant_capability(pid, ResourceType::Process, 0, Rights::POWER_OFF)
+                        .map_err(|_| "granting POWER_OFF failed")?;
+                    if reboot_decision(Some(pid), &args(m1, m2, 0x4321_FEDC))
+                        != Ok(RebootAction::PowerOff)
+                        || reboot_decision(Some(pid), &args(m1, 85_072_278, 0xCDEF_0123))
+                            != Ok(RebootAction::PowerOff)
+                    {
+                        return Err("a POWER_OFF holder's power off or halt was not PowerOff");
+                    }
+                    Ok(())
+                })();
+                pcb::destroy(pid);
+                if let Err(why) = outcome {
+                    serial_println!("[syscall/linux]   FAIL: reboot(2): {}", why);
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[syscall/linux]   reboot(2): REBOOT restarts, POWER_OFF powers off and halts, each refused without its right; CAD 0; KEXEC and SW_SUSPEND EINVAL: OK"
+                );
+            }
 
             // syslog(99) -> EINVAL (out of 0..=10 range).
             let a = SyscallArgs {

@@ -5583,6 +5583,24 @@ _Port ext4 first. Don't write a custom filesystem._
   `scripts/tload-diff.sh`, over a pinned `/proc/loadavg` and frames read by
   `scripts/tload-frames.py` from a pipe or from pseudo-terminals of chosen
   sizes, resized mid-run);
+  `pidof` and `killall5` (2026-10-09, sysvinit 3.08's `killall5.c` -- new,
+  nothing here had them: one program, `pidof` by that name and `killall5` by
+  any other; a name matched as upstream matches it -- `argv[0]`, its last
+  part, the name's last part, the executable's real path or the executable
+  deleted, under `-x` a script's argument when `stat` names the script, a
+  title with a blank or a login shell by its `stat` name -- with `cmdline`
+  read 4096 bytes to an argument as upstream reads it; `-s` one id for each
+  name, `-d`'s first byte or a NUL, `-o`'s `,`/`;`/`:` lists and `%PPID`,
+  `-c` for root only; killall5's signal read from its first argument
+  wherever the others are, every process stopped first unless `-o` named
+  some, and its own session, init and kernel threads left alone; what either
+  has to say sent to syslog as `daemon.err` unless standard input is a
+  terminal `ttyname` can name; the new `libcall::process::getuid`, `geteuid`
+  and `lock_all_memory`; `scripts/pidof-diff.sh`: 83 cases agree, each run
+  with standard input `/dev/null` -- the complaints read from a socket bound
+  over `/dev/log` -- and with a terminal, every run in a PID namespace of its
+  own whose init starts the same fixtures in the same order on both sides,
+  so that killall5 can reach nothing else);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5614,6 +5632,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pmap: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/pmap-diff.sh`, 331 cases)
   - [x] skill/snice: procps-ng 4.0.4's, coreutils programs since 2026-10-09 (see the coreutils item; `scripts/skill-diff.sh`, 121 cases)
   - [x] tload: procps-ng 4.0.4's, a coreutils program since 2026-10-09 (see the coreutils item; `scripts/tload-diff.sh`)
+  - [x] pidof/killall5: sysvinit 3.08's, coreutils programs since 2026-10-09 (see the coreutils item; `scripts/pidof-diff.sh`, 83 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)

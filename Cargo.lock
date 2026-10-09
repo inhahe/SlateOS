@@ -673,6 +673,7 @@ dependencies = [
  "journalio",
  "journalrec",
  "libcall",
+ "libcsyslog",
  "localtime",
  "md5",
  "modechange",

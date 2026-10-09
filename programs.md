@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**498 programs; 339 on the image, 6 carried inside the kernel.**
+**500 programs; 341 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 313
+## Userland utilities and services (`userspace/`, lane B) -- 315
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -137,6 +137,7 @@ two disagree.
 | `jq` | Slate OS JSON processor | yes |  |  |
 | `kill` | Send a signal to a process or a process group. | yes | `coreutils` | `killall` |
 | `kill` | Process Termination Utility | yes |  | `killall` |
+| `killall5` | Send a signal to every process but those of its own session: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `last` | `last`, `lastb` -- show a listing of last logged in users: util-linux 2.39.3's, ported. | yes | `coreutils` | `lastb`, `lastlog` |
 | `lastlog` | Report the most recent login of every user, or of some: shadow-utils 4.13's, ported. | yes | `coreutils` |  |
 | `ldconfig` | Shared library cache management. | yes |  |  |
@@ -205,6 +206,7 @@ two disagree.
 | `patch` | Apply a diff to the files it names: GNU patch 2.7.6 as Ubuntu ships it, ported. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. | yes | `coreutils` |  |
 | `pgrep` | Look up processes by name and other attributes. | yes | `coreutils` |  |
+| `pidof` | Find the processes running a program: sysvinit 3.08's, ported. | yes | `coreutils` |  |
 | `ping` | ICMP Ping Utility | yes |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. | yes | `coreutils` |  |
 | `pkg` | Slate OS package manager. | yes |  |  |

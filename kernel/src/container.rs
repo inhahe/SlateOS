@@ -5064,6 +5064,23 @@ fn this_cpu_only() -> u64 {
         .unwrap_or(0)
 }
 
+/// Reap until task `task` is gone, yielding between tries -- bounded, so a
+/// task that is never reaped is a test failure and not a hung boot. What a
+/// self-test needs before it checks what a reap undoes: on more than one CPU a
+/// process reads as exited while its last thread is still finishing its exit
+/// on another CPU, and the reaper takes a task only once it is dead and off
+/// every CPU's stack.
+fn reap_until_gone(task: u64) -> bool {
+    for _ in 0..100_000u32 {
+        crate::sched::reap_dead_tasks();
+        if !crate::sched::task_exists(task) {
+            return true;
+        }
+        crate::sched::yield_now();
+    }
+    false
+}
+
 /// Comprehensive self-test for the container lifecycle manager.
 pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[container] Running self-test...");
@@ -6161,8 +6178,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // Force the dead task through reap so the cgroup auto-detach runs, then
         // the container cgroup is empty again (proves teardown accounting is
-        // robust to a process that simply exits — see reap_dead_tasks).
-        crate::sched::reap_dead_tasks();
+        // robust to a process that simply exits — see reap_dead_tasks). On more
+        // than one CPU the process reads as a zombie while its thread is still
+        // finishing its exit on the other CPU -- not yet dead, or dead but still
+        // on that CPU's stack, which the reaper waits out -- so reap until the
+        // task is gone (bounded), then look.
+        assert!(
+            reap_until_gone(spawned.task_id),
+            "the exec'd task was never reaped",
+        );
         assert_eq!(
             crate::cgroup::stats(cg_ex).map(|s| s.nr_tasks),
             Some(0),
@@ -6298,11 +6322,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         // The probe was reaped and unbound: force any Dead task through reap and
-        // confirm the container cgroup is empty (no probe-process leak).
-        crate::sched::reap_dead_tasks();
+        // confirm the container cgroup is empty (no probe-process leak). Reaped
+        // until it drains, bounded: on more than one CPU the probe's thread can
+        // still be finishing its exit on the other CPU when the status reads
+        // Healthy, and a leak is a count that never drains, not one that drains
+        // a moment late.
         let cg2 = cgroup(cth2).expect("health container cgroup");
+        let mut billed = crate::cgroup::stats(cg2).map(|s| s.nr_tasks);
+        for _ in 0..100_000u32 {
+            crate::sched::reap_dead_tasks();
+            billed = crate::cgroup::stats(cg2).map(|s| s.nr_tasks);
+            if billed == Some(0) {
+                break;
+            }
+            crate::sched::yield_now();
+        }
         assert_eq!(
-            crate::cgroup::stats(cg2).map(|s| s.nr_tasks),
+            billed,
             Some(0),
             "healthcheck probe must not leak a task in the container cgroup",
         );

@@ -450,6 +450,23 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, so no atomics needed.
     pub pending_wake: bool,
+    /// Created by [`spawn_suspended`](super::spawn_suspended) and not yet
+    /// [`admit`](super::admit)ted: the task has never run, and only `admit`
+    /// may make it runnable.
+    ///
+    /// Its state is `Blocked` -- or `Suspended`, if it was suspended before
+    /// its admission -- and until 2026-10-09 that was all there was to say,
+    /// so anything that ends a `Blocked` or `Suspended` state could start it:
+    /// a [`wake`](super::wake) from a stale wait-queue entry naming a reused
+    /// id, or the [`resume`](super::resume) of a container thawed while a
+    /// process was joining it. A task started that way ran before its creator
+    /// had finished registering it, the race the two-phase spawn exists to
+    /// close. Now a wake leaves such a task be -- one that has not started
+    /// cannot be waiting for anything -- and `resume` returns it to
+    /// `Blocked`, still awaiting its admission.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub awaiting_admission: bool,
     /// Source location of the most recent [`block_current()`](super::block_current)
     /// call that parked this task, or `None` if it has never blocked.
     ///
@@ -1254,6 +1271,7 @@ impl Task {
             name_len: tag.len(),
             state: TaskState::Running,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
@@ -1361,6 +1379,7 @@ impl Task {
             name_len: idx_str,
             state: TaskState::Running,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,
@@ -1533,6 +1552,7 @@ impl Task {
             name_len: copy_len,
             state: TaskState::Ready,
             pending_wake: false,
+            awaiting_admission: false,
             block_site: None,
             block_tick: 0,
             block_seq: 0,

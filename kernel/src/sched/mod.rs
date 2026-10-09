@@ -2437,16 +2437,42 @@ pub fn spawn_suspended_with_id(
     )
 }
 
-/// Admit a task previously created via [`spawn_suspended`], transitioning it
-/// from `Blocked` to `Ready` and enqueuing it so the scheduler can run it.
+/// Admit a task created by [`spawn_suspended`] -- the one thing that starts
+/// it (`Task::awaiting_admission`).
 ///
-/// Returns `true` if the task was admitted.  Returns `false` if the task no
-/// longer exists or was not in the expected `Blocked` state (e.g. it was
-/// already killed).  Implemented on top of [`wake`], which already handles
-/// the Blocked→Ready transition, run-queue insertion, target-CPU selection,
-/// and the pending-wake race.
+/// A `Blocked` task is made `Ready` and queued, as a wake would. One
+/// suspended before its admission -- a process joining a frozen container
+/// (`container::add_process_task`) -- is admitted where it is: it stays
+/// `Suspended`, and the [`resume`] that thaws it queues it.
+///
+/// Returns `true` if the task was admitted; `false` if there is no such task,
+/// it was not awaiting admission (admitted already, or not spawned
+/// suspended), or it was killed first.
 pub fn admit(task_id: TaskId) -> bool {
-    wake(task_id)
+    let (target_cpu, preempt_target) = {
+        let mut state = SCHED.lock();
+        let Some(task) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
+        if !task.awaiting_admission {
+            return false;
+        }
+        match task.state {
+            TaskState::Blocked => {
+                task.awaiting_admission = false;
+                make_blocked_ready(task_id, task)
+            }
+            TaskState::Suspended => {
+                task.awaiting_admission = false;
+                return true;
+            }
+            // Killed before its admission. (`Ready` and `Running` are not
+            // reached without one.)
+            TaskState::Dead | TaskState::Ready | TaskState::Running => return false,
+        }
+    };
+    announce_ready(task_id, target_cpu, preempt_target);
+    true
 }
 
 /// Shared implementation of [`spawn_with_affinity`] and [`spawn_suspended`].
@@ -2502,7 +2528,9 @@ fn spawn_inner(
         // scheduled until the caller finishes registration and calls admit().
         if !admit {
             new_task.state = task::TaskState::Blocked;
-            // Admission is a `wake`, and a wake from Blocked banks the ticks
+            // Only `admit` may start it: see `Task::awaiting_admission`.
+            new_task.awaiting_admission = true;
+            // Admission ends a Blocked state, which banks the ticks
             // since `block_tick` as sleep credit. Left at its initial 0, that
             // would credit a brand-new task with every tick since boot and
             // hand it the interactive boost on its first run; stamped now, it
@@ -3225,49 +3253,66 @@ fn block_current_inner(
 /// Returns `true` if the task was blocked and is now ready.
 /// Returns `false` if the task was not in the Blocked state.
 pub fn wake(task_id: TaskId) -> bool {
-    let target_cpu;
-    let preempt_target;
-    {
+    let (target_cpu, preempt_target) = {
         let mut state = SCHED.lock();
-        if let Some(task) = state.tasks.get_mut(&task_id) {
-            if task.state == TaskState::Blocked {
-                task.mark_ready(crate::apic::tick_count());
-                // Reset burst counter for the new wake cycle.
-                task.burst_ticks = 0;
-                let prio = task.effective_priority();
-                // Respect CPU affinity when choosing the target CPU.
-                target_cpu = select_wake_cpu(task);
-                task.last_cpu = target_cpu;
-                PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
-                preempt_target = wake_preempts(target_cpu, prio);
-            } else {
-                // Task is not Blocked (still Running or Ready).  Set the
-                // pending-wake flag so block_current() won't actually
-                // block.  This prevents the lost-wakeup race where a
-                // timer preemption between registering in a wait queue
-                // and calling block_current() lets a waker find the task
-                // as Running and lose the wake signal.
-                task.pending_wake = true;
-                return false;
-            }
-        } else {
+        let Some(task) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
+        if task.awaiting_admission {
+            // Not started, so not waiting for anything: a wake aimed at it is
+            // stale (a reused id) or early, and only `admit` starts it
+            // (`Task::awaiting_admission`). Not kept as `pending_wake` either,
+            // which would only make the task's first real park return early.
             return false;
         }
-    }
+        if task.state != TaskState::Blocked {
+            // Task is not Blocked (still Running or Ready).  Set the
+            // pending-wake flag so block_current() won't actually
+            // block.  This prevents the lost-wakeup race where a
+            // timer preemption between registering in a wait queue
+            // and calling block_current() lets a waker find the task
+            // as Running and lose the wake signal.
+            task.pending_wake = true;
+            return false;
+        }
+        make_blocked_ready(task_id, task)
+    };
+    announce_ready(task_id, target_cpu, preempt_target);
+    true
+}
+
+/// Make the `Blocked` task `task` (`task_id`) `Ready`, queued on a CPU it may
+/// use: the part of a wake -- and of an admission -- done under the `SCHED`
+/// lock. Returns that CPU, and whether the task should preempt what it runs
+/// ([`wake_preempts`]); [`announce_ready`] does the rest once the lock is
+/// dropped.
+fn make_blocked_ready(task_id: TaskId, task: &mut Task) -> (usize, bool) {
+    task.mark_ready(crate::apic::tick_count());
+    // Reset burst counter for the new wake cycle.
+    task.burst_ticks = 0;
+    let prio = task.effective_priority();
+    // Respect CPU affinity when choosing the target CPU.
+    let target_cpu = select_wake_cpu(task);
+    task.last_cpu = target_cpu;
+    PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+    (target_cpu, wake_preempts(target_cpu, prio))
+}
+
+/// The end of a wake, after the `SCHED` lock is dropped: trace it, and signal
+/// the CPU the task was queued on -- or, for a wake into the real-time band
+/// above what that CPU runs, have it switch now.
+fn announce_ready(task_id: TaskId, target_cpu: usize, preempt_target: bool) {
     crate::ktrace::record(
         crate::ktrace::Category::Sched,
         crate::ktrace::event::TASK_WAKE,
         task_id,
         target_cpu as u64,
     );
-    // Signal the target CPU after releasing the lock -- and, for a wake into
-    // the real-time band above what it runs, have it switch now.
     if preempt_target {
         request_preempt_on(target_cpu);
     } else {
         signal_cpu(target_cpu);
     }
-    true
 }
 
 /// Wake a blocked task using `try_lock` — safe in ISR context.
@@ -3317,6 +3362,11 @@ pub fn try_wake(task_id: TaskId) -> bool {
         // No such task: nothing to wake, and retrying cannot help.
         return true;
     };
+    if task.awaiting_admission {
+        // Accounted for: dropped, as `wake` drops it -- a task that has not
+        // started is waiting for nothing (`Task::awaiting_admission`).
+        return true;
+    }
     if task.state != TaskState::Blocked {
         // Same pending-wake logic as wake() — see the comment there.  The
         // wake is now recorded on the task itself, so it must NOT also be
@@ -6598,6 +6648,13 @@ pub fn resume(task_id: TaskId) -> bool {
         if task.state != TaskState::Suspended {
             return false;
         }
+        if task.awaiting_admission {
+            // Suspended before it was ever admitted: thawed, it is back where
+            // it was -- created and not started -- and its `admit` is what
+            // starts it (`Task::awaiting_admission`).
+            task.state = TaskState::Blocked;
+            return true;
+        }
 
         task.mark_ready(crate::apic::tick_count());
         let prio = task.effective_priority();
@@ -8489,7 +8546,10 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) -> u64 {
         }
         // We already hold the lock — wake directly.
         if let Some(task) = state.tasks.get_mut(&task_id) {
-            if task.state == TaskState::Blocked {
+            if task.awaiting_admission {
+                // Dropped, as `wake` drops it: a task that has not started is
+                // waiting for nothing (`Task::awaiting_admission`).
+            } else if task.state == TaskState::Blocked {
                 task.mark_ready(crate::apic::tick_count());
                 task.burst_ticks = 0;
                 let prio = task.effective_priority();
@@ -8839,6 +8899,11 @@ fn wake_expired_sleeper(task_id: TaskId) -> SleeperWake {
         return SleeperWake::Retry;
     };
     match state.tasks.get_mut(&task_id) {
+        Some(task) if task.awaiting_admission => {
+            // Not started, so not asleep: a slot naming a reused id. Released
+            // and dropped, as `wake` drops it (`Task::awaiting_admission`).
+            SleeperWake::Release
+        }
         Some(task) if task.state == TaskState::Blocked => {
             // Normal case: the task is still blocked on its timed sleep.
             task.mark_ready(crate::apic::tick_count());
@@ -10479,6 +10544,7 @@ pub fn self_test() -> KernelResult<()> {
     test_kill_and_reap()?;
     test_stale_run_queue_entries()?;
     test_suspend_resume()?;
+    test_admission()?;
     test_two_phase_self_suspend()?;
     test_set_priority()?;
     test_realtime_band()?;
@@ -12214,6 +12280,76 @@ fn test_suspend_resume() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   Suspend/resume: OK");
+    Ok(())
+}
+
+/// Only [`admit`] starts a task spawned suspended (`Task::awaiting_admission`).
+///
+/// A wake, an interrupt's wake, a deferred wake, and a resume after a suspend
+/// each leave it unstarted -- each used to start it, running a thread before
+/// its creator had finished registering it. Suspended before its admission,
+/// it stays suspended once admitted, and the resume runs it.
+fn test_admission() -> KernelResult<()> {
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    let id = spawn_suspended(b"test-admission", 16, test_task_incr, 7, 0)?;
+    let fail = |what: &str| {
+        serial_println!("[sched]   FAIL: admission: {}", what);
+        kill_task(id);
+        reap_dead_tasks();
+        Err(KernelError::InternalError)
+    };
+    // (state, awaiting admission, pending wake)
+    let look = || {
+        let state = SCHED.lock();
+        state
+            .tasks
+            .get(&id)
+            .map(|t| (t.state, t.awaiting_admission, t.pending_wake))
+    };
+    let ran = || TEST_COUNTER.load(Ordering::SeqCst) != 0;
+
+    let woke = wake(id);
+    let accounted = try_wake(id);
+    defer_wake(id);
+    yield_now();
+    yield_now();
+    if woke || !accounted || look() != Some((TaskState::Blocked, true, false)) || ran() {
+        return fail("a wake started a task awaiting admission, or was kept for it");
+    }
+
+    let suspended = suspend(id);
+    let resumed = resume(id);
+    yield_now();
+    yield_now();
+    if !suspended || !resumed || look() != Some((TaskState::Blocked, true, false)) || ran() {
+        return fail("suspended and resumed, it did not go back to awaiting admission");
+    }
+
+    let suspended = suspend(id);
+    let admitted = admit(id);
+    yield_now();
+    yield_now();
+    if !suspended || !admitted || look() != Some((TaskState::Suspended, false, false)) || ran() {
+        return fail("suspended, then admitted, it did not stay suspended");
+    }
+    if admit(id) {
+        return fail("admitted twice");
+    }
+
+    if !resume(id) {
+        return fail("the resume of an admitted task was refused");
+    }
+    for _ in 0..200 {
+        if ran() {
+            break;
+        }
+        yield_now();
+    }
+    if TEST_COUNTER.load(Ordering::SeqCst) != 7 {
+        return fail("resumed after its admission, it never ran");
+    }
+    reap_dead_tasks();
+    serial_println!("[sched]   Only admit starts a task spawned suspended: OK");
     Ok(())
 }
 

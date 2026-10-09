@@ -117,7 +117,51 @@ task's stack as the incoming one's context. `sched::SwitchIrqs` now clears
 the flag for the switch and gives each task back the one it entered with;
 `sched::self_test_switch_interrupt_flag` checks both states.
 
-**What would make it stay fixed:** a boot test on more than one CPU. Today
-`scripts/boot-test.sh` starts QEMU without `-smp`, so a multi-CPU
-regression is invisible to every gate. Once a full-self-test boot on two
-CPUs is clean, it should run at least in the release boot.
+**The first full-self-test boot on two CPUs (2026-10-09)** -- QEMU with
+`-smp 2 -accel tcg,thread=multi` and every self-test on (what
+`boot-test.sh --smp=2` now does) -- found four more, each fixed on
+lane-a-wip:
+
+- **An AP was told it was CPU 0 until every AP had started.**
+  `smp::current_cpu_index` answered 0 until the BSP set `SMP_INITIALIZED`
+  at the end of bring-up, so AP 1, starting, raised CPU 0's preempt count
+  taking a lock and lowered its own releasing it, leaving CPU 0's count at
+  1: every voluntary switch there was reported as made under a lock nobody
+  held, and once the affinity test's spinning task was pinned to CPU 0,
+  CPU 0 could never preempt it and the boot starved behind it. The gate
+  protected nothing (`fast_cpu_index`'s tier 0 covers the BSP's window);
+  `current_cpu_index` is now `fast_cpu_index`, and an AP writes its
+  `IA32_TSC_AUX` (the RDPID and rdtscp tiers) before its first lock.
+- **CPU 0 had no idle context of its own while the boot ran.** With task 0
+  -- the boot -- asleep, the scheduler's idle fallback idled on the stack
+  of whichever task had just stopped, which tied that task to CPU 0: the
+  affinity test's task pinned itself to CPU 1 and "returned on 0". CPU 0
+  now has a hidden boot-time idle task the fallback switches to
+  (`sched::BOOT_IDLE_ID`, design-decisions 1559).
+- **A container's init ran before it was in its container**
+  (`A-CONTAINER-INIT-RAN-BEFORE-IT-WAS-IN-ITS-CONTAINER`): `container::run`
+  made it runnable, then bound it to its cgroup, namespaces and root. Now
+  the process is spawned unstarted and started last.
+- **A task spawned suspended could be started by a stray wake.** Only
+  `sched::admit` starts one now (`Task::awaiting_admission`).
+
+And five self-tests that held only on one CPU, each now waiting for what it
+checks: the container `exec` and live health-check tests reaped once and
+checked the cgroup while the exited task was still finishing on the other
+CPU (`container::reap_until_gone`); the futex PI-timeout and service
+blocking-accept tests yielded a fixed number of times for a task the wake
+had placed on the other CPU (`selftest::wait_until`, bounded by the clock);
+and the container run/logs/port tests now pin their init to the CPU whose
+interrupts they hold off.
+
+**Verified (lane-a-wip, 2026-10-09):** two CPUs under multi-threaded TCG,
+every self-test on: BOOT_OK after 1628 s, no self-test failed or was carried
+past, no lockup, wedge or switch-under-lock report (fc6aa39db). The kexec
+restart works on two CPUs as well (`SYS_POWER_RELOAD`'s boot: AP 1 stopped
+by NMI, restarted by the new kernel).
+
+**What would make it stay fixed:** a boot test on more than one CPU.
+`scripts/boot-test.sh --smp=N` exists since 2026-10-09 (lane-a-wip):
+`-smp N` under multi-threaded TCG, recorded as a boot of the tree with its
+own `cpus` population, not as an experiment. Nothing runs it by default
+yet; once two-CPU boots are clean it should be the release boot's shape.

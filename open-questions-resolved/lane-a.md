@@ -129,3 +129,8 @@
   antivirus exclusion should be requested. Re-runnable:
   `python bench/file-read-latency.py`.
 
+- A-Q22 [does a file's version history follow it through a rename?] -- resolved 2026-10-09, **A: it follows the file** (§1564).
+- A-Q23 [capsettings and secpolicy: make live, merge or remove?] -- resolved 2026-10-09, **A: capsettings becomes a view of the enforced groups and tags; secpolicy parked** (§1565).
+- A-Q24 [writable shared file mappings, refused in June?] -- resolved 2026-10-09, **A: build them** (§1566, reversing §22/§23).
+- A-Q25 [who lets a debugger take over a running program?] -- resolved 2026-10-09, **Claude's recommendation: the user, asked at the moment, or the program's own advance consent** (§1567).
+- A-Q26 [what does "Always allow" mean?] -- resolved 2026-10-09, **B, remembered for that program by fingerprint, plus an Allow for this run only** (§1568).

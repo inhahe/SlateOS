@@ -48,8 +48,9 @@ Both are here because this is the one script every lane runs at the start of
 a task and on every wakeup, and both failed for want of exactly that.
 
 The operator answers `open-questions/` by writing `open-questions-answers*.txt`
-at the root of the integration tree (`E:/visual studio projects/os`) -- an
-untracked file, on no branch, that no merge can show anyone. This reports any
+at the root of the integration tree (`E:/visual studio projects/os`), or
+`open-questions/answers*.txt` in it -- an untracked file, on no branch, that no
+merge can show anyone. This reports any
 such file, or later version of one, whose content hash is not yet in
 `operator-answers/LEDGER.md` on any lane's branch (`operator-answers/README.md`).
 It only reports: it never fails the run.
@@ -259,11 +260,13 @@ def pending(
 # The operator's answers, and the integration tree (see the module docstring)
 # ---------------------------------------------------------------------------
 
-#: The operator's answers files, at the root of the integration tree, with any
-#: suffix: `open-questions-answers.txt` (2026-09-07), then
-#: `open-questions-answers.2.txt` (2026-09-27). A check for the first name
-#: alone is how the second would be missed.
-ANSWERS_GLOB = "open-questions-answers*.txt"
+#: The operator's answers files, relative to the integration tree, with any
+#: suffix: `open-questions-answers.txt` (2026-09-07) and
+#: `open-questions-answers.2.txt` (2026-09-27) at its root, then
+#: `open-questions/answers.txt` (2026-10-09) beside the questions. A check for
+#: the first name alone is how the second would be missed, and a check of the
+#: root alone how the third would have been.
+ANSWERS_GLOBS = ("open-questions-answers*.txt", "open-questions/*answers*.txt")
 
 #: Where a processed answers file is recorded (`operator-answers/README.md`).
 ANSWERS_LEDGER = "operator-answers/LEDGER.md"
@@ -419,10 +422,11 @@ def integration_tree(worktree: Path) -> Path | None:
 
 
 def unrecorded_answers(tree: Path, keys: set[str]) -> list[tuple[Path, dict[str, list[str]]]]:
-    """Each answers file at the root of `tree` whose content is in no ledger,
-    with what it answers."""
+    """Each answers file in `tree` (`ANSWERS_GLOBS`) whose content is in no
+    ledger, with what it answers."""
     found = []
-    for p in sorted(tree.glob(ANSWERS_GLOB)):
+    paths = sorted({p for pattern in ANSWERS_GLOBS for p in tree.glob(pattern)})
+    for p in paths:
         try:
             data = p.read_bytes()
         except OSError:
@@ -731,12 +735,20 @@ def _self_test() -> int:
         # The suffix a check for the bare name missed.
         (tree / "open-questions-answers.2.txt").write_bytes(b"B-Q9: real Oils\n")
         (tree / "answers.txt").write_bytes(b"A-Q1: A\n")
+        # Beside the questions, where the third one was written; a question's
+        # own file there is not an answers file.
+        (tree / "open-questions").mkdir()
+        (tree / "open-questions" / "answers.txt").write_bytes(b"D-Q3: C\n")
+        (tree / "open-questions" / "D-Q3.md").write_bytes(b"## D-Q3\n")
         found = unrecorded_answers(tree, {answers_key(lf)})
-        check("a recorded file is quiet, a suffixed one is found, others ignored",
-              [(p.name, by) for p, by in found],
-              [("open-questions-answers.2.txt", {"B": ["B-Q9"]})])
-        check("with both recorded, nothing is found",
-              unrecorded_answers(tree, {answers_key(lf), answers_key(b"B-Q9: real Oils")}),
+        check("a recorded file is quiet; a suffixed one and one in open-questions/ are "
+              "found; others ignored",
+              [(p.relative_to(tree).as_posix(), by) for p, by in found],
+              [("open-questions/answers.txt", {"D": ["D-Q3"]}),
+               ("open-questions-answers.2.txt", {"B": ["B-Q9"]})])
+        check("with all recorded, nothing is found",
+              unrecorded_answers(tree, {answers_key(lf), answers_key(b"B-Q9: real Oils"),
+                                        answers_key(b"D-Q3: C")}),
               [])
 
     # --- The integration tree ---

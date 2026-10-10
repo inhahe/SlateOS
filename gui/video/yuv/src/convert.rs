@@ -408,16 +408,37 @@ impl Rows {
 /// picture a pair at a time; each row's chroma depends only on where the row
 /// is, which is what lets a band start anywhere -- on the lower row of a
 /// pair too -- and come out as the same rows of the whole picture do.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "row indices stay within the band, which is within the picture"
-)]
 pub fn i420_bilinear<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
     rows: Rows,
     out: &mut [u32],
+) {
+    walk_420::<D>(planes, width, rows, out, |y, u, v, a, dst| {
+        row_444::<D>(k, y, u, v, a, dst);
+    });
+}
+
+/// One row of a picture whose chroma is at full width -- luma, U, V, alpha
+/// -- into its pixels.
+pub(crate) trait RowOf<S>: FnMut(&[S], &[S], &[S], Option<&[S]>, &mut [u32]) {}
+
+impl<S, F: FnMut(&[S], &[S], &[S], Option<&[S]>, &mut [u32])> RowOf<S> for F {}
+
+/// [`i420_bilinear`]'s walk down a 4:2:0 picture, each row's chroma
+/// upsampled as it upsamples it, each row handed to `row` to turn into
+/// pixels: libyuv's arithmetic, or another (`crate::hdr`).
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "row indices stay within the band, which is within the picture"
+)]
+pub(crate) fn walk_420<D: Depth>(
+    planes: &Planes<'_, D::Sample>,
+    width: usize,
+    rows: Rows,
+    out: &mut [u32],
+    mut row_444: impl RowOf<D::Sample>,
 ) {
     let mut u1 = vec![D::Sample::default(); width];
     let mut u2 = vec![D::Sample::default(); width];
@@ -434,22 +455,22 @@ pub fn i420_bilinear<D: Depth>(
             // The first row, and an even height's last: one chroma row.
             up2_linear::<D>(planes.u.row(c), &mut u1);
             up2_linear::<D>(planes.v.row(c), &mut v1);
-            row_444::<D>(k, planes.y.row(row), &u1, &v1, planes.alpha_row(row), dst);
+            row_444(planes.y.row(row), &u1, &v1, planes.alpha_row(row), dst);
             row += 1;
             continue;
         }
         up2_bilinear::<D>(planes.u.row(c), planes.u.row(c + 1), &mut u1, &mut u2);
         up2_bilinear::<D>(planes.v.row(c), planes.v.row(c + 1), &mut v1, &mut v2);
         if row % 2 == 1 {
-            row_444::<D>(k, planes.y.row(row), &u1, &v1, planes.alpha_row(row), dst);
+            row_444(planes.y.row(row), &u1, &v1, planes.alpha_row(row), dst);
             row += 1;
             let Some(dst) = out_rows.next() else {
                 break;
             };
-            row_444::<D>(k, planes.y.row(row), &u2, &v2, planes.alpha_row(row), dst);
+            row_444(planes.y.row(row), &u2, &v2, planes.alpha_row(row), dst);
         } else {
             // A band that starts on the lower row of a pair.
-            row_444::<D>(k, planes.y.row(row), &u2, &v2, planes.alpha_row(row), dst);
+            row_444(planes.y.row(row), &u2, &v2, planes.alpha_row(row), dst);
         }
         row += 1;
     }
@@ -465,12 +486,25 @@ pub fn i422_linear<D: Depth>(
     rows: Rows,
     out: &mut [u32],
 ) {
+    walk_422::<D>(planes, width, rows, out, |y, u, v, a, dst| {
+        row_444::<D>(k, y, u, v, a, dst);
+    });
+}
+
+/// [`i422_linear`]'s walk, each row handed to `row` to turn into pixels.
+pub(crate) fn walk_422<D: Depth>(
+    planes: &Planes<'_, D::Sample>,
+    width: usize,
+    rows: Rows,
+    out: &mut [u32],
+    mut row_444: impl RowOf<D::Sample>,
+) {
     let mut u = vec![D::Sample::default(); width];
     let mut v = vec![D::Sample::default(); width];
     for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
         up2_linear::<D>(planes.u.row(row), &mut u);
         up2_linear::<D>(planes.v.row(row), &mut v);
-        row_444::<D>(k, planes.y.row(row), &u, &v, planes.alpha_row(row), out);
+        row_444(planes.y.row(row), &u, &v, planes.alpha_row(row), out);
     }
 }
 
@@ -483,9 +517,21 @@ pub fn i444<D: Depth>(
     rows: Rows,
     out: &mut [u32],
 ) {
+    walk_444(planes, width, rows, out, |y, u, v, a, dst| {
+        row_444::<D>(k, y, u, v, a, dst);
+    });
+}
+
+/// [`i444`]'s walk, each row handed to `row` to turn into pixels.
+pub(crate) fn walk_444<S>(
+    planes: &Planes<'_, S>,
+    width: usize,
+    rows: Rows,
+    out: &mut [u32],
+    mut row_444: impl RowOf<S>,
+) {
     for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
-        row_444::<D>(
-            k,
+        row_444(
             planes.y.row(row),
             planes.u.row(row),
             planes.v.row(row),

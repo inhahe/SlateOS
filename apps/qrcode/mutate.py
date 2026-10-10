@@ -197,8 +197,8 @@ MUTATIONS = [
     # -- the pointer -------------------------------------------------------------------------------------------------------
     (
         "a press in a box leaves the keys where they were",
-        "                self.focused_field = at;",
-        "                let _ = at;",
+        "        self.focused_field = at;\n",
+        "        let _ = at;\n",
         ["a_press_in_a_box_puts_the_keys_there"],
     ),
     (
@@ -366,8 +366,8 @@ MUTATIONS += [
     ),
     (
         "the right-click leaves the keys where they were",
-        "        self.focused_field = at;\n        if was != field || self.editor.text() != self.field_text(field) {\n            self.load_editor();\n        }\n        let viewport",
-        "        let _ = at;\n        if was != field || self.editor.text() != self.field_text(field) {\n            self.load_editor();\n        }\n        let viewport",
+        "        if self.focus_field(field).is_none() {\n            return EventResult::Ignored;\n        }\n        let viewport",
+        "        let viewport",
         [QR_MENU],
     ),
     (

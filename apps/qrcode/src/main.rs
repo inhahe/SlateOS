@@ -2160,18 +2160,27 @@ impl QrApp {
         let Some(Target::Field(field)) = self.target_at(x, y) else {
             return EventResult::Ignored;
         };
-        let Some(at) = self.input_mode.fields().iter().position(|f| *f == field) else {
+        if self.focus_field(field).is_none() {
             return EventResult::Ignored;
-        };
-        let was = self.focused_field();
-        self.focused_field = at;
-        if was != field || self.editor.text() != self.field_text(field) {
-            self.load_editor();
         }
         let viewport = (self.window_width, self.window_height);
         self.field_menu
             .open(field, self.editor.edit_menu(), x, y, viewport);
         EventResult::Consumed
+    }
+
+    /// Give the box `field` the keys -- with what it holds, loaded afresh
+    /// when it is another box or was changed from outside -- as a press on it
+    /// does, with either button. The box that had them, or `None` for a box
+    /// this mode does not show.
+    fn focus_field(&mut self, field: Field) -> Option<Field> {
+        let at = self.input_mode.fields().iter().position(|f| *f == field)?;
+        let was = self.focused_field();
+        self.focused_field = at;
+        if was != field || self.editor.text() != self.field_text(field) {
+            self.load_editor();
+        }
+        Some(was)
     }
 
     /// The menu's row `id`, chosen for the box `field`: done to it as its key
@@ -2620,14 +2629,9 @@ impl QrApp {
                 self.set_input_mode(mode);
             }
             Target::Field(field) => {
-                let Some(at) = self.input_mode.fields().iter().position(|f| *f == field) else {
+                let Some(was) = self.focus_field(field) else {
                     return EventResult::Ignored;
                 };
-                let was = self.focused_field();
-                self.focused_field = at;
-                if was != field || self.editor.text() != self.field_text(field) {
-                    self.load_editor();
-                }
                 if let Some(rect) = rect {
                     self.place_caret(rect, x, was == field);
                 }

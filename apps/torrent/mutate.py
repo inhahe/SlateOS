@@ -291,14 +291,14 @@ MAIN = [
     ),
     (
         "the clock runs with no download",
-        "        if self.sessions.is_empty() {\n            return None;\n        }",
+        "        if self.sessions.is_empty() {\n            return menu;\n        }",
         "",
         [WINDOW, CTRL_P],
     ),
     (
         "a download with no peers ticks as fast as one with them",
-        "        } else {\n            Duration::from_secs(1)\n        })",
-        "        } else {\n            PIECE_STEP\n        })",
+        "        } else {\n            Duration::from_secs(1)\n        };",
+        "        } else {\n            PIECE_STEP\n        };",
         [LOOKING],
     ),
     (
@@ -385,6 +385,82 @@ MAIN = [
         '        self.focus_ring_width = settings.focus_ring_width();',
         '        let _ = settings;',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+]
+
+# The magnet box's right-click menu (2026-10-10, requests/c-e-text-fields-
+# have-a-right-click-menu.md), through apps/fieldmenu, on the program's
+# clipboard, the box holding its capacity, the clock for a dimmed row's
+# reason beside the transfers'.
+TM_MENU = "the_magnet_boxs_right_click_menu_pastes_a_link"
+TM_CLOCK = "the_magnet_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
+
+MAIN += [
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "",
+        [TM_MENU, TM_CLOCK],
+    ),
+    (
+        "a right press with the dialog away opens the menu",
+        "        if !self.show_add_dialog || self.target_at(x, y) != Some(Target::MagnetField) {\n",
+        "        if self.target_at(x, y) != Some(Target::MagnetField) && self.show_add_dialog {\n",
+        [TM_MENU],
+    ),
+    (
+        "a row chosen does nothing",
+        "        let _edit = self.magnet_input.edit_command(id);\n",
+        "",
+        [TM_MENU, TM_CLOCK],
+    ),
+    (
+        "the complaint outlives a change from the menu",
+        "        if self.magnet_input.text() != before {\n            self.magnet_error = None;\n        }\n        EventResult::Consumed\n",
+        "        EventResult::Consumed\n",
+        [TM_MENU],
+    ),
+    (
+        "the menu's keys reach the dialog too",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n                    return EventResult::Consumed;\n                }\n",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        [TM_MENU],
+    ),
+    (
+        "a press the menu took reaches the window too",
+        "                fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "                fieldmenu::Outcome::Taken => {}\n",
+        [TM_MENU],
+    ),
+    (
+        "the menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [TM_MENU],
+    ),
+    (
+        "the keys keep a clipboard of their own",
+        "                let did_copy = textline::apply_key_on_clipboard(\n                    &mut self.magnet_input,\n                    key,\n                    MAX_MAGNET_CHARS,\n                    12.0,\n                )\n",
+        "                let did_copy = textline::apply_key(\n                    &mut self.magnet_input,\n                    key,\n                    MAX_MAGNET_CHARS,\n                    \"\",\n                    12.0,\n                )\n",
+        [TM_MENU],
+    ),
+    (
+        "the box holds no capacity",
+        "    input.set_capacity(Some(capacity));\n",
+        "    let _ = capacity;\n",
+        [TM_CLOCK],
+    ),
+    (
+        "no clock while the menu waits",
+        "        let menu = self.field_menu.due_in(self.clock_ms).map(Duration::from_millis);\n",
+        "        let menu: Option<Duration> = None;\n",
+        [TM_CLOCK],
+    ),
+    (
+        "the clock does not move the menu",
+        "                let reason = self.field_menu.tick(self.clock_ms);\n",
+        "                let reason = false;\n",
+        [TM_CLOCK],
     ),
 ]
 

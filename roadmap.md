@@ -4754,6 +4754,14 @@ lane C's `guitk`.
   tooltip a kilobyte, and is told when refused. Lane C draws the named icon
   and keys the tray's arrangement by the program's name.
 
+- `[x]` `[F]` **Text in a font family the drawing names** -- done
+  2026-10-10, with lane C, for `requests/c-f-text-in-a-family-the-drawing-names.md`
+  (`roadmap-detailed.md` §3.5: a font picker's live preview, a document's
+  runs). `FontFamily::Named(FamilyName)` (lane C's `5cc5a8029`, merged) on
+  the wire as `FontFamilyTag::Named` and its name; the compositor loads a
+  named family with the toolkit's own `ensure_family`, so a run is drawn in
+  the face it was measured in, at most four new families a frame.
+
 - `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
   F's part** (the operator's rule, `design-decisions.md` §1242;
   `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).

@@ -286,7 +286,9 @@ impl Tag {
     }
 }
 
-/// Wire encoding of [`FontFamily`].
+/// Wire encoding of [`FontFamily`]: one byte, and for
+/// [`Named`](Self::Named) the family's name after it as a length-prefixed
+/// string ([`write_family`], [`read_family`]).
 ///
 /// Added after `PROTOCOL_VERSION` was set to 1, without bumping it: the two
 /// tags it belongs to are *new* tag bytes, so every frame a version-1 encoder
@@ -295,11 +297,17 @@ impl Tag {
 /// [`DecodeError::BadTag`] naming the byte it did not know. Bumping the
 /// version instead would additionally reject old encoders whose frames are
 /// perfectly decodable, which trades a clear error for a broader outage.
+///
+/// [`Named`](Self::Named) came the same way, for the same reason: a new byte,
+/// whose name an older decoder never reaches because it stops at the byte
+/// with [`DecodeError::BadFontFamily`].
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FontFamilyTag {
     Ui = 0x00,
     Mono = 0x01,
+    /// A family the drawing names (`FontFamily::Named`), its name following.
+    Named = 0x02,
 }
 
 impl FontFamilyTag {
@@ -307,22 +315,39 @@ impl FontFamilyTag {
         match b {
             0x00 => Some(Self::Ui),
             0x01 => Some(Self::Mono),
+            0x02 => Some(Self::Named),
             _ => None,
         }
     }
+}
 
-    fn to_family(self) -> FontFamily {
-        match self {
-            Self::Ui => FontFamily::Ui,
-            Self::Mono => FontFamily::Mono,
+/// [`FontFamily`] on the wire: its [`FontFamilyTag`], and a named family's
+/// name after it.
+fn write_family(out: &mut Vec<u8>, family: FontFamily) {
+    match family {
+        FontFamily::Ui => out.push(FontFamilyTag::Ui as u8),
+        FontFamily::Mono => out.push(FontFamilyTag::Mono as u8),
+        FontFamily::Named(name) => {
+            out.push(FontFamilyTag::Named as u8);
+            write_string(out, name.as_str());
         }
     }
+}
 
-    fn from_family(f: FontFamily) -> Self {
-        match f {
-            FontFamily::Ui => Self::Ui,
-            FontFamily::Mono => Self::Mono,
-        }
+/// A [`FontFamily`] off the wire. A named family's name is held to what
+/// [`FamilyName::new`](guitk::render::FamilyName::new) accepts -- not empty,
+/// at most `FamilyName::MAX_LEN` bytes -- and anything else fails the frame
+/// ([`DecodeError::BadFamilyName`]), as a malformed field does everywhere
+/// here: the compositor draws every client's names, and one it could not
+/// hold is no name.
+fn read_family(r: &mut Reader<'_>) -> Result<FontFamily, DecodeError> {
+    let byte = r.read_u8()?;
+    match FontFamilyTag::from_byte(byte).ok_or(DecodeError::BadFontFamily(byte))? {
+        FontFamilyTag::Ui => Ok(FontFamily::Ui),
+        FontFamilyTag::Mono => Ok(FontFamily::Mono),
+        FontFamilyTag::Named => guitk::render::FamilyName::new(&r.read_string()?)
+            .map(FontFamily::Named)
+            .ok_or(DecodeError::BadFamilyName),
     }
 }
 
@@ -425,6 +450,10 @@ pub enum DecodeError {
     BadFontWeight(u8),
     /// A `FontFamily` tag byte was unknown.
     BadFontFamily(u8),
+    /// A named font family's name that
+    /// [`FamilyName::new`](guitk::render::FamilyName::new) refuses: empty, or
+    /// longer than `FamilyName::MAX_LEN` bytes.
+    BadFamilyName,
     /// A `TextOverflow` tag byte was unknown.
     BadTextOverflow(u8),
     /// A string field was not valid UTF-8.
@@ -523,6 +552,7 @@ impl core::fmt::Display for DecodeError {
             Self::BadTag(b) => write!(f, "unknown command tag {b:#04x}"),
             Self::BadFontWeight(b) => write!(f, "unknown font-weight tag {b:#04x}"),
             Self::BadFontFamily(b) => write!(f, "unknown font-family tag {b:#04x}"),
+            Self::BadFamilyName => write!(f, "not a font family name"),
             Self::BadTextOverflow(b) => write!(f, "unknown text-overflow tag {b:#04x}"),
             Self::BadUtf8 => write!(f, "string field was not valid UTF-8"),
             Self::TooManyImageChanges(n) => {
@@ -873,7 +903,7 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
         }
         RenderCommand::PushFont { family } => {
             out.push(Tag::PushFont as u8);
-            out.push(FontFamilyTag::from_family(*family) as u8);
+            write_family(out, *family);
         }
         RenderCommand::PopFont => {
             out.push(Tag::PopFont as u8);
@@ -1141,14 +1171,9 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
             dy: r.read_f32()?,
         },
         Tag::PopTranslate => RenderCommand::PopTranslate,
-        Tag::PushFont => {
-            let byte = r.read_u8()?;
-            RenderCommand::PushFont {
-                family: FontFamilyTag::from_byte(byte)
-                    .ok_or(DecodeError::BadFontFamily(byte))?
-                    .to_family(),
-            }
-        }
+        Tag::PushFont => RenderCommand::PushFont {
+            family: read_family(r)?,
+        },
         Tag::PopFont => RenderCommand::PopFont,
         Tag::BoxShadow => RenderCommand::BoxShadow {
             x: r.read_f32()?,
@@ -1497,8 +1522,60 @@ mod tests {
     fn font_family_wire_values_are_fixed() {
         assert_eq!(FontFamilyTag::Ui as u8, 0x00);
         assert_eq!(FontFamilyTag::Mono as u8, 0x01);
+        assert_eq!(FontFamilyTag::Named as u8, 0x02);
         assert_eq!(Tag::PushFont as u8, 0x0B);
         assert_eq!(Tag::PopFont as u8, 0x0C);
+    }
+
+    /// A family the drawing names crosses the wire with its name, and the
+    /// commands after it still line up: the name is the one variable-length
+    /// field a `PushFont` can carry, so a codec that misjudged its length
+    /// would take the next command's tag out of it.
+    #[test]
+    fn a_named_family_survives_the_wire() {
+        for name in [
+            "Noto Serif",
+            "a",
+            &"x".repeat(guitk::render::FamilyName::MAX_LEN),
+        ] {
+            let family = FontFamily::named(name).unwrap();
+            let mut t = RenderTree::new();
+            t.commands.push(RenderCommand::PushFont { family });
+            t.commands.push(RenderCommand::PopFont);
+            t.commands.push(RenderCommand::PushFont {
+                family: FontFamily::Mono,
+            });
+            let bytes = encode_frame_to_vec(&t);
+            let (back, used) = decode_frame(&bytes).unwrap();
+            assert_eq!(used, bytes.len(), "{name:?}");
+            assert_eq!(back.commands, t.commands, "{name:?}");
+        }
+    }
+
+    /// A name `FamilyName` cannot hold fails the frame rather than being cut
+    /// or replaced: empty, or one byte past the limit. A hostile client gets
+    /// no name the compositor would have to invent a meaning for.
+    #[test]
+    fn a_family_name_out_of_bounds_is_refused() {
+        for name in [
+            String::new(),
+            "x".repeat(guitk::render::FamilyName::MAX_LEN + 1),
+        ] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&MAGIC);
+            bytes.push(PROTOCOL_VERSION);
+            bytes.push(0);
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.push(Tag::PushFont as u8);
+            bytes.push(FontFamilyTag::Named as u8);
+            write_string(&mut bytes, &name);
+            assert_eq!(
+                decode_frame(&bytes).err(),
+                Some(DecodeError::BadFamilyName),
+                "{} bytes",
+                name.len()
+            );
+        }
     }
 
     #[test]

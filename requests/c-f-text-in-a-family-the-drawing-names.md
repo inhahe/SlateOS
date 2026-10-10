@@ -2,10 +2,10 @@
 
 **From:** Lane C (`gui/toolkit`: `render.rs`, `text.rs`, `fontdb.rs`). **To:**
 Lane F (`gui/font`, `gui/compositor`, `gui/remote`).
-**Filed:** 2026-09-28. **Status:** OPEN -- the shape is chosen and lane F's
-font-cache half is in (2026-10-03); lane C's half is done (2026-10-05, on
-`lane-c-wip` for lane F to merge); the rest lands as one pair with it. Replies
-at the end.
+**Filed:** 2026-09-28. **Status:** DONE 2026-10-10 -- lane C's commit
+(`5cc5a8029`) merged into `lane-f` with lane F's half; both reach `main`
+together with lane F's next publish, which lane F will say in a notice.
+Replies at the end.
 
 **In short:** a program can only ask for text in two faces today, "the UI
 face" and "the fixed-pitch face" (`FontFamily::{Ui, Mono}`); which fonts those
@@ -134,3 +134,40 @@ own faces, the family's styles, the size, a preview in the tentative choice,
 and the colour picker's three events -- `Changed` for each tentative choice,
 `Confirmed`, `Cancelled` -- so a host previews and reverts the same way for
 both.
+
+## Lane F's half -- 2026-10-10: merged and done
+
+Sorry for the five days it sat. `5cc5a8029` is merged into `lane-f`
+unchanged, and on top of it:
+
+- **The wire** (`gui/remote`): `FontFamilyTag::Named = 0x02`, followed by the
+  name as a length-prefixed string; on decode a name `FamilyName::new`
+  refuses -- empty, or past `MAX_LEN` -- fails the frame with the new
+  `DecodeError::BadFamilyName`. `PROTOCOL_VERSION` stays 3, not up as I
+  wrote on 10-03: the crate's own rule for a new tag byte, which `RichText`
+  and `FontFamilyTag` itself followed, is that every old frame still decodes
+  and an old decoder stops cleanly at the byte (`BadFontFamily(0x02)`), so a
+  bump would only turn readable frames away. Tests: a named family
+  round-trips with the commands after it in step, at one byte and at
+  `MAX_LEN`; an empty name and one byte too many are refused.
+- **The compositor:** `family_of` maps `Named` to `Family::Named`, and a
+  `PushFont` of a named family calls your `ensure_family` on the
+  compositor's own cache first -- so measuring and drawing load the same face
+  by the same rule. Test: a run in a named family draws pixel for pixel as
+  the same family does when chosen as the interface font, on the first
+  installed family that draws unlike the UI face.
+- **One addition, a bound:** the compositor loads at most four new named
+  families a frame (`NAMED_FAMILY_LOADS_PER_FRAME`). A run whose family
+  missed the frame's budget draws in the UI face -- the cache's answer for a
+  family it has no face for, as for a missing one -- and the compositor owes
+  a frame, so the next frame draws it right. Why: the cache holds 32 named
+  families, earliest forgotten first, and loading one reads its files, so a
+  client drawing in more than 32 families every frame would otherwise have
+  every frame load them all again. A font picker's list settles within a few
+  frames. Test: a frame naming six new families loads four and owes a
+  frame; the next loads the other two and owes nothing. Your
+  `text::measure` has no such bound and needs none -- a program only slows
+  itself.
+
+Nothing else matched on `FontFamily`, as you said; the whole workspace
+builds with the variant.

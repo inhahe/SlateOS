@@ -4207,8 +4207,22 @@ fn family_of(family: FontFamily) -> Family {
     match family {
         FontFamily::Ui => Family::Ui,
         FontFamily::Mono => Family::Mono,
+        FontFamily::Named(name) => Family::Named(name),
     }
 }
+
+/// How many named font families the compositor loads in one frame, at most
+/// ([`RenderEngine::begin_frame`]).
+///
+/// Loading a family reads its files, and the cache holds only
+/// `osfont::system::MAX_NAMED_FAMILIES` of them, earliest forgotten first: a
+/// client drawing in more families than that, again every frame, would have
+/// every frame load them all anew. With the bound, a frame loads at most
+/// this many, a run whose family could not be loaded yet is drawn in the UI
+/// face, and the frame after loads the next ones -- so an honest drawing
+/// (a font picker's list, scrolled) settles within a few frames, and a
+/// thrashing one costs a few loads a frame rather than dozens.
+const NAMED_FAMILY_LOADS_PER_FRAME: u32 = 4;
 
 /// Draw a shaped run from `pen`, stopping before the first glyph that would
 /// cross `limit`, and leave `pen` where it stopped.
@@ -4331,6 +4345,13 @@ struct RenderEngine {
     /// and the status bar drawn after it must get the UI face back rather than
     /// whatever the last push happened to be.
     font_stack: Vec<FontFamily>,
+    /// Named families loaded since [`begin_frame`](Self::begin_frame), against
+    /// [`NAMED_FAMILY_LOADS_PER_FRAME`].
+    named_loads: u32,
+    /// Whether a named family was left unloaded this frame for want of the
+    /// budget: the frame drew its runs in the UI face, and another frame is
+    /// owed to draw them right ([`take_deferred_load`](Self::take_deferred_load)).
+    deferred_load: bool,
 }
 
 impl RenderEngine {
@@ -4362,7 +4383,45 @@ impl RenderEngine {
             translate_stack: TranslateStack::default(),
             fonts,
             font_stack: Vec::new(),
+            named_loads: 0,
+            deferred_load: false,
         }
+    }
+
+    /// A new frame: its budget of named-family loads is whole again.
+    fn begin_frame(&mut self) {
+        self.named_loads = 0;
+    }
+
+    /// Whether a named family was left for a later frame since this was last
+    /// asked, clearing it.
+    fn take_deferred_load(&mut self) -> bool {
+        core::mem::take(&mut self.deferred_load)
+    }
+
+    /// Make the named family `name` drawable, as the toolkit makes it
+    /// measurable -- [`guitk::text::ensure_family`], the same rule on this
+    /// process's own cache, so a run is drawn in the face it was measured in
+    /// -- within this frame's budget of loads. A family already in the cache
+    /// costs nothing and no budget; one past the budget is left for a later
+    /// frame, its runs drawn in the UI face meanwhile, which is what the cache
+    /// answers for a named family it has no face for.
+    fn ensure_named(&mut self, name: guitk::render::FamilyName) {
+        if self
+            .fonts
+            .has_face(Family::Named(name), osfont::system::Weight::Regular)
+        {
+            return;
+        }
+        if self.named_loads >= NAMED_FAMILY_LOADS_PER_FRAME {
+            self.deferred_load = true;
+            return;
+        }
+        self.named_loads = self.named_loads.saturating_add(1);
+        // Whether it loaded is the cache's to answer from now on: a family
+        // this machine lacks is drawn in the UI face, and remembered as
+        // missing so it costs no search again.
+        let _ = guitk::text::ensure_family(&mut self.fonts, name);
     }
 
     /// Execute a list of render commands, drawing into the framebuffer within
@@ -4548,6 +4607,9 @@ impl RenderEngine {
                 self.translate_stack.pop();
             }
             RenderCommand::PushFont { family } => {
+                if let FontFamily::Named(name) = family {
+                    self.ensure_named(*name);
+                }
                 self.font_stack.push(*family);
             }
             RenderCommand::PopFont => {
@@ -10083,12 +10145,17 @@ impl Compositor {
         }
         self.scanout = Scanout::Composited;
 
+        self.render_engine.begin_frame();
         let (region, change) = self.plan_repaint();
         let plan = self.stack_plan();
         self.repaint_background(&region, &plan);
         self.repaint_windows(&region, &plan);
         self.damage_history.record(change);
-        self.full_recomposite = false;
+        // A named family this frame had no budget left to load drew its runs
+        // in the UI face; the next frame, with a fresh budget, draws them
+        // again. Whole, because which windows named it is not recorded, and
+        // it lasts only the few frames a long list of families takes to load.
+        self.full_recomposite = self.render_engine.take_deferred_load();
         self.framebuffer_stale = false;
         self.damage.clear();
 
@@ -21350,6 +21417,143 @@ mod tests {
             with.title_bar_focused, accent,
             "the focused bar changed to something that is not the accent"
         );
+    }
+
+    /// What the named-family tests draw: Latin every face has, wide enough
+    /// that two families' glyphs differ.
+    const NAMED_SAMPLE: &str = "Hamburgefonstiv 0123 WMQ";
+
+    /// A window drawing [`NAMED_SAMPLE`] in `family`.
+    fn text_window(comp: &mut Compositor, family: FontFamily) -> WindowId {
+        let mut spec = WindowSpec::new("Text", 360, 48);
+        spec.position = Some((10, 10));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.submit_render(
+            id,
+            vec![
+                RenderCommand::PushFont { family },
+                RenderCommand::Text {
+                    x: 4.0,
+                    y: 8.0,
+                    text: NAMED_SAMPLE.to_string(),
+                    color: Color::rgba(0, 0, 0, 255),
+                    font_size: 20.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                },
+                RenderCommand::PopFont,
+            ],
+        )
+        .expect("render");
+        id
+    }
+
+    /// Window `id`'s client area, drawn alone onto a cleared surface.
+    fn drawn_client(comp: &mut Compositor, id: WindowId) -> Vec<u32> {
+        comp.refresh_window_scales();
+        comp.backend.clear(0xFF00_0000);
+        comp.render_window(id);
+        let client = comp.window_ref(id).expect("window").client_rect();
+        let mut out = Vec::new();
+        for y in client.y..client.bottom() {
+            for x in client.x..client.right() {
+                let (x, y) = (u32::try_from(x).expect("x"), u32::try_from(y).expect("y"));
+                out.push(working_pixel(&comp.backend, x, y).unwrap_or(0));
+            }
+        }
+        out
+    }
+
+    /// **Text in a family the drawing names is drawn in that family's face**
+    /// -- exactly as it is drawn when the user chooses the same family as the
+    /// interface font, which is the face the program measured it in
+    /// (`guitk::text::ensure_family` loads both by one rule).
+    ///
+    /// The family is the first installed one that, *chosen as the interface
+    /// font*, draws unlike the default interface font -- found through the
+    /// settings, not through named runs, so a compositor that drew named runs
+    /// in the UI face has no family to hide behind: the comparison it then
+    /// fails is against the chosen family's drawing. A host with no such
+    /// family passes vacuously.
+    #[test]
+    fn a_named_family_is_drawn_in_the_face_it_names() {
+        let mut plain = ungated_compositor(400, 100);
+        let ui_window = text_window(&mut plain, FontFamily::Ui);
+        let default_ui = drawn_client(&mut plain, ui_window);
+        let found = guitk::text::available_families()
+            .into_iter()
+            .find_map(|family| {
+                let named = FontFamily::named(&family)?;
+                let mut settings = AppearanceSettings::default();
+                settings.fonts.ui_font.clone_from(&family);
+                let mut chosen = ungated_compositor(400, 100);
+                chosen.set_appearance(settings);
+                let id = text_window(&mut chosen, FontFamily::Ui);
+                let as_ui = drawn_client(&mut chosen, id);
+                (as_ui != default_ui).then_some((family, named, as_ui))
+            });
+        let Some((family, named, as_ui)) = found else {
+            return;
+        };
+        let mut comp = ungated_compositor(400, 100);
+        let id = text_window(&mut comp, named);
+        assert_eq!(drawn_client(&mut comp, id), as_ui, "{family}");
+    }
+
+    /// **A frame loads at most its budget of named families, and the frames
+    /// after it the rest** (`NAMED_FAMILY_LOADS_PER_FRAME`): the first frame
+    /// owes another, which draws the runs left in the UI face in their own,
+    /// and then nothing is owed.
+    #[test]
+    fn a_frame_loads_its_budget_of_named_families_and_the_next_the_rest() {
+        let budget = usize::try_from(NAMED_FAMILY_LOADS_PER_FRAME).expect("budget");
+        let names: Vec<guitk::render::FamilyName> = guitk::text::available_families()
+            .iter()
+            .filter_map(|family| guitk::render::FamilyName::new(family))
+            .filter(|&name| guitk::text::ensure_family(&mut FontCache::new(), name))
+            .take(budget + 2)
+            .collect();
+        if names.len() < budget + 2 {
+            return;
+        }
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Picker".to_string(), 360, 260, 1);
+        let mut commands = Vec::new();
+        for (row, &name) in names.iter().enumerate() {
+            commands.push(RenderCommand::PushFont {
+                family: FontFamily::Named(name),
+            });
+            commands.push(RenderCommand::Text {
+                x: 4.0,
+                y: 4.0 + 24.0 * row as f32,
+                text: NAMED_SAMPLE.to_string(),
+                color: Color::rgba(0, 0, 0, 255),
+                font_size: 18.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            commands.push(RenderCommand::PopFont);
+        }
+        comp.submit_render(id, commands).expect("render");
+        let loaded = |comp: &Compositor| {
+            names
+                .iter()
+                .filter(|&&name| {
+                    comp.render_engine
+                        .fonts
+                        .has_face(Family::Named(name), Weight::Regular)
+                })
+                .count()
+        };
+
+        assert!(comp.compose_frame());
+        assert_eq!(loaded(&comp), budget, "the first frame loads its budget");
+        assert!(comp.frame_owed(), "and owes a frame for the rest");
+        assert!(comp.compose_frame());
+        assert_eq!(loaded(&comp), budget + 2, "the next frame loads the rest");
+        assert!(!comp.frame_owed(), "every run is in its own face now");
     }
 
     #[test]

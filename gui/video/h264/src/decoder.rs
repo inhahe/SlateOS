@@ -122,6 +122,9 @@ pub(crate) struct SliceContext {
 
     // The macroblock being decoded, and its neighbours.
     pub(crate) prev_mb_skipped: i32,
+    /// In an MBAFF frame, whether the bottom macroblock of the pair is
+    /// skipped, read with the top one's skip flag (CABAC).
+    pub(crate) next_mb_skipped: i32,
     pub(crate) chroma_pred_mode: i32,
     pub(crate) intra16x16_pred_mode: i32,
     /// Each 4x4 block's intra prediction mode, `scan8`-laid with the
@@ -187,6 +190,10 @@ pub(crate) struct SliceContext {
     /// FFmpeg grows them -- zeroed only then.
     pub(crate) top_borders: [Vec<[u16; 48]>; 2],
     pub(crate) top_borders_allocated: [usize; 2],
+    /// The arithmetic decoder of a CABAC slice, and its context states
+    /// (`cabac`, `cabac_state`).
+    pub(crate) cabac: crate::cabac::Cabac,
+    pub(crate) cabac_state: [u8; 1024],
 }
 
 impl SliceContext {
@@ -246,6 +253,7 @@ impl Default for SliceContext {
             col_parity: 0,
             col_fieldoff: 0,
             prev_mb_skipped: 0,
+            next_mb_skipped: 0,
             chroma_pred_mode: 0,
             intra16x16_pred_mode: 0,
             intra4x4_pred_mode_cache: [0; 40],
@@ -285,6 +293,8 @@ impl Default for SliceContext {
             intra_pcm_pos: 0,
             top_borders: [Vec::new(), Vec::new()],
             top_borders_allocated: [0; 2],
+            cabac: crate::cabac::Cabac::default(),
+            cabac_state: [0; 1024],
         }
     }
 }

@@ -4551,8 +4551,18 @@ lane C's `guitk`.
           its size only (953 pictures in 37 streams). `tools/h264cmp.py`
           runs both decoders on a stream and names the first macroblock
           that parts -- its reconstruction, its filtering, its vectors.
-        - `[ ]` CABAC (`cabac.c`, `h264_cabac.c`): its slices are refused
-          until then, so 398 streams have the right pictures but no samples.
+        - `[x]` CABAC (2026-10-10): `cabac.c` and `cabac_functions.h` as
+          FFmpeg builds them without assembly, and `h264_cabac.c`. With
+          it every one of the 716 streams is decoded, and 714 match FFmpeg
+          in every picture (38,701 of 38,889; 397 of the 398 CABAC
+          streams). The two that do not: `FM1_FT_E`, above, and
+          `extradata-reload-multi-stsd.mov`, whose MP4 changes parameter
+          sets midway through new extradata, which the decoder cannot yet
+          be handed (todo.txt). The checksums are now taken as each
+          picture leaves FFmpeg's decoder (`FFDBG_FRAMECRC`) rather than
+          from what its command line passes on, which converts every
+          picture to the first one's format: nine streams that change size
+          or format midway had been compared converted.
         - `[ ]` Error concealment (`error_resilience.c`): a lost or refused
           slice's macroblocks are left unwritten rather than guessed.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).

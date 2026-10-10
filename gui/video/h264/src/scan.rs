@@ -22,6 +22,7 @@
               within the array that holds them"
 )]
 
+use crate::decoder::DecodeError;
 use crate::tables::{ZIGZAG_DIRECT, ZIGZAG_SCAN};
 
 /// A field's 4x4 scan, raster positions (`field_scan`).
@@ -140,6 +141,39 @@ impl ScanTables {
         } else {
             (base + ZIGZAG, base + ZIGZAG8X8_CAVLC)
         }
+    }
+
+    /// The same for CABAC, whose 8x8 blocks are one run of 64, not four
+    /// interleaved runs of 16.
+    pub(crate) fn cabac(field: bool, qp0: bool) -> (usize, usize) {
+        let base = if qp0 { Q0 } else { 0 };
+        if field {
+            (base + FIELD, base + FIELD8X8)
+        } else {
+            (base + ZIGZAG, base + ZIGZAG8X8)
+        }
+    }
+}
+
+/// Where a block's coefficients are placed: the scan read, as an array and
+/// where in it the scan starts -- which may be read before or past that
+/// table, into the tables around it, as FFmpeg's pointer is.
+#[derive(Clone, Copy)]
+pub(crate) struct Scan<'a> {
+    pub(crate) tables: &'a [u8],
+    pub(crate) start: usize,
+}
+
+impl Scan<'_> {
+    /// The position `at` places past the scan's start. A position before
+    /// the first table or past the last is one FFmpeg reads from whatever
+    /// lies there in its context; it is refused here.
+    pub(crate) fn get(self, at: isize) -> Result<usize, DecodeError> {
+        self.start
+            .checked_add_signed(at)
+            .and_then(|p| self.tables.get(p))
+            .map(|&v| usize::from(v))
+            .ok_or(DecodeError)
     }
 }
 

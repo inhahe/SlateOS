@@ -45,7 +45,7 @@ use crate::mbtype::{
 use crate::mvpred::{LIST_NOT_USED, PART_NOT_AVAILABLE, fill, tab};
 use crate::picture::table_offset;
 use crate::pred::{DC_128_PRED8X8, check_intra_pred_mode, check_intra4x4_pred_mode};
-use crate::scan::ScanTables;
+use crate::scan::{Scan, ScanTables};
 use crate::slice::{TYPE_B, TYPE_I, TYPE_P, TYPE_SI};
 use crate::vlc::{Vlc, VlcError};
 
@@ -195,28 +195,6 @@ fn pred_non_zero_count(nnz: &[u8; 120], n: usize) -> usize {
         i = (i + 1) >> 1;
     }
     (i & 31) as usize
-}
-
-/// Where a block's coefficients are placed: the scan read, as an array and
-/// where in it the scan starts -- which may be read before or past that
-/// table, into the tables around it, as FFmpeg's pointer is.
-#[derive(Clone, Copy)]
-struct Scan<'a> {
-    tables: &'a [u8],
-    start: usize,
-}
-
-impl Scan<'_> {
-    /// The position `at` places past the scan's start. A position before
-    /// the first table or past the last is one FFmpeg reads from whatever
-    /// lies there in its context; it is refused here.
-    fn get(self, at: isize) -> Result<usize, DecodeError> {
-        self.start
-            .checked_add_signed(at)
-            .and_then(|p| self.tables.get(p))
-            .map(|&v| usize::from(v))
-            .ok_or(DecodeError)
-    }
 }
 
 /// One block's coefficients (`decode_residual`): at most `max_coeff` of

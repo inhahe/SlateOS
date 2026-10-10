@@ -45,6 +45,10 @@
 //!   slice's macroblocks decoded in turn and filtered a row behind.
 //! - `cavlc`: `h264_cavlc.c` -- a macroblock's syntax coded with CAVLC:
 //!   its type, prediction modes, references, vectors and residual.
+//! - `cabac`: `cabac.c` and `cabac_functions.h` -- the arithmetic decoder
+//!   CABAC slices are read with, as FFmpeg's C build has it.
+//! - `cabacmb`: `h264_cabac.c` -- a macroblock's syntax coded with CABAC,
+//!   from its context states.
 //! - `mbtype`: the macroblock and sub-macroblock types of `h264dec.h`,
 //!   `h264data.c` and `mpegutils.h`, and `scan8`.
 //! - `mvpred`: `h264_mvpred.h` -- what a macroblock's neighbours hold,
@@ -68,9 +72,7 @@
 //! - `vlc`: `vlc.c`'s table building and `get_vlc2` -- variable-length
 //!   codes read as FFmpeg reads them, the invalid ones included.
 //!
-//! Two parts are still to be translated: CABAC (`cabac.c`,
-//! `h264_cabac.c`), whose slices are refused until it is, so a stream coded
-//! with it has the right pictures with no samples; and error concealment
+//! One part is still to be translated: error concealment
 //! (`error_resilience.c`), without which the macroblocks of a slice that is
 //! lost or refused are left unwritten rather than guessed from their
 //! neighbours.
@@ -78,6 +80,8 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod cabac;
+mod cabacmb;
 mod cavlc;
 mod decoder;
 mod direct;

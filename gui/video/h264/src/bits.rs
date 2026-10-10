@@ -60,6 +60,11 @@ pub(crate) struct Bits<'a> {
     /// Whether reads count past `size_in_bits + 8` (FFmpeg's
     /// `UNCHECKED_BITSTREAM_READER`); see the module documentation.
     unchecked: bool,
+    /// Where `buf` starts in the allocation it is part of, whose start
+    /// FFmpeg aligns: what an address in it is, modulo the alignment. One
+    /// thing reads it, CABAC's start (`Cabac::init`), which reads two or
+    /// three bytes by the parity of an address.
+    origin: usize,
 }
 
 impl<'a> Bits<'a> {
@@ -79,7 +84,19 @@ impl<'a> Bits<'a> {
             )]
             size_in_bits: bit_size as u32,
             unchecked: false,
+            origin: 0,
         })
+    }
+
+    /// The same reader, its buffer `origin` bytes into an aligned
+    /// allocation.
+    pub(crate) fn at_origin(self, origin: usize) -> Self {
+        Self { origin, ..self }
+    }
+
+    /// Where the buffer starts in its aligned allocation.
+    pub(crate) fn origin(&self) -> usize {
+        self.origin
     }
 
     /// Every bit of `buf` (`init_get_bits8`).

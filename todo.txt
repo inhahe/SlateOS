@@ -59327,15 +59327,6 @@ is still run by hand, not by `boot-test.sh`.
   H.264 film grain sample and x264 writes none. **Do it** after the loop
   filter: write film grain SEIs into conformance streams with the tests'
   `Syntax` writer and compare each picture with FFmpeg's.
-- **h264: CABAC slices are refused** (`gui/video/h264/src/slicedata.rs`,
-  `decode_slice_into`). The macroblock layer is in for CAVLC and held to
-  FFmpeg 8.1.3 sample for sample (`decoder/tests.rs`,
-  `pictures_are_ffmpegs_sample_for_sample`), but a slice coded with CABAC
-  is refused at its first macroblock, so the 398 streams coded with it
-  have the right pictures with no samples. **Translate** `cabac.c`,
-  `cabac_functions.h` and `h264_cabac.c` next, held the same way; then the
-  test compares every stream, and `tools/h264cmp.py` finds the first
-  macroblock that parts from FFmpeg.
 - **h264: no error concealment** (`error_resilience.c`, with
   `ff_er_frame_start`/`er_add_slice` in `h264_slice.c`, the frame-end call
   and `h264_er_decode_mb` in `h264dec.c`, `ff_h264_set_erpic` in
@@ -59347,3 +59338,15 @@ is still run by hand, not by `boot-test.sh`.
   conceals: from picture 119) and damaged or cut streams. **Translate it**
   after CABAC, with `tools/ffdbg`'s `FFDBG_ER` to see where FFmpeg
   conceals.
+- **h264: no new extradata with a packet** (`gui/video/h264/src/lib.rs`,
+  `Decoder::decode`). A MOV with several sample descriptions hands the
+  decoder new parameter sets with the packet where the description changes
+  (`AV_PKT_DATA_NEW_EXTRADATA`, read at the top of `h264_decode_frame`,
+  which runs `ff_h264_decode_extradata` on it and nothing more). `decode`
+  takes no side data, so `h264/extradata-reload-multi-stsd.mov` decodes its
+  third picture with the old parameter sets and its slices fail. **Add**
+  `Decoder::new_extradata(&[u8])` (FFmpeg's call alone -- not `configure`,
+  which also flushes); and in `tools/pict_expect.py` record which packets
+  carry it, with its bytes, for the tests to hand over at the same packet;
+  and in the MP4 reader (`gui/video/mp4`) produce it where the sample
+  description changes.

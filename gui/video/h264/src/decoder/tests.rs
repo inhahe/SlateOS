@@ -379,8 +379,8 @@ fn picture_bytes(p: &crate::Picture) -> Vec<u8> {
 }
 
 /// Each picture this decoder shows of a stream, summed, and whether the
-/// stream is coded with CABAC -- not yet translated, so not yet compared.
-/// With `raw`, the pictures themselves end to end too.
+/// stream is coded with CABAC (counted apart in the report). With `raw`,
+/// the pictures themselves end to end too.
 fn sums(s: &Stream, delay: u32, mut raw: Option<&mut Vec<u8>>) -> (Vec<String>, bool, Vec<String>) {
     let mut d = s.open(delay);
     let mut out = Vec::new();
@@ -404,8 +404,7 @@ fn sums(s: &Stream, delay: u32, mut raw: Option<&mut Vec<u8>>) -> (Vec<String>, 
 }
 
 /// Every picture's samples FFmpeg's, as its `framecrc` sums them
-/// (`.crc`, `tools/pict_expect.py --add-crc`). Streams coded with CABAC
-/// are counted apart until it is translated.
+/// (`.crc`, `tools/pict_expect.py --add-crc`).
 #[test]
 #[ignore = "needs FFmpeg's FATE samples and tools/pict_expect.py's lines: set H264_FATE and H264_PICT"]
 fn pictures_are_ffmpegs_sample_for_sample() {
@@ -430,7 +429,7 @@ fn pictures_are_ffmpegs_sample_for_sample() {
     });
     files.sort();
     let (mut compared, mut cabac_streams, mut pictures, mut matching) = (0, 0, 0, 0);
-    let mut undefined = 0;
+    let (mut undefined, mut cabac_differ) = (0, 0);
     let mut failures = Vec::new();
     for file in &files {
         let rel = file.strip_prefix(&pict).unwrap();
@@ -450,7 +449,6 @@ fn pictures_are_ffmpegs_sample_for_sample() {
         let (mut got, cabac, errors) = sums(&stream, delay, dump.as_ref().map(|_| &mut raw));
         if cabac {
             cabac_streams += 1;
-            continue;
         }
         // `<size>, ?`: a picture with samples FFmpeg never wrote, which it
         // leaves undefined -- any of that size will do.
@@ -470,6 +468,9 @@ fn pictures_are_ffmpegs_sample_for_sample() {
                 format!(" ({} slices failed; first: {e})", errors.len())
             });
             failures.push(format!("{name}: {d}{why}"));
+            if cabac {
+                cabac_differ += 1;
+            }
             if let Some(dump) = &dump {
                 let to = sibling(&dump.join(&name), ".yuv");
                 std::fs::create_dir_all(to.parent().unwrap()).unwrap();
@@ -479,15 +480,14 @@ fn pictures_are_ffmpegs_sample_for_sample() {
     }
     let report = failures.join("\n");
     println!(
-        "{compared} streams compared, {} differ; {matching} of {pictures} pictures match \
-         ({undefined} of them only in size, FFmpeg leaving their samples undefined); \
-         {cabac_streams} CABAC streams not compared",
+        "{compared} streams compared ({cabac_streams} CABAC), {} differ ({cabac_differ} CABAC); \
+         {matching} of {pictures} pictures match ({undefined} of them only in size, FFmpeg \
+         leaving their samples undefined)",
         failures.len()
     );
     assert!(
         failures.is_empty(),
-        "{} of {compared} streams differ ({matching} of {pictures} pictures match; {cabac_streams} \
-         CABAC streams not compared):\n{report}",
+        "{} of {compared} streams differ ({matching} of {pictures} pictures match):\n{report}",
         failures.len()
     );
 }

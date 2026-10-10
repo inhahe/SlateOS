@@ -142,7 +142,12 @@ impl Splitter {
     /// A reader of `nal`'s syntax, past its header byte, as `nal->gb` is
     /// left once the header is read.
     pub(crate) fn reader<'s>(&'s self, packet: &'s [u8], nal: &Nal) -> Option<Bits<'s>> {
-        let mut gb = Bits::new(self.data(packet, nal), nal.size_bits)?;
+        // Both buffers start aligned, the packet as FFmpeg's demuxers and
+        // parsers allocate it, the RBSP buffer as av_malloc does.
+        let origin = match nal.data {
+            Place::Rbsp(at) | Place::Packet(at) => at,
+        };
+        let mut gb = Bits::new(self.data(packet, nal), nal.size_bits)?.at_origin(origin);
         gb.skip(8);
         Some(gb)
     }

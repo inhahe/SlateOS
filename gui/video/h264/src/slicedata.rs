@@ -31,6 +31,7 @@
 use std::sync::Arc;
 
 use crate::bits::Bits;
+use crate::cabacmb::Data;
 use crate::decoder::{Context, DecodeError, SliceContext};
 use crate::loopfilter::Planes;
 use crate::mbtype::is_interlaced;
@@ -74,16 +75,70 @@ impl Context {
             sl.hdr.deblocking_filter = 0;
         }
         let pps = self.ps.pps.clone().ok_or(DecodeError)?;
+        let field_or_mbaff = self.picture_structure != PICT_FRAME || self.mb_aff_frame;
         if pps.cabac != 0 {
-            // CABAC is the next part of the translation.
-            sl.hdr.deblocking_filter = orig_deblock;
-            return Err(DecodeError);
+            gb.align();
+            let d = Data {
+                buf: gb.buffer(),
+                origin: gb.origin(),
+            };
+            sl.cabac.init(
+                d.buf,
+                d.origin,
+                (gb.count() / 8) as isize,
+                ((gb.left() + 7) / 8) as isize,
+            )?;
+            self.init_cabac_states(sl)?;
+            loop {
+                if sl.mb_x + sl.mb_y * self.mb_width >= sl.next_slice_idx {
+                    // "Slice overlaps with next".
+                    return Err(DecodeError);
+                }
+                let mut ret = self.decode_mb_cabac(sl, d);
+                if ret.is_ok() {
+                    self.hl_decode_mb(sl, frame, d.buf)?;
+                }
+                if ret.is_ok() && self.mb_aff_frame {
+                    sl.mb_y += 1;
+                    ret = self.decode_mb_cabac(sl, d);
+                    if ret.is_ok() {
+                        self.hl_decode_mb(sl, frame, d.buf)?;
+                    }
+                    sl.mb_y -= 1;
+                }
+                let eos = sl.cabac.terminate(d.buf);
+                // A slice may read a little past its data (the workaround
+                // for truncated slices is off, as it is by default), but no
+                // more than four bytes.
+                if ret.is_err() || sl.cabac.pos > sl.cabac.end + 4 {
+                    return Err(DecodeError);
+                }
+                sl.mb_x += 1;
+                if sl.mb_x >= self.mb_width {
+                    self.loop_filter(sl, frame, lf_x_start, sl.mb_x);
+                    sl.mb_x = 0;
+                    lf_x_start = 0;
+                    sl.mb_y += 1;
+                    if field_or_mbaff {
+                        sl.mb_y += 1;
+                        if self.mb_aff_frame && sl.mb_y < self.mb_height {
+                            self.predict_field_decoding_flag(sl);
+                        }
+                    }
+                }
+                if eos != 0 || sl.mb_y >= self.mb_height {
+                    if sl.mb_x > lf_x_start {
+                        self.loop_filter(sl, frame, lf_x_start, sl.mb_x);
+                    }
+                    sl.hdr.deblocking_filter = orig_deblock;
+                    return Ok(());
+                }
+            }
         }
 
         // Macroblocks are read as h264_cavlc.c reads them.
         gb.set_unchecked(true);
         let nal = gb.buffer();
-        let field_or_mbaff = self.picture_structure != PICT_FRAME || self.mb_aff_frame;
         loop {
             if sl.mb_x + sl.mb_y * self.mb_width >= sl.next_slice_idx {
                 // "Slice overlaps with next".

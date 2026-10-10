@@ -3262,6 +3262,46 @@ word; text inside them that says "lane C" is history.
   prerequisite of the two items that open this list. Do not start until the
   large-initiative ordering reaches it.
 
+- `[E]` **The operator's backup program, LithicBackup, reimplemented for
+  SlateOS** (design-decisions §1050, the operator's answer to B-Q18: "a
+  reimplementation of `d:\visual studio projects\backup` in a language we
+  support, or if we get Mono ported, we can just run it on that"). Adopted
+  2026-10-10 from the list in lane B's backlog. The program is C# for .NET 8
+  (`net8.0-windows`): about 50,000 lines in 168 files, a WPF window, and
+  Windows underneath it -- the NTFS change journal says what changed, IMAPI2
+  burns the discs, Win32 names the volumes. **Mono will not run it.** Lane D's
+  Mono 6.14 is the .NET Framework 4 runtime and cannot load a .NET 8 program;
+  WPF exists only on Windows; and the journal and the burner are Windows
+  calls. So it is reimplemented, the operator's first route:
+  - the engine on `apps/snapstore`, the store `apps/backup` and System
+    Restore share;
+  - its schedules as `apps/backup` already keeps them (C-Q21, §1426);
+  - the window in our toolkit;
+  - the feature list from the program's own `design.md`, `roadmap.md` and
+    `known-issues.md`.
+
+  Copying a file that is open and changing waits on the VSS equivalent in
+  `roadmap-detailed.md` (the operator's request of 2026-08-21).
+
+- `[E]` **The operator's WinDirStat fork on SlateOS** (design-decisions
+  §1050, B-Q18: "QDirStat, or better, port my own fork of WinDirStat that can
+  be found at d:\visual studio projects\dirsize\windirstat"). Adopted
+  2026-10-10 from the same list.
+  - **The fork:** C++ on MFC and Win32, about 39,000 lines. It has All
+    Files, Largest Files, Duplicate Files, Search Results, File Watcher,
+    Extension and Treemap views; logical against physical size; scans saved
+    and reloaded; and cleanup from the window. MFC is Windows-only, so a port
+    means a new window layer under the fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported: a treemap, a sortable file list and an
+    extension breakdown.
+  - **First step:** compare the fork's features with diskanalyzer's. Then
+    either port the fork's logic or bring its features to diskanalyzer; if
+    neither is clearly better, it is a question for the operator.
+
+  QDirStat, the other route the operator named, is built on Qt, which
+  nothing here has ported.
+
 - `[-]` `[E]` **Games and the theme** — **C-Q16**, answered by the operator
   (`design-decisions.md` §1422): every game's chrome follows the palette, and
   on the board a colour keeps its own value only where a player reads it --

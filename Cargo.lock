@@ -3421,6 +3421,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",

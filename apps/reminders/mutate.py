@@ -102,14 +102,14 @@ MUTATIONS = [
     # ---- keeping it ----
     (
         "a first run is taken for a broken file",
-        "            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,\n",
+        "        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),\n",
         "",
         [KEPT],
     ),
     (
         "a file too large is read in part",
-        "        if read.truncated {\n            self.persist = false;",
-        "        if false {\n            self.persist = false;",
+        "    if read.truncated {\n        return Err(format!(",
+        "    if false {\n        return Err(format!(",
         [BIG],
     ),
     (
@@ -382,6 +382,120 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [ROWS],
+    ),
+]
+
+# Two windows of Reminders save into one list (2026-10-09, design-decisions
+# §1239): each wrote its own copy over the other's, so the last to save threw
+# away the other's reminders.
+TWO = "two_windows_each_add_a_reminder_and_both_are_kept"
+HEAR = "a_window_hears_another_windows_save"
+STAYS_DELETED = "a_reminder_deleted_in_another_window_stays_deleted"
+CHOSEN_GONE = "what_another_window_deleted_is_no_longer_chosen"
+FORM_DELETED = "a_reminder_deleted_elsewhere_while_changed_here_is_saved_back"
+FILE_DELETED = "a_list_file_deleted_while_open_is_written_back_whole"
+PUT_BACK_ONCE = "a_reminder_put_back_is_not_there_twice"
+UNREADABLE = "a_save_leaves_a_file_it_cannot_read_as_it_is"
+
+MUTATIONS += [
+    (
+        "a save writes this window's list over the file",
+        "        let merged = recordfile::merge(&self.base, self.store.all(), &theirs);\n",
+        "        let merged = self.store.all().to_vec();\n        let _ = &theirs;\n",
+        [TWO],
+    ),
+    (
+        "a save takes the file for unchanged without asking",
+        "        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {",
+        "        let read = if true {",
+        [TWO],
+    ),
+    (
+        "a missing file is taken for an empty one",
+        "            Ok(None) => self.base.clone(),",
+        "            Ok(None) => Vec::new(),",
+        [FILE_DELETED],
+    ),
+    (
+        "a save over a file it cannot read goes ahead",
+        "            read_tasks_file(&path, MAX_TASKS_BYTES)\n        };",
+        "            read_tasks_file(&path, MAX_TASKS_BYTES).or(Ok::<_, String>(None))\n        };",
+        [UNREADABLE],
+    ),
+    (
+        "a save does not move on what it compares with",
+        "                self.base.clone_from(&merged);\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "new numbers count up from the largest",
+        "        let id = recordfile::fresh_id(|id| self.tasks.iter().any(|t| t.id == id));",
+        "        let id = self.tasks.iter().map(|t| t.id).max().map_or(1, |m| m.saturating_add(1));",
+        [TWO],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {",
+        "        if true {",
+        [HEAR],
+    ),
+    (
+        "a reread throws away what is not saved",
+        "            recordfile::merge(&self.base, self.store.all(), &theirs)\n        } else {",
+        "            theirs.clone()\n        } else {",
+        [HEAR],
+    ),
+    (
+        "a reread does not move on what the next save compares with",
+        "        self.base = theirs;\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "a reminder another window deleted stays chosen",
+        "        if self.selected_task_id.as_ref().is_some_and(gone) {",
+        "        if false {",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a delete waits on a reminder another window deleted",
+        "        if self.pending_delete.as_ref().is_some_and(gone) {",
+        "        if false {",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a reminder another window deleted is still announced",
+        "        self.notifications\n            .retain(|n| store.get(n.task_id).is_some());",
+        "        let _ = store;",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a change to a reminder deleted elsewhere is dropped",
+        "                    self.store.put_back(task);\n",
+        "                    drop(task);\n",
+        [FORM_DELETED],
+    ),
+    (
+        "a reminder put back loses what the form did not show",
+        "            None => form\n"
+        "                .original\n"
+        "                .clone()\n"
+        "                .unwrap_or_else(|| Task::new(0, \"\", self.now)),",
+        "            None => Task::new(0, \"\", self.now),",
+        [FORM_DELETED],
+    ),
+    (
+        "a failed save is not said",
+        '                self.store_error = Some(format!(\n                    "Your reminders were not saved to {}: {err}",\n                    path.shown()\n                ));\n',
+        "                drop(err);\n",
+        ["a_save_that_cannot_be_written_says_so"],
+    ),
+    (
+        "a reminder put back is there twice",
+        "        if self.get(task.id).is_none() {\n            self.tasks.push(task);",
+        "        if true {\n            self.tasks.push(task);",
+        [PUT_BACK_ONCE],
     ),
 ]
 

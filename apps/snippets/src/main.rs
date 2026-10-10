@@ -67,9 +67,9 @@
 //! pushed a real entry off the end of it.
 //!
 //! **`create_snippet` and `create_folder` said "no" by returning `0`,** which
-//! is the same `u64` a real id is. Nothing distinguishes a refused create from
-//! one that produced snippet zero except knowing that `IdGen` starts at one.
-//! Both return an `Option` now.
+//! is the same `u64` a real id is. Nothing distinguished a refused create from
+//! one that produced snippet zero except knowing that the id counter started
+//! at one. Both return an `Option` now.
 //!
 //! **The toolbar had an Import button for a feature the program does not
 //! have.** There is no import function in this file and never was; the module
@@ -85,6 +85,22 @@
 //! one site that set either, then never read, never exported and never updated,
 //! because nothing in the program can modify a snippet), and `apply_template`,
 //! which nothing but a test has ever called.
+//!
+//! ## Two windows
+//!
+//! Snippets may be open twice, and neither window loses the other's work
+//! (design-decisions §1239): a save reads the library file first and puts in
+//! only what this window changed since it last read or wrote it -- a merge by
+//! id (`merge_libraries`) -- and the window is woken to read the file again
+//! when another saves (`recordfile::Watch`). New snippets and folders take
+//! random ids, so two windows do not give out the same one; the examples a
+//! first run starts on are numbered from one in every window, so two windows
+//! opened on a first run share them rather than each adding a copy. Two
+//! windows changing the same snippet at once is the one case where the later
+//! save wins, for that snippet alone. A snippet whose folder the other window
+//! deleted is at the top level, as deleting a folder leaves the snippets in
+//! it; and a snippet the other window deleted while this one was editing it
+//! is put back by the Save.
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -98,6 +114,7 @@ use guitk::textinput::TextInput;
 use guitk::{scroll_window, text, textedit, wheel};
 use oswindow::app::{self, App as WindowApp, Response};
 use pathtext::ShowPath;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -733,7 +750,7 @@ fn tokenize_line(line: &str, keywords: &[&str], language: Language) -> Vec<Token
 type SnippetId = u64;
 type FolderId = u64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Snippet {
     id: SnippetId,
     title: String,
@@ -756,7 +773,7 @@ struct Snippet {
     template_vars: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Folder {
     id: FolderId,
     name: String,
@@ -765,19 +782,15 @@ struct Folder {
     color: Color,
 }
 
-struct IdGen {
-    next: u64,
+impl recordfile::Record for Snippet {
+    fn id(&self) -> u64 {
+        self.id
+    }
 }
 
-impl IdGen {
-    fn new() -> Self {
-        Self { next: 1 }
-    }
-
-    fn next_id(&mut self) -> u64 {
-        let id = self.next;
-        self.next = self.next.saturating_add(1);
-        id
+impl recordfile::Record for Folder {
+    fn id(&self) -> u64 {
+        self.id
     }
 }
 
@@ -841,11 +854,128 @@ fn optional_id(id: Option<u64>) -> String {
 }
 
 /// What a library file holds.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Library {
     folders: Vec<Folder>,
     snippets: Vec<Snippet>,
     recent: Vec<SnippetId>,
+}
+
+/// The library the file at `path` holds now: `None` when there is no file
+/// yet. `Err` says why it was not read -- too big, or not a library -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only what was understood.
+fn read_library_file(path: &Path, max_bytes: usize) -> Result<Option<Library>, String> {
+    let read = match safeio::read_to_string_capped(path, max_bytes) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    parse_library(&read.text).map(Some)
+}
+
+/// This window's changes since `base`, put into `theirs` -- what the file
+/// holds now (design-decisions §1239).
+///
+/// Folders and snippets are merged one by one ([`recordfile::merge`]), the
+/// recently used list is this window's if it used something and the file's
+/// otherwise, and what a merge taken piece by piece can leave is mended
+/// ([`mend_library`]).
+fn merge_libraries(base: &Library, mine: &Library, theirs: &Library) -> Library {
+    let mut merged = Library {
+        folders: recordfile::merge(&base.folders, &mine.folders, &theirs.folders),
+        snippets: recordfile::merge(&base.snippets, &mine.snippets, &theirs.snippets),
+        recent: if mine.recent == base.recent {
+            theirs.recent.clone()
+        } else {
+            mine.recent.clone()
+        },
+    };
+    mend_library(&mut merged);
+    merged
+}
+
+/// Mend what a merge taken piece by piece can leave in `lib`: what
+/// [`parse_library`] refuses, so that a merged library written out can be
+/// read again -- refused, it could not be, and every window would refuse to
+/// save over it.
+///
+/// - A folder whose parent another window deleted is at the top level, and a
+///   snippet whose folder another window deleted is in no folder: what
+///   deleting a folder does to the snippets in it ([`App::delete_folder`]),
+///   and the folder or snippet this window kept is kept, to be deleted on
+///   purpose if it is not wanted.
+/// - Every folder comes after its parent, which is the order the file must
+///   have. Folders are only ever made under one that is there, so the order
+///   each window has is already that; it is the folders put back to the top
+///   level, and a merge's interleaving of two windows' new ones, that it is
+///   for. A loop of parents -- which no window can make, since a folder's
+///   parent is set only when it is made -- is broken by putting the rest at
+///   the top level, rather than looping.
+/// - The recently used names only snippets there are, each once.
+fn mend_library(lib: &mut Library) {
+    let present: HashSet<FolderId> = lib.folders.iter().map(|f| f.id).collect();
+    for folder in &mut lib.folders {
+        if folder.parent_id.is_some_and(|p| !present.contains(&p)) {
+            folder.parent_id = None;
+        }
+    }
+    for snippet in &mut lib.snippets {
+        if snippet.folder_id.is_some_and(|f| !present.contains(&f)) {
+            snippet.folder_id = None;
+        }
+    }
+
+    // Each folder where it is, unless its parent comes later: then straight
+    // after its parent, with the parent's other waiting children.
+    let mut placed: HashSet<FolderId> = HashSet::new();
+    let mut waiting: HashMap<FolderId, Vec<Folder>> = HashMap::new();
+    for folder in std::mem::take(&mut lib.folders) {
+        match folder.parent_id {
+            Some(parent) if !placed.contains(&parent) => {
+                waiting.entry(parent).or_default().push(folder);
+            }
+            _ => place_folder(folder, &mut lib.folders, &mut placed, &mut waiting),
+        }
+    }
+    // Still waiting: a loop of parents. Each goes under its parent if that is
+    // placed by now, and to the top level if not.
+    let mut looped: Vec<Folder> = waiting.into_values().flatten().collect();
+    looped.sort_by_key(|f| f.id);
+    let mut none_waiting = HashMap::new();
+    for mut folder in looped {
+        if folder.parent_id.is_some_and(|p| !placed.contains(&p)) {
+            folder.parent_id = None;
+        }
+        place_folder(folder, &mut lib.folders, &mut placed, &mut none_waiting);
+    }
+
+    let snippets: HashSet<SnippetId> = lib.snippets.iter().map(|s| s.id).collect();
+    let mut seen = HashSet::new();
+    lib.recent
+        .retain(|id| snippets.contains(id) && seen.insert(*id));
+}
+
+/// Put `folder` at the end of `out`, and after it every folder that was
+/// waiting for it to be placed, each followed by its own.
+fn place_folder(
+    folder: Folder,
+    out: &mut Vec<Folder>,
+    placed: &mut HashSet<FolderId>,
+    waiting: &mut HashMap<FolderId, Vec<Folder>>,
+) {
+    let id = folder.id;
+    placed.insert(id);
+    out.push(folder);
+    for child in waiting.remove(&id).unwrap_or_default() {
+        place_folder(child, out, placed, waiting);
+    }
 }
 
 /// The library as the file holds it: the format line, the folders (each
@@ -1121,6 +1251,9 @@ const INDENT: &str = "    ";
 #[derive(Clone, Debug)]
 pub struct Editing {
     id: SnippetId,
+    /// The snippet as it was when the editor opened, to put back if another
+    /// window deletes it before this one saves (design-decisions §1239).
+    original: Snippet,
     title: TextInput,
     language: Language,
     folder: Option<FolderId>,
@@ -1150,6 +1283,7 @@ impl Editing {
         content.set_text(&sn.content);
         Self {
             id: sn.id,
+            original: sn.clone(),
             title: line(&sn.title),
             language: sn.language,
             folder: sn.folder_id,
@@ -1829,7 +1963,17 @@ pub struct App {
     // Data
     snippets: Vec<Snippet>,
     folders: Vec<Folder>,
-    id_gen: IdGen,
+    /// The library as this window last read or wrote it -- or, on a first
+    /// run, as it started: what a save merges this window's changes against,
+    /// so another window's, saved since, are kept rather than written over
+    /// (design-decisions §1239).
+    base: Library,
+    /// The library file as this window last read or wrote it, to tell
+    /// another window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the library file, which wakes the window when another
+    /// one saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
 
     // Selection
     selected_snippet_id: Option<SnippetId>,
@@ -1927,12 +2071,21 @@ pub struct App {
 
 impl App {
     fn new() -> Self {
-        let mut id_gen = IdGen::new();
+        // The examples a first run starts on are numbered from one, the same
+        // in every window: two windows opened on a first run have the same
+        // examples, and a merge takes them for the same ones. Random numbers,
+        // as everything made later has (`fresh_id`), would give each window a
+        // copy of every example of its own (design-decisions §1239).
+        let mut last_id: u64 = 0;
+        let mut next_id = || {
+            last_id = last_id.saturating_add(1);
+            last_id
+        };
         let mut folders = Vec::new();
         let mut snippets = Vec::new();
 
         // Default folders
-        let general_id = id_gen.next_id();
+        let general_id = next_id();
         folders.push(Folder {
             id: general_id,
             name: "General".into(),
@@ -1941,7 +2094,7 @@ impl App {
             color: Color::from_hex(0x89B4FA),
         });
 
-        let web_id = id_gen.next_id();
+        let web_id = next_id();
         folders.push(Folder {
             id: web_id,
             name: "Web Dev".into(),
@@ -1950,7 +2103,7 @@ impl App {
             color: Color::from_hex(0xFAB387),
         });
 
-        let utils_id = id_gen.next_id();
+        let utils_id = next_id();
         folders.push(Folder {
             id: utils_id,
             name: "Utilities".into(),
@@ -1964,7 +2117,7 @@ impl App {
         // `draw_folder_tree`, the twisty and the recursion in `walk_folders`
         // were all written for nesting the seeded library never had — nothing
         // a user opened the program on could exercise any of them.
-        let snippets_id = id_gen.next_id();
+        let snippets_id = next_id();
         folders.push(Folder {
             id: snippets_id,
             name: "Regex".into(),
@@ -1975,7 +2128,7 @@ impl App {
 
         // Sample snippets
         snippets.push(Snippet {
-            id: id_gen.next_id(),
+            id: next_id(),
             title: "Hello World (Rust)".into(),
             content: "fn main() {\n    println!(\"Hello, world!\");\n}".into(),
             language: Language::Rust,
@@ -1990,7 +2143,7 @@ impl App {
         });
 
         snippets.push(Snippet {
-            id: id_gen.next_id(),
+            id: next_id(),
             title: "HTTP Server (Python)".into(),
             content: "from http.server import HTTPServer, SimpleHTTPRequestHandler\n\ndef run(port=8080):\n    server = HTTPServer(('', port), SimpleHTTPRequestHandler)\n    print(f'Serving on port {port}')\n    server.serve_forever()\n\nif __name__ == '__main__':\n    run()".into(),
             language: Language::Python,
@@ -2005,7 +2158,7 @@ impl App {
         });
 
         snippets.push(Snippet {
-            id: id_gen.next_id(),
+            id: next_id(),
             title: "Function Template".into(),
             content: "fn ${function_name}(${params}) -> ${return_type} {\n    ${body}\n}".into(),
             language: Language::Rust,
@@ -2025,7 +2178,7 @@ impl App {
         });
 
         snippets.push(Snippet {
-            id: id_gen.next_id(),
+            id: next_id(),
             title: "SQL Select Join".into(),
             content: "SELECT u.name, o.total\nFROM users u\nINNER JOIN orders o ON u.id = o.user_id\nWHERE o.total > 100\nORDER BY o.total DESC\nLIMIT 10;".into(),
             language: Language::Sql,
@@ -2040,7 +2193,7 @@ impl App {
         });
 
         snippets.push(Snippet {
-            id: id_gen.next_id(),
+            id: next_id(),
             title: "CSS Flexbox Center".into(),
             content: ".container {\n    display: flex;\n    justify-content: center;\n    align-items: center;\n    height: 100vh;\n}".into(),
             language: Language::Css,
@@ -2058,7 +2211,9 @@ impl App {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             snippets,
             folders,
-            id_gen,
+            base: Library::default(),
+            file_stamp: None,
+            watch: None,
             selected_snippet_id: None,
             selected_folder_id: None,
             selected_tag: None,
@@ -2118,60 +2273,118 @@ impl App {
     /// [`load_library`](Self::load_library) with the size limit given, so a
     /// test can reach it without writing sixty-four megabytes.
     fn load_library_within(&mut self, path: &Path, max_bytes: usize) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                show_path(path)
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, max_bytes) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.store_error = Some(refused(err.to_string()));
-                return;
-            }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.store_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                max_bytes / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_library(&read.text) {
-            Ok(lib) => {
-                let highest = lib
-                    .folders
-                    .iter()
-                    .map(|f| f.id)
-                    .chain(lib.snippets.iter().map(|sn| sn.id))
-                    .max()
-                    .unwrap_or(0);
-                self.last_stamp = lib
-                    .snippets
-                    .iter()
-                    .map(|sn| sn.created_at)
-                    .max()
-                    .unwrap_or(0);
-                self.folders = lib.folders;
-                self.snippets = lib.snippets;
-                self.recently_used = lib.recent;
-                // New ids go past every one the file used.
-                self.id_gen = IdGen {
-                    next: highest.saturating_add(1),
-                };
+        match read_library_file(path, max_bytes) {
+            // None there yet: a first run, on the examples `new` starts with
+            // -- which are what this window's changes are measured from, so
+            // the first save is them and those changes.
+            Ok(None) => self.base = self.library(),
+            Ok(Some(lib)) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base = lib.clone();
                 self.selected_snippet_id = None;
                 self.selected_folder_id = None;
+                self.adopt(lib);
                 self.kept_revision = self.revision;
             }
             Err(why) => {
                 self.persist = false;
-                self.store_error = Some(refused(why));
+                self.store_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    show_path(path)
+                ));
             }
         }
+    }
+
+    /// The library as this window has it.
+    fn library(&self) -> Library {
+        Library {
+            folders: self.folders.clone(),
+            snippets: self.snippets.clone(),
+            recent: self.recently_used.clone(),
+        }
+    }
+
+    /// Show `lib`: what this window and the file hold together, after a
+    /// save or another window's. What is chosen stays chosen while it is
+    /// there.
+    fn adopt(&mut self, lib: Library) {
+        // Every time in the file, so a snippet made now is later than all of
+        // them even if the clock has been set back.
+        self.last_stamp = lib
+            .snippets
+            .iter()
+            .map(|sn| sn.created_at)
+            .fold(self.last_stamp, u64::max);
+        self.folders = lib.folders;
+        self.snippets = lib.snippets;
+        self.recently_used = lib.recent;
+        let snippet_gone = |id: &SnippetId| !self.snippets.iter().any(|sn| sn.id == *id);
+        if self.selected_snippet_id.as_ref().is_some_and(snippet_gone) {
+            self.selected_snippet_id = None;
+        }
+        if self.pending_delete.as_ref().is_some_and(snippet_gone) {
+            self.pending_delete = None;
+        }
+        if self
+            .selected_folder_id
+            .is_some_and(|id| !self.folders.iter().any(|f| f.id == id))
+        {
+            self.selected_folder_id = None;
+        }
+    }
+
+    /// A number for a new snippet or folder that nothing here, or in the
+    /// file as this window last read it, has -- and, being random, that no
+    /// other window will give out either ([`recordfile::fresh_id`]).
+    fn fresh_id(&self) -> u64 {
+        recordfile::fresh_id(|id| {
+            self.folders
+                .iter()
+                .chain(&self.base.folders)
+                .any(|f| f.id == id)
+                || self
+                    .snippets
+                    .iter()
+                    .chain(&self.base.snippets)
+                    .any(|s| s.id == id)
+        })
+    }
+
+    /// Read the library again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's unsaved changes put into it. Whether what is
+    /// shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case. So is one that has gone: there is nothing in
+    /// it to show, and the next save writes this window's library back.
+    fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = library_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(Some(theirs)) = read_library_file(&path, MAX_LIBRARY_BYTES) else {
+            return false;
+        };
+        let shown = if self.unkept() {
+            merge_libraries(&self.base, &self.library(), &theirs)
+        } else {
+            theirs.clone()
+        };
+        let changed = shown != self.library();
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown);
+        changed
     }
 
     /// Note that the library changed: it is written after the event.
@@ -2189,6 +2402,12 @@ impl App {
     /// Write the library, if it changed since it was last written and this
     /// window keeps anything. A failure is said on the status line, and the
     /// next change tries again.
+    ///
+    /// **Into what the file holds now**, not over it: another window may have
+    /// saved since this one read it, so the file is read first and this
+    /// window's changes are put into it (design-decisions §1239,
+    /// [`merge_libraries`]). Written whole and over, as it used to be, the
+    /// window that saved last threw away the other's snippets.
     fn keep(&mut self) {
         if !self.persist || self.revision == self.kept_revision {
             return;
@@ -2197,7 +2416,31 @@ impl App {
             self.store_error = Some(String::from(NO_HOME));
             return;
         };
-        let text = library_text(&self.folders, &self.snippets, &self.recently_used);
+        // The file as this window last wrote or read it needs no reading: it
+        // is `base`. A save follows every change, so the read is kept for
+        // when something else has written.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            read_library_file(&path, MAX_LIBRARY_BYTES)
+        };
+        let theirs = match read {
+            Ok(Some(theirs)) => theirs,
+            // None there -- a first run, or gone since: nothing has been
+            // deleted from it, so it is what this window started from.
+            Ok(None) => self.base.clone(),
+            Err(why) => {
+                self.store_error = Some(format!(
+                    "Your snippets were not saved: {} could not be read ({why}), so \
+                     nothing is saved over it",
+                    show_path(&path)
+                ));
+                return;
+            }
+        };
+        let merged = merge_libraries(&self.base, &self.library(), &theirs);
+        let text = library_text(&merged.folders, &merged.snippets, &merged.recent);
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
@@ -2206,6 +2449,11 @@ impl App {
             Ok(()) => {
                 self.kept_revision = self.revision;
                 self.store_error = None;
+                // Taken after the write, so the window's own save is known
+                // for its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base = merged.clone();
+                self.adopt(merged);
             }
             Err(err) => {
                 self.store_error = Some(format!(
@@ -2301,9 +2549,18 @@ impl App {
         }
         let tags = ed.tag_list();
         let ed = ed.clone();
-        let Some(sn) = self.snippets.iter_mut().find(|sn| sn.id == ed.id) else {
-            // Deleted from under the editor: nothing to put it in.
-            self.editing = None;
+        let index = if let Some(at) = self.snippets.iter().position(|sn| sn.id == ed.id) {
+            at
+        } else {
+            // Deleted from under the editor -- by another window's save, since
+            // this one's editor takes every key and press while it is up. The
+            // edit is the later change, so the snippet is put back with it: an
+            // edit here beats a deletion elsewhere, as in a merge
+            // (design-decisions §1239). It was dropped, edit and all.
+            self.snippets.push(ed.original.clone());
+            self.snippets.len().saturating_sub(1)
+        };
+        let Some(sn) = self.snippets.get_mut(index) else {
             return false;
         };
         sn.title = title;
@@ -2517,7 +2774,7 @@ impl App {
     ///
     /// It used to answer a refusal with `0`, which is the same `u64` as a real
     /// id: nothing distinguished "did not make one" from "made snippet zero"
-    /// except knowing that [`IdGen`] happens to start at one.
+    /// except knowing that the counter ids then came from started at one.
     fn create_snippet(
         &mut self,
         title: &str,
@@ -2528,7 +2785,7 @@ impl App {
             return None;
         }
 
-        let id = self.id_gen.next_id();
+        let id = self.fresh_id();
         let template_vars = extract_template_vars(content);
         let is_template = !template_vars.is_empty();
         self.changed();
@@ -2569,7 +2826,7 @@ impl App {
             return None;
         }
 
-        let id = self.id_gen.next_id();
+        let id = self.fresh_id();
         self.changed();
         self.folders.push(Folder {
             id,
@@ -5409,6 +5666,27 @@ impl WindowApp for App {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// Watch the library file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its library.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = library_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the library file written: read it again if another
+    /// window wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     /// Closing asks first over a snippet being edited with changes, or
     /// latest changes that cannot be saved; the window then waits for the
     /// answer (`KeepOpen`) with the question drawn.
@@ -5526,8 +5804,9 @@ mod tests {
         a.sort_order = SortOrder::DateAsc;
         for title in titles {
             let id = a.create_snippet(title, "", Language::PlainText).unwrap();
-            // `DateAsc` sorts by `created_at`, which is the id, so the order
-            // the titles were given in is the order they are listed in.
+            // `DateAsc` sorts by `created_at`, later for each one made, so
+            // the order the titles were given in is the order they are
+            // listed in.
             assert!(id > 0);
         }
         a
@@ -6926,6 +7205,27 @@ mod tests {
         let mut a = app();
         a.search_query.clear();
         assert!(rect_of(&a, Target::ClearSearch).is_none());
+    }
+
+    /// An empty box keeps no room for the cross it does not draw: the scope
+    /// button sits at the box's right-hand end, and moves left to make room
+    /// only once there is something to clear.
+    #[test]
+    fn with_nothing_to_clear_no_room_is_kept_for_the_cross() {
+        let mut a = app();
+        a.search_query.clear();
+        let empty = rect_of(&a, Target::Scope).expect("the scope button is drawn");
+        a.search_query = "abc".into();
+        let typed = rect_of(&a, Target::Scope).expect("the scope button is drawn");
+        let cross = rect_of(&a, Target::ClearSearch).expect("the cross is drawn");
+        assert!(
+            typed.right() <= cross.x,
+            "the scope and the cross overlap: {typed:?} {cross:?}"
+        );
+        assert!(
+            empty.right() > typed.right() + 1.0,
+            "the empty box keeps the cross's room: {empty:?} against {typed:?}"
+        );
     }
 
     #[test]
@@ -8395,8 +8695,6 @@ mod tests {
     /// free field, tags, favourites, uses, and the recently used.
     fn awkward_library() -> App {
         let mut a = app_with(&[]);
-        // Numbered from one, so a case below can name a line by its numbers.
-        a.id_gen = IdGen::new();
         let top = a.create_folder("Top\tfolder").unwrap();
         a.selected_folder_id = Some(top);
         let inner = a.create_folder("Inner").unwrap();
@@ -8427,7 +8725,31 @@ mod tests {
             sn.use_count = 7;
         }
         a.recently_used = vec![two, one];
+        // Numbered from one, so a case below can name a line by its numbers:
+        // new ids are random (design-decisions §1239).
+        renumber(&mut a, &[top, inner, one, two]);
         a
+    }
+
+    /// Give the folders and snippets `ids` names the numbers 1, 2, 3, ... in
+    /// that order, everywhere they are named.
+    fn renumber(a: &mut App, ids: &[u64]) {
+        let new = |old: u64| {
+            ids.iter()
+                .position(|&id| id == old)
+                .map_or(old, |at| u64::try_from(at).unwrap().saturating_add(1))
+        };
+        for f in &mut a.folders {
+            f.id = new(f.id);
+            f.parent_id = f.parent_id.map(new);
+        }
+        for sn in &mut a.snippets {
+            sn.id = new(sn.id);
+            sn.folder_id = sn.folder_id.map(new);
+        }
+        for id in &mut a.recently_used {
+            *id = new(*id);
+        }
     }
 
     /// Everything about a snippet the file keeps.
@@ -8484,7 +8806,7 @@ mod tests {
     fn a_library_that_cannot_be_read_whole_is_refused_and_says_why() {
         let a = awkward_library();
         let good = library_text(&a.folders, &a.snippets, &a.recently_used);
-        let cases: [(&str, String, &str); 8] = [
+        let cases: [(&str, String, &str); 10] = [
             (
                 "later",
                 good.replacen("slateos-snippets\t1", "slateos-snippets\t2", 1),
@@ -8528,6 +8850,17 @@ mod tests {
                 "escape",
                 good.replacen("a tag", "a\\q tag", 1),
                 "broken escape",
+            ),
+            // Two records with one number: which is meant cannot be known.
+            (
+                "twin snippets",
+                good.replacen("snippet\t4\t", "snippet\t3\t", 1),
+                "another snippet has its number (3)",
+            ),
+            (
+                "twin folders",
+                good.replacen("folder\t2\t1\t", "folder\t1\t1\t", 1),
+                "another folder has its number (1)",
             ),
         ];
         for (name, text, why) in cases {
@@ -8734,6 +9067,45 @@ mod tests {
         );
     }
 
+    /// A press in the code puts the caret where it lands: on the line
+    /// pressed, at the column under the pointer -- the start of a line for a
+    /// press at its left edge, the end for one past its last letter.
+    #[test]
+    fn a_press_in_the_code_puts_the_caret_where_it_lands() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        if let Some(sn) = a.snippets.first_mut() {
+            sn.content = String::from("first line\nsecond line");
+        }
+        key(&mut a, &press(Key::F2));
+        let l = a.layout();
+        let code = a.edit_code_area(&l);
+        let press_at = |a: &mut App, x: f32, y: f32| {
+            handle_event(
+                a,
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            )
+        };
+        // The second line, at its start.
+        press_at(&mut a, code.x + 0.5, code.y + l.line * 1.5);
+        type_str(&mut a, "#");
+        assert_eq!(
+            a.editing.as_ref().unwrap().content.text(),
+            "first line\n#second line"
+        );
+        // The first line, past its end.
+        press_at(&mut a, code.right() - 1.0, code.y + l.line * 0.5);
+        type_str(&mut a, "!");
+        assert_eq!(
+            a.editing.as_ref().unwrap().content.text(),
+            "first line!\n#second line"
+        );
+    }
+
     #[test]
     fn the_code_is_drawn_in_the_editor_with_the_rest_of_the_snippet() {
         let mut a = app_with(&["one"]);
@@ -8805,10 +9177,9 @@ mod tests {
             key(&mut a, &press(Key::N));
             key(&mut a, &ctrl(Key::S));
             let error = a.store_error.clone().expect("a failed save said nothing");
-            assert!(
-                error.starts_with("Your snippets were not saved to "),
-                "{error}"
-            );
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239).
+            assert!(error.starts_with("Your snippets were not saved"), "{error}");
             assert!(
                 all_text(&a).contains(&error),
                 "the failure is not on screen"
@@ -8831,6 +9202,45 @@ mod tests {
                 a.on_event(&Event::Key(press(Key::S))),
                 Response::Exit
             ));
+        });
+    }
+
+    /// A save whose write fails -- the library reads, and cannot be
+    /// replaced -- says so, and the next change tries again. A folder where
+    /// the file goes (the test above) fails at the read, which a save does
+    /// first (design-decisions §1239), so the write's failure needs a file
+    /// that reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("snippets-unwritable", |_| {
+            let mut a = App::from_settings();
+            a.create_snippet("Kept", "", Language::PlainText).unwrap();
+            a.keep();
+            assert!(a.store_error.is_none(), "{:?}", a.store_error);
+            let path = library_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            a.create_snippet("Unwritten", "", Language::PlainText)
+                .unwrap();
+            a.keep();
+            let error = a.store_error.clone().expect("a failed save said nothing");
+            assert!(
+                error.starts_with("Your snippets were not saved to "),
+                "{error}"
+            );
+            assert!(
+                all_text(&a).contains(&error),
+                "the failure is not on screen"
+            );
+            assert!(a.unkept(), "the failed change is taken for kept");
+            drop(refusal);
+            a.keep();
+            assert!(a.store_error.is_none(), "{:?}", a.store_error);
+            assert!(!a.unkept());
+            let again = App::from_settings();
+            assert!(again.snippets.iter().any(|sn| sn.title == "Unwritten"));
         });
     }
 
@@ -8880,6 +9290,337 @@ mod tests {
             whole.load_library_within(&path, text.len());
             assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
             assert_eq!(whole.snippets.len(), 2, "control: the whole file reads");
+        });
+    }
+
+    /// **Two windows each make a snippet, and both are kept** -- each wrote
+    /// its own copy of the library whole, so the last to save threw away the
+    /// other's (design-decisions §1239). Both opened on a first run: the
+    /// examples they start on are there once each, and one deleted in either
+    /// window stays deleted.
+    #[test]
+    fn two_windows_each_make_a_snippet_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("snippets-two-windows", |_| {
+            let mut first = App::from_settings();
+            let mut second = App::from_settings();
+            let examples = first.snippets.len();
+            let example = first.snippets[0].id;
+            let one = first
+                .create_snippet("From the first", "a", Language::Rust)
+                .unwrap();
+            first.delete_snippet(example);
+            first.keep();
+            let two = second
+                .create_snippet("From the second", "b", Language::Rust)
+                .unwrap();
+            // An example changed here is the same example as the other
+            // window's, not a second copy of it.
+            let favourite = second.snippets[1].id;
+            let was = second.snippets[1].favorite;
+            second.toggle_favorite(favourite);
+            second.keep();
+
+            let again = App::from_settings();
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            for id in [one, two] {
+                assert!(
+                    again.snippets.iter().any(|sn| sn.id == id),
+                    "a window's snippet was lost"
+                );
+            }
+            assert!(
+                !again.snippets.iter().any(|sn| sn.id == example),
+                "an example deleted in one window came back"
+            );
+            assert_eq!(
+                again.snippets.len(),
+                examples + 1,
+                "an example is there twice, or is missing"
+            );
+            let changed = again.snippets.iter().find(|sn| sn.id == favourite);
+            assert_eq!(changed.map(|sn| sn.favorite), Some(!was));
+        });
+    }
+
+    /// A snippet another window deleted stays deleted when this window saves
+    /// next -- one this window made, and one it heard of from the other's
+    /// save. A save compares with what the window last wrote or read; a
+    /// snippet it has that is not in that is taken for one it made since,
+    /// and kept.
+    #[test]
+    fn a_snippet_deleted_in_another_window_stays_deleted() {
+        settingsfile::testing::with_scratch_config("snippets-stays-deleted", |_| {
+            let mut first = App::from_settings();
+            first.create_snippet("Start", "", Language::Rust).unwrap();
+            first.keep();
+            let mut second = App::from_settings();
+
+            let made_here = second
+                .create_snippet("Made here", "", Language::Rust)
+                .unwrap();
+            second.keep();
+            assert!(first.reread_if_changed());
+            first.delete_snippet(made_here);
+            first.keep();
+            second.create_snippet("Later", "", Language::Rust).unwrap();
+            second.keep();
+            let kept = App::from_settings();
+            assert!(
+                !kept.snippets.iter().any(|sn| sn.id == made_here),
+                "a snippet made here and deleted there came back"
+            );
+
+            let heard_of = first
+                .create_snippet("Heard of", "", Language::Rust)
+                .unwrap();
+            first.keep();
+            assert!(second.reread_if_changed());
+            first.delete_snippet(heard_of);
+            first.keep();
+            second
+                .create_snippet("Later still", "", Language::Rust)
+                .unwrap();
+            second.keep();
+            let kept = App::from_settings();
+            assert!(
+                !kept.snippets.iter().any(|sn| sn.id == heard_of),
+                "a snippet heard of here and deleted there came back"
+            );
+        });
+    }
+
+    /// What another window deleted is no longer chosen: the snippet, the
+    /// folder new snippets go into, and the snippet a delete is waiting on.
+    #[test]
+    fn what_another_window_deleted_is_no_longer_chosen() {
+        settingsfile::testing::with_scratch_config("snippets-chosen-gone", |_| {
+            let mut first = App::from_settings();
+            let folder = first.create_folder("Doomed folder").unwrap();
+            let id = first.create_snippet("Doomed", "", Language::Rust).unwrap();
+            first.keep();
+            let mut second = App::from_settings();
+            second.select(id);
+            second.selected_folder_id = Some(folder);
+            second.pending_delete = Some(id);
+
+            first.delete_snippet(id);
+            first.delete_folder(folder);
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert_eq!(
+                second.selected_snippet_id, None,
+                "a deleted snippet is chosen"
+            );
+            assert_eq!(
+                second.selected_folder_id, None,
+                "a deleted folder is chosen"
+            );
+            assert_eq!(second.pending_delete, None, "a delete waits on nothing");
+        });
+    }
+
+    /// **A window reads the library again when another saves**, keeping what
+    /// it has not saved; its own save is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("snippets-hear", |_| {
+            let mut first = App::from_settings();
+            first.create_snippet("One", "", Language::Rust).unwrap();
+            first.keep();
+            let mut second = App::from_settings();
+            first.create_snippet("Two", "", Language::Rust).unwrap();
+            first.keep();
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert!(second.snippets.iter().any(|sn| sn.title == "Two"));
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+            assert!(!second.unkept(), "hearing left something to save");
+
+            let mine = second
+                .create_snippet("Not yet saved", "", Language::Rust)
+                .unwrap();
+            first.create_snippet("Three", "", Language::Rust).unwrap();
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                second.snippets.iter().any(|sn| sn.id == mine),
+                "an unsaved snippet went"
+            );
+            assert!(second.snippets.iter().any(|sn| sn.title == "Three"));
+            assert!(second.unkept(), "the unsaved snippet is taken for saved");
+            second.keep();
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+            let again = App::from_settings();
+            for title in ["One", "Two", "Three", "Not yet saved"] {
+                assert!(
+                    again.snippets.iter().any(|sn| sn.title == title),
+                    "{title} was lost"
+                );
+            }
+        });
+    }
+
+    /// A snippet and a folder the other window put in a folder this one
+    /// deleted are at the top level -- where deleting a folder leaves its
+    /// snippets -- and the library reads back. Kept in a folder that is gone,
+    /// it would not: a folder's parent and a snippet's folder must be written
+    /// before it.
+    #[test]
+    fn what_another_window_put_in_a_folder_deleted_here_goes_to_the_top_level() {
+        settingsfile::testing::with_scratch_config("snippets-folder-gone", |_| {
+            let mut first = App::from_settings();
+            let folder = first.create_folder("Shared").unwrap();
+            first.keep();
+            let mut second = App::from_settings();
+            second.selected_folder_id = Some(folder);
+            let inside = second.create_folder("Inside").unwrap();
+            let put = second
+                .create_snippet("Put in it", "", Language::Rust)
+                .unwrap();
+            second.keep();
+            first.delete_folder(folder);
+            first.keep();
+
+            let again = App::from_settings();
+            assert!(
+                again.store_error.is_none(),
+                "the library cannot be read again: {:?}",
+                again.store_error
+            );
+            assert!(!again.folders.iter().any(|f| f.id == folder));
+            let sn = again.snippets.iter().find(|sn| sn.id == put).unwrap();
+            assert_eq!(sn.folder_id, None);
+            let f = again.folders.iter().find(|f| f.id == inside).unwrap();
+            assert_eq!(f.parent_id, None);
+        });
+    }
+
+    /// A merged library lists every folder after its parent, which is the
+    /// order the file must have, moving only what must move; and a loop of
+    /// parents -- which no window can make -- is broken rather than looped.
+    #[test]
+    fn a_merged_library_lists_every_folder_after_its_parent() {
+        let folder = |id: u64, parent_id: Option<u64>| Folder {
+            id,
+            name: format!("F{id}"),
+            parent_id,
+            expanded: true,
+            color: Color::from_hex(0x89B4FA),
+        };
+        let order = |lib: &Library| -> Vec<(u64, Option<u64>)> {
+            lib.folders.iter().map(|f| (f.id, f.parent_id)).collect()
+        };
+        let mut lib = Library {
+            folders: vec![
+                folder(1, None),
+                folder(3, Some(2)),
+                folder(4, Some(3)),
+                folder(2, Some(1)),
+                folder(5, Some(9)),
+                folder(6, None),
+            ],
+            ..Library::default()
+        };
+        mend_library(&mut lib);
+        assert_eq!(
+            order(&lib),
+            [
+                (1, None),
+                (2, Some(1)),
+                (3, Some(2)),
+                (4, Some(3)),
+                (5, None),
+                (6, None)
+            ]
+        );
+        let text = library_text(&lib.folders, &lib.snippets, &lib.recent);
+        assert!(parse_library(&text).is_ok(), "{text}");
+
+        let mut looped = Library {
+            folders: vec![folder(8, Some(7)), folder(7, Some(8))],
+            ..Library::default()
+        };
+        mend_library(&mut looped);
+        assert_eq!(order(&looped), [(7, None), (8, Some(7))]);
+    }
+
+    /// The recently used are this window's if it used something since it
+    /// last read the library, the file's otherwise -- and name no snippet the
+    /// library does not have.
+    #[test]
+    fn the_recently_used_are_this_windows_if_it_used_something() {
+        let base = App::new().library();
+        let x = base.snippets[0].id;
+        let y = base.snippets[1].id;
+        let mut mine = base.clone();
+        mine.recent = vec![x];
+        let mut theirs = base.clone();
+        theirs.recent = vec![y];
+        assert_eq!(merge_libraries(&base, &mine, &theirs).recent, [x]);
+        assert_eq!(merge_libraries(&base, &base, &theirs).recent, [y]);
+        theirs.snippets.retain(|sn| sn.id != x);
+        assert!(
+            merge_libraries(&base, &mine, &theirs).recent.is_empty(),
+            "a snippet the other window deleted is still recently used"
+        );
+    }
+
+    /// A snippet the other window deleted while this one was editing it is
+    /// put back by the Save, with the edit: an edit here beats a deletion
+    /// elsewhere. The editor found nothing to save into and dropped the edit.
+    #[test]
+    fn a_snippet_deleted_elsewhere_while_edited_here_is_saved_back() {
+        settingsfile::testing::with_scratch_config("snippets-edit-deleted", |_| {
+            let mut first = App::from_settings();
+            let id = first
+                .create_snippet("Shared", "old", Language::Rust)
+                .unwrap();
+            first.keep();
+            let mut second = App::from_settings();
+            second.select(id);
+            second.edit(id);
+            second.editing.as_mut().unwrap().content.set_text("new");
+            first.delete_snippet(id);
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                !second.snippets.iter().any(|sn| sn.id == id),
+                "control: the other window's delete was heard"
+            );
+            assert!(second.save_edit(), "the edit was dropped");
+            second.keep();
+            let again = App::from_settings();
+            let sn = again
+                .snippets
+                .iter()
+                .find(|sn| sn.id == id)
+                .expect("the edited snippet was not put back");
+            assert_eq!(sn.content, "new");
+            assert_eq!(sn.title, "Shared");
+        });
+    }
+
+    /// A save that finds the library file broken -- another program wrote it
+    /// -- leaves it as it is and says so, rather than writing this window's
+    /// library over what it could not read.
+    #[test]
+    fn a_save_leaves_a_file_it_cannot_read_as_it_is() {
+        settingsfile::testing::with_scratch_config("snippets-save-unreadable", |_| {
+            let mut a = App::from_settings();
+            a.create_snippet("Mine", "", Language::Rust).unwrap();
+            a.keep();
+            let path = library_path().unwrap();
+            std::fs::write(&path, "not a library\n").unwrap();
+            a.create_snippet("Another", "", Language::Rust).unwrap();
+            a.keep();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a library\n");
+            let error = a.store_error.clone().expect("the refusal said nothing");
+            assert!(error.contains("could not be read"), "{error}");
         });
     }
 

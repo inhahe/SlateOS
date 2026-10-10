@@ -443,11 +443,17 @@ MUTATIONS = [
         "        if true {",
         ["a_twisty_is_drawn_only_where_there_is_something_to_open"],
     ),
+    # No row for the draw's own "if !self.search_query.is_empty()" around the
+    # cross: `search_parts` already makes the cross Rect::EMPTY for an empty
+    # box, and an empty rect is neither drawn (`label_centred`) nor hit, so
+    # dropping the test changes nothing anyone can see (an equivalent mutant,
+    # 2026-10-10). The `search_parts` row is the one with an effect of its
+    # own: room kept for a cross that is not there.
     (
-        "the cross is offered when the search box is empty",
-        "        if !self.search_query.is_empty() {",
-        "        if true {",
-        ["there_is_no_cross_when_there_is_nothing_to_clear"],
+        "room is kept for the cross when the search box is empty",
+        "        let cross = if self.search_query.is_empty() {",
+        "        let cross = if false {",
+        ["with_nothing_to_clear_no_room_is_kept_for_the_cross"],
     ),
     (
         "the cross does not clear the box",
@@ -931,7 +937,13 @@ MUTATIONS = [
         "two snippets with one number are read",
         "                if lib.snippets.iter().any(|sn| sn.id == id) {",
         "                if false {",
-        [ROUND, REFUSED],
+        [REFUSED],
+    ),
+    (
+        "two folders with one number are read",
+        "                if lib.folders.iter().any(|f| f.id == id) {",
+        "                if false {",
+        [REFUSED],
     ),
     (
         "a folder may hang from nothing",
@@ -1035,7 +1047,19 @@ MUTATIONS = [
         "a press in the code puts no caret",
         "                    ed.content.click(line, (x - code.x).max(0.0), false);",
         "                    let _ = line;",
-        [PRESSES],
+        ["a_press_in_the_code_puts_the_caret_where_it_lands"],
+    ),
+    (
+        "a press in the code finds its line from the top of the window",
+        "                    let line = usize_from_f32(((y - code.y) / l.line).floor().max(0.0))",
+        "                    let line = usize_from_f32((y / l.line).floor().max(0.0))",
+        ["a_press_in_the_code_puts_the_caret_where_it_lands"],
+    ),
+    (
+        "a press in the code finds its column from the edge of the window",
+        "                    ed.content.click(line, (x - code.x).max(0.0), false);",
+        "                    ed.content.click(line, x.max(0.0), false);",
+        ["a_press_in_the_code_puts_the_caret_where_it_lands"],
     ),
     (
         "New does not open the editor",
@@ -1074,6 +1098,26 @@ MUTATIONS = [
         "        if let Some(error) = &self.store_error {",
         "        if let Some(error) = None::<&String> {",
         [BROKEN, FAILING],
+    ),
+    (
+        "a failed write is not said",
+        "            Err(err) => {\n"
+        "                self.store_error = Some(format!(\n"
+        '                    "Your snippets were not saved to {}: {err}",',
+        "            Err(err) => {\n"
+        "                let _ = err;\n"
+        "                self.store_error = Some(format!(\n"
+        '                    "Your snippets were saved to {}",',
+        ["a_save_that_cannot_be_written_says_so"],
+    ),
+    (
+        "a write that lands is not taken for kept",
+        "            Ok(()) => {\n"
+        "                self.kept_revision = self.revision;\n"
+        "                self.store_error = None;",
+        "            Ok(()) => {\n"
+        "                self.store_error = None;",
+        ["a_save_that_cannot_be_written_says_so"],
     ),
     (
         'a chord answers "discard?"',
@@ -1199,6 +1243,198 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [SEARCH_FIELD, EDITOR_BOXES],
+    ),
+]
+
+# Two windows of Snippets save into one library (2026-10-09, design-decisions
+# §1239): each wrote its own copy over the other's, so the last to save threw
+# away the other's snippets.
+TWO = "two_windows_each_make_a_snippet_and_both_are_kept"
+HEAR = "a_window_hears_another_windows_save"
+STAYS_DELETED = "a_snippet_deleted_in_another_window_stays_deleted"
+CHOSEN_GONE = "what_another_window_deleted_is_no_longer_chosen"
+FOLDER_GONE = "what_another_window_put_in_a_folder_deleted_here_goes_to_the_top_level"
+ORDER = "a_merged_library_lists_every_folder_after_its_parent"
+RECENT = "the_recently_used_are_this_windows_if_it_used_something"
+EDIT_DELETED = "a_snippet_deleted_elsewhere_while_edited_here_is_saved_back"
+UNREADABLE = "a_save_leaves_a_file_it_cannot_read_as_it_is"
+KEPT = "a_snippet_is_written_in_the_editor_and_is_there_next_time"
+
+MUTATIONS += [
+    (
+        "a save writes this window's library over the file",
+        "        let merged = merge_libraries(&self.base, &self.library(), &theirs);\n",
+        "        let merged = self.library();\n        let _ = &theirs;\n",
+        [TWO],
+    ),
+    (
+        "a save takes the file for unchanged without asking",
+        "        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {",
+        "        let read = if true {",
+        [TWO],
+    ),
+    (
+        "a missing file is taken for an empty one",
+        "            Ok(None) => self.base.clone(),",
+        "            Ok(None) => Library::default(),",
+        [TWO, KEPT],
+    ),
+    (
+        "a save over a file it cannot read goes ahead",
+        "            read_library_file(&path, MAX_LIBRARY_BYTES)\n        };",
+        "            read_library_file(&path, MAX_LIBRARY_BYTES).or(Ok::<_, String>(None))\n        };",
+        [UNREADABLE],
+    ),
+    (
+        "a save does not move on what it compares with",
+        "                self.base = merged.clone();\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "a first run's changes are measured from nothing",
+        "            Ok(None) => self.base = self.library(),",
+        "            Ok(None) => {}",
+        [TWO],
+    ),
+    (
+        "the examples take numbers of their own in each window",
+        "            last_id = last_id.saturating_add(1);\n            last_id\n",
+        "            let _ = last_id;\n            recordfile::fresh_id(|_| false)\n",
+        [TWO],
+    ),
+    (
+        "new numbers count up from the largest",
+        "        recordfile::fresh_id(|id| {\n"
+        "            self.folders\n"
+        "                .iter()\n"
+        "                .chain(&self.base.folders)\n"
+        "                .any(|f| f.id == id)\n"
+        "                || self\n"
+        "                    .snippets\n"
+        "                    .iter()\n"
+        "                    .chain(&self.base.snippets)\n"
+        "                    .any(|s| s.id == id)\n"
+        "        })\n",
+        "        self.snippets\n"
+        "            .iter()\n"
+        "            .map(|s| s.id)\n"
+        "            .chain(self.folders.iter().map(|f| f.id))\n"
+        "            .max()\n"
+        "            .map_or(1, |m| m.saturating_add(1))\n",
+        [TWO],
+    ),
+    (
+        "another window's save is not heard",
+        "        if now == self.file_stamp {",
+        "        if true {",
+        [HEAR],
+    ),
+    (
+        "a reread throws away what is not saved",
+        "            merge_libraries(&self.base, &self.library(), &theirs)\n        } else {",
+        "            theirs.clone()\n        } else {",
+        [HEAR],
+    ),
+    (
+        "a reread does not move on what the next save compares with",
+        "        self.base = theirs;\n",
+        "",
+        [STAYS_DELETED],
+    ),
+    (
+        "a snippet another window deleted stays chosen",
+        "        if self.selected_snippet_id.as_ref().is_some_and(snippet_gone) {",
+        "        if false {",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a delete waits on a snippet another window deleted",
+        "        if self.pending_delete.as_ref().is_some_and(snippet_gone) {",
+        "        if false {",
+        [CHOSEN_GONE],
+    ),
+    (
+        "a folder another window deleted stays chosen",
+        "            .is_some_and(|id| !self.folders.iter().any(|f| f.id == id))\n        {\n            self.selected_folder_id = None;",
+        "            .is_some_and(|_| false)\n        {\n            self.selected_folder_id = None;",
+        [CHOSEN_GONE],
+    ),
+    (
+        "the folders are this window's",
+        "        folders: recordfile::merge(&base.folders, &mine.folders, &theirs.folders),",
+        "        folders: mine.folders.clone(),",
+        [FOLDER_GONE],
+    ),
+    (
+        "the snippets are this window's",
+        "        snippets: recordfile::merge(&base.snippets, &mine.snippets, &theirs.snippets),",
+        "        snippets: mine.snippets.clone(),",
+        [TWO],
+    ),
+    (
+        "the recently used are always the file's",
+        "        recent: if mine.recent == base.recent {",
+        "        recent: if true {",
+        [RECENT],
+    ),
+    (
+        "the recently used are always this window's",
+        "        recent: if mine.recent == base.recent {",
+        "        recent: if false {",
+        [RECENT],
+    ),
+    (
+        "a merge is not mended",
+        "    mend_library(&mut merged);\n",
+        "",
+        [FOLDER_GONE, RECENT],
+    ),
+    (
+        # Not FOLDER_GONE: a folder whose parent is gone waits for it in the
+        # ordering below, is never placed, and is put at the top level there
+        # too -- at the end of the list rather than where it was, which is
+        # what ORDER sees.
+        "a folder whose parent is gone keeps it",
+        "        if folder.parent_id.is_some_and(|p| !present.contains(&p)) {\n            folder.parent_id = None;\n        }\n",
+        "",
+        [ORDER],
+    ),
+    (
+        "a snippet whose folder is gone keeps it",
+        "        if snippet.folder_id.is_some_and(|f| !present.contains(&f)) {\n            snippet.folder_id = None;\n        }\n",
+        "",
+        [FOLDER_GONE],
+    ),
+    (
+        "a folder is listed before its parent",
+        "                waiting.entry(parent).or_default().push(folder);",
+        "                let _ = parent;\n                place_folder(folder, &mut lib.folders, &mut placed, &mut waiting);",
+        [ORDER],
+    ),
+    (
+        "a folder's waiting children are not placed after it",
+        "    for child in waiting.remove(&id).unwrap_or_default() {",
+        "    for child in Vec::<Folder>::new() {",
+        [ORDER],
+    ),
+    (
+        "a loop of parents is kept",
+        "        if folder.parent_id.is_some_and(|p| !placed.contains(&p)) {\n            folder.parent_id = None;\n        }\n",
+        "",
+        [ORDER],
+    ),
+    (
+        "the recently used name a snippet that is gone",
+        "        .retain(|id| snippets.contains(id) && seen.insert(*id));",
+        "        .retain(|id| seen.insert(*id));",
+        [RECENT],
+    ),
+    (
+        "a snippet deleted elsewhere while edited here is dropped",
+        "            self.snippets.push(ed.original.clone());\n",
+        "",
+        [EDIT_DELETED],
     ),
 ]
 

@@ -77,6 +77,14 @@
 //! floating point for the rest. Held to libavif itself, frame by frame
 //! (`tests/frames.rs`).
 //!
+//! The description also says what light the samples stand for -- the
+//! transfer function, BT.709's for ordinary video, PQ or HLG for HDR -- and a
+//! picture says what HDR metadata it carries ([`Picture::light`]): the
+//! display it was mastered on and how bright its content gets, AV1's metadata
+//! OBUs kind by kind over the file's (Matroska's `Colour`, MP4's `mdcv` and
+//! `clli`, VP9's `SmDm` and `CoLL`), each as FFmpeg gives it with each frame
+//! (`tests/hdr.rs`).
+//!
 //! # Time
 //!
 //! In nanoseconds, on the file's own clock: a frame's [`Frame::time`] is
@@ -152,12 +160,62 @@ impl fmt::Display for Codec {
 }
 
 /// What a file says of a track's colour, for whatever the bitstream leaves
-/// unsaid: each `None` where the file is silent. H.273's numbers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// unsaid: each `None` where the file is silent. H.273's numbers, and the
+/// HDR metadata.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ColourHint {
     pub matrix: Option<u16>,
     pub primaries: Option<u16>,
+    pub transfer: Option<u16>,
     pub full_range: Option<bool>,
+    /// The mastering display and content light level the file says.
+    pub light: Light,
+}
+
+/// What a video says of its light, for whatever maps HDR video to a display:
+/// the display it was mastered on, and how bright its content gets -- each
+/// `None` where nothing says. A picture's is its bitstream's, kind by kind,
+/// else its file's ([`Picture::light`]), as FFmpeg gives it with each frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Light {
+    pub mastering: Option<MasteringDisplay>,
+    pub content: Option<ContentLightLevel>,
+}
+
+/// The display a video was mastered on (SMPTE ST 2086, HDR10's "mastering
+/// display colour volume"). A file may say either half without the other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MasteringDisplay {
+    /// Its primaries and white point.
+    pub chromaticities: Option<Chromaticities>,
+    /// Its peak and black.
+    pub luminance: Option<Luminance>,
+}
+
+/// The CIE 1931 x and y of a display's red, green and blue primaries and of
+/// its white point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chromaticities {
+    pub red: [f64; 2],
+    pub green: [f64; 2],
+    pub blue: [f64; 2],
+    pub white: [f64; 2],
+}
+
+/// A display's peak and black, in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Luminance {
+    pub max: f64,
+    pub min: f64,
+}
+
+/// How bright a video's content gets (CTA-861.3), in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentLightLevel {
+    /// MaxCLL: its brightest pixel's light.
+    pub max_cll: u32,
+    /// MaxFALL: its brightest frame's average light.
+    pub max_fall: u32,
 }
 
 /// What a decoder will take on before it refuses.

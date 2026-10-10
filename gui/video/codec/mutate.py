@@ -31,6 +31,15 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src"
 TARGETS = ("--lib", "--test", "subtitles")
+# colour.rs's rows run its unit tests and the HDR fixtures' test.
+COLOUR_TARGETS = ("--lib", "--test", "hdr")
+
+# What each video says of its light (colour.rs, tests/hdr.rs).
+HDR = "every_frame_says_its_light_as_ffmpeg_reads_it"
+HDR_TRANSFER = "unsaid_transfer_is_bt709s"
+HDR_SCALED = "the_light_is_scaled_as_ffmpeg_scales_it"
+HDR_KINDS = "the_bitstream_s_light_stands_kind_by_kind"
+HDR_UNSAID = "unspecified_and_reserved_say_nothing"
 
 # pgs.rs's own.
 SHOWS = "a_display_set_shows_its_composition"
@@ -1587,6 +1596,82 @@ DVB_ROWS = [
     ),
 ]
 
+# What a picture says of its light (colour.rs).
+COLOUR = [
+    (
+        "an unsaid transfer is PQ",
+        "            .unwrap_or(TRANSFER_BT709),",
+        "            .unwrap_or(16),",
+        [HDR_TRANSFER],
+    ),
+    (
+        "the file's transfer stands over the bitstream's",
+        "        transfer: bitstream\n            .transfer\n            .or(container.transfer)",
+        "        transfer: container\n            .transfer\n            .or(bitstream.transfer)",
+        [HDR],
+    ),
+    (
+        "an AV1 transfer that says nothing is taken",
+        "            transfer: said(u16::from(c.transfer), false),",
+        "            transfer: Some(u16::from(c.transfer)),",
+        [HDR],
+    ),
+    (
+        "Matroska's transfer is not read",
+        "            transfer: u16::try_from(c.transfer_characteristics)\n                .ok()\n                .and_then(|t| said(t, false)),",
+        "            transfer: None,",
+        [HDR, HDR_UNSAID],
+    ),
+    (
+        "MP4's transfer is not read",
+        "            transfer: said(c.transfer, false),",
+        "            transfer: None,",
+        [HDR, HDR_UNSAID],
+    ),
+    (
+        "the file's mastering display stands over the bitstream's",
+        "        mastering: bitstream.mastering.or(container.mastering),",
+        "        mastering: container.mastering.or(bitstream.mastering),",
+        [HDR, HDR_KINDS],
+    ),
+    (
+        "the file's content light level stands over the bitstream's",
+        "        content: bitstream.content.or(container.content),",
+        "        content: container.content.or(bitstream.content),",
+        [HDR, HDR_KINDS],
+    ),
+    (
+        "AV1's chromaticities are read as 24.8",
+        "let xy = |p: [u16; 2]| p.map(|v| f64::from(v) / 65536.0);",
+        "let xy = |p: [u16; 2]| p.map(|v| f64::from(v) / 256.0);",
+        [HDR],
+    ),
+    (
+        "AV1's peak is read as 0.16",
+        "max: f64::from(m.max_luminance) / 256.0,",
+        "max: f64::from(m.max_luminance) / 65536.0,",
+        [HDR],
+    ),
+    (
+        "AV1's black is read as 24.8",
+        "min: f64::from(m.min_luminance) / 16384.0,",
+        "min: f64::from(m.min_luminance) / 256.0,",
+        [HDR],
+    ),
+    (
+        "MP4's peak is over its chromaticities' scale",
+        "max: over(m.max_luminance, m.max_luminance_scale),",
+        "max: over(m.max_luminance, m.chromaticity_scale),",
+        [HDR, HDR_SCALED],
+    ),
+    (
+        "Matroska's MaxCLL past 32 bits is kept whole",
+        "    u32::try_from(v & u64::from(u32::MAX)).unwrap_or(u32::MAX)",
+        "    u32::try_from(v).unwrap_or(u32::MAX)",
+        [HDR_SCALED],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -1603,8 +1688,9 @@ if __name__ == "__main__":
         (SRC / "subtitle.rs", READER),
         (SRC / "container.rs", CONTAINER),
         (SRC / "lib.rs", LIB),
+        (SRC / "colour.rs", COLOUR, COLOUR_TARGETS),
     ]
-    names = [name for _, rows in tables for name, *_ in rows]
+    names = [name for _, rows, *_ in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]
     if unmatched:
         print(f"{len(unmatched)} filter(s) name no row in any table:")
@@ -1612,9 +1698,10 @@ if __name__ == "__main__":
             print(f"  {o!r}")
         raise SystemExit(2)
     results = [0]
-    for src, rows in tables:
+    for src, rows, *targets in tables:
         mine = [o for o in only if any(o in name for name, *_ in rows)]
         if only and not mine:
             continue
-        results.append(sweep(src, rows, "videocodec", timeout=600, only=mine or None, targets=TARGETS))
+        results.append(sweep(src, rows, "videocodec", timeout=600, only=mine or None,
+                             targets=targets[0] if targets else TARGETS))
     raise SystemExit(max(results))

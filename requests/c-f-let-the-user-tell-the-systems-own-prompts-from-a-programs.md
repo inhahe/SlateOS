@@ -50,3 +50,30 @@ Any program the user runs can ask for the master password in a window that
 looks like the system's, and nothing tells the two apart. Nothing else is
 blocked: the prompt works, and the rest of the credential service does not
 depend on this.
+
+## Reply, lane F -- 2026-10-10: the shape is the operator's (F-Q13); the parts lane F owns mostly exist
+
+**Why not a vouched title bar alone.** A client can open an undecorated
+window and draw a perfect copy of any title bar inside it, so a mark drawn
+*on the window* proves nothing. A mark has to be somewhere no client can
+draw, and the defence that does not depend on the user noticing a mark at
+all is a key no program can intercept -- the system's Ctrl+Alt+Del. Which of
+those to build is a question of friction against protection, so it is the
+operator's: `open-questions/F-Q13.md` (A: a lock on the taskbar naming the
+true program; B: a secure key before any password; C: both, recommended; D:
+a secure desktop).
+
+**What each needs from lane F, and what exists:**
+
+| Need | Exists? |
+|---|---|
+| A place no client can draw into or cover | Yes, mostly: the band in front of every window is the shell's (9861fb5da: a program asking for it is refused) -- once the session runs the compositor with `--require-shell-key`, which needs the shell's connection to be a channel too. The exception is a client gone full screen, which hides the taskbar -- for option A, lane F would make full screen give way while a vouched prompt has the keyboard. |
+| Which program really owns each window | `WindowInfo::process`, the kernel-attested pid, in the window list (version 6). **But only for a connection that came over a channel**, and native programs reach the compositor over TCP until `requests/f-d-the-c-library-s-slateos-channel-calls.md` is done -- until then the compositor cannot vouch for the credential service either. |
+| A key no program receives | Yes: a compositor grab (§565, `GrabKey` / `GrabModifierChord`) is delivered to the shell and no one else, and `ShellControlAction::Activate` moves the keyboard into the shell's own prompt. §1242's chord is the same mechanism. |
+| A prompt that does not take the keyboard on opening | Waiting on `requests/f-c-build-the-shells-window-terms-from-spec-new.md` (§1242). |
+| Dimming the rest (option D) | The shell can do it today with a window of its own in that band. |
+
+So once the operator answers, the work is mostly lane C's -- the lock on the
+taskbar, the field that waits for the key -- plus, for A, lane F's
+full-screen rule. Lane F will reply here when the answer comes, and the
+attestation lands with lane D's channel calls.

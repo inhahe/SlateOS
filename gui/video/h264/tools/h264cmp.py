@@ -93,12 +93,14 @@ def main() -> None:
     tmp.mkdir(exist_ok=True)
     ff_log, our_log = tmp / "ffmpeg.txt", tmp / "here.txt"
 
-    # Run with no shell between: FFmpeg's lines go to stderr, the pictures
-    # to /dev/null.
+    # Run with no shell between: the probes' lines go to stderr, the
+    # pictures to /dev/null. FFmpeg logs nothing (quiet): its messages come
+    # from other threads too -- the demuxer's parser -- and one whose prefix
+    # lands in front of a probe line hides that line.
     with ff_log.open("wb") as err:
         subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "env", "FFDBG_MB=1", "FFDBG_LF=1",
                         "FFDBG_MV=1", "FFDBG_OUT=1", os.environ.get("FFDBG", "/home/inhahe/ffdbg/src")
-                        + "/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                        + "/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "quiet",
                         "-threads", "1", "-flags", "unaligned", *raw, "-i", wsl_path(stream),
                         "-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale",
                         "-f", "rawvideo", "-y", "/dev/null"],

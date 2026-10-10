@@ -537,8 +537,7 @@ def wsl_path(p: Path) -> str:
 # FFmpeg's options for summing a stream's pictures (see `framecrc`), around
 # its `-i`. -noautoscale: a picture of a new size is summed as the decoder
 # made it, not scaled back to the first picture's size for the encoder.
-CRC_HEAD = ["-hide_banner", "-loglevel", "error", "-cpuflags", "0", "-threads", "1",
-            "-flags", "unaligned"]
+CRC_HEAD = ["-hide_banner", "-cpuflags", "0", "-threads", "1", "-flags", "unaligned"]
 CRC_TAIL = ["-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale", "-f", "framecrc", "-"]
 
 
@@ -557,16 +556,40 @@ def framecrc(path: Path) -> list[str]:
     (`-flags unaligned`: otherwise FFmpeg keeps a left crop that would
     leave its planes unaligned short, and the picture wider). This is the
     FFmpeg on PATH; `wsl_framecrc` is the one `.crc` comes from."""
-    return crc_lines(run(["ffmpeg", *CRC_HEAD, *raw_format(path), "-i", str(path),
-                          *CRC_TAIL]).stdout)
+    return crc_lines(run(["ffmpeg", "-loglevel", "error", *CRC_HEAD, *raw_format(path),
+                          "-i", str(path), *CRC_TAIL]).stdout)
+
+
+def decoder_crc_lines(err: str) -> list[str]:
+    """The size and sum of each picture the main decoder handed out, from
+    the 8.1.3 build's `FFDBG_FRAMECRC` lines: `DECODER d=<n>` as each
+    decoder opens, `FRAMECRC d=<n> <size>, 0x<sum>` for each frame. The main
+    decoder is the last opened, after avformat_find_stream_info's -- which
+    may show pictures the main one never does."""
+    main = 0
+    lines: dict[int, list[str]] = {}
+    for l in err.splitlines():
+        if l.startswith("DECODER d="):
+            main = max(main, int(l[len("DECODER d="):]))
+        elif l.startswith("FRAMECRC d="):
+            d, _, rest = l[len("FRAMECRC d="):].partition(" ")
+            lines.setdefault(int(d), []).append(rest.strip())
+    return lines.get(main, [])
 
 
 def wsl_framecrc(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]:
-    """`framecrc` for each of `paths` from FFmpeg 8.1.3's own build in WSL,
-    in `CRC_WSL` (`tools/ffdbg/build.sh`): the release this decoder is a
-    translation of, built with no assembly at all. Another build parts from
-    it where FFmpeg has changed since -- the March 2026 snapshot `.crc` was
-    first made with shows four cut streams' pictures differently.
+    """Each picture of each of `paths` as FFmpeg 8.1.3's own build in WSL
+    hands it out, in `CRC_WSL` (`tools/ffdbg/build.sh`): the release this
+    decoder is a translation of, built with no assembly at all. Another
+    build parts from it where FFmpeg has changed since -- the March 2026
+    snapshot `.crc` was first made with shows four cut streams' pictures
+    differently.
+
+    The sums are taken as each picture leaves the decoder (`FFDBG_FRAMECRC`),
+    cropped exactly, summed as `framecrc` sums a picture -- not from what
+    the command line passes on: that converts every picture to the first
+    one's pixel format for its encoder, so a stream that changes depth or
+    chroma format midway would be summed converted.
 
     That build fills every picture it starts with one byte; each stream is
     run with one byte and then with another. A picture whose sum moves with
@@ -574,6 +597,10 @@ def wsl_framecrc(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]
     part of it reached by no slice -- which in an ordinary build are
     whatever memory its buffer pool hands back, and differ from run to run:
     it is `<size>, ?`.
+
+    FFmpeg logs nothing in these runs, so the probe's lines are their whole
+    stderr: its messages come from other threads too -- the demuxer's
+    parser -- and one whose prefix lands in front of a probe line hides it.
 
     The runs are one bash script, `jobs` chains of them at once, started by
     a single `wsl.exe`: with ten `wsl.exe` at once, some exit -1 partway
@@ -584,13 +611,16 @@ def wsl_framecrc(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]
                     "-version"], stdin=subprocess.DEVNULL, capture_output=True, check=True)
     scratch.mkdir(parents=True, exist_ok=True)
     chains: list[list[str]] = [[] for _ in range(jobs)]
+    tail = ["-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale", "-f", "rawvideo",
+            "-y", "/dev/null"]
     for i, path in enumerate(paths):
         for fill in (0, 255):
-            args = [f"FFDBG_FILL={fill}", f"{CRC_WSL}/ffmpeg", "-nostdin", *CRC_HEAD,
-                    *raw_format(path), "-i", wsl_path(path), *CRC_TAIL]
+            args = [f"FFDBG_FILL={fill}", "FFDBG_FRAMECRC=1", f"{CRC_WSL}/ffmpeg", "-nostdin",
+                    "-loglevel", "quiet", *CRC_HEAD, *raw_format(path), "-i", wsl_path(path),
+                    *tail]
             target = wsl_path(scratch / f"{i}.{fill}")
             chains[i % jobs].append(" ".join(shlex.quote(a) if not a.startswith("FFDBG_") else a
-                                             for a in args) + f" > {shlex.quote(target)} 2>/dev/null")
+                                             for a in args) + f" 2> {shlex.quote(target)} >/dev/null")
     script = ["#!/bin/bash"]
     for chain in chains:
         if chain:
@@ -602,7 +632,8 @@ def wsl_framecrc(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]
                    stdin=subprocess.DEVNULL, check=True)
     result = []
     for i, path in enumerate(paths):
-        a, b = (crc_lines((scratch / f"{i}.{fill}").read_text(encoding="utf-8", errors="replace"))
+        a, b = (decoder_crc_lines((scratch / f"{i}.{fill}").read_text(encoding="utf-8",
+                                                                        errors="replace"))
                 for fill in (0, 255))
         if len(a) != len(b):
             raise SystemExit(f"{path}: {len(a)} pictures with one fill, {len(b)} with the other")
@@ -627,11 +658,11 @@ def add_crc(fate: Path, out: Path, jobs: int) -> None:
     # The pictures summed are the pictures ffprobe saw handed out (`.frames`):
     # a count that differs is a run that failed, or a build that decodes
     # differently from the one `.frames` came from.
-    wrong = []
-    for name, lines in zip(names, sums):
-        shown = sibling(out / name, ".frames").read_text(encoding="utf-8").splitlines()
-        if len(lines) != len(shown):
-            wrong.append(f"{name}: {len(lines)} pictures summed, {len(shown)} in .frames")
+    def shown(name: str) -> int:
+        return len(sibling(out / name, ".frames").read_text(encoding="utf-8").splitlines())
+
+    wrong = [f"{name}: {len(lines)} pictures summed, {shown(name)} in .frames"
+             for name, lines in zip(names, sums) if len(lines) != shown(name)]
     if wrong:
         raise SystemExit("\n".join(wrong))
     for name, lines in zip(names, sums):

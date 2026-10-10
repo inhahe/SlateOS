@@ -24,13 +24,20 @@
 #   FFDBG_MV    for each inter macroblock: its references and vectors, block
 #               by block, as motion compensation reads them.
 #   FFDBG_OUT   for each picture handed out: its POCs and each field's luma.
+#   FFDBG_FRAMECRC
+#               "DECODER d=N" as each decoder opens, and for each frame
+#               leaving one (decode.c), cropped exactly, "FRAMECRC d=N size,
+#               0x...": summed as the framecrc muxer sums a picture but in
+#               the frame's own format -- the command line converts every
+#               frame to the first one's format for its encoder. What
+#               tools/pict_expect.py --crc-wsl reads.
 #   FFDBG_ER    when error concealment conceals anything.
 #   FFDBG_FILL  every picture started filled with this byte (0-255), so
 #               samples FFmpeg never writes show as it rather than as
 #               whatever memory its buffer pool hands back.
 #
-# `h=N` numbers the decoder: avformat_find_stream_info's comes first, and
-# the one that shows the stream is the last.
+# `h=N` and `d=N` number the decoder as it opens: avformat_find_stream_info's
+# comes first, and the one that shows the stream is the last.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 dir=${1:-$HOME/ffdbg/src}

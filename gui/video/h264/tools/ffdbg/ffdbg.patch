@@ -1,6 +1,67 @@
+diff -ru a/libavcodec/decode.c b/libavcodec/decode.c
+--- a/libavcodec/decode.c	2026-10-10 15:41:48.589183908 -0400
++++ b/libavcodec/decode.c	2026-10-10 15:41:48.607517242 -0400
+@@ -1,3 +1,6 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include "libavutil/adler32.h"
+ /*
+  * generic decoding-related code
+  *
+@@ -61,6 +64,8 @@
+ typedef struct DecodeContext {
+     AVCodecInternal avci;
+ 
++    int ffdbg_id;
++
+     /**
+      * This is set to AV_FRAME_FLAG_KEY for decoders of intra-only formats
+      * (those whose codec descriptor has AV_CODEC_PROP_INTRA_ONLY set)
+@@ -822,6 +827,27 @@
+         ret = apply_cropping(avctx, frame);
+         if (ret < 0)
+             goto fail;
++        {
++            static int dbg = -1;
++            if (dbg < 0)
++                dbg = getenv("FFDBG_FRAMECRC") != NULL;
++            if (dbg) {
++                AVFrame *c = av_frame_clone(frame);
++                int decoders = decode_ctx(avctx->internal)->ffdbg_id;
++                if (c && av_frame_apply_cropping(c, AV_FRAME_CROP_UNALIGNED) >= 0) {
++                    int size = av_image_get_buffer_size(c->format, c->width, c->height, 1);
++                    uint8_t *buf = size > 0 ? av_malloc(size) : NULL;
++                    if (buf) {
++                        av_image_copy_to_buffer(buf, size, (const uint8_t * const *)c->data,
++                                                c->linesize, c->format, c->width, c->height, 1);
++                        fprintf(stderr, "FRAMECRC d=%d %d, 0x%08x\n", decoders, size,
++                                (unsigned)av_adler32_update(0, buf, size));
++                        av_free(buf);
++                    }
++                }
++                av_frame_free(&c);
++            }
++        }
+     }
+ 
+     avctx->frame_num++;
+@@ -2001,6 +2027,13 @@
+     DecodeContext     *dc = decode_ctx(avci);
+     int ret = 0;
+ 
++    {
++        static int ffdbg_next;
++        dc->ffdbg_id = ++ffdbg_next;
++        if (getenv("FFDBG_FRAMECRC"))
++            fprintf(stderr, "DECODER d=%d\n", dc->ffdbg_id);
++    }
++
+     dc->initial_pict_type = AV_PICTURE_TYPE_NONE;
+     if (avctx->codec_descriptor->props & AV_CODEC_PROP_INTRA_ONLY) {
+         dc->intra_only_flag = AV_FRAME_FLAG_KEY;
 diff -ru a/libavcodec/error_resilience.c b/libavcodec/error_resilience.c
---- a/libavcodec/error_resilience.c	2026-10-10 14:22:25.296390564 -0400
-+++ b/libavcodec/error_resilience.c	2026-10-10 14:22:25.300057231 -0400
+--- a/libavcodec/error_resilience.c	2026-10-10 15:41:48.658850577 -0400
++++ b/libavcodec/error_resilience.c	2026-10-10 15:41:48.673517244 -0400
 @@ -1,3 +1,5 @@
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -18,8 +79,8 @@ diff -ru a/libavcodec/error_resilience.c b/libavcodec/error_resilience.c
  
      if (   s->avctx->codec_id == AV_CODEC_ID_MPEG2VIDEO
 diff -ru a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
---- a/libavcodec/h264_mb.c	2026-10-10 14:22:25.245057229 -0400
-+++ b/libavcodec/h264_mb.c	2026-10-10 14:22:25.252390563 -0400
+--- a/libavcodec/h264_mb.c	2026-10-10 15:41:48.702850579 -0400
++++ b/libavcodec/h264_mb.c	2026-10-10 15:41:48.706517246 -0400
 @@ -1,3 +1,5 @@
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -88,8 +149,8 @@ diff -ru a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
 +    }
  }
 diff -ru a/libavcodec/h264_mc_template.c b/libavcodec/h264_mc_template.c
---- a/libavcodec/h264_mc_template.c	2026-10-10 14:22:25.237723896 -0400
-+++ b/libavcodec/h264_mc_template.c	2026-10-10 14:22:25.241390563 -0400
+--- a/libavcodec/h264_mc_template.c	2026-10-10 15:41:48.724850580 -0400
++++ b/libavcodec/h264_mc_template.c	2026-10-10 15:41:48.746850581 -0400
 @@ -1,3 +1,5 @@
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -124,8 +185,8 @@ diff -ru a/libavcodec/h264_mc_template.c b/libavcodec/h264_mc_template.c
      if (HAVE_THREADS && (h->avctx->active_thread_type & FF_THREAD_FRAME))
          await_references(h, sl);
 diff -ru a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
---- a/libavcodec/h264_slice.c	2026-10-10 14:22:25.281723897 -0400
-+++ b/libavcodec/h264_slice.c	2026-10-10 14:22:25.285390564 -0400
+--- a/libavcodec/h264_slice.c	2026-10-10 15:41:48.768850582 -0400
++++ b/libavcodec/h264_slice.c	2026-10-10 15:41:48.776183915 -0400
 @@ -1,3 +1,5 @@
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -185,8 +246,8 @@ diff -ru a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
      }
      sl->slice_type  = old_slice_type;
 diff -ru a/libavcodec/h264dec.c b/libavcodec/h264dec.c
---- a/libavcodec/h264dec.c	2026-10-10 14:22:25.270723897 -0400
-+++ b/libavcodec/h264dec.c	2026-10-10 14:22:25.274390564 -0400
+--- a/libavcodec/h264dec.c	2026-10-10 15:41:48.794517249 -0400
++++ b/libavcodec/h264dec.c	2026-10-10 15:41:48.801850583 -0400
 @@ -1,3 +1,5 @@
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -228,8 +289,8 @@ diff -ru a/libavcodec/h264dec.c b/libavcodec/h264dec.c
          if (ret < 0)
              return ret;
 diff -ru a/libavcodec/h264dec.h b/libavcodec/h264dec.h
---- a/libavcodec/h264dec.h	2026-10-10 14:22:25.259723896 -0400
-+++ b/libavcodec/h264dec.h	2026-10-10 14:22:25.263390563 -0400
+--- a/libavcodec/h264dec.h	2026-10-10 15:41:48.812850584 -0400
++++ b/libavcodec/h264dec.h	2026-10-10 15:41:48.823850584 -0400
 @@ -577,6 +577,7 @@
      int non_gray;                       ///< Did we encounter a intra frame after a gray gap frame
      int noref_gray;

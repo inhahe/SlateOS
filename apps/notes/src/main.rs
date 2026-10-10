@@ -32,6 +32,18 @@
 //! is said in the status bar and tried again with the next change, and a
 //! close while a save is failing asks first.
 //!
+//! # Two windows
+//!
+//! Notes may be open twice, and neither window loses the other's work
+//! (design-decisions §1239): a save reads the file first and puts in only
+//! what this window changed since it last read or wrote it -- a merge by id
+//! (`recordfile::merge`) -- and the window is woken to read the file again
+//! when another saves (`recordfile::Watch`). Ids are random, so two windows
+//! do not give out the same one. Two windows changing the same note at once
+//! is the one case where the later save wins, for that note alone; and a
+//! notebook one window deleted while the other put a note in it comes back
+//! with the note (`restore_needed_notebooks`).
+//!
 //! When a note was made or changed is read from the clock, as milliseconds
 //! since 1970 and never earlier than a stamp already given (`stamp`): sorting
 //! by date depends on a later change having a later stamp, even when two land
@@ -276,9 +288,9 @@ const MENU_ADD_TAG: u64 = u64::MAX - 1;
 
 /// The note menu's id for "Delete note", which is not a notebook.
 ///
-/// The top of the `u64` range: the other ids in that menu are notebook ids
-/// from an `IdGen` counting up, so this is unreachable by construction rather
-/// than merely unused so far.
+/// The top of the `u64` range: the other ids in that menu are notebook ids,
+/// which are below 2^52 (`recordfile::MAX_ID`), so this is unreachable by
+/// construction rather than merely unused so far.
 const MENU_DELETE_NOTE: u64 = u64::MAX;
 
 /// How tall one row of the note list is.
@@ -383,24 +395,6 @@ struct HeldNote {
 
 pub type NoteId = u64;
 pub type NotebookId = u64;
-
-/// Simple monotonic ID counter.
-#[derive(Debug)]
-struct IdGen {
-    next: u64,
-}
-
-impl IdGen {
-    const fn new(start: u64) -> Self {
-        Self { next: start }
-    }
-
-    fn next_id(&mut self) -> u64 {
-        let id = self.next;
-        self.next = self.next.saturating_add(1);
-        id
-    }
-}
 
 // ============================================================================
 // Note types
@@ -1682,8 +1676,6 @@ pub struct NotesApp {
     menu_target: Option<MenuTarget>,
     pub window_width: f32,
     pub window_height: f32,
-    note_id_gen: IdGen,
-    notebook_id_gen: IdGen,
     /// The last stamp [`stamp`](Self::stamp) gave, so the next is later.
     ///
     /// It was a counter from 1000, which is what "Modified:" showed; it did
@@ -1697,6 +1689,16 @@ pub struct NotesApp {
     persist: bool,
     /// Whether the library has changed since it was last written.
     unsaved: bool,
+    /// The library as this window last read or wrote it: what a save merges
+    /// this window's changes against, so that another window's notes, saved
+    /// since, are kept rather than written over (design-decisions §1239).
+    base: Library,
+    /// The library file as this window last read or wrote it, to tell
+    /// another window's save from its own.
+    file_stamp: Option<recordfile::Stamp>,
+    /// The watch on the library file, which wakes the window when another
+    /// one saves; none on a system that cannot watch.
+    watch: Option<recordfile::Watch>,
     /// Why the library is not being kept, drawn for as long as it is true: it
     /// could not be read (and so is left exactly as it is), there is nowhere
     /// to keep it, or the last save failed.
@@ -1759,11 +1761,12 @@ impl NotesApp {
             menu_target: None,
             window_width: 1280.0,
             window_height: 800.0,
-            note_id_gen: IdGen::new(1),
-            notebook_id_gen: IdGen::new(1),
             last_stamp: 0,
             persist: false,
             unsaved: false,
+            base: Library::default(),
+            file_stamp: None,
+            watch: None,
             store_error: None,
             question: None,
             asking: None,
@@ -1803,42 +1806,35 @@ impl NotesApp {
     /// [`load_library`](Self::load_library) with the size limit given, so a
     /// test can reach the limit without writing a quarter of a gigabyte.
     fn load_library_within(&mut self, path: &std::path::Path, max_bytes: usize) {
-        let refused = |why: String| {
-            format!(
-                "{} was not read ({why}), so nothing is saved over it",
-                path.shown()
-            )
-        };
-        let read = match safeio::read_to_string_capped(path, max_bytes) {
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) => {
-                self.persist = false;
-                self.store_error = Some(refused(err.to_string()));
-                return;
+        match read_library_file(path, max_bytes) {
+            // None there yet: a first run.
+            Ok(None) => {}
+            Ok(Some(library)) => {
+                self.file_stamp = recordfile::Stamp::of(path).ok().flatten();
+                self.base = library.clone();
+                self.take_library(library);
             }
-        };
-        if read.truncated {
-            self.persist = false;
-            self.store_error = Some(refused(format!(
-                "it is larger than {} MiB",
-                max_bytes / (1024 * 1024)
-            )));
-            return;
-        }
-        match parse_library(&read.text) {
-            Ok(library) => self.take_library(library),
             Err(why) => {
                 self.persist = false;
-                self.store_error = Some(refused(why));
+                self.store_error = Some(format!(
+                    "{} was not read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
             }
         }
     }
 
-    /// Make `library` this window's notes.
+    /// Make `library` this window's notes, nothing chosen.
     fn take_library(&mut self, library: Library) {
-        self.note_id_gen = IdGen::new(next_id_after(library.notes.iter().map(|n| n.id)));
-        self.notebook_id_gen = IdGen::new(next_id_after(library.notebooks.iter().map(|nb| nb.id)));
+        self.selected_notebook = None;
+        self.selected_note = None;
+        self.adopt(library);
+    }
+
+    /// Show `library`: what this window and the file hold together, after a
+    /// save or another window's. What is chosen stays chosen while it is
+    /// there.
+    fn adopt(&mut self, library: Library) {
         // Every stamp in the file, so that a change made now is later than
         // all of them even if the clock has since been set back.
         let stamps = library.notes.iter().flat_map(|n| {
@@ -1849,9 +1845,76 @@ impl NotesApp {
         self.last_stamp = stamps.fold(self.last_stamp, u64::max);
         self.notebooks = library.notebooks;
         self.notes = library.notes;
-        self.selected_notebook = None;
-        self.selected_note = None;
+        if self
+            .selected_notebook
+            .is_some_and(|id| !self.notebooks.iter().any(|nb| nb.id == id))
+        {
+            self.selected_notebook = None;
+        }
         self.reanchor_selection();
+    }
+
+    /// This window's changes since it last read or wrote the library, put
+    /// into `theirs` -- what the file holds now (design-decisions §1239).
+    fn merged_with(&self, theirs: &Library) -> Library {
+        let mut notebooks =
+            recordfile::merge(&self.base.notebooks, &self.notebooks, &theirs.notebooks);
+        let notes = recordfile::merge(&self.base.notes, &self.notes, &theirs.notes);
+        restore_needed_notebooks(&mut notebooks, &notes, &self.notebooks);
+        Library { notebooks, notes }
+    }
+
+    /// Read the library again if something has written it since this window
+    /// last read or wrote it -- another window's save -- and show what it
+    /// holds, with this window's unsaved changes put into it. Whether what is
+    /// shown changed.
+    ///
+    /// A file that cannot be read now -- caught mid-write by another program,
+    /// or broken -- is left for the next notice; this window's save reads it
+    /// again first in any case.
+    pub fn reread_if_changed(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let Some(path) = library_path() else {
+            return false;
+        };
+        let now = recordfile::Stamp::of(&path).ok().flatten();
+        if now == self.file_stamp {
+            // This window's own save, or nothing.
+            return false;
+        }
+        let Ok(theirs) = read_library_file(&path, MAX_LIBRARY_BYTES) else {
+            return false;
+        };
+        let theirs = theirs.unwrap_or_default();
+        let shown = if self.unsaved {
+            self.merged_with(&theirs)
+        } else {
+            theirs.clone()
+        };
+        let changed = shown.notebooks != self.notebooks || shown.notes != self.notes;
+        self.base = theirs;
+        self.file_stamp = now;
+        self.adopt(shown);
+        changed
+    }
+
+    /// A number for a new note that no note here, or in the file as this
+    /// window last read it, has -- and, being random, that no other window
+    /// will give out either ([`recordfile::fresh_id`]).
+    fn fresh_note_id(&self) -> NoteId {
+        recordfile::fresh_id(|id| {
+            self.notes.iter().any(|n| n.id == id) || self.base.notes.iter().any(|n| n.id == id)
+        })
+    }
+
+    /// The same for a new notebook.
+    fn fresh_notebook_id(&self) -> NotebookId {
+        recordfile::fresh_id(|id| {
+            self.notebooks.iter().any(|nb| nb.id == id)
+                || self.base.notebooks.iter().any(|nb| nb.id == id)
+        })
     }
 
     /// Note that the library has changed since it was last written. Every
@@ -1864,6 +1927,12 @@ impl NotesApp {
 
     /// Write the library, if it has changed and this window keeps anything.
     ///
+    /// **Into what the file holds now**, not over it: another window may have
+    /// saved since this one read it, so the file is read first and this
+    /// window's changes are put into it (design-decisions §1239). Written
+    /// whole and over, as it used to be, the window that saved last threw
+    /// away every note the other had made.
+    ///
     /// A failure is kept in [`store_error`](Self::store_error), drawn in the
     /// status bar, and the library stays unsaved, so the next change -- or
     /// Ctrl+S, or the close question's Save -- tries again.
@@ -1875,7 +1944,27 @@ impl NotesApp {
             self.store_error = Some(String::from(NO_HOME));
             return;
         };
-        let text = library_text(&self.notebooks, &self.notes);
+        // The file as this window last wrote or read it needs no reading: it
+        // is `base`. A save follows every change -- every key typed in a note
+        // -- so the read is kept for when something else has written.
+        let stamp_now = recordfile::Stamp::of(&path).ok().flatten();
+        let read = if stamp_now.is_some() && stamp_now == self.file_stamp {
+            Ok(Some(self.base.clone()))
+        } else {
+            read_library_file(&path, MAX_LIBRARY_BYTES)
+        };
+        let theirs = match read {
+            Ok(theirs) => theirs.unwrap_or_default(),
+            Err(why) => {
+                self.store_error = Some(format!(
+                    "Not saved: {} could not be read ({why}), so nothing is saved over it",
+                    path.shown()
+                ));
+                return;
+            }
+        };
+        let merged = self.merged_with(&theirs);
+        let text = library_text(&merged.notebooks, &merged.notes);
         let written = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
@@ -1884,6 +1973,11 @@ impl NotesApp {
             Ok(()) => {
                 self.unsaved = false;
                 self.store_error = None;
+                // Taken after the write, so the window's own save is known
+                // for its own when the watch reports it.
+                self.file_stamp = recordfile::Stamp::of(&path).ok().flatten();
+                self.base = merged.clone();
+                self.adopt(merged);
             }
             Err(err) => {
                 self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
@@ -1924,7 +2018,7 @@ impl NotesApp {
 
     /// Create a new top-level notebook.
     pub fn create_notebook(&mut self, name: &str) -> NotebookId {
-        let id = self.notebook_id_gen.next_id();
+        let id = self.fresh_notebook_id();
         self.notebooks.push(Notebook::new(id, name));
         self.after_change();
         id
@@ -1932,7 +2026,7 @@ impl NotesApp {
 
     /// Create a nested notebook under a parent.
     pub fn create_child_notebook(&mut self, name: &str, parent_id: NotebookId) -> NotebookId {
-        let id = self.notebook_id_gen.next_id();
+        let id = self.fresh_notebook_id();
         self.notebooks
             .push(Notebook::with_parent(id, name, parent_id));
         self.after_change();
@@ -2013,7 +2107,7 @@ impl NotesApp {
 
     /// Create a new note in the given notebook.
     pub fn create_note(&mut self, title: &str, notebook_id: NotebookId) -> NoteId {
-        let id = self.note_id_gen.next_id();
+        let id = self.fresh_note_id();
         let ts = self.stamp();
         let mut note = Note::new(id, title, notebook_id);
         note.created_at = ts;
@@ -2029,7 +2123,7 @@ impl NotesApp {
         template: NoteTemplate,
         notebook_id: NotebookId,
     ) -> NoteId {
-        let id = self.note_id_gen.next_id();
+        let id = self.fresh_note_id();
         let ts = self.stamp();
         let mut note = Note::new(id, template.label(), notebook_id);
         note.kind = template.kind();
@@ -5425,6 +5519,27 @@ impl App for NotesApp {
         None
     }
 
+    /// Watch the library file, so another window's save reaches this one
+    /// (design-decisions §1239). Only where this window keeps its notes in it.
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        if !self.persist {
+            return;
+        }
+        if let Some(path) = library_path() {
+            self.watch = recordfile::Watch::start(&path, move || waker.wake_by_ref());
+        }
+    }
+
+    /// The watch saw the library written: read it again if another window
+    /// wrote it.
+    fn on_wake(&mut self) -> Response {
+        if self.reread_if_changed() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             let close = self.request_close();
@@ -5492,14 +5607,72 @@ fn library_path() -> Option<std::path::PathBuf> {
     settingsfile::config_dir().map(|dir| dir.join("notes").join("library.txt"))
 }
 
-/// The first number after `ids`, for the next thing made: past every one
-/// read, so nothing made later takes the number of something kept.
-fn next_id_after(ids: impl Iterator<Item = u64>) -> u64 {
-    ids.max().map_or(1, |highest| highest.saturating_add(1))
+impl recordfile::Record for Note {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl recordfile::Record for Notebook {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+/// The library the file at `path` holds now: `None` when there is no file
+/// yet. `Err` says why it was not read -- too big, or not a library -- and
+/// nothing is saved over a file in that state, since a save would write back
+/// only what was understood.
+fn read_library_file(path: &std::path::Path, max_bytes: usize) -> Result<Option<Library>, String> {
+    let read = match safeio::read_to_string_capped(path, max_bytes) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    if read.truncated {
+        return Err(format!(
+            "it is larger than {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    parse_library(&read.text).map(Some)
+}
+
+/// Bring back, from this window's copy `mine`, every notebook something kept
+/// still needs: a note's notebook, or a notebook's parent.
+///
+/// Deleting a notebook deletes what is in it, but a merge takes records one
+/// by one: another window deleting a notebook while this one put a note in it
+/// would keep the note -- the later save wins for it -- and leave it in a
+/// notebook that is gone, kept and nowhere to be seen. The notebook comes
+/// back with it instead, so the note can be found and deleted on purpose.
+fn restore_needed_notebooks(notebooks: &mut Vec<Notebook>, notes: &[Note], mine: &[Notebook]) {
+    loop {
+        let present: std::collections::HashSet<NotebookId> =
+            notebooks.iter().map(|nb| nb.id).collect();
+        let needed: std::collections::HashSet<NotebookId> = notes
+            .iter()
+            .map(|n| n.notebook_id)
+            .chain(notebooks.iter().filter_map(|nb| nb.parent_id))
+            .filter(|id| !present.contains(id))
+            .collect();
+        let restored: Vec<Notebook> = mine
+            .iter()
+            .filter(|nb| needed.contains(&nb.id))
+            .cloned()
+            .collect();
+        if restored.is_empty() {
+            // Nothing more this window can bring back. A need left over is a
+            // library that was already like that, which the window shows as
+            // it shows it now.
+            return;
+        }
+        notebooks.extend(restored);
+    }
 }
 
 /// Everything a library holds.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Library {
     notebooks: Vec<Notebook>,
     notes: Vec<Note>,
@@ -9290,6 +9463,128 @@ mod tests {
         });
     }
 
+    /// **Two windows each make a note, and both are kept.** Each wrote its
+    /// own copy of the library whole, so the last to save threw away the
+    /// other's notes (design-decisions §1239).
+    #[test]
+    fn two_windows_each_make_a_note_and_both_are_kept() {
+        settingsfile::testing::with_scratch_config("notes-two-windows", |_| {
+            let mut first = NotesApp::from_settings();
+            let book = first.create_notebook("Home");
+            first.keep();
+            let mut second = NotesApp::from_settings();
+            assert_eq!(second.notebooks.len(), 1);
+
+            let a = first.create_note("From the first", book);
+            first.keep();
+            let b = second.create_note("From the second", book);
+            second.keep();
+            assert_ne!(a, b, "two windows gave out one number");
+            assert_eq!(
+                second.notes.len(),
+                2,
+                "the save did not show the other's note"
+            );
+
+            // An edit in each, to different notes: both stand.
+            let at = first.stamp();
+            first
+                .notes
+                .iter_mut()
+                .find(|n| n.id == a)
+                .unwrap()
+                .set_content("first's", at);
+            first.after_change();
+            first.keep();
+            let at = second.stamp();
+            second
+                .notes
+                .iter_mut()
+                .find(|n| n.id == b)
+                .unwrap()
+                .set_content("second's", at);
+            second.after_change();
+            second.keep();
+
+            let again = NotesApp::from_settings();
+            let content = |id| {
+                again
+                    .notes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| n.content.as_str())
+            };
+            assert_eq!(content(a), Some("first's"));
+            assert_eq!(content(b), Some("second's"));
+        });
+    }
+
+    /// **A window reads the library again when another saves**, keeping what
+    /// it has not saved yet; its own save is not taken for another's.
+    #[test]
+    fn a_window_hears_another_windows_save() {
+        settingsfile::testing::with_scratch_config("notes-hear", |_| {
+            let mut first = NotesApp::from_settings();
+            let book = first.create_notebook("Home");
+            first.keep();
+            let mut second = NotesApp::from_settings();
+
+            first.create_note("New there", book);
+            first.keep();
+            assert!(
+                second.reread_if_changed(),
+                "the other window's save was not seen"
+            );
+            assert!(second.notes.iter().any(|n| n.title == "New there"));
+            assert!(!second.reread_if_changed(), "read again with nothing new");
+
+            second.create_note("Mine", book);
+            second.keep();
+            assert!(
+                !second.reread_if_changed(),
+                "its own save taken for another's"
+            );
+
+            let unsaved = second.create_note("Not yet saved", book);
+            first.reread_if_changed();
+            first.create_note("Saved there", book);
+            first.keep();
+            assert!(second.reread_if_changed());
+            assert!(
+                second.notes.iter().any(|n| n.id == unsaved),
+                "an unsaved note went"
+            );
+            assert!(second.notes.iter().any(|n| n.title == "Saved there"));
+            assert!(second.unsaved, "the unsaved note is taken for saved");
+            second.keep();
+            let again = NotesApp::from_settings();
+            assert_eq!(again.notes.len(), 4, "{:?}", again.notes);
+        });
+    }
+
+    /// A notebook deleted in one window while the other put a note in it
+    /// comes back with the note, rather than the note being kept where
+    /// nobody can see it.
+    #[test]
+    fn a_notebook_deleted_while_another_window_filled_it_comes_back() {
+        settingsfile::testing::with_scratch_config("notes-restore-book", |_| {
+            let mut first = NotesApp::from_settings();
+            let book = first.create_notebook("Trip");
+            first.keep();
+            let mut second = NotesApp::from_settings();
+            first.delete_notebook(book);
+            first.keep();
+            let note = second.create_note("Packing list", book);
+            second.keep();
+            let again = NotesApp::from_settings();
+            assert!(again.notes.iter().any(|n| n.id == note));
+            assert!(
+                again.notebooks.iter().any(|nb| nb.id == book),
+                "the note was kept in a notebook that is gone"
+            );
+        });
+    }
+
     #[test]
     fn deleting_is_kept_too() {
         settingsfile::testing::with_scratch_config("notes-deleted", |_| {
@@ -9398,7 +9693,10 @@ mod tests {
             type_str(&mut app, "First");
             assert_eq!(app.handle_event(&press(Key::Enter)), EventResult::Consumed);
             let error = app.store_error.clone().expect("a failed save said nothing");
-            assert!(error.starts_with("Not saved to "), "{error}");
+            // "could not be read": a save reads the file first, to keep what
+            // another window saved (design-decisions §1239), and a folder in
+            // its place fails there.
+            assert!(error.starts_with("Not saved"), "{error}");
             assert!(texts(&app).contains(&error), "the failure is not on screen");
             assert!(app.unsaved);
 

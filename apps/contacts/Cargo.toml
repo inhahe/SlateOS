@@ -19,6 +19,10 @@ oswindow = { path = "../../gui/window" }
 # `safeio::write_str_atomically`, not `fs::write`, which truncates the target
 # before writing it: an interrupted save would leave the book as a fragment.
 safeio = { path = "../safeio" }
+# Two windows of Contacts save into one book without losing each other's
+# changes: fresh ids, a merge by id, and a watch on the file
+# (design-decisions §1239).
+recordfile = { path = "../recordfile" }
 
 # The address book is kept in the user's settings directory
 # (`settingsfile::config_dir`), as the notes library and the finance ledger are.

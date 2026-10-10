@@ -652,6 +652,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
@@ -2770,6 +2771,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textfmt",
@@ -3338,6 +3340,14 @@ dependencies = [
 [[package]]
 name = "readpass"
 version = "0.1.0"
+
+[[package]]
+name = "recordfile"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "scratchdir",
+]
 
 [[package]]
 name = "recyclebin"

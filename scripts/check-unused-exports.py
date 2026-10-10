@@ -86,6 +86,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rustlex  # noqa: E402
+
 # `pub` items worth asking about. Methods are excluded deliberately -- see the
 # module docstring.
 # Bare `pub` only. `pub(crate)`, `pub(super)` and `pub(in path)` all restrict
@@ -164,35 +167,12 @@ def crate_of(path: Path, root: Path) -> Path | None:
     return None
 
 
-def strip_test_modules(text: str) -> str:
-    """Remove `#[cfg(test)]` blocks, so test-only exports are not reported.
-
-    Brace-matched from the `mod` that follows the attribute. A regex that cut
-    to the next `}` would stop at the first nested block and leave the rest of
-    the module looking like ordinary code.
-    """
-    out = []
-    i = 0
-    while True:
-        at = text.find("#[cfg(test)]", i)
-        if at == -1:
-            out.append(text[i:])
-            return "".join(out)
-        out.append(text[i:at])
-        brace = text.find("{", at)
-        if brace == -1:
-            return "".join(out)
-        depth = 0
-        j = brace
-        while j < len(text):
-            if text[j] == "{":
-                depth += 1
-            elif text[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        i = j + 1
+def production(text: str) -> str:
+    """`text` with its `#[cfg(test)]` items blanked, so test-only exports are
+    not reported -- `rustlex.live_code`, which ends each item where that item
+    ends: a module or a function at its closing brace, a `mod tests;` or a
+    field at its own `;` or `,`."""
+    return rustlex.live_code(text)[0]
 
 
 # Bare `pub mod` only, for ITEM_RE's reason: a `pub(crate) mod` is not a way
@@ -218,7 +198,7 @@ def reachable_sources(crate: Path) -> list[Path]:
     while queue:
         cur = queue.pop()
         try:
-            text = strip_test_modules(cur.read_text(encoding="utf-8", errors="replace"))
+            text = production(cur.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
         base = cur.parent if cur.name in ("lib.rs", "mod.rs") else cur.with_suffix("")
@@ -243,7 +223,7 @@ def exports(root: Path) -> tuple[dict[str, list[tuple[str, str]]], int]:
         items: list[tuple[str, str]] = []
         for src in reachable_sources(crate):
             try:
-                text = strip_test_modules(src.read_text(encoding="utf-8", errors="replace"))
+                text = production(src.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
             for kind, name in ITEM_RE.findall(text):
@@ -270,6 +250,15 @@ mod tests {
     pub fn test_only_export() {}
     fn nested() { if true { } }
 }
+
+#[cfg(test)]
+mod out_of_line;
+pub fn after_out_of_line() {}
+pub struct Holder {
+    #[cfg(test)]
+    scratch: u8,
+}
+pub fn after_field() {}
 """
 
 
@@ -281,7 +270,7 @@ def selftest() -> int:
         cases.append((name, ok))
         print(f"{'ok  ' if ok else 'FAIL'}  {name}")
 
-    stripped = strip_test_modules(SELFTEST_SOURCE)
+    stripped = production(SELFTEST_SOURCE)
     case("a cfg(test) module is removed", "test_only_export" not in stripped)
     case(
         "...and its nested braces do not end the cut early",
@@ -289,6 +278,17 @@ def selftest() -> int:
     )
 
     items = dict((name, kind) for kind, name in ITEM_RE.findall(stripped))
+    # The cut used to run from the attribute to the end of the next braced
+    # block, which after a `mod tests;` or a test-only field is the next
+    # production item.
+    case(
+        "an export after `#[cfg(test)] mod x;` is still one",
+        items.get("after_out_of_line") == "fn",
+    )
+    case(
+        "an export after a test-only field is still one",
+        items.get("after_field") == "fn" and items.get("Holder") == "struct",
+    )
     case("a pub fn is an export", items.get("wanted") == "fn")
     case("a pub struct is an export", items.get("Kept") == "struct")
     case("a pub enum is an export", items.get("Shape") == "enum")

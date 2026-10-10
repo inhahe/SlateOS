@@ -4498,9 +4498,19 @@ lane C's `guitk`.
       files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
   - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
     write into MP4: `videocodec` refuses them by name today.
-    - `[ ]` H.264: FFmpeg's decoder translated into `gui/video/h264` (F-Q8
+    - `[-]` H.264: FFmpeg's decoder translated into `gui/video/h264` (F-Q8
       answered B, §1376), included, held picture for picture to FFmpeg and
       the conformance streams; every profile, interlaced, 10-bit and 4:2:2.
+      From FFmpeg 8.1.3 (its fixes past the 9b7439c31b the MP4 demuxer
+      follows), held to FATE's checksums for its 185 conformance streams.
+      - `[x]` The bits, NAL units and parameter sets (2026-10-10):
+        `get_bits.h`/`golomb.h`, `h2645_parse.c` (its packet buffer laid
+        out as FFmpeg's, so a read past a unit finds what FFmpeg's does),
+        `h264_ps.c`/`h2645_vui.c`; eight conformance streams' SPS and PPS
+        checked against FFmpeg's `trace_headers` field by field, scaling
+        lists against the standard's fall-back rules.
+      - `[ ]` SEI, slice headers, references, CAVLC and CABAC, prediction,
+        reconstruction, the loop filter, error concealment, the decoder.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point

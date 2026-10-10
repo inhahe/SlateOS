@@ -1,0 +1,15 @@
+[package]
+name = "h264"
+version = "0.1.0"
+edition = "2024"
+description = "H.264 video decoded as FFmpeg's decoder decodes it."
+# Translated from FFmpeg's libavcodec H.264 decoder (see licenses/notices.yaml
+# and design-decisions/1376).
+license = "LGPL-2.1-or-later"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

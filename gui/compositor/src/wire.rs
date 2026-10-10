@@ -48,7 +48,7 @@
 use guiremote::DecodeError;
 use guiremote::channel::PeerCred;
 use guiremote::control::{
-    DisplayInfo, Request, RequestBody, Response, ResponseBody, encode_responses_into,
+    DisplayInfo, Layer, Request, RequestBody, Response, ResponseBody, encode_responses_into,
 };
 use guiremote::frame::{Frame, try_decode_any};
 use guiremote::submit::Submission;
@@ -482,14 +482,27 @@ fn to_compositor_request(
     body: RequestBody,
 ) -> Result<CompositorRequest, ResponseBody> {
     Ok(match body {
-        RequestBody::CreateWindow(spec) => CompositorRequest::CreateWindow {
-            spec,
-            // From the link, never from the frame: a client that could state
-            // its own pid could claim another process's windows in the taskbar.
-            client_pid: link.client_pid,
-            // And the process the kernel names for the link, if it named one.
-            owner_pid: link.peer.map(|peer| peer.pid),
-        },
+        RequestBody::CreateWindow(spec) => {
+            // The bands either side of the applications' are the shell's: in
+            // front of every window, its taskbar, menus and prompts; behind
+            // them, the wallpaper. A program that could open a window there
+            // could cover a security prompt with a look-alike, or lay a fake
+            // desktop behind everything, so asking for one takes the shell's
+            // check, as the window list does.
+            if spec.layer != Layer::Normal {
+                link.require_shell()?;
+            }
+            CompositorRequest::CreateWindow {
+                spec,
+                // From the link, never from the frame: a client that could
+                // state its own pid could claim another process's windows in
+                // the taskbar.
+                client_pid: link.client_pid,
+                // And the process the kernel names for the link, if it named
+                // one.
+                owner_pid: link.peer.map(|peer| peer.pid),
+            }
+        }
         RequestBody::DestroyWindow { window } => CompositorRequest::DestroyWindow {
             window_id: link.resolve(window)?,
         },
@@ -1921,6 +1934,54 @@ mod tests {
             (2, true),
             "the shell's picture was dropped"
         );
+    }
+
+    /// The bands either side of the applications' are the shell's: once the
+    /// gate is armed, a client the kernel does not vouch for as the shell is
+    /// refused a window in front of every window or behind them all, and
+    /// still opens ordinary ones; the shell opens all three.
+    #[test]
+    fn a_band_other_than_the_applications_takes_the_shells_check() {
+        for (holds_key, layer, opens) in [
+            (Some(false), Layer::Overlay, false),
+            (Some(false), Layer::Background, false),
+            (None, Layer::Overlay, false),
+            (Some(false), Layer::Normal, true),
+            (Some(true), Layer::Overlay, true),
+            (Some(true), Layer::Background, true),
+        ] {
+            let (mut comp, mut link) = wired();
+            link.attest(
+                Some(PeerCred {
+                    pid: 300,
+                    uid: 1000,
+                    gid: 1000,
+                }),
+                holds_key,
+            );
+            link.set_shell_gate(ShellGate::KeyHolders);
+            let mut spec = WindowSpec::new("Surface", 100, 80);
+            spec.layer = layer;
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::CreateWindow(spec)]);
+            let opened = matches!(responses[0].body, ResponseBody::WindowCreated { .. });
+            assert_eq!(opened, opens, "{layer:?}, key {holds_key:?}");
+            assert!(
+                opens || is_refusal(&responses[0].body),
+                "{:?}",
+                responses[0].body
+            );
+            assert_eq!(comp.window_list().windows.len(), usize::from(opens));
+        }
+        // Under the open gate -- every session until its shell holds the
+        // key -- anyone may, as before.
+        let (mut comp, mut link) = wired();
+        let mut spec = WindowSpec::new("Surface", 100, 80);
+        spec.layer = Layer::Overlay;
+        let responses = exchange(&mut comp, &mut link, vec![RequestBody::CreateWindow(spec)]);
+        assert!(matches!(
+            responses[0].body,
+            ResponseBody::WindowCreated { .. }
+        ));
     }
 
     #[test]

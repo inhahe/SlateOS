@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sound Recorder
+Comment=Record sound from a microphone
+Icon=audio-input-microphone
+Exec=soundrecorder
+Categories=AudioVideo;Audio;Recorder;
+Keywords=record;microphone;voice;

@@ -54,6 +54,15 @@ height was computed from the font and never bounded by the toolbar, so in a
 window shorter than the toolbar wanted, every button was painted past the
 bottom edge of the window -- and hit-boxed there too.
 
+2026-10-04 added two groups.  The toolbar's sidebar and strip toggles were
+flags nothing read -- the panes stayed, drawn and answering clicks, whatever
+the toolbar said -- and `Layout::hiding` now gives their room to the picture.
+And the settings' bars became lane C's slider (`guitk::slider`): a press on a
+bar sets the setting there, a drag carries it, Escape takes it back, the thumb
+lights under the pointer, and a drag whose bar the window takes away is taken
+back too, so the bar that returns does not follow a pointer whose button is
+up.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -166,9 +175,12 @@ MUTATIONS = [
     # -- what the pointer reaches --------------------------------------------
     (
         "any mouse event is a left click",
-        "        if mouse.kind != MouseEventKind::Press(MouseButton::Left) {\n"
-        "            return EventResult::Ignored;\n        }",
-        "        if false {\n            return EventResult::Ignored;\n        }",
+        "            _ => return EventResult::Ignored,\n"
+        "        }\n"
+        "        let frame = self.frame(self.width, self.height);",
+        "            _ => {}\n"
+        "        }\n"
+        "        let frame = self.frame(self.width, self.height);",
         ["a_right_click_is_not_a_left_one"],
     ),
     (
@@ -221,8 +233,8 @@ MUTATIONS = [
     ),
     (
         "both ends of a slider nudge it the same way",
-        "            for (r, label, nudge) in [(down, \"-\", Nudge::Down), (up, \"+\", Nudge::Up)] {",
-        "            for (r, label, nudge) in [(down, \"-\", Nudge::Up), (up, \"+\", Nudge::Up)] {",
+        "[(parts.down, \"-\", Nudge::Down), (parts.up, \"+\", Nudge::Up)]",
+        "[(parts.down, \"-\", Nudge::Up), (parts.up, \"+\", Nudge::Up)]",
         ["each_slider_end_moves_its_own_setting_in_its_own_direction"],
     ),
     (
@@ -362,6 +374,240 @@ MUTATIONS = [
         "            if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {\n"
         "                self.show_help = false;\n",
         ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    # -- 2026-10-04: the toolbar's two pane toggles, read at last -------------
+    (
+        "the pane toggles are read by nothing",
+        "        let l = Layout::solve(w, h).hiding(!self.sidebar_visible, !self.photo_strip_visible);",
+        "        let l = Layout::solve(w, h).hiding(false, false);",
+        [
+            "hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture",
+            "hiding_only_the_strip_keeps_the_sidebar_full_height",
+        ],
+    ),
+    (
+        "the sidebar's toggle hides the strip and the strip's the sidebar",
+        "        let l = Layout::solve(w, h).hiding(!self.sidebar_visible, !self.photo_strip_visible);",
+        "        let l = Layout::solve(w, h).hiding(!self.photo_strip_visible, !self.sidebar_visible);",
+        [
+            "hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture",
+            "hiding_only_the_strip_keeps_the_sidebar_full_height",
+        ],
+    ),
+    (
+        "the hidden sidebar's room is not given to the picture",
+        "            viewfinder.w = self.window.w;\n",
+        "",
+        ["hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture"],
+    ),
+    (
+        "the hidden sidebar is still laid out",
+        "            side = Rect::new(self.window.w, self.viewfinder.y, 0.0, 0.0);\n",
+        "",
+        ["hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture"],
+    ),
+    (
+        "the hidden strip's room is not given to the picture",
+        "            viewfinder.h =\n"
+        "                (self.strip.bottom().max(self.viewfinder.bottom()) - viewfinder.y).max(0.0);\n",
+        "",
+        [
+            "hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture",
+            "hiding_only_the_strip_keeps_the_sidebar_full_height",
+        ],
+    ),
+    (
+        "the hidden strip is still laid out",
+        "            Rect::new(0.0, viewfinder.bottom(), 0.0, 0.0)\n        } else {",
+        "            self.strip\n        } else {",
+        ["hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture"],
+    ),
+    (
+        "a kept strip keeps its old width under a hidden sidebar",
+        "            Rect::new(0.0, viewfinder.bottom(), viewfinder.w, self.strip.h)",
+        "            self.strip",
+        ["hiding_the_sidebar_and_the_strip_gives_their_room_to_the_picture"],
+    ),
+    # -- 2026-10-04: the settings' bars are the toolkit's slider --------------
+    (
+        "the settings rows are laid out under every panel",
+        "        if self.sidebar_panel != SidebarPanel::Settings {\n"
+        "            return Vec::new();\n"
+        "        }\n"
+        "        let Some(body) = sidebar_body(l) else {",
+        "        let Some(body) = sidebar_body(l) else {",
+        ["the_bars_answer_only_while_the_settings_panel_is_up"],
+    ),
+    (
+        "a settings row that does not fit is laid out anyway",
+        "            if y + l.row > body.bottom() {\n                break;\n            }\n",
+        "",
+        # Not `nothing_is_painted_outside_the_window`: the rows left over
+        # land on the status line, inside the window.
+        ["the_settings_rows_stay_inside_the_sidebar"],
+    ),
+    (
+        "a bar runs under its ends",
+        "    let inset = thumb / 2.0 + reach;",
+        "    let inset = 0.0;",
+        ["a_bars_thumb_and_its_light_stay_between_its_ends_at_every_size"],
+    ),
+    (
+        "a bar's thumb is as tall as it likes",
+        "    let thumb = BAR_THUMB.min(lower.h - 2.0 * reach).min(mid.w);",
+        "    let thumb = BAR_THUMB.min(mid.w);",
+        ["a_bars_thumb_and_its_light_stay_between_its_ends_at_every_size"],
+    ),
+    (
+        "white balance moved on its bar stays automatic",
+        "                self.settings.auto_white_balance = false;\n"
+        "                self.settings.set_white_balance(whole as u32);",
+        "                self.settings.set_white_balance(whole as u32);",
+        ["white_balance_moved_on_its_bar_is_no_longer_automatic"],
+    ),
+    (
+        "zoom is rounded to a whole number like the rest",
+        "            Setting::Zoom => self.settings.set_zoom(v as f32),",
+        "            Setting::Zoom => self.settings.set_zoom(whole as f32),",
+        ["zoom_keeps_its_tenths_on_its_bar"],
+    ),
+    (
+        "a value from a bar is not held to its setting's range",
+        "            v.clamp(lo, hi)\n        } else {",
+        "            v\n        } else {",
+        ["set_setting_holds_every_setting_to_its_range"],
+    ),
+    (
+        "a value that is not a number reaches the setters as the bottom",
+        "        } else {\n            self.setting_number(s)\n        };",
+        "        } else {\n            lo\n        };",
+        ["set_setting_holds_every_setting_to_its_range"],
+    ),
+    (
+        "a bar's move is not said on the status line",
+        "            Setting::Zoom => self.settings.set_zoom(v as f32),\n"
+        "        }\n"
+        "        let label = self.setting_value(s);\n"
+        "        self.set_status(&format!(\"{}: {label}\", s.label()));",
+        "            Setting::Zoom => self.settings.set_zoom(v as f32),\n"
+        "        }",
+        ["a_setting_follows_a_press_and_a_drag_along_its_bar"],
+    ),
+    (
+        "a bar is drawn where it was last dragged rather than at its setting",
+        "        if !bar.is_dragging() {\n"
+        "            bar.set_value(self.setting_number(s));\n"
+        "        }",
+        "",
+        ["a_bar_is_drawn_where_its_setting_is_whatever_moved_it"],
+    ),
+    (
+        "zoom's bar reads the brightness",
+        "            Setting::Zoom => f64::from(self.settings.zoom),",
+        "            Setting::Zoom => f64::from(self.settings.brightness),",
+        ["a_bar_is_drawn_where_its_setting_is_whatever_moved_it"],
+    ),
+    (
+        "a press on a bar sets nothing",
+        "        if let Some(event) = response.event() {\n"
+        "            self.set_setting(s, event.value());\n"
+        "        }\n"
+        "        response.is_taken()",
+        "        response.is_taken()",
+        ["a_setting_follows_a_press_and_a_drag_along_its_bar"],
+    ),
+    (
+        "a press on a bar starts no drag",
+        "        if dragging {\n            self.dragging = Some(s);\n        } else if",
+        "        if false {\n            self.dragging = Some(s);\n        } else if",
+        ["a_setting_follows_a_press_and_a_drag_along_its_bar"],
+    ),
+    (
+        "a bar's drag is never let go",
+        "        } else if self.dragging == Some(s) {\n"
+        "            self.dragging = None;\n"
+        "        }\n"
+        "        if let Some(event) = response.event() {",
+        "        }\n"
+        "        if let Some(event) = response.event() {",
+        ["a_setting_follows_a_press_and_a_drag_along_its_bar"],
+    ),
+    (
+        "a drag whose bar goes is kept by the slider",
+        "            let response = self.setting_bars.get_mut(s.index()).map(Slider::cancel);\n"
+        "            if let Some(event) = response.and_then(guitk::slider::Response::event) {\n"
+        "                self.set_setting(s, event.value());\n"
+        "            }\n",
+        "",
+        ["a_drag_whose_bar_goes_is_taken_back_and_lets_the_pointer_go"],
+    ),
+    (
+        "a drag whose bar goes keeps the pointer",
+        "            self.dragging = None;\n"
+        "            let response = self.setting_bars.get_mut(s.index()).map(Slider::cancel);",
+        "            let response = self.setting_bars.get_mut(s.index()).map(Slider::cancel);",
+        ["a_drag_whose_bar_goes_is_taken_back_and_lets_the_pointer_go"],
+    ),
+    (
+        "no bar's thumb ever lights",
+        "            lit |= self.bar_mouse(*s, mouse);",
+        "            let _ = s;",
+        ["a_bars_thumb_lights_under_the_pointer_and_goes_out_after"],
+    ),
+    (
+        "a move is never offered to the bars",
+        "                return if self.hover_bars(mouse) {",
+        "                return if false {",
+        ["a_bars_thumb_lights_under_the_pointer_and_goes_out_after"],
+    ),
+    (
+        "a drag's pointer goes where any pointer goes",
+        "        if let Some(setting) = self.dragging {\n"
+        "            return if self.bar_mouse(setting, mouse) {",
+        "        if let Some(setting) = None::<Setting> {\n"
+        "            return if self.bar_mouse(setting, mouse) {",
+        ["a_setting_follows_a_press_and_a_drag_along_its_bar"],
+    ),
+    (
+        "a press on a bar is answered like a press on a button",
+        "            Some(Target::SettingBar(setting)) => {\n"
+        "                self.bar_mouse(setting, mouse);",
+        "            Some(Target::SettingBar(setting)) => {\n"
+        "                self.activate(Target::SettingBar(setting));",
+        ["a_setting_follows_a_press_and_a_drag_along_its_bar"],
+    ),
+    (
+        "every bar's hit box is brightness's",
+        "                    f.hit(Target::SettingBar(setting), hit);",
+        "                    f.hit(Target::SettingBar(Setting::Brightness), hit);",
+        [
+            "zoom_keeps_its_tenths_on_its_bar",
+            "white_balance_moved_on_its_bar_is_no_longer_automatic",
+        ],
+    ),
+    (
+        "a key mid-drag is answered as if there were no drag",
+        "        if let Some(result) = self.drag_key(key) {\n            return result;\n        }\n",
+        "",
+        ["escape_takes_a_bars_drag_back_and_other_keys_wait"],
+    ),
+    (
+        "Escape takes the drag back and the setting keeps the drag's value",
+        "        if let Some(event) = response.event() {\n"
+        "            self.set_setting(s, event.value());\n"
+        "        }\n"
+        "        Some(if response.is_taken() {",
+        "        Some(if response.is_taken() {",
+        ["escape_takes_a_bars_drag_back_and_other_keys_wait"],
+    ),
+    (
+        "a drag Escape took back still has the pointer",
+        "        let response = stored.handle_key(key);\n"
+        "        if !stored.is_dragging() {\n"
+        "            self.dragging = None;\n"
+        "        }\n",
+        "        let response = stored.handle_key(key);\n",
+        ["escape_takes_a_bars_drag_back_and_other_keys_wait"],
     ),
 ]
 

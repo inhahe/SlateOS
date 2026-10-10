@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Torrent
+Comment=Download and share files with BitTorrent
+Icon=network-transmit-receive
+Exec=torrent
+Categories=Network;FileTransfer;P2P;
+Keywords=bittorrent;download;

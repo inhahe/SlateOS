@@ -42,6 +42,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::{scroll_window, text, wheel};
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -187,12 +188,14 @@ fn row_indent(depth: u32, name_width: f32) -> f32 {
 const MIN_WIDTH: f32 = 480.0;
 const MIN_HEIGHT: f32 = 320.0;
 
-/// Longest path the toolbar's text field will accept.
+/// Longest path the toolbar's text field will accept, in characters.
 ///
 /// A key event handler that appends without a bound is a memory leak with a
 /// keyboard attached to it. This is far longer than any path the filesystem
 /// will accept, so it never truncates something a user could really open.
 const MAX_PATH_INPUT: usize = 4096;
+/// How far the path field's text sits inside each side of the field.
+const PATH_TEXT_INSET: f32 = 8.0;
 
 /// Widest a single breadcrumb button is drawn, in pixels.
 const BREADCRUMB_MAX_SEGMENT: f32 = 160.0;
@@ -1241,6 +1244,11 @@ pub struct DiskAnalyzerUI {
     pub show_help: bool,
     /// Whether the path field has the keyboard.
     pub path_focused: bool,
+    /// The path field's editor -- its caret and selection over
+    /// `path_input` -- reloaded when the path changed under it.
+    path_editor: TextInput,
+    /// What the path field's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    path_clipboard: String,
     /// Whether the pointer is over the path field, which lights its edge.
     pub path_hovered: bool,
     /// How wide the mark is round the path field while it has the keyboard:
@@ -1322,6 +1330,8 @@ impl DiskAnalyzerUI {
             path_input,
             show_help: false,
             path_focused: false,
+            path_editor: TextInput::new(),
+            path_clipboard: String::new(),
             path_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             scroll_offset: 0,
@@ -1704,19 +1714,30 @@ impl DiskAnalyzerUI {
         let input = path_input_rect(width);
         let state = self.path_field_state();
         field::draw(frame, &self.palette, input, state, self.focus_ring_width);
-        let inner = Rect::new(input.x + 8.0, 14.0, (input.w - 16.0).max(0.0), 0.0);
+        let inner = Rect::new(
+            input.x + PATH_TEXT_INSET,
+            14.0,
+            (input.w - 2.0 * PATH_TEXT_INSET).max(0.0),
+            0.0,
+        );
         if state.focused {
-            // The typing, with the caret after it -- and scrolled once it is
-            // wider than the field, so the end being typed stays in view.
+            // The path, with its caret and selection where they are -- and
+            // scrolled once it is wider than the field, so the caret stays in
+            // view. The caret was fixed at the end, the only place the keys
+            // could type. The editor's selection only while it is the
+            // field's: a path changed under it has not been reloaded into it
+            // yet.
             let mut tree = RenderTree::new();
             textedit::draw(
                 &mut tree,
                 &textedit::SingleLine {
                     text: &self.path_input,
-                    // Typed and erased at its end, so the end is where the
-                    // caret is.
-                    cursor: guitk::text::TextCursor::from(self.path_input.len()),
-                    selection_anchor: None,
+                    cursor: self.path_cursor(),
+                    selection_anchor: if self.path_editor.text() == self.path_input {
+                        self.path_editor.selection_anchor()
+                    } else {
+                        None
+                    },
                     focused: true,
                     x: inner.x,
                     y: inner.y,
@@ -2416,7 +2437,7 @@ impl DiskAnalyzerUI {
         }
         match target {
             Some(Target::PathInput) => {
-                self.path_focused = true;
+                self.press_path(x, size.0);
                 Action::Redraw
             }
             Some(Target::Scan) => {
@@ -2547,7 +2568,7 @@ impl DiskAnalyzerUI {
         // Tab would switch views behind the user's back as they switched
         // windows, and they would never see it happen.
         if key.modifiers.ctrl && key.key == Key::L {
-            self.path_focused = true;
+            self.focus_path();
             return Action::Redraw;
         }
         if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
@@ -2622,33 +2643,98 @@ impl DiskAnalyzerUI {
                 self.start_scan(self.path_field_target());
                 Action::Redraw
             }
-            Key::Backspace => {
-                if self.path_input.pop().is_some() {
-                    Action::Redraw
-                } else {
-                    Action::None
-                }
-            }
             _ => {
-                // Every character the keystroke typed, not just the first: one
-                // press can produce several (a dead key composing, a paste
-                // delivered as text), and taking only the first would silently
-                // drop the rest.
-                let before = self.path_input.len();
-                for c in key.typed() {
-                    if self.path_input.len() >= MAX_PATH_INPUT {
-                        break;
-                    }
-                    self.path_input.push(c);
-                }
                 let _ = size;
-                if self.path_input.len() == before {
-                    Action::None
-                } else {
+                if self.path_key(key) {
                     Action::Redraw
+                } else {
+                    Action::None
                 }
             }
         }
+    }
+
+    /// A key for the path field, which has the keyboard: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
+    /// every character a keystroke types, not just the first (a dead key
+    /// composing, a paste delivered as text), and no command's letter.
+    /// Whether the path changed, or its caret or selection moved: a key that
+    /// changes nothing is not a redraw.
+    ///
+    /// The field took typing at its end and Backspace from it, and nothing
+    /// else -- a typo at the start of a long path was fixed by deleting the
+    /// whole path.
+    fn path_key(&mut self, key: &KeyEvent) -> bool {
+        if self.path_editor.text() != self.path_input {
+            self.path_editor.set_text(&self.path_input);
+        }
+        let before = (
+            self.path_editor.cursor(),
+            self.path_editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.path_editor,
+            key,
+            MAX_PATH_INPUT,
+            &self.path_clipboard,
+            FONT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.path_clipboard = copied;
+        }
+        if self.path_editor.text() != self.path_input {
+            self.path_input = self.path_editor.text().to_owned();
+            return true;
+        }
+        before
+            != (
+                self.path_editor.cursor(),
+                self.path_editor.selection_anchor(),
+            )
+    }
+
+    /// Ctrl+L: the path field takes the keyboard with the path selected, as
+    /// an address bar does, so typing replaces it and an arrow key keeps it
+    /// to edit.
+    fn focus_path(&mut self) {
+        self.path_focused = true;
+        self.path_editor.set_text(&self.path_input);
+        self.path_editor.select_all();
+    }
+
+    /// Where the path field's caret is: the editor's while the field has the
+    /// keyboard, and the end otherwise -- the field without the keyboard
+    /// reads from the path's tail, and the end is where the field opens. One
+    /// answer for the drawing and for a press.
+    fn path_cursor(&self) -> text::TextCursor {
+        if self.path_focused && self.path_editor.text() == self.path_input {
+            self.path_editor.cursor()
+        } else {
+            text::TextCursor::from(self.path_input.len())
+        }
+    }
+
+    /// A press in the path field at `x`: it takes the keyboard, with the
+    /// caret under the pointer, measured against the field as it reads with
+    /// the caret where it was -- for a field that did not have the keyboard,
+    /// at the end, which shows the path's tail as the field without it does.
+    fn press_path(&mut self, x: f32, width: f32) {
+        let rect = path_input_rect(width);
+        let drawn = self.path_cursor();
+        self.path_focused = true;
+        if self.path_editor.text() != self.path_input {
+            self.path_editor.set_text(&self.path_input);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.path_input,
+            drawn,
+            (rect.w - 2.0 * PATH_TEXT_INSET).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - PATH_TEXT_INSET,
+        );
+        self.path_editor.set_selection_anchor(None);
+        self.path_editor.set_cursor(cursor);
     }
 
     /// Move the view tab `step` places, wrapping.
@@ -5341,5 +5427,164 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // -- The path field edits at a caret ----------------------------------------
+
+    /// The x of every caret drawn in the path field.
+    fn path_carets(ui: &DiskAnalyzerUI) -> Vec<f32> {
+        let rect = path_input_rect(WINDOW_WIDTH);
+        ui.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_path_at(ui: &mut DiskAnalyzerUI, x: f32) -> Action {
+        let rect = path_input_rect(WINDOW_WIDTH);
+        ui.click_at(
+            x,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+        )
+    }
+
+    /// **The path field edits at a caret**: the arrows, Home and End move
+    /// it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn where they are. The field took typing at
+    /// its end and Backspace from it, and nothing else: a typo at the start
+    /// of a long path was fixed by deleting the whole path.
+    #[test]
+    fn the_path_field_edits_at_a_caret() {
+        let mut ui = loaded();
+        probe::key(&mut ui, &probe::ctrl(Key::L));
+        assert!(ui.path_focused);
+        probe::type_str(&mut ui, "/hme");
+        probe::key(&mut ui, &probe::press(Key::Left));
+        probe::key(&mut ui, &probe::press(Key::Left));
+        probe::type_str(&mut ui, "o");
+        assert_eq!(ui.path_input, "/home", "the caret did not move");
+        let rect = path_input_rect(WINDOW_WIDTH);
+        let at =
+            rect.x + PATH_TEXT_INSET + text::measure("/ho", FONT_SIZE, FontWeightHint::Regular);
+        let carets = path_carets(&ui);
+        assert_eq!(carets.len(), 1, "one caret in the field");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `/ho` it follows at {at}"
+        );
+
+        probe::key(&mut ui, &probe::press(Key::Home));
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(ui.path_input, "home", "Delete at the caret");
+        probe::key(&mut ui, &probe::press(Key::End));
+        probe::key(&mut ui, &probe::shift(Key::Home));
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + PATH_TEXT_INSET,
+            text::measure("home", FONT_SIZE, FontWeightHint::Regular),
+        );
+        assert!(
+            ui.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .iter()
+                .any(|c| matches!(c,
+                RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        probe::key(&mut ui, &probe::ctrl(Key::C));
+        probe::type_str(&mut ui, "/");
+        assert_eq!(ui.path_input, "/", "Shift+Home did not select");
+        probe::key(&mut ui, &probe::ctrl(Key::V));
+        assert_eq!(ui.path_input, "/home", "Ctrl+C or Ctrl+V");
+        probe::key(&mut ui, &probe::ctrl(Key::A));
+        probe::key(&mut ui, &probe::ctrl(Key::X));
+        assert_eq!(ui.path_input, "", "Ctrl+A and Ctrl+X");
+        probe::key(&mut ui, &probe::ctrl(Key::V));
+        assert_eq!(ui.path_input, "/home", "Ctrl+X took nothing");
+
+        // A press at the start of the path puts the caret there, and one past
+        // its end at its end.
+        assert_eq!(
+            press_path_at(&mut ui, rect.x + PATH_TEXT_INSET + 0.5),
+            Action::Redraw
+        );
+        probe::type_str(&mut ui, "<");
+        assert_eq!(
+            ui.path_input, "</home",
+            "the press did not put the caret there"
+        );
+        press_path_at(&mut ui, rect.right() - 2.0);
+        probe::type_str(&mut ui, ">");
+        assert_eq!(ui.path_input, "</home>");
+    }
+
+    /// **Ctrl+L selects the path, as an address bar does**, so typing
+    /// replaces it and an arrow keeps it to edit; and **a key that changes
+    /// nothing in the field is not a redraw**, while one that moves only the
+    /// caret is.
+    #[test]
+    fn ctrl_l_selects_the_path() {
+        let mut ui = loaded();
+        let shown = ui.path_input.clone();
+        assert!(!shown.is_empty());
+        probe::key(&mut ui, &probe::ctrl(Key::L));
+        probe::type_str(&mut ui, "/tmp");
+        assert_eq!(ui.path_input, "/tmp", "Ctrl+L did not select the path");
+        assert_eq!(probe::key(&mut ui, &probe::press(Key::Right)), Action::None);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Left)),
+            Action::Redraw,
+            "a caret moved is not drawn"
+        );
+    }
+
+    /// **A press in a field without the keyboard lands where the field
+    /// reads**: the field shows a long path's tail, cut at the front, so a
+    /// press at its right end puts the caret at the path's end -- not at
+    /// whatever character the press would have hit in the path's head.
+    #[test]
+    fn a_press_in_a_field_without_the_keyboard_lands_where_it_reads() {
+        let mut ui = loaded();
+        ui.path_input = format!("/{}/end", "deep/".repeat(40));
+        assert!(!ui.path_focused);
+        let rect = path_input_rect(WINDOW_WIDTH);
+        press_path_at(&mut ui, rect.right() - 2.0);
+        assert!(ui.path_focused);
+        probe::type_str(&mut ui, "!");
+        assert!(
+            ui.path_input.ends_with("/end!"),
+            "the press missed the tail the field shows: {}",
+            ui.path_input
+        );
+    }
+
+    /// **The field edits the path it shows**, however the path came to be in
+    /// it: its editor is loaded from the field whenever a press or a key
+    /// finds the two apart.
+    #[test]
+    fn the_path_field_edits_the_path_it_shows() {
+        let mut ui = loaded();
+        ui.path_input = String::from("/home");
+        let rect = path_input_rect(WINDOW_WIDTH);
+        press_path_at(&mut ui, rect.x + PATH_TEXT_INSET + 0.5);
+        probe::type_str(&mut ui, "<");
+        assert_eq!(ui.path_input, "</home", "the press missed the shown path");
+        ui.path_input = String::from("/srv");
+        probe::type_str(&mut ui, "?");
+        assert_eq!(ui.path_input, "/srv?", "the key edited another path");
     }
 }

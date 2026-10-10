@@ -1412,6 +1412,30 @@ fn search_box_rect(width: f32) -> Rect {
     Rect::new(16.0, 28.0, (width - 32.0).max(0.0), 28.0)
 }
 
+/// The size the query is drawn at, which its caret keys and a press measure
+/// against as well.
+const QUERY_TEXT_SIZE: f32 = 13.0;
+/// How far the query sits inside the box's left end.
+const QUERY_TEXT_INSET: f32 = 12.0;
+/// The most the query holds, in characters: a name, a pattern or a phrase
+/// with its `ext:` and `in:` terms, and a paste of a page is none of them.
+const QUERY_CAPACITY: usize = 1024;
+
+/// Where the query is drawn in the box at `search`: from its left end up to
+/// the switches, a line high and centred. One answer for the drawing and for
+/// a press.
+fn query_text_area(search: Rect) -> Rect {
+    let (save, _) = search_switch_rects(search);
+    let line = guitk::text::line_height(QUERY_TEXT_SIZE, FontWeightHint::Regular);
+    let x = search.x + QUERY_TEXT_INSET;
+    Rect::new(
+        x,
+        search.y + (search.h - line) / 2.0,
+        (save.x - 8.0 - x).max(0.0),
+        line,
+    )
+}
+
 /// The save switch and the mode switch inside the query box's right end.
 fn search_switch_rects(search: Rect) -> (Rect, Rect) {
     let mode = Rect::new(search.right() - 80.0, 30.0, 68.0, 24.0);
@@ -1447,6 +1471,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1517,7 +1542,7 @@ fn narrowing(criteria: &SearchCriteria) -> String {
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the results"),
     ("PageUp / PageDown", "A page of results"),
-    ("Home / End", "First / last result"),
+    ("Ctrl+Home / Ctrl+End", "First / last result"),
     ("Enter", "Open what is selected"),
     ("Ctrl+L", "Open the folder it is in"),
     ("Ctrl+D", "Save this search, or forget it"),
@@ -1526,7 +1551,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+O", "Choose a folder to search"),
     ("Ctrl+N / Ctrl+S / Ctrl+M", "Sort by name / size / modified"),
     (
-        "Ctrl+E / Ctrl+C / Ctrl+A",
+        "Ctrl+E / Ctrl+Shift+C / Ctrl+Shift+A",
         "Sort by extension / category / path",
     ),
     ("Ctrl+F", "Show or hide the filters"),
@@ -1608,6 +1633,12 @@ pub struct FileSearchApp {
     /// The largest file a content search reads; [`MAX_CONTENT_BYTES`] but for
     /// the tests that need a small one.
     content_limit: u64,
+    /// The query's editor -- its caret and selection over `criteria.query`
+    /// -- reloaded when the query changed under it: cleared, or a saved
+    /// search brought back.
+    query_editor: TextInput,
+    /// What the query's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    clipboard: String,
 }
 
 impl Default for FileSearchApp {
@@ -1649,6 +1680,8 @@ impl FileSearchApp {
             launch: spawn_program,
             content: None,
             content_limit: MAX_CONTENT_BYTES,
+            query_editor: TextInput::new(),
+            clipboard: String::new(),
         }
     }
 
@@ -2041,19 +2074,33 @@ impl FileSearchApp {
         // the desktop's.
         let ctrl = textline::is_ctrl_chord(key.modifiers);
         match key.key {
+            // The two sorts that share a letter with the clipboard's keys
+            // take Shift, and come ahead of the query, whose Ctrl+A and
+            // Ctrl+C they were: a search box where Ctrl+A sorted by path and
+            // Ctrl+C by category had no select-all and no copy
+            // (design-decisions 1233).
+            Key::C if ctrl && key.modifiers.shift => return self.sort_by(SortColumn::Category),
+            Key::A if ctrl && key.modifiers.shift => return self.sort_by(SortColumn::Path),
+            // The results' ends, with Home and End the query's.
+            Key::Home if ctrl => return self.select_edge(true),
+            Key::End if ctrl => return self.select_edge(false),
+            _ => {}
+        }
+        // The query has the keys a text box has: the caret keys, Backspace
+        // and Delete at the caret, Ctrl+A, C, X and V, and typing -- what
+        // AltGr types among it (refused with every Ctrl key once, so German
+        // `@` could not be typed), and no command's letter (Alt+X typed an
+        // `x`, and Windows+E an `e`). Up and Down, the page keys and Enter are
+        // the results'. The query took typing at its end and Backspace from
+        // it, and nothing else.
+        if let Some(answered) = self.query_key(key) {
+            return answered;
+        }
+        match key.key {
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
             Key::PageUp => self.step_selection(self.page_rows().saturating_neg()),
             Key::PageDown => self.step_selection(self.page_rows()),
-            Key::Home => self.select_edge(true),
-            Key::End => self.select_edge(false),
-            Key::Backspace => {
-                if self.criteria.query.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.execute_search();
-                EventResult::Consumed
-            }
             Key::Escape => {
                 if self.criteria.query.is_empty() {
                     return EventResult::Ignored;
@@ -2087,8 +2134,6 @@ impl FileSearchApp {
             Key::S if ctrl => self.sort_by(SortColumn::Size),
             Key::M if ctrl => self.sort_by(SortColumn::Modified),
             Key::E if ctrl => self.sort_by(SortColumn::Extension),
-            Key::C if ctrl => self.sort_by(SortColumn::Category),
-            Key::A if ctrl => self.sort_by(SortColumn::Path),
             Key::F if ctrl => {
                 self.show_filters = !self.show_filters;
                 EventResult::Consumed
@@ -2131,18 +2176,92 @@ impl FileSearchApp {
                 self.criteria.include_directories = !self.criteria.include_directories;
                 self.rerun_with_filters()
             }
-            // What a key typed, AltGr's among it -- refused with every Ctrl
-            // key once, so German `@` could not be typed -- and not a
-            // command's letter: Alt+X typed an `x`, and Windows+E an `e`.
-            _ => {
-                if !textline::types_into_field(key) {
-                    return EventResult::Ignored;
-                }
-                self.criteria.query.extend(key.typed());
-                self.execute_search();
-                EventResult::Consumed
-            }
+            _ => EventResult::Ignored,
         }
+    }
+
+    /// The query's editor loaded with the query, unless it holds it
+    /// already: the caret after it.
+    fn load_query(&mut self) {
+        if self.query_editor.text() != self.criteria.query {
+            self.query_editor.set_text(&self.criteria.query);
+        }
+    }
+
+    /// A key for the query: `None` for one it does not answer; else
+    /// `Consumed` where the key changed the query, its caret or its
+    /// selection. A query changed is searched for again.
+    fn query_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        self.load_query();
+        let editor = &self.query_editor;
+        let before = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.query_editor,
+            key,
+            QUERY_CAPACITY,
+            &self.clipboard,
+            QUERY_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if !edit.handled {
+            return None;
+        }
+        if self.query_editor.text() != self.criteria.query {
+            self.criteria.query = self.query_editor.text().to_owned();
+            self.execute_search();
+        }
+        let editor = &self.query_editor;
+        let after = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        Some(if after == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        })
+    }
+
+    /// Where the query's caret and selection anchor are: the editor's while
+    /// it holds the query, after it and none otherwise. One answer for the
+    /// drawing and for a press.
+    fn query_caret(&self) -> (guitk::text::TextCursor, Option<usize>) {
+        if self.query_editor.text() == self.criteria.query {
+            (
+                self.query_editor.cursor(),
+                self.query_editor.selection_anchor(),
+            )
+        } else {
+            (
+                guitk::text::TextCursor::from(self.criteria.query.len()),
+                None,
+            )
+        }
+    }
+
+    /// A press at `x` in the query's box: the caret under the pointer,
+    /// measured against the query as it was drawn.
+    fn press_query(&mut self, x: f32) {
+        let (drawn, _) = self.query_caret();
+        self.load_query();
+        let area = query_text_area(search_box_rect(self.window.0));
+        let cursor = textedit::cursor_at_click(
+            &self.criteria.query,
+            drawn,
+            area.w,
+            QUERY_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - area.x,
+        );
+        self.query_editor.set_selection_anchor(None);
+        self.query_editor.set_cursor(cursor);
     }
 
     /// Run the search again after a filter moved, and say it was handled.
@@ -2381,15 +2500,11 @@ impl FileSearchApp {
         // end. The mode was a label; it is the switch Ctrl+R turns now.
         let (save, mode) = search_switch_rects(search);
 
-        // The query, with the caret after it -- scrolled so the end being
-        // typed stays in view -- up to the switches; empty, what it is for.
-        let line = guitk::text::line_height(13.0, FontWeightHint::Regular);
-        let inner = Rect::new(
-            search.x + 12.0,
-            search.y + (search.h - line) / 2.0,
-            (save.x - 8.0 - (search.x + 12.0)).max(0.0),
-            line,
-        );
+        // The query, with its caret and selection where they are --
+        // scrolled so the caret stays in view -- up to the switches; empty,
+        // what it is for.
+        let inner = query_text_area(search);
+        let line = inner.h;
         if self.criteria.query.is_empty() {
             f.push(RenderCommand::Text {
                 x: inner.x,
@@ -2407,10 +2522,10 @@ impl FileSearchApp {
             &mut tree,
             &textedit::SingleLine {
                 text: &self.criteria.query,
-                // Typed and erased at its end, so the end is where the caret
-                // is.
-                cursor: guitk::text::TextCursor::from(self.criteria.query.len()),
-                selection_anchor: None,
+                // Where the caret and the selection are; the caret was fixed
+                // at the end, the only place the keys could type.
+                cursor: self.query_caret().0,
+                selection_anchor: self.query_caret().1,
                 focused: state.focused,
                 x: inner.x,
                 y: inner.y,
@@ -3101,6 +3216,11 @@ impl FileSearchApp {
                 let Some(target) = self.current_frame().hit_test(event.x, event.y) else {
                     return EventResult::Ignored;
                 };
+                // The query's box: the caret under the pointer.
+                if target == Target::SearchBox {
+                    self.press_query(event.x);
+                    return EventResult::Consumed;
+                }
                 self.activate(target)
             }
             // A double press on a result opens it, which is what a double
@@ -4423,14 +4543,15 @@ mod tests {
             EventResult::Ignored,
             "Up at the top should stay put"
         );
-        let _ = app.handle_event(&press(Key::End));
+        // Ctrl+End and Ctrl+Home: plain, they are the query's.
+        let _ = app.handle_event(&Event::Key(probe::ctrl(Key::End)));
         assert_eq!(app.selected_result, app.results.len().checked_sub(1));
         assert_eq!(
             app.handle_event(&press(Key::Down)),
             EventResult::Ignored,
             "Down at the bottom should stay put"
         );
-        let _ = app.handle_event(&press(Key::Home));
+        let _ = app.handle_event(&Event::Key(probe::ctrl(Key::Home)));
         assert_eq!(app.selected_result, Some(0));
     }
 
@@ -5691,12 +5812,12 @@ mod tests {
         let last = *app.results.last().unwrap();
         assert!(!probe::is_visible(&app, Target::Result(last)));
 
-        probe::key(&mut app, &probe::press(Key::End));
+        probe::key(&mut app, &probe::ctrl(Key::End));
         assert!(
             probe::is_visible(&app, Target::Result(last)),
             "the selection left the screen"
         );
-        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::ctrl(Key::Home));
         assert!(probe::is_visible(&app, Target::Result(app.results[0])));
 
         probe::scroll_at_point(&mut app, Target::Results, -5.0);
@@ -6625,6 +6746,14 @@ mod tests {
             sort,
             "AltGr+S sorted the results"
         );
+        // Nor where AltGr+S types nothing, on a layout with nothing there:
+        // the query does not answer it, and it is still no Ctrl+S.
+        app.handle_event(&key_with(Key::S, "", altgr));
+        assert_eq!(
+            (app.sort_column, app.sort_ascending),
+            sort,
+            "AltGr+S with nothing to type sorted the results"
+        );
         for (k, t, m) in [
             (
                 Key::X,
@@ -6675,6 +6804,176 @@ mod tests {
         assert!(
             (caret - end).abs() < 0.5 && caret < save.x,
             "the caret is at {caret}, not after the query at {end}, short of {save:?}"
+        );
+    }
+
+    // -- The query edits at a caret ------------------------------------------------
+
+    fn typing_in(app: &mut FileSearchApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&Event::Key(probe::typing(&c.to_string())));
+        }
+    }
+
+    fn key_in(app: &mut FileSearchApp, key: KeyEvent) -> EventResult {
+        app.handle_event(&Event::Key(key))
+    }
+
+    /// The x of every caret drawn inside `area`.
+    fn carets_in(app: &FileSearchApp, area: Rect) -> Vec<f32> {
+        app.current_frame()
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && area.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The query edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn where they are, and an edit is searched
+    /// for. The query took typing at its end and Backspace from it, and
+    /// nothing else.
+    #[test]
+    fn the_query_edits_at_a_caret() {
+        let mut app = indexed();
+        typing_in(&mut app, "cnfig");
+        key_in(&mut app, probe::press(Key::Home));
+        key_in(&mut app, probe::press(Key::Right));
+        typing_in(&mut app, "o");
+        assert_eq!(app.criteria.query, "config", "the caret did not move");
+        assert!(
+            app.results.iter().all(|&r| {
+                app.index.entries[r].name.to_lowercase().contains("config")
+                    || app.index.entries[r].path.to_lowercase().contains("config")
+            }),
+            "the edit was not searched for"
+        );
+        let area = query_text_area(search_box_rect(app.window.0));
+        let at = area.x
+            + guitk::text::caret_x(
+                "config",
+                guitk::text::TextCursor::from(2),
+                QUERY_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&app, area);
+        assert_eq!(carets.len(), 1, "one caret in the query");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `co` it follows at {at}"
+        );
+
+        key_in(&mut app, probe::press(Key::Home));
+        key_in(&mut app, probe::press(Key::Delete));
+        assert_eq!(app.criteria.query, "onfig", "Delete at the caret");
+        typing_in(&mut app, "c");
+        key_in(&mut app, probe::ctrl(Key::A));
+        assert!(
+            app.current_frame()
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { text, spans, .. }
+                    if text == "config" && !spans.is_empty())),
+            "the selection is not drawn"
+        );
+        key_in(&mut app, probe::ctrl(Key::C));
+        assert_eq!(app.clipboard, "config", "Ctrl+C copied nothing");
+        key_in(&mut app, probe::ctrl(Key::X));
+        assert_eq!(app.criteria.query, "", "Ctrl+A and Ctrl+X");
+        key_in(&mut app, probe::ctrl(Key::V));
+        assert_eq!(app.criteria.query, "config", "Ctrl+V");
+
+        // A press at the start of the query puts the caret there, and one
+        // past its end at its end.
+        let mid = area.y + area.h / 2.0;
+        let size = <FileSearchApp as Probe>::SIZE;
+        app.click_at(area.x + 0.5, mid, MouseButton::Left, size);
+        typing_in(&mut app, "<");
+        app.click_at(area.right() - 1.0, mid, MouseButton::Left, size);
+        typing_in(&mut app, ">");
+        assert_eq!(
+            app.criteria.query, "<config>",
+            "a press did not put the caret where it landed"
+        );
+    }
+
+    /// **The sorts that shared Ctrl+C and Ctrl+A with the clipboard take
+    /// Shift**, and the plain chords are the query's (design-decisions
+    /// 1233): a search box where Ctrl+A sorted by path and Ctrl+C by
+    /// category had no select-all and no copy.
+    #[test]
+    fn the_sorts_that_shared_the_clipboards_keys_take_shift() {
+        let mut app = indexed();
+        let shift_ctrl = |k: Key| {
+            probe::press_with(
+                k,
+                guitk::event::Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..guitk::event::Modifiers::NONE
+                },
+            )
+        };
+        key_in(&mut app, shift_ctrl(Key::C));
+        assert_eq!(app.sort_column, SortColumn::Category, "Ctrl+Shift+C");
+        key_in(&mut app, shift_ctrl(Key::A));
+        assert_eq!(app.sort_column, SortColumn::Path, "Ctrl+Shift+A");
+        key_in(&mut app, probe::ctrl(Key::C));
+        key_in(&mut app, probe::ctrl(Key::A));
+        assert_eq!(
+            app.sort_column,
+            SortColumn::Path,
+            "a plain Ctrl+C or Ctrl+A sorted"
+        );
+    }
+
+    /// **The results keep their keys beside the query**: Home and End move
+    /// the caret and not the selection, and a key that changes nothing in
+    /// the query is no redraw.
+    #[test]
+    fn the_results_keep_their_keys_beside_the_query() {
+        let mut app = indexed();
+        typing_in(&mut app, "e");
+        key_in(&mut app, probe::press(Key::Down));
+        key_in(&mut app, probe::press(Key::Down));
+        let at = app.selected_result;
+        key_in(&mut app, probe::press(Key::Home));
+        assert_eq!(app.selected_result, at, "Home moved the selection");
+        typing_in(&mut app, "x");
+        assert_eq!(
+            app.criteria.query, "xe",
+            "Home did not take the caret to the start"
+        );
+        key_in(&mut app, probe::press(Key::Home));
+        assert_eq!(
+            key_in(&mut app, probe::press(Key::Left)),
+            EventResult::Ignored,
+            "Left at the start is a redraw"
+        );
+    }
+
+    /// **The query edits what it shows**, however it came to be what it is.
+    #[test]
+    fn the_query_edits_what_it_shows() {
+        let mut app = indexed();
+        typing_in(&mut app, "ab");
+        key_in(&mut app, probe::press(Key::Home));
+        app.criteria.query = String::from("notes");
+        typing_in(&mut app, "!");
+        assert_eq!(
+            app.criteria.query, "notes!",
+            "the key edited the query the editor held"
         );
     }
 }

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=FreeCell
+Comment=The FreeCell patience card game
+Icon=applications-games
+Exec=freecell
+Categories=Game;CardGame;
+Keywords=cards;solitaire;patience;

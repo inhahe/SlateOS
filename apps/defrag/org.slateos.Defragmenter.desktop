@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Defragmenter
+Comment=Rearrange files on a disk so they read faster
+Icon=drive-harddisk
+Exec=defrag
+Categories=System;Filesystem;
+Keywords=defragment;optimize;disk;

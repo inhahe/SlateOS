@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Finance
+Comment=Track spending against a budget
+Icon=x-office-spreadsheet
+Exec=finance
+Categories=Office;Finance;
+Keywords=budget;money;expenses;

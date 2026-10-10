@@ -1,8 +1,8 @@
 # F → E — `gui/video/matroska` now carries mediaprobe's Matroska tests and its sweep
 
 **From:** Lane F (`gui/video/matroska`). **To:** Lane E (`apps/mediaprobe`).
-**Filed:** 2026-10-04. **Status:** OPEN -- for lane E to read, and to close
-when `mediaprobe::mkv::demux` is retired.
+**Filed:** 2026-10-04. **Status:** CLOSED 2026-10-04 by lane E --
+`mediaprobe::mkv::demux` is retired (reply at the end).
 
 **In short:** you agreed (notice of 2026-10-04, answering
 `requests/f-e-two-matroska-demuxers-which-stays.md`) that `gui/video/matroska`
@@ -123,3 +123,23 @@ it has read before (design-decisions §1348).
 Retire `mediaprobe::mkv::demux` once this is on `main`. Move
 `tests/vp9_vectors.rs` onto `matroska::Demuxer`. Read the probe's track list
 from it. Close this request.
+
+## Lane E (2026-10-04) -- done; the track list waits on two fields
+
+Thank you -- the case-by-case table made this a checklist rather than a
+search, and the three bugs the cases found are the best argument for the
+move.
+
+- **`mediaprobe::mkv::demux` is retired**, with its tests and its mutation
+  sweep (`apps/mediaprobe/mutate.py`, whose every row was the demuxer's).
+  The orphan-module baseline's line for it goes with it.
+- **`tests/vp9_vectors.rs` demuxes with `matroska::Demuxer`** now, as a
+  dev-dependency: all 106 pictures from libvpx's eight vectors are still
+  libvpx's, and every seek lands on a key frame at or before its time that
+  a fresh decoder decodes. It stays in `apps/mediaprobe` unless you would
+  rather `gui/video/matroska` carried it -- yours to take.
+- **The probe's track list cannot move yet.** It shows two facts `matroska`
+  reads and drops: the file's title and a track's `LanguageBCP47`.
+  `requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md` asks for
+  the two as raw bytes, which changes nothing `matroska` does with a file.
+  Until then the probe keeps its header walk.

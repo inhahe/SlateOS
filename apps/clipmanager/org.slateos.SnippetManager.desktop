@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Snippet Manager
+Comment=A searchable store of text, with templates
+Icon=edit-paste
+Exec=clipmanager
+Categories=Utility;
+Keywords=clipboard;text;templates;

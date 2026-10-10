@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lock Screen
+Comment=The screen that locks the session
+Icon=system-lock-screen
+Exec=lockscreen
+Categories=System;
+Keywords=lock;
+NoDisplay=true

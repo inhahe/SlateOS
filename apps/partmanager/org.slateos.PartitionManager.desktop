@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Partition Manager
+Comment=Divide disks into partitions
+Icon=drive-harddisk
+Exec=partmanager
+Categories=System;Filesystem;
+Keywords=partition;disk;format;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=File Associations
+Comment=Choose which program opens each kind of file
+Icon=preferences-system
+Exec=fileassoc
+Categories=Settings;
+Keywords=open;with;default;types;

@@ -40,7 +40,9 @@
 //! but Ctrl chords it does not use fall through to the document's, so Ctrl+S
 //! still saves with the bar open.
 
-use crate::{Document, EditorState, ExternalChoice};
+use crate::{
+    Document, EditorState, ExternalChoice, FIND_CAPACITY, FIND_TEXT_INSET, FIND_TEXT_SIZE,
+};
 use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::EventResult;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -484,7 +486,17 @@ impl EditorState {
     /// Returns `None` for anything the bar does not claim, so it falls through
     /// to the document's bindings — Ctrl+S must still save while searching.
     fn find_key(&mut self, key: &KeyEvent) -> Option<Response> {
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types,
+        // and AltGr+R replaced the match where it should have typed into the
+        // field.
+        if textline::is_ctrl_chord(key.modifiers) {
+            // The field's own chords first: Ctrl+A, C, X and V select, copy,
+            // cut and paste in the field the keyboard is in -- through the
+            // window's clipboard, so a word copied from the text pastes into
+            // the search.
+            if matches!(key.key, Key::A | Key::C | Key::X | Key::V) {
+                return self.find_field_key(key);
+            }
             return match key.key {
                 Key::R => {
                     if key.modifiers.shift {
@@ -503,6 +515,15 @@ impl EditorState {
                 }
                 _ => None,
             };
+        }
+        // The bar's own keys are plain -- Shift aside: Alt+Enter went to the
+        // next match, and every chord with Alt typed its letter into the
+        // field. A chord with Alt or the Windows key that is not a menu's --
+        // the menu bar has had those -- is nobody's while the bar has the
+        // keys: the text's typing table takes a key whatever is held with
+        // it, and Alt+Enter would break a line under the bar.
+        if !textline::is_plain(key.modifiers) {
+            return Some(self.find_field_key(key).unwrap_or(Response::Idle));
         }
         match key.key {
             Key::Escape => {
@@ -525,34 +546,87 @@ impl EditorState {
                 self.after_cursor_move();
                 Some(Response::Redraw)
             }
-            Key::Backspace => {
-                let field = self.find_field;
-                let changed = self.find_field_mut(field).pop().is_some();
-                if field == FindField::Query {
-                    self.refresh_matches();
-                }
-                Some(if changed {
-                    Response::Redraw
-                } else {
-                    Response::Idle
-                })
-            }
-            _ => {
-                // Control characters would otherwise be appended literally: the
-                // Enter and Tab cases above are handled, but a key that reports
-                // text of '\u{8}' or '\u{1b}' must not become part of the query.
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return None;
-                }
-                let field = self.find_field;
-                self.find_field_mut(field).push_str(&typed);
-                if field == FindField::Query {
-                    self.refresh_matches();
-                }
-                Some(Response::Redraw)
-            }
+            _ => self.find_field_key(key),
         }
+    }
+
+    /// A key for the find field the keyboard is in: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
+    /// what `AltGr` types among it, and no command's letter. `None` for a
+    /// key the field does not answer, which goes on to the text; for one it
+    /// does, a redraw where the field changed or its caret or selection
+    /// moved -- Backspace at the start of a field is answered and changes
+    /// nothing, and must not reach the text, where it deletes.
+    ///
+    /// The fields took typing at their end and Backspace from it, and
+    /// nothing else.
+    pub(crate) fn find_field_key(&mut self, key: &KeyEvent) -> Option<Response> {
+        let field = self.find_field;
+        self.load_find_editor(field);
+        let before = (
+            self.find_editor.cursor(),
+            self.find_editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.find_editor,
+            key,
+            FIND_CAPACITY,
+            &self.clipboard,
+            FIND_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if !edit.handled {
+            return None;
+        }
+        if self.find_editor.text() != self.find_text(field) {
+            let typed = self.find_editor.text().to_owned();
+            *self.find_field_mut(field) = typed;
+            if field == FindField::Query {
+                self.refresh_matches();
+            }
+            return Some(Response::Redraw);
+        }
+        let moved = before
+            != (
+                self.find_editor.cursor(),
+                self.find_editor.selection_anchor(),
+            );
+        Some(if moved {
+            Response::Redraw
+        } else {
+            Response::Idle
+        })
+    }
+
+    /// Load `field` into the find bar's editor, unless it already holds it as
+    /// it is -- the caret after the text.
+    fn load_find_editor(&mut self, field: FindField) {
+        if self.find_editor_for != Some(field) || self.find_editor.text() != self.find_text(field) {
+            let held = self.find_text(field).to_owned();
+            self.find_editor.set_text(&held);
+            self.find_editor_for = Some(field);
+        }
+    }
+
+    /// A press in the find field `field` at `x`: the keyboard, and the caret
+    /// under the pointer, measured against the field as it was drawn.
+    fn press_find(&mut self, field: FindField, x: f32) {
+        let rect = self.find_box(field);
+        let drawn = self.find_cursor(field);
+        self.find_field = field;
+        self.load_find_editor(field);
+        let cursor = guitk::textedit::cursor_at_click(
+            self.find_text(field),
+            drawn,
+            (rect.w - 2.0 * FIND_TEXT_INSET).max(0.0),
+            FIND_TEXT_SIZE,
+            guitk::render::FontWeightHint::Regular,
+            x - rect.x - FIND_TEXT_INSET,
+        );
+        self.find_editor.set_selection_anchor(None);
+        self.find_editor.set_cursor(cursor);
     }
 
     fn find_field_mut(&mut self, field: FindField) -> &mut String {
@@ -862,6 +936,12 @@ impl EditorState {
             self.find.query = selected;
         }
         self.refresh_matches();
+        // What the field holds, selected: typing starts a new search, and an
+        // arrow key keeps this one to edit.
+        let held = self.find_text(field).to_owned();
+        self.find_editor.set_text(&held);
+        self.find_editor.select_all();
+        self.find_editor_for = Some(field);
     }
 
     /// Copy the selection, then delete it.
@@ -1188,11 +1268,12 @@ impl EditorState {
                     .into_iter()
                     .find(|&f| self.find_box(f).contains(mouse.x, mouse.y));
                 match on {
-                    Some(field) if field != self.find_field => {
-                        self.find_field = field;
+                    // The keyboard, and the caret under the pointer.
+                    Some(field) => {
+                        self.press_find(field, mouse.x);
                         Some(Response::Redraw)
                     }
-                    _ => Some(Response::Idle),
+                    None => Some(Response::Idle),
                 }
             }
             _ => None,
@@ -3158,5 +3239,243 @@ mod tests {
         // The document.
         editor.handle_event(&typed('x'));
         assert_eq!(editor.active_document().lines[0], "xalpha");
+    }
+
+    // ---- the find bar's fields edit at a caret ---------------------------------
+
+    /// The x of every caret drawn in `rect`.
+    fn carets_in(editor: &mut EditorState, rect: guitk::frame::Rect) -> Vec<f32> {
+        editor
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_at(editor: &mut EditorState, x: f32, y: f32) {
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **The find bar's fields edit at a caret**: the arrows, Home and End
+    /// move it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X
+    /// and V select, copy, cut and paste in the field -- through the window's
+    /// clipboard, so a word copied from the text pastes into the search -- a
+    /// press puts it where it lands, and it and the selection are drawn where
+    /// they are. The fields were plain text with no caret at all, typed only
+    /// at their end.
+    #[test]
+    fn the_find_fields_edit_at_a_caret() {
+        let mut editor = editor_with("needle in a haystack");
+        editor.resize(900, 600);
+        editor.handle_event(&ctrl(Key::F));
+        for ch in "nedle".chars() {
+            editor.handle_event(&typed(ch));
+        }
+        for _ in 0..3 {
+            editor.handle_event(&plain(Key::Left));
+        }
+        editor.handle_event(&typed('e'));
+        assert_eq!(editor.find.query, "needle", "the caret did not move");
+        assert_eq!(
+            editor.find.matches.len(),
+            1,
+            "the edit was not searched for"
+        );
+        assert_eq!(
+            editor.active_document().lines[0],
+            "needle in a haystack",
+            "an arrow reached the text"
+        );
+        let rect = editor.find_box(FindField::Query);
+        let at = rect.x
+            + FIND_TEXT_INSET
+            + guitk::text::caret_x(
+                "needle",
+                guitk::text::TextCursor::from(3),
+                FIND_TEXT_SIZE,
+                guitk::render::FontWeightHint::Regular,
+            );
+        let carets = carets_in(&mut editor, rect);
+        assert_eq!(carets.len(), 1, "one caret in the field");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `nee` it follows at {at}"
+        );
+        let replace_box = editor.find_box(FindField::Replace);
+        assert!(
+            carets_in(&mut editor, replace_box).is_empty(),
+            "the field without the keys draws a caret"
+        );
+
+        editor.handle_event(&plain(Key::Home));
+        editor.handle_event(&plain(Key::Delete));
+        assert_eq!(editor.find.query, "eedle", "Delete at the caret");
+        editor.handle_event(&plain(Key::End));
+        editor.handle_event(&shift(Key::Home));
+        // The selection drawn over what it selects.
+        let line = guitk::text::line_height(FIND_TEXT_SIZE, guitk::render::FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + FIND_TEXT_INSET,
+            guitk::text::measure(
+                "eedle",
+                FIND_TEXT_SIZE,
+                guitk::render::FontWeightHint::Regular,
+            ),
+        );
+        assert!(
+            editor.render_tree().commands.iter().any(|c| matches!(c,
+                guitk::render::RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        editor.handle_event(&ctrl(Key::C));
+        assert_eq!(
+            editor.clipboard, "eedle",
+            "Ctrl+C did not copy the field's selection"
+        );
+        editor.handle_event(&typed('n'));
+        assert_eq!(editor.find.query, "n", "Shift+Home did not select");
+        editor.handle_event(&ctrl(Key::V));
+        assert_eq!(editor.find.query, "needle", "Ctrl+V");
+        editor.handle_event(&ctrl(Key::A));
+        editor.handle_event(&ctrl(Key::X));
+        assert_eq!(editor.find.query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(
+            editor.active_document().lines[0],
+            "needle in a haystack",
+            "the field's Ctrl+X cut the text"
+        );
+        editor.handle_event(&plain(Key::Backspace));
+        assert_eq!(
+            editor.active_document().lines[0],
+            "needle in a haystack",
+            "Backspace in an empty field deleted in the text"
+        );
+
+        // The replacement field: Tab to it, type, and a press in the query
+        // at its start puts the keyboard and the caret there.
+        editor.handle_event(&plain(Key::Tab));
+        for ch in "pin".chars() {
+            editor.handle_event(&typed(ch));
+        }
+        assert_eq!(editor.find.replace_text, "pin");
+        editor.find.query = String::from("eedle");
+        press_at(
+            &mut editor,
+            rect.x + FIND_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+        );
+        assert_eq!(editor.find_field, FindField::Query);
+        editor.handle_event(&typed('n'));
+        assert_eq!(
+            editor.find.query, "needle",
+            "the press did not put the caret there"
+        );
+        let replace = editor.find_box(FindField::Replace);
+        press_at(
+            &mut editor,
+            replace.right() - 2.0,
+            replace.y + replace.h / 2.0,
+        );
+        editor.handle_event(&typed('e'));
+        assert_eq!(editor.find.replace_text, "pine");
+    }
+
+    /// **A chord is the bar's only as a Ctrl chord, and a command's letter is
+    /// never typed into it**: AltGr arrives as Ctrl+Alt, and AltGr+R -- a
+    /// character on several layouts -- replaced the match; Alt+X typed an
+    /// `x` into the search, and Alt+Enter went to the next match. Ctrl+R
+    /// still replaces; and Ctrl+F selects what the field holds, so typing
+    /// starts a new search.
+    #[test]
+    fn the_find_bar_takes_chords_as_chords() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut editor = editor_with("aaa bbb aaa");
+        editor.handle_event(&ctrl(Key::F));
+        for ch in "aaa".chars() {
+            editor.handle_event(&typed(ch));
+        }
+        editor.handle_event(&plain(Key::Tab));
+        for ch in "ccc".chars() {
+            editor.handle_event(&typed(ch));
+        }
+        editor.handle_event(&Event::Key(KeyEvent {
+            key: Key::R,
+            pressed: true,
+            modifiers: altgr,
+            text: String::from("®"),
+        }));
+        assert_eq!(
+            editor.active_document().lines[0],
+            "aaa bbb aaa",
+            "AltGr+R replaced the match"
+        );
+        assert_eq!(
+            editor.find.replace_text, "ccc®",
+            "AltGr+R did not type its ®"
+        );
+        editor.handle_event(&Event::Key(KeyEvent {
+            key: Key::X,
+            pressed: true,
+            modifiers: Modifiers::alt(),
+            text: String::from("x"),
+        }));
+        assert_eq!(editor.find.replace_text, "ccc®", "Alt+X typed an x");
+        let doc = editor.active_document();
+        let caret = (doc.cursor_line, doc.cursor_col);
+        editor.handle_event(&press(Key::Enter, Modifiers::alt()));
+        let doc = editor.active_document();
+        assert_eq!(
+            (doc.cursor_line, doc.cursor_col),
+            caret,
+            "Alt+Enter went to the next match"
+        );
+
+        // Ctrl+F selects the query: typing replaces it.
+        editor.handle_event(&ctrl(Key::F));
+        assert_eq!(editor.find_field, FindField::Query);
+        for ch in "bbb".chars() {
+            editor.handle_event(&typed(ch));
+        }
+        assert_eq!(editor.find.query, "bbb", "Ctrl+F did not select the search");
+    }
+
+    /// **The field the keyboard moves to types after what it holds**, even
+    /// when the two fields hold the same text and the caret stood at the
+    /// start of the first -- when an editor left as it was would type at the
+    /// first field's caret.
+    #[test]
+    fn the_find_field_the_keyboard_moves_to_types_after_what_it_holds() {
+        let mut editor = editor_with("ab");
+        editor.handle_event(&ctrl(Key::F));
+        for ch in "ab".chars() {
+            editor.handle_event(&typed(ch));
+        }
+        editor.find.replace_text = String::from("ab");
+        editor.handle_event(&plain(Key::Home));
+        editor.handle_event(&plain(Key::Tab));
+        assert_eq!(editor.find_field, FindField::Replace);
+        editor.handle_event(&typed('c'));
+        assert_eq!(
+            editor.find.replace_text, "abc",
+            "Tab left the caret where the query had it"
+        );
     }
 }

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=E-book Reader
+Comment=Read e-books, with a library and bookmarks
+Icon=x-office-document
+Exec=ebook
+Categories=Office;Viewer;
+Keywords=ebook;epub;reading;book;

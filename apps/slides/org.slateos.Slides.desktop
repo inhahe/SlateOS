@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Slides
+Comment=Make and show presentations
+Icon=x-office-presentation
+Exec=slides
+Categories=Office;Presentation;
+Keywords=presentation;slides;

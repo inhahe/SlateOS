@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mandelbrot Explorer
+Comment=Zoom into the Mandelbrot set
+Icon=applications-science
+Exec=mandelbrot
+Categories=Education;Math;
+Keywords=fractal;mandelbrot;

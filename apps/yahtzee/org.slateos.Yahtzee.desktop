@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Yahtzee
+Comment=The dice game
+Icon=applications-games
+Exec=yahtzee
+Categories=Game;
+Keywords=dice;

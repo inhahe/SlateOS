@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Battleship
+Comment=Sink the computer's fleet before it sinks yours
+Icon=applications-games
+Exec=battleship
+Categories=Game;StrategyGame;
+Keywords=naval;ships;

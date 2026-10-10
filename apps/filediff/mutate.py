@@ -112,16 +112,14 @@ MUTATIONS = [
         '        if key.key == Key::I && key.modifiers.ctrl {',
         ['each_kind_of_key_is_asked_for_as_itself'],
     ),
-    (
-        "a command's letter is typed into the search",
-        '        if textline::types_into_field(key) {',
-        '        if key.types_text() {',
-        ['each_kind_of_key_is_asked_for_as_itself'],
-    ),
+    # No row for "a command's letter is typed into the search": since
+    # 2026-10-04 the find bar's typing is textline::apply_key's, which tells a
+    # command from AltGr itself, in its own crate and with its own tests;
+    # each_kind_of_key_is_asked_for_as_itself still holds the bar to it.
     (
         'a chord works the search box',
-        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
-        '',
+        '        // The bar\'s own keys are plain.\n        if textline::is_plain(key.modifiers) {\n',
+        '        // The bar\'s own keys are plain.\n        if true {\n',
         ['each_kind_of_key_is_asked_for_as_itself'],
     ),
     (
@@ -160,6 +158,9 @@ MUTATIONS = [
 FIELD = "the_find_bars_box_is_the_toolkits_field"
 LAYOUT = "the_find_bars_parts_never_overlap_at_any_width"
 CARET = "the_find_bars_caret_follows_the_typing"
+EDITS = "the_find_bars_box_edits_at_a_caret"
+CTRL_F = "ctrl_f_selects_what_the_find_bar_holds"
+SHOWN = "the_find_bars_box_edits_the_search_it_shows"
 
 MUTATIONS += [
     # The find bar's box is the toolkit's field, and its parts are laid out
@@ -209,9 +210,75 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the query",
-        "                cursor: text::TextCursor::from(self.search.query.len()),\n",
+        "                cursor: self.search_cursor(),\n",
         "                cursor: text::TextCursor::from(0),\n",
-        [CARET],
+        [CARET, EDITS],
+    ),
+]
+
+# The find bar's box edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+MUTATIONS += [
+    (
+        "Ctrl+F does not select what the box holds",
+        "        self.search_editor.select_all();\n",
+        "",
+        [CTRL_F],
+    ),
+    (
+        "Ctrl+F in an open bar does nothing",
+        "        if key.key == Key::F && textline::is_ctrl_chord(key.modifiers) {\n            self.focus_search();\n",
+        "        if key.key == Key::F && textline::is_ctrl_chord(key.modifiers) && false {\n            self.focus_search();\n",
+        [CTRL_F],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.search_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit is not searched for",
+        "            self.search.query = self.search_editor.text().to_owned();\n            self.rerun_search();\n",
+        "            self.search.query = self.search_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another search",
+        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if self.search_editor.text() != self.search.query {\n",
+        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another search",
+        "        let drawn = self.search_cursor();\n        if self.search_editor.text() != self.search.query {\n",
+        "        let drawn = self.search_cursor();\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - FindBar::INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does nothing",
+        "                self.press_search(mouse.x);\n",
+        "",
+        [EDITS],
+    ),
+    (
+        "a shut bar's box takes a press",
+        "                if self.search.visible\n                    && FindBar::at(self.width).query.contains(mouse.x, mouse.y) =>\n",
+        "                if FindBar::at(self.width).query.contains(mouse.x, mouse.y) =>\n",
+        [SHOWN],
+    ),
+    (
+        "the selection is not drawn",
+        "                selection_anchor: if editing {\n",
+        "                selection_anchor: if false {\n",
+        [EDITS],
     ),
 ]
 

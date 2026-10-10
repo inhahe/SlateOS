@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Screenshot
+Comment=Take a picture of the screen or a window
+Icon=accessories-screenshot
+Exec=screenshot
+Categories=Utility;Graphics;
+Keywords=capture;screen;

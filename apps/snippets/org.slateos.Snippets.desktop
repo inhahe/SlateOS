@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Snippets
+Comment=A library of code fragments, in folders and under tags
+Icon=text-x-generic
+Exec=snippets
+Categories=Development;
+Keywords=code;fragments;library;

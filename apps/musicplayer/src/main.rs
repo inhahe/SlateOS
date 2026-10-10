@@ -411,7 +411,18 @@ pub struct PlayerState {
     /// the user's focus width (`App::appearance_changed`), the toolkit's
     /// until it is known.
     pub focus_ring_width: f32,
-    pub selected_index: Option<usize>,
+    /// The library's selected track, by its place in `library` -- not in the
+    /// list a search leaves, so a change of search keeps the same track
+    /// selected while it is still listed. [`Self::selected_row`] is where it
+    /// is drawn.
+    library_selection: Option<usize>,
+    /// The playlist's selected track, by its place in `playlist`.
+    ///
+    /// The two lists had one selection between them, a row number: a track
+    /// selected in the library showed as selected in the playlist, where
+    /// Delete took it out though nobody had chosen it there, and a search
+    /// moved the selection to whatever track its row now held.
+    playlist_selection: Option<usize>,
     pub scroll_offset: f32,
 
     // Interaction state
@@ -488,7 +499,8 @@ impl PlayerState {
             search_editor: TextInput::new(),
             search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
-            selected_index: None,
+            library_selection: None,
+            playlist_selection: None,
             scroll_offset: 0.0,
             dragging_progress: false,
             dragging_volume: false,
@@ -762,6 +774,15 @@ impl PlayerState {
             return;
         }
         self.playlist.remove(index);
+        // The selection stays on its track, or on the row the removed one
+        // left -- the next track, or the last where it was the last.
+        self.playlist_selection = match self.playlist_selection {
+            Some(sel) if sel > index => sel.checked_sub(1),
+            Some(sel) if sel == index => {
+                (!self.playlist.is_empty()).then(|| sel.min(self.playlist.len().saturating_sub(1)))
+            }
+            other => other,
+        };
         // Adjust current index
         if let Some(cur) = self.current_track_index {
             if index == cur {
@@ -787,13 +808,8 @@ impl PlayerState {
             return;
         };
         self.playlist.swap(index, above);
-        if let Some(cur) = self.current_track_index {
-            if cur == index {
-                self.current_track_index = Some(above);
-            } else if cur == above {
-                self.current_track_index = Some(index);
-            }
-        }
+        self.current_track_index = swapped(self.current_track_index, index, above);
+        self.playlist_selection = swapped(self.playlist_selection, index, above);
     }
 
     /// Move track down in playlist.
@@ -803,53 +819,140 @@ impl PlayerState {
             return;
         }
         self.playlist.swap(index, below);
-        if let Some(cur) = self.current_track_index {
-            if cur == index {
-                self.current_track_index = Some(below);
-            } else if cur == below {
-                self.current_track_index = Some(index);
-            }
-        }
+        self.current_track_index = swapped(self.current_track_index, index, below);
+        self.playlist_selection = swapped(self.playlist_selection, index, below);
     }
 
     /// Clear the playlist.
     pub fn clear_playlist(&mut self) {
         self.playlist.clear();
+        self.playlist_selection = None;
         self.current_track_index = None;
         self.playing = false;
         self.position_secs = 0.0;
     }
 
-    /// Sort library by given criteria.
+    /// Sort library by given criteria, the selected track staying selected.
     pub fn sort_library(&mut self, sort_by: SortBy) {
         self.library_sort = sort_by;
-        match sort_by {
-            SortBy::Title => self.library.sort_by(|a, b| a.title.cmp(&b.title)),
-            SortBy::Artist => self.library.sort_by(|a, b| a.artist.cmp(&b.artist)),
-            SortBy::Album => self.library.sort_by(|a, b| a.album.cmp(&b.album)),
-            SortBy::Duration => self.library.sort_by(|a, b| {
-                a.duration_secs
-                    .partial_cmp(&b.duration_secs)
-                    .unwrap_or(core::cmp::Ordering::Equal)
-            }),
-        }
+        let compare = |a: &Track, b: &Track| match sort_by {
+            SortBy::Title => a.title.cmp(&b.title),
+            SortBy::Artist => a.artist.cmp(&b.artist),
+            SortBy::Album => a.album.cmp(&b.album),
+            SortBy::Duration => a
+                .duration_secs
+                .partial_cmp(&b.duration_secs)
+                .unwrap_or(core::cmp::Ordering::Equal),
+        };
+        // The order as places in the old library, so the selection can be
+        // carried to its track's new place. Stable, as `sort_by` was.
+        let mut order: Vec<usize> = (0..self.library.len()).collect();
+        let library = &self.library;
+        order.sort_by(|&a, &b| match (library.get(a), library.get(b)) {
+            (Some(a), Some(b)) => compare(a, b),
+            _ => core::cmp::Ordering::Equal,
+        });
+        self.library_selection = self
+            .library_selection
+            .and_then(|sel| order.iter().position(|&i| i == sel));
+        let mut old: Vec<Option<Track>> = std::mem::take(&mut self.library)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.library = order
+            .iter()
+            .filter_map(|&i| old.get_mut(i).and_then(Option::take))
+            .collect();
     }
 
-    /// Get filtered library tracks based on search query.
-    pub fn filtered_library(&self) -> Vec<&Track> {
-        if self.search_query.is_empty() {
-            return self.library.iter().collect();
-        }
+    /// The library's tracks the Library tab lists, by their places in
+    /// `library`: those the search finds, in the library's order.
+    fn library_rows(&self) -> Vec<usize> {
         let query = self.search_query.to_lowercase();
         self.library
             .iter()
-            .filter(|t| {
-                t.title.to_lowercase().contains(&query)
+            .enumerate()
+            .filter(|(_, t)| {
+                query.is_empty()
+                    || t.title.to_lowercase().contains(&query)
                     || t.artist.to_lowercase().contains(&query)
                     || t.album.to_lowercase().contains(&query)
                     || t.genre.to_lowercase().contains(&query)
             })
+            .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Get filtered library tracks based on search query.
+    pub fn filtered_library(&self) -> Vec<&Track> {
+        self.library_rows()
+            .into_iter()
+            .filter_map(|i| self.library.get(i))
+            .collect()
+    }
+
+    /// The selected row of the active tab's list, as it is drawn: `None`
+    /// where nothing is selected, and where the library's selected track is
+    /// not among what the search found.
+    pub fn selected_row(&self) -> Option<usize> {
+        match self.active_tab {
+            Tab::Library => {
+                let selected = self.library_selection?;
+                self.library_rows().iter().position(|&i| i == selected)
+            }
+            Tab::Playlists => self.playlist_selection.filter(|&i| i < self.playlist.len()),
+            Tab::NowPlaying => None,
+        }
+    }
+
+    /// Select `row` of the active tab's list -- nothing, for `None` or a row
+    /// the list does not have.
+    pub fn select_row(&mut self, row: Option<usize>) {
+        match self.active_tab {
+            Tab::Library => {
+                self.library_selection = row.and_then(|r| self.library_rows().get(r).copied());
+            }
+            Tab::Playlists => {
+                self.playlist_selection = row.filter(|&r| r < self.playlist.len());
+            }
+            Tab::NowPlaying => {}
+        }
+    }
+
+    /// Enter on a track, or a double-click: the track at `row` of the active
+    /// tab's list is selected and made the current one -- a library track
+    /// joining the playlist first, where it is not on it -- and the window
+    /// says it cannot be played.
+    ///
+    /// Both set `playing`, and the window drew what that claims: the clock
+    /// counted, the bar filled and the visualiser moved, over silence. The
+    /// claim `toggle_play` had been cured of, left in the two other ways of
+    /// asking for a track.
+    fn choose_row(&mut self, row: usize) {
+        let index = match self.active_tab {
+            Tab::Library => {
+                let Some(track) = self
+                    .library_rows()
+                    .get(row)
+                    .and_then(|&i| self.library.get(i))
+                else {
+                    return;
+                };
+                if let Some(pos) = self.playlist.iter().position(|t| t.path == track.path) {
+                    pos
+                } else {
+                    let track = track.clone();
+                    self.playlist.push(track);
+                    self.playlist.len().saturating_sub(1)
+                }
+            }
+            Tab::Playlists if row < self.playlist.len() => row,
+            Tab::Playlists | Tab::NowPlaying => return,
+        };
+        self.select_row(Some(row));
+        self.current_track_index = Some(index);
+        self.position_secs = 0.0;
+        self.status_message = String::from(NO_AUDIO);
     }
 
     // ------------------------------------------------------------------
@@ -981,7 +1084,7 @@ impl PlayerState {
             Tab::Library => self.filtered_library().len(),
             Tab::Playlists => self.playlist.len(),
             // Now Playing is not a list. Clicking it used to set
-            // `selected_index` anyway, to a track the tab never showed.
+            // a selection anyway, to a track the tab never showed.
             Tab::NowPlaying => 0,
         }
     }
@@ -999,7 +1102,7 @@ impl PlayerState {
     ///   pointer was not the row that had been painted there -- by up to a
     ///   whole row. The renderer now draws at the continuous offset and
     ///   clips, which is what the hit test always assumed.
-    /// * `selected_index` was assigned unconditionally, so a click below the
+    /// * The selection was assigned unconditionally, so a click below the
     ///   last track selected a track index past the end of the list, and a
     ///   click in the header strip -- or on the Now Playing tab -- selected
     ///   one too.
@@ -1566,6 +1669,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
     // away the fraction the hit test kept -- so after a trackpad scroll the
     // row under the pointer was not the row painted there.
     let filtered = state.filtered_library();
+    let selected = state.selected_row();
     let rows_y = PlayerState::rows_top();
     let rows_h = state.rows_height();
     let first = first_visible_row(state.scroll_offset);
@@ -1587,7 +1691,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         let is_playing = state
             .current_track()
             .is_some_and(|ct| ct.path == track.path);
-        let is_selected = state.selected_index == Some(track_idx);
+        let is_selected = selected == Some(track_idx);
 
         // Striped by *track* index, not by visible slot: the stripes belong
         // to the rows, so they no longer invert every time the list scrolls
@@ -1726,6 +1830,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
 
     tree.clip(0.0, rows_y, state.width, rows_h);
 
+    let selected = state.selected_row();
     for track_idx in first..state.playlist.len() {
         #[allow(clippy::cast_precision_loss)]
         let row_y = origin_y + track_idx as f32 * TRACK_ROW_HEIGHT;
@@ -1738,7 +1843,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         };
 
         let is_current = state.current_track_index == Some(track_idx);
-        let is_selected = state.selected_index == Some(track_idx);
+        let is_selected = selected == Some(track_idx);
 
         let row_bg =
             track_row_background(&state.palette, is_current, is_selected, track_idx % 2 == 0);
@@ -2497,79 +2602,38 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
             state.active_tab = Tab::Playlists;
             true
         }
-        Key::Up => {
-            if let Some(idx) = state.selected_index {
-                if idx > 0 {
-                    state.selected_index = idx.checked_sub(1);
-                }
-            } else if !state.playlist.is_empty() {
-                state.selected_index = Some(0);
-            }
-            true
-        }
-        Key::Down => {
-            let max_idx = match state.active_tab {
-                Tab::Library => state.filtered_library().len(),
-                Tab::Playlists => state.playlist.len(),
-                // Named rather than `_`, so a tab added later is a compile
-                // error here instead of silently arrowing over nothing.
-                Tab::NowPlaying => 0,
+        // Through the active tab's list, from its selected row -- or onto
+        // its first, where nothing there is selected. Up with nothing
+        // selected asked whether the *playlist* was empty, on every tab.
+        Key::Up | Key::Down => {
+            let count = state.row_count();
+            let row = match state.selected_row() {
+                Some(row) if key_event.key == Key::Up => row.saturating_sub(1),
+                Some(row) => row.saturating_add(1).min(count.saturating_sub(1)),
+                None => 0,
             };
-            if let Some(idx) = state.selected_index {
-                if idx.saturating_add(1) < max_idx {
-                    state.selected_index = Some(idx.saturating_add(1));
-                }
-            } else if max_idx > 0 {
-                state.selected_index = Some(0);
+            if count > 0 {
+                state.select_row(Some(row));
             }
             true
         }
         Key::Enter => {
-            // Play selected track
-            if let Some(idx) = state.selected_index {
-                match state.active_tab {
-                    Tab::Library => {
-                        let filtered = state.filtered_library();
-                        if let Some(track) = filtered.get(idx) {
-                            let path = track.path.clone();
-                            // Find matching track in playlist or add it
-                            if let Some(pos) = state.playlist.iter().position(|t| t.path == path) {
-                                state.current_track_index = Some(pos);
-                            } else {
-                                let track_clone = (*track).clone();
-                                state.playlist.push(track_clone);
-                                state.current_track_index = state.playlist.len().checked_sub(1);
-                            }
-                            state.position_secs = 0.0;
-                            state.playing = true;
-                        }
-                    }
-                    Tab::Playlists if idx < state.playlist.len() => {
-                        state.current_track_index = Some(idx);
-                        state.position_secs = 0.0;
-                        state.playing = true;
-                    }
-                    _ => {}
-                }
+            if let Some(row) = state.selected_row() {
+                state.choose_row(row);
             }
             true
         }
         Key::Delete => {
             // Remove selected track from playlist
             if state.active_tab == Tab::Playlists
-                && let Some(idx) = state.selected_index
+                && let Some(row) = state.selected_row()
             {
-                state.remove_track(idx);
-                if state.playlist.is_empty() {
-                    state.selected_index = None;
-                } else if idx >= state.playlist.len() {
-                    state.selected_index = state.playlist.len().checked_sub(1);
-                }
+                state.remove_track(row);
             }
             true
         }
         Key::Escape => {
-            state.selected_index = None;
+            state.select_row(None);
             true
         }
         _ => false,
@@ -2712,11 +2776,11 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
             }
 
             // Content area clicks (track selection). `row_at` is the bound
-            // this never had: it used to assign `selected_index`
+            // this never had: it used to assign the selection
             // unconditionally, so a click below the last track selected an
             // index past the end of the list.
             if let Some(row_idx) = state.row_at(y) {
-                state.selected_index = Some(row_idx);
+                state.select_row(Some(row_idx));
                 return true;
             }
 
@@ -2770,30 +2834,7 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
         MouseEventKind::DoubleClick(MouseButton::Left) => {
             // Double-click to play track
             if let Some(row_idx) = state.row_at(y) {
-                match state.active_tab {
-                    Tab::Library => {
-                        let filtered = state.filtered_library();
-                        if let Some(track) = filtered.get(row_idx) {
-                            let path = track.path.clone();
-                            if let Some(pos) = state.playlist.iter().position(|t| t.path == path) {
-                                state.current_track_index = Some(pos);
-                            } else {
-                                let track_clone = (*track).clone();
-                                state.playlist.push(track_clone);
-                                state.current_track_index =
-                                    Some(state.playlist.len().saturating_sub(1));
-                            }
-                            state.position_secs = 0.0;
-                            state.playing = true;
-                        }
-                    }
-                    Tab::Playlists if row_idx < state.playlist.len() => {
-                        state.current_track_index = Some(row_idx);
-                        state.position_secs = 0.0;
-                        state.playing = true;
-                    }
-                    _ => {}
-                }
+                state.choose_row(row_idx);
                 return true;
             }
             false
@@ -2806,6 +2847,16 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
 // ============================================================================
 // Utility Functions
 // ============================================================================
+
+/// The place `at` names in a list after its entries at `a` and `b` swap:
+/// the place its entry moved to.
+fn swapped(at: Option<usize>, a: usize, b: usize) -> Option<usize> {
+    match at {
+        Some(i) if i == a => Some(b),
+        Some(i) if i == b => Some(a),
+        other => other,
+    }
+}
 
 /// Format seconds as `mm:ss`, widening to `hh:mm:ss` past an hour.
 ///
@@ -3210,7 +3261,7 @@ mod tests {
                 let mut state = PlayerState::new();
                 load_demo_library(&mut state);
                 state.active_tab = Tab::Library;
-                state.selected_index = Some(1);
+                state.select_row(Some(1));
                 assert!(
                     handle_key(&mut state, &stroke),
                     "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
@@ -3562,7 +3613,7 @@ mod tests {
     // -- The track list's edges --
 
     fn click(state: &mut PlayerState, y: f32) {
-        state.selected_index = None;
+        state.select_row(None);
         handle_mouse(
             state,
             &MouseEvent {
@@ -3631,15 +3682,16 @@ mod tests {
         assert_eq!(clip_h, state.rows_height());
 
         click(&mut state, clip_y);
-        assert_eq!(state.selected_index, Some(0), "the clip's top edge is dead");
+        assert_eq!(state.selected_row(), Some(0), "the clip's top edge is dead");
         click(&mut state, clip_y + clip_h - 0.5);
         assert!(
-            state.selected_index.is_some(),
+            state.selected_row().is_some(),
             "the clip's bottom edge is dead"
         );
         click(&mut state, clip_y + clip_h);
         assert_eq!(
-            state.selected_index, None,
+            state.selected_row(),
+            None,
             "the hit test runs past the clip the rows are painted in"
         );
     }
@@ -3667,10 +3719,10 @@ mod tests {
                 }
                 click(&mut state, probe);
                 assert_eq!(
-                    state.selected_index,
+                    state.selected_row(),
                     Some(track_idx),
                     "row painted at {row_y} hit-tests as {:?} at y={probe}",
-                    state.selected_index
+                    state.selected_row()
                 );
             }
         }
@@ -3707,10 +3759,10 @@ mod tests {
                 }
                 click(&mut state, probe);
                 assert_eq!(
-                    state.selected_index,
+                    state.selected_row(),
                     Some(track_idx),
                     "playlist row painted at {row_y} hit-tests as {:?} at y={probe}",
-                    state.selected_index
+                    state.selected_row()
                 );
             }
         }
@@ -3718,7 +3770,7 @@ mod tests {
         // And the tab's own bottom edge, which is the fault the whole sweep
         // started from.
         click(&mut state, clip_y + clip_h);
-        assert_eq!(state.selected_index, None);
+        assert_eq!(state.selected_row(), None);
     }
 
     #[test]
@@ -3732,7 +3784,7 @@ mod tests {
                     continue;
                 }
                 click(&mut state, probe);
-                assert_eq!(state.selected_index, Some(track_idx), "at y={probe}");
+                assert_eq!(state.selected_row(), Some(track_idx), "at y={probe}");
             }
         }
     }
@@ -3746,13 +3798,13 @@ mod tests {
             TAB_BAR_HEIGHT + PlayerState::rows_top() - 0.5,
         ] {
             click(&mut state, y);
-            assert_eq!(state.selected_index, None, "the header selected at {y}");
+            assert_eq!(state.selected_row(), None, "the header selected at {y}");
         }
     }
 
     #[test]
     fn empty_space_below_a_short_list_selects_nothing() {
-        // The bug: `selected_index` was assigned unconditionally, so a click
+        // The bug: the selection was assigned unconditionally, so a click
         // in the blank part of the pane selected a track index past the end
         // of the list -- which nothing downstream expected.
         let mut state = player_with_library(3);
@@ -3760,7 +3812,7 @@ mod tests {
         let below_last = clip_y + 3.0 * TRACK_ROW_HEIGHT + 1.0;
         assert!(below_last < clip_y + clip_h, "the pane must fit >3 rows");
         click(&mut state, below_last);
-        assert_eq!(state.selected_index, None);
+        assert_eq!(state.selected_row(), None);
     }
 
     #[test]
@@ -3768,17 +3820,17 @@ mod tests {
         let mut state = player_with_library(400);
         let in_controls = state.height - CONTROLS_HEIGHT / 2.0;
         click(&mut state, in_controls);
-        assert_eq!(state.selected_index, None);
+        assert_eq!(state.selected_row(), None);
     }
 
     #[test]
     fn the_now_playing_tab_has_no_rows_to_select() {
-        // It is not a list, but the click path used to set `selected_index`
+        // It is not a list, but the click path used to set a selection
         // on it anyway -- to a track that tab never showed.
         let mut state = player_with_library(400);
         state.active_tab = Tab::NowPlaying;
         click(&mut state, TAB_BAR_HEIGHT + PlayerState::rows_top() + 1.0);
-        assert_eq!(state.selected_index, None);
+        assert_eq!(state.selected_row(), None);
     }
 
     #[test]
@@ -3787,7 +3839,7 @@ mod tests {
         state.height = TAB_BAR_HEIGHT;
         assert_eq!(state.rows_height(), 0.0);
         click(&mut state, TAB_BAR_HEIGHT + 1.0);
-        assert_eq!(state.selected_index, None);
+        assert_eq!(state.selected_row(), None);
     }
 
     #[test]
@@ -3871,7 +3923,7 @@ mod tests {
         let mut state = player_with_library(400);
         for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             click(&mut state, y);
-            assert_eq!(state.selected_index, None, "selected on {y}");
+            assert_eq!(state.selected_row(), None, "selected on {y}");
         }
     }
 
@@ -5139,7 +5191,7 @@ mod tests {
         // A plain key the box does not answer does nothing while it has the
         // keyboard: Down goes to the list once Enter has given it back.
         assert!(!handle_key(&mut state, &pressed(Key::Down, false)));
-        assert_eq!(state.selected_index, None, "Down went through the search");
+        assert_eq!(state.selected_row(), None, "Down went through the search");
         handle_key(&mut state, &pressed(Key::Enter, false));
         assert!(!state.searching, "control: Enter gives the keyboard back");
         assert_eq!(
@@ -5163,7 +5215,7 @@ mod tests {
             "a box without the keyboard draws a caret"
         );
         handle_key(&mut state, &pressed(Key::Down, false));
-        assert_eq!(state.selected_index, Some(0), "the arrows go to the list");
+        assert_eq!(state.selected_row(), Some(0), "the arrows go to the list");
 
         handle_key(&mut state, &pressed(Key::F, true));
         assert!(state.searching);
@@ -5173,7 +5225,11 @@ mod tests {
             "Ctrl+F did not select what the box holds"
         );
         handle_key(&mut state, &pressed(Key::Enter, false));
-        assert!(state.selected_index.is_some());
+        // The track Down selected among what `neon` found is not among what
+        // `storm` finds, so nothing in the list is selected, and Down
+        // selects its first.
+        assert_eq!(state.selected_row(), None);
+        handle_key(&mut state, &pressed(Key::Down, false));
         assert!(handle_key(&mut state, &pressed(Key::Escape, false)));
         assert!(state.search_query.is_empty(), "Escape kept the search");
         assert_eq!(state.filtered_library().len(), 10);
@@ -5181,13 +5237,14 @@ mod tests {
             !search_box_drawn_as(&state, field::State::default()),
             "the box outlived its search"
         );
-        // One step at a time: the search, and then the selection.
-        assert!(
-            state.selected_index.is_some(),
-            "Escape took the selection with the search"
-        );
+        // One step at a time: the search, and then the selection -- which
+        // stayed on its track, at that track's row in the whole library.
+        let row = state
+            .selected_row()
+            .expect("Escape took the selection with the search");
+        assert_eq!(state.filtered_library()[row].title, "Velvet Thunder");
         handle_key(&mut state, &pressed(Key::Escape, false));
-        assert_eq!(state.selected_index, None);
+        assert_eq!(state.selected_row(), None);
     }
 
     /// **A press outside the search box gives the keyboard back to the
@@ -5210,7 +5267,7 @@ mod tests {
             first_row + TRACK_ROW_HEIGHT / 2.0
         ));
         assert_eq!(
-            state.selected_index,
+            state.selected_row(),
             Some(0),
             "control: the press reached the row"
         );
@@ -5330,5 +5387,241 @@ mod tests {
             state.search_query, "blues?",
             "the key edited another search"
         );
+    }
+
+    // -- A selection a list ------------------------------------------------------
+
+    /// The title of the active tab's selected track, as its row shows it.
+    fn selected_title(state: &PlayerState) -> Option<String> {
+        let row = state.selected_row()?;
+        match state.active_tab {
+            Tab::Library => state.filtered_library().get(row).map(|t| t.title.clone()),
+            Tab::Playlists => state.playlist.get(row).map(|t| t.title.clone()),
+            Tab::NowPlaying => None,
+        }
+    }
+
+    /// **Each list keeps a selection of its own, and a search keeps the
+    /// track selected rather than the row.** The two lists had one row
+    /// number between them: a track selected in the library showed as
+    /// selected in the playlist, where Delete took out a track nobody had
+    /// chosen there, and a search moved the selection to whatever track its
+    /// row then held.
+    #[test]
+    fn each_list_keeps_its_own_selection_and_a_search_keeps_the_track() {
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        state.active_tab = Tab::Library;
+        state.select_row(Some(2));
+        assert_eq!(selected_title(&state).as_deref(), Some("Summer Rain"));
+
+        handle_key(&mut state, &pressed(Key::Num3, false));
+        assert_eq!(
+            state.selected_row(),
+            None,
+            "the library's selection showed in the playlist"
+        );
+        let before = state.playlist.len();
+        handle_key(&mut state, &pressed(Key::Delete, false));
+        assert_eq!(
+            state.playlist.len(),
+            before,
+            "Delete took out a track nobody chose"
+        );
+        state.select_row(Some(4));
+        handle_key(&mut state, &pressed(Key::Num2, false));
+        assert_eq!(
+            selected_title(&state).as_deref(),
+            Some("Summer Rain"),
+            "the playlist's selection took the library's place"
+        );
+        handle_key(&mut state, &pressed(Key::Num3, false));
+        assert_eq!(state.selected_row(), Some(4));
+
+        // A search: the selection stays on its track, at the row the search
+        // gives it, and is neither shown nor answered by Enter while the
+        // search hides it.
+        handle_key(&mut state, &pressed(Key::Num2, false));
+        state.search_query = String::from("summer");
+        assert_eq!(
+            state.selected_row(),
+            Some(0),
+            "the search moved the selection"
+        );
+        state.search_query = String::from("storm");
+        assert_eq!(
+            state.selected_row(),
+            None,
+            "a track the search hides is selected"
+        );
+        let current = state.current_track_index;
+        handle_key(&mut state, &pressed(Key::Enter, false));
+        assert_eq!(
+            state.current_track_index, current,
+            "Enter chose a track the search hides"
+        );
+        state.search_query.clear();
+        assert_eq!(selected_title(&state).as_deref(), Some("Summer Rain"));
+    }
+
+    /// **Enter on a track and a double-click choose it, and say it cannot be
+    /// played** -- as Play does. Both set the player playing, and the window
+    /// drew that: the clock counted, the bar filled and the visualiser
+    /// moved, over silence.
+    #[test]
+    fn choosing_a_track_says_it_cannot_play_it() {
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        state.active_tab = Tab::Library;
+        state.select_row(Some(3));
+        handle_key(&mut state, &pressed(Key::Enter, false));
+        assert_eq!(
+            state.current_track().map(|t| t.title.as_str()),
+            Some("Binary Stars")
+        );
+        assert!(!state.playing, "Enter claimed to play");
+        assert_eq!(state.status_message, NO_AUDIO);
+        state.tick(5.0);
+        assert!(
+            state.position_secs.abs() < f32::EPSILON,
+            "the clock counted over silence"
+        );
+
+        state.status_message.clear();
+        state.active_tab = Tab::Playlists;
+        let row_y = painted_rows(&state)[1];
+        handle_mouse(
+            &mut state,
+            &MouseEvent {
+                x: 100.0,
+                y: row_y + 1.0,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+        );
+        assert_eq!(state.current_track_index, Some(1));
+        assert_eq!(
+            state.selected_row(),
+            Some(1),
+            "the track double-clicked is not the one selected"
+        );
+        assert!(!state.playing, "a double-click claimed to play");
+        assert_eq!(state.status_message, NO_AUDIO);
+    }
+
+    /// **A selection stays on its track** through what moves tracks about: a
+    /// sort of the library, a track moved up or down the playlist, a track
+    /// removed above it -- and where its own track is removed, it goes to the
+    /// track that took its row, or the last.
+    #[test]
+    fn a_selection_stays_on_its_track() {
+        let mut state = PlayerState::new();
+        for name in ["c", "a", "d", "b"] {
+            let mut t = Track::from_path(PathBuf::from(format!("/{name}.mp3")));
+            t.title = name.to_string();
+            state.add_track(t);
+        }
+        state.active_tab = Tab::Library;
+        state.select_row(Some(2));
+        state.sort_library(SortBy::Title);
+        assert_eq!(
+            selected_title(&state).as_deref(),
+            Some("d"),
+            "the sort lost it"
+        );
+
+        state.active_tab = Tab::Playlists;
+        state.select_row(Some(2));
+        state.move_track_up(2);
+        assert_eq!(selected_title(&state).as_deref(), Some("d"), "moved up");
+        state.move_track_down(1);
+        assert_eq!(selected_title(&state).as_deref(), Some("d"), "moved down");
+        state.remove_track(0);
+        assert_eq!(
+            selected_title(&state).as_deref(),
+            Some("d"),
+            "a track removed above"
+        );
+        state.remove_track(1);
+        assert_eq!(
+            selected_title(&state).as_deref(),
+            Some("b"),
+            "its own removed"
+        );
+        state.remove_track(1);
+        assert_eq!(
+            selected_title(&state).as_deref(),
+            Some("a"),
+            "the last removed"
+        );
+        state.remove_track(0);
+        assert_eq!(state.selected_row(), None);
+
+        state.add_track(Track::from_path(PathBuf::from("/e.mp3")));
+        state.select_row(Some(0));
+        state.clear_playlist();
+        state.add_track(Track::from_path(PathBuf::from("/f.mp3")));
+        assert_eq!(
+            state.selected_row(),
+            None,
+            "a cleared playlist kept its selection"
+        );
+    }
+
+    /// **The arrows go through the list on screen**, from its selected row
+    /// or onto its first, and stop at its ends. Up with nothing selected
+    /// asked whether the *playlist* was empty, on every tab: beside an empty
+    /// playlist, Up could not reach the library.
+    #[test]
+    fn the_arrows_go_through_the_list_on_screen() {
+        let mut state = PlayerState::new();
+        for i in 0..3 {
+            state
+                .library
+                .push(Track::from_path(PathBuf::from(format!("/{i}.mp3"))));
+        }
+        state.active_tab = Tab::Library;
+        let press = |state: &mut PlayerState, k: Key| {
+            handle_key(state, &pressed(k, false));
+            state.selected_row()
+        };
+        assert_eq!(press(&mut state, Key::Up), Some(0), "Up asked the playlist");
+        assert_eq!(press(&mut state, Key::Up), Some(0), "Up ran off the top");
+        assert_eq!(press(&mut state, Key::Down), Some(1));
+        assert_eq!(press(&mut state, Key::Down), Some(2));
+        assert_eq!(
+            press(&mut state, Key::Down),
+            Some(2),
+            "Down ran off the end"
+        );
+        assert_eq!(press(&mut state, Key::Up), Some(1));
+    }
+
+    /// **A selection is a row its list has**: one past the end selects
+    /// nothing -- rather than the track that later arrives there -- and a
+    /// list cut short under its selection shows none.
+    #[test]
+    fn a_selection_is_a_row_its_list_has() {
+        let mut state = PlayerState::new();
+        for i in 0..3 {
+            state.add_track(Track::from_path(PathBuf::from(format!("/{i}.mp3"))));
+        }
+        state.active_tab = Tab::Playlists;
+        state.select_row(Some(5));
+        for i in 3..8 {
+            state
+                .playlist
+                .push(Track::from_path(PathBuf::from(format!("/{i}.mp3"))));
+        }
+        assert_eq!(
+            state.selected_row(),
+            None,
+            "a row past the end waited for the track that came"
+        );
+        state.select_row(Some(6));
+        state.playlist.truncate(2);
+        assert_eq!(state.selected_row(), None, "a row the list lost is shown");
+        state.active_tab = Tab::Library;
+        state.select_row(Some(9));
+        assert_eq!(state.selected_row(), None);
     }
 }

@@ -237,40 +237,29 @@ MAIN = [
         "",
         [BUTTONS_ON_ENTRY],
     ),
-    (
-        "a command's letter is typed into an entry",
-        '    if textline::types_into_field(key) {\n        let typed: String = key.typed().collect();',
-        '    if key.types_text() {\n        let typed: String = key.typed().collect();',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
+    # No rows for a command's letter typed into an entry, the new master
+    # password, the master password, the search or a backup's password:
+    # since 2026-10-04 every box's typing is textline's (apply_key, or
+    # apply_masked_key for a secret), which tells a command from AltGr
+    # itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types still holds
+    # the boxes to it.
     (
         "a chord works the entry form's keys",
-        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n    match key.key {\n        Key::Escape => {',
-        '    match key.key {\n        Key::Escape => {',
+        "    let own = textline::is_plain(key.modifiers)\n",
+        "    let own = true\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        "a command's letter is typed into a new master password",
-        '            Gate::Create(form) if textline::types_into_field(key) => {',
-        '            Gate::Create(form) if key.types_text() => {',
+        "a chord works the new-vault form",
+        "            Gate::Create(form) if textline::is_plain(key.modifiers) => match key.key {\n",
+        "            Gate::Create(form) if true => match key.key {\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        'a chord works the new-vault form',
-        '            Gate::Create(_) if !textline::is_plain(key.modifiers) => {',
-        '            Gate::Create(_) if false => {',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        "a command's letter is typed into the master password",
-        '        if textline::types_into_field(key) {\n            state.master_input.extend(key.typed());',
-        '        if key.types_text() {\n            state.master_input.extend(key.typed());',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'a chord works the lock screen',
-        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        match key.key {\n            Key::Enter => attempt_unlock(state),',
-        '        match key.key {\n            Key::Enter => attempt_unlock(state),',
+        "a chord works the lock screen",
+        "        if matches!(state.gate, Gate::Unlock) && textline::is_plain(key.modifiers) {\n",
+        "        if matches!(state.gate, Gate::Unlock) {\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -280,15 +269,9 @@ MAIN = [
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        "a command's letter is typed into the search",
-        '        _ if textline::types_into_field(key) => {',
-        '        _ if key.types_text() => {',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'a chord works the list',
-        '        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,\n',
-        '',
+        "a chord works the list",
+        "        Key::Escape if plain => {\n",
+        "        Key::Escape => {\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -304,15 +287,9 @@ MAIN = [
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        "a command's letter is typed into a backup's password",
-        '            if textline::types_into_field(key) =>',
-        '            if key.types_text() =>',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'a chord answers a vault dialog',
-        '        _ if !textline::is_plain(key.modifiers) => Then::Nothing,\n',
-        '',
+        "a chord answers a vault dialog",
+        "        _ if !plain => Then::Nothing,\n",
+        "",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -471,27 +448,17 @@ MAIN = [
         [FIRST_RUN_BOXES],
     ),
     (
-        'typing leaves the box red',
-        '                field.extend(key.typed());\n'
-        '                form.error = None;\n'
-        '                form.wrong = None;\n',
-        '                field.extend(key.typed());\n'
-        '                form.error = None;\n',
+        "typing leaves the box red",
+        "                if let Gate::Create(form) = &mut state.gate {\n                    form.error = None;\n                    form.wrong = None;\n                }\n",
+        "                if let Gate::Create(form) = &mut state.gate {\n                    form.error = None;\n                }\n",
         [FIRST_RUN_BOXES],
     ),
+    # "a Backspace leaves the box red" is "typing leaves the box red" now:
+    # one line puts the refusal away for every key the box answers.
     (
-        'a Backspace leaves the box red',
-        '                    field.pop();\n'
-        '                    form.error = None;\n'
-        '                    form.wrong = None;\n',
-        '                    field.pop();\n'
-        '                    form.error = None;\n',
-        [FIRST_RUN_BOXES],
-    ),
-    (
-        'a refused master password is not shown red',
-        '        state.field_state(Target::MasterInput, state.unlock_failed),\n',
-        '        state.field_state(Target::MasterInput, false),\n',
+        "a refused master password is not shown red",
+        "        state.unlock_failed,\n        Target::MasterInput,\n",
+        "        false,\n        Target::MasterInput,\n",
         [LOCK_BOX],
     ),
     (
@@ -517,8 +484,10 @@ MAIN = [
     ),
     (
         "a drag's minutes are not shown as it goes",
-        '        if !shown.is_dragging() {\n',
-        '        if true {\n',
+        '        if !shown.is_dragging() {\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
+        '        if true {\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
         [SLIDER_SETS],
     ),
     (
@@ -567,8 +536,10 @@ MAIN = [
     ),
     (
         'the slider is moved through a vault dialog',
+        '            && self.detail_view == DetailView::Settings\n'
         '            && self.dialog.is_none()\n'
         '    }\n',
+        '            && self.detail_view == DetailView::Settings\n'
         '    }\n',
         [SLIDER_GUARDED],
     ),
@@ -705,8 +676,8 @@ MAIN += [
     ),
     (
         "the list outlives a lock",
-        "        self.vault.lock();\n        self.show_help = false;\n",
-        "        self.vault.lock();\n",
+        "        self.generated_password.clear();\n        self.show_help = false;\n",
+        "        self.generated_password.clear();\n",
         [LOCKS],
     ),
     (
@@ -714,6 +685,205 @@ MAIN += [
         "        Target::LockVault => {\n            state.lock_vault();\n",
         "        Target::LockVault => {\n            state.vault.lock();\n",
         [BUTTON],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): every
+# box took typing at its end and Backspace from it, and nothing else, and drew
+# no caret; the master password drew a mask for each byte.
+SEARCH = "the_search_edits_at_a_caret"
+DELETE = "delete_with_an_entry_selected_asks_to_delete_it"
+MASTER = "the_master_password_edits_at_a_caret"
+NEW_VAULT = "the_new_vaults_boxes_edit_at_a_caret"
+FORM = "a_forms_fields_edit_at_a_caret"
+RESTORE = "the_restore_password_edits_at_a_caret"
+SHOWN = "a_box_edits_the_text_it_shows"
+
+MAIN += [
+    (
+        "a secret box is not masked",
+        "        let edit = if self.box_masked(target) {\n",
+        "        let edit = if false {\n",
+        [MASTER, FORM],
+    ),
+    (
+        "a shown secret is still masked",
+        "                !self.show_password\n",
+        "                true\n",
+        [FORM],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SEARCH, FORM],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(target) || self.editor.text() != held {\n",
+        "        if self.editor.text() != held {\n",
+        [FORM],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(target) || self.editor.text() != held {\n",
+        "        if self.editor_for != Some(target) {\n",
+        [SHOWN],
+    ),
+    (
+        "the caret is drawn at the start",
+        "        let (cursor, anchor) = if focused {\n            state.box_caret(target)\n",
+        "        let (cursor, anchor) = if false {\n            state.box_caret(target)\n",
+        [SEARCH, MASTER],
+    ),
+    (
+        "the selection is not drawn",
+        "                selection_anchor,\n                focused,\n",
+        "                selection_anchor: None,\n                focused,\n",
+        [SEARCH],
+    ),
+    (
+        "a press puts the caret at the start",
+        "                x - area.x,\n            )\n        };\n",
+        "                0.0,\n            )\n        };\n",
+        [SEARCH],
+    ),
+    (
+        "a press in a box does not place the caret",
+        "        state.press_box(target, rect, x);\n",
+        "        let _ = (rect, x);\n",
+        [SEARCH, MASTER, FORM],
+    ),
+    (
+        "Delete with an entry selected is the search's",
+        "        Key::Delete if plain && state.selected_entry_id.is_some() => {\n",
+        "        Key::Delete if false => {\n",
+        [DELETE],
+    ),
+    (
+        "an edit of the search is not filtered by",
+        "                    if state.search_query != before {\n"
+        "                        state.refresh_filter();\n",
+        "                    if false {\n"
+        "                        state.refresh_filter();\n",
+        ["an_edit_of_the_search_filters_the_list"],
+    ),
+    (
+        "an edit leaves the restore dialog's error up",
+        "            said = error.take().is_some();\n",
+        "            said = error.is_some();\n",
+        [RESTORE],
+    ),
+]
+
+# The generator panel answers the pointer (2026-10-04): its length bar was a
+# track and a knob only Left and Right could move, and its mode buttons,
+# boxes, Generate and Copy recorded no place to be pressed. A generated
+# password also outlived a lock.
+LENGTH_SETS = "the_length_slider_sets_the_length_and_draws_the_password_again"
+LENGTH_ESCAPE = "escape_takes_a_length_drag_back"
+LENGTH_LOCK = "a_length_drag_the_lock_takes_away_is_taken_back"
+LENGTH_KEYS = "the_length_slider_follows_left_and_right"
+LENGTH_LABEL = "the_length_slider_is_drawn_under_its_label"
+PANEL_PRESSES = "the_generator_panels_buttons_and_boxes_answer_the_pointer"
+
+MAIN += [
+    (
+        "locking keeps the generated password",
+        "        self.generated_password.clear();\n        self.show_help = false;\n",
+        "        self.show_help = false;\n",
+        ["locking_forgets_the_generated_password"],
+    ),
+    (
+        "the length slider is drawn where it was last dragged",
+        "        if !shown.is_dragging() {\n            #[allow(\n",
+        "        if false {\n            #[allow(\n",
+        [LENGTH_KEYS],
+    ),
+    (
+        "a new length draws no new password",
+        "        if self.vault.is_unlocked() {\n            regenerate_password(self);\n        }\n",
+        "",
+        [LENGTH_SETS],
+    ),
+    (
+        "a drag's release draws the password again",
+        "        if length == self.password_generator.length {\n            return;\n        }\n",
+        "",
+        [LENGTH_SETS],
+    ),
+    (
+        "the length slider never hears the pointer",
+        "        None => state.length_mouse(mouse),\n",
+        "        None => None,\n",
+        [LENGTH_SETS],
+    ),
+    (
+        "a length drag outlives its panel",
+        "        if !self.generator_live() {\n"
+        "            self.drop_length_drag();\n"
+        "            return None;\n"
+        "        }\n"
+        "        self.length = self.length_shown();\n",
+        "        if !self.generator_live() {\n"
+        "            return None;\n"
+        "        }\n"
+        "        self.length = self.length_shown();\n",
+        [LENGTH_LOCK],
+    ),
+    (
+        "a key mid-drag is not the length slider's",
+        "    if let Some(result) = state.length_key(key) {\n"
+        "        state.vault.touch(state.now);\n"
+        "        return result;\n"
+        "    }\n",
+        "",
+        [LENGTH_ESCAPE],
+    ),
+    (
+        "Generate draws nothing",
+        "        Target::GeneratorGenerate => {\n            regenerate_password(state);\n",
+        "        Target::GeneratorGenerate => {\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "a press on the lit kind draws a new password",
+        "            if state.password_generator.mode != mode {\n"
+        "                state.password_generator.mode = mode;\n"
+        "                regenerate_password(state);\n"
+        "            }\n",
+        "            state.password_generator.mode = mode;\n"
+        "            regenerate_password(state);\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "every mode button is Random's",
+        "            Target::GeneratorMode(*mode),\n",
+        "            Target::GeneratorMode(GeneratorMode::Random),\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "every box row is the first box's",
+        "                Target::GeneratorBox(box_),\n",
+        "                Target::GeneratorBox(CharsetBox::Uppercase),\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "the generator's password is said to need revealing",
+        "        let why = if label == GENERATED_LABEL {\n",
+        "        let why = if false {\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "the strength row's room goes with the password",
+        "    y = strength_top + 40.0;\n",
+        "    y = if state.generated_password.is_empty() {\n"
+        "        strength_top\n"
+        "    } else {\n"
+        "        strength_top + 40.0\n"
+        "    };\n",
+        [LENGTH_LABEL],
     ),
 ]
 

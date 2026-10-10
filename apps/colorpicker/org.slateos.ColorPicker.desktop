@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Color Picker
+Comment=Pick a colour and read its value in any notation
+Icon=applications-graphics
+Exec=colorpicker
+Categories=Graphics;
+Keywords=color;colour;eyedropper;hex;

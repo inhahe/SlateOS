@@ -181,6 +181,8 @@ INPUT_MUTATIONS = [
 ]
 
 FIND_BAR = "the_find_bar_takes_the_pointer_and_its_boxes_are_the_toolkits_fields"
+CARET = "the_find_fields_edit_at_a_caret"
+CHORDS = "the_find_bar_takes_chords_as_chords"
 
 # The find bar takes the pointer over itself, and its boxes are the toolkit's
 # fields (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
@@ -228,9 +230,9 @@ INPUT_MUTATIONS += [
     ),
     (
         "a press on a find box gives it no keys",
-        "                    Some(field) if field != self.find_field => {\n",
-        "                    Some(field) if false && field != self.find_field => {\n",
-        [FIND_BAR],
+        "                    Some(field) => {\n                        self.press_find(field, mouse.x);\n",
+        "                    Some(_) => {\n",
+        [FIND_BAR, CARET],
     ),
 ]
 
@@ -314,6 +316,88 @@ MAIN_MUTATIONS += [
         "        if self.show_help {\n            guitk::shortcut::render_card(\n",
         "        if false {\n            guitk::shortcut::render_card(\n",
         [REACHES],
+    ),
+]
+
+# The find bar's fields edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# were plain text with no caret, typed only at their end -- and a chord with
+# Alt typed its letter into them, and AltGr+R replaced the match.
+MAIN_MUTATIONS += [
+    (
+        "the find fields draw no caret",
+        "                cursor: self.find_cursor(field),\n",
+        "                cursor: text::TextCursor::from(held.len()),\n",
+        [CARET],
+    ),
+    (
+        "the find fields draw no selection",
+        "                selection_anchor: if editing && focused {\n",
+        "                selection_anchor: if false {\n",
+        [CARET],
+    ),
+    (
+        "both find fields draw a caret",
+        "                focused,\n                x: rect.x + FIND_TEXT_INSET,\n",
+        "                focused: true,\n                x: rect.x + FIND_TEXT_INSET,\n",
+        [CARET],
+    ),
+]
+
+INPUT_MUTATIONS += [
+    (
+        "AltGr is a find-bar chord",
+        "        if textline::is_ctrl_chord(key.modifiers) {\n            // The field's own chords first",
+        "        if key.modifiers.ctrl {\n            // The field's own chords first",
+        [CHORDS],
+    ),
+    (
+        "the field's clipboard chords go to the text",
+        "            if matches!(key.key, Key::A | Key::C | Key::X | Key::V) {\n                return self.find_field_key(key);\n            }\n",
+        "",
+        [CARET],
+    ),
+    (
+        "an Alt chord reaches the text under the bar",
+        "            return Some(self.find_field_key(key).unwrap_or(Response::Idle));\n",
+        "            return self.find_field_key(key);\n",
+        [CHORDS],
+    ),
+    (
+        "a copy in a field takes nothing to the clipboard",
+        "            self.clipboard = copied;\n        }\n        if !edit.handled {\n",
+        "            let _ = copied;\n        }\n        if !edit.handled {\n",
+        [CARET],
+    ),
+    (
+        "an answered key that changes nothing reaches the text",
+        "        if !edit.handled {\n            return None;\n        }\n",
+        "        if !edit.handled || self.find_editor.text() == self.find_text(field) {\n            return None;\n        }\n",
+        [CARET],
+    ),
+    (
+        "an edit of the query is not searched for",
+        "            if field == FindField::Query {\n                self.refresh_matches();\n            }\n            return Some(Response::Redraw);\n",
+        "            return Some(Response::Redraw);\n",
+        [CARET],
+    ),
+    (
+        "the editor is kept for the field the keyboard moved to",
+        "        if self.find_editor_for != Some(field) || self.find_editor.text() != self.find_text(field) {\n",
+        "        if self.find_editor.text() != self.find_text(field) {\n",
+        ["the_find_field_the_keyboard_moves_to_types_after_what_it_holds"],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - FIND_TEXT_INSET,\n",
+        "            0.0,\n",
+        [CARET],
+    ),
+    (
+        "Ctrl+F does not select what the field holds",
+        "        self.find_editor.select_all();\n",
+        "",
+        [CHORDS],
     ),
 ]
 

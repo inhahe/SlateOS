@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Weather
+Comment=Forecasts for the places you choose
+Icon=weather-few-clouds
+Exec=weather
+Categories=Utility;
+Keywords=forecast;temperature;

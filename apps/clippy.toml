@@ -20,6 +20,11 @@ doc-valid-idents = [
     "..",
 ]
 
+# `ExtF80` (the software x87 80-bit float in `userspace/cprintf`) is IEEE
+# arithmetic like `f32`/`f64`, which the lint already exempts; the workspace's
+# clippy.toml says why there are three names for it.
+arithmetic-side-effects-allowed = ["coreutils::extfloat::ExtF80", "cprintf::extfloat::ExtF80", "extfloat::ExtF80"]
+
 # ---------------------------------------------------------------------------
 # Applications only.
 # ---------------------------------------------------------------------------

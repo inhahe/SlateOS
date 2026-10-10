@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Unit Converter
+Comment=Convert between units of measure
+Icon=accessories-calculator
+Exec=unitconverter
+Categories=Utility;Calculator;
+Keywords=units;convert;measure;

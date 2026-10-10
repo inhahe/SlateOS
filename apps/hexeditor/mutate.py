@@ -47,8 +47,11 @@ MUTATIONS = [
     ),
     (
         "the picker's choice always opens",
-        "            PickerPurpose::SaveAs => {\n                let idx = self.active_tab;",
-        "            PickerPurpose::SaveAs if false => {\n                let idx = self.active_tab;",
+        "            PickerPurpose::Open => self.last_open = Some(self.open_path(path)),\n",
+        "            PickerPurpose::Open => self.last_open = Some(self.open_path(path)),\n"
+        "            PickerPurpose::SaveAs if true => {\n"
+        "                self.last_open = Some(self.open_path(path));\n"
+        "            }\n",
         ["an_untitled_document_is_saved_where_the_picker_says"],
     ),
     (
@@ -197,18 +200,10 @@ MUTATIONS += [
         "                if key.modifiers.ctrl || key.modifiers.alt {\n",
         [CHORD],
     ),
-    (
-        "a command's letter is typed into the search box",
-        "            if textline::types_into_field(key) {\n                self.search.input_text.extend(key.typed());\n",
-        "            if key.types_text() {\n                self.search.input_text.extend(key.typed());\n",
-        [CHORD],
-    ),
-    (
-        "a command's letter is typed into the go-to box",
-        "            if textline::types_into_field(key) {\n                self.goto_text.extend(key.typed());\n",
-        "            if key.types_text() {\n                self.goto_text.extend(key.typed());\n",
-        [CHORD],
-    ),
+    # No rows for "a command's letter is typed into the search box" or
+    # "into the go-to box": since 2026-10-04 the boxes' typing is
+    # textline::apply_key's, which tells a command from AltGr itself, in its
+    # own crate and with its own tests; CHORD still holds both boxes to it.
     (
         "AltGr+I sets whether case matters",
         "            if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {\n",
@@ -233,6 +228,8 @@ FIND = "the_find_bars_box_is_the_toolkits_field"
 LAYOUT = "the_find_bars_parts_never_overlap_at_any_width"
 PRESS = "a_press_on_a_bar_does_not_reach_the_byte_under_it"
 GOTO = "the_go_to_box_is_red_while_it_is_not_an_offset_and_enter_leaves_it_up"
+EDITS = "the_find_box_edits_at_a_caret"
+GOTO_EDITS = "the_go_to_box_edits_at_a_caret"
 
 MUTATIONS += [
     # The find bar's box and the go-to box are the toolkit's fields; the bar
@@ -284,9 +281,9 @@ MUTATIONS += [
     ),
     (
         "a press on the find bar's box does not give it the keyboard",
-        "                if l.query.contains(x, y) {\n                    self.focused_panel = FocusedPanel::SearchBar;\n                }\n",
+        "                if l.query.contains(x, y) {\n                    self.press_box(FocusedPanel::SearchBar, l.query, x);\n                }\n",
         "",
-        [FIND],
+        [FIND, EDITS],
     ),
     (
         "a press on the find bar reaches the byte under it",
@@ -323,6 +320,67 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [FIND, GOTO],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else; and the
+# window's chords took Ctrl+C, V and Home for the file under a box with the
+# keyboard.
+MUTATIONS += [
+    (
+        "the window's chords come before the box's",
+        "        if let Some(panel) = self.box_with_keyboard()\n            && let Some(result) = self.box_key(panel, key)\n        {\n            return result;\n        }\n\n        // Global shortcuts",
+        "        // Global shortcuts",
+        [EDITS, CHORD],
+    ),
+    (
+        "a hidden box takes the keys",
+        "            FocusedPanel::SearchBar if self.search.visible => Some(FocusedPanel::SearchBar),\n",
+        "            FocusedPanel::SearchBar => Some(FocusedPanel::SearchBar),\n",
+        [EDITS],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.box_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.box_editor_for != Some(panel) || self.box_editor.text() != self.box_text(panel) {\n",
+        "        if self.box_editor.text() != self.box_text(panel) {\n",
+        [EDITS],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - r.x - FIELD_INSET,\n",
+        "            0.0,\n",
+        [GOTO_EDITS],
+    ),
+    (
+        "a press on the go-to box does not place the caret",
+        "                    self.press_box(FocusedPanel::GoToDialog, input, x);\n",
+        "                    self.focused_panel = FocusedPanel::GoToDialog;\n",
+        [GOTO_EDITS],
+    ),
+    (
+        "the caret is drawn at the end",
+        "                cursor: self.box_cursor(panel),\n",
+        "                cursor: text::TextCursor::from(typed.len()),\n",
+        [EDITS],
+    ),
+]
+
+# Escape closes the box with the keyboard (2026-10-04): it closed the find bar
+# first whichever had it, leaving the go-to box opened over the bar up.
+MUTATIONS += [
+    (
+        "Escape closes the find bar ahead of the go-to box with the keyboard",
+        "            let goto_first = self.focused_panel == FocusedPanel::GoToDialog;\n",
+        "            let goto_first = false;\n",
+        ["escape_closes_the_box_with_the_keyboard"],
     ),
 ]
 

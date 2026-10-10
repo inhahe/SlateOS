@@ -9,12 +9,16 @@
 //! built-in word list, in a real window: every tab, result row, list row and
 //! button is clickable, and the keyboard reaches all of it.
 //!
-//! A word the thirty built-in entries lack is looked up in WordNet at
+//! A word the thirty built-in entries lack can be looked up in WordNet at
 //! dict.org -- when the reader asks, never as they type, since the word is
 //! sent to a server this project does not run ([`online`], design-decisions
-//! §1214). The answer becomes an entry like the others, saying where it came
-//! from, and a remembered word the list lacks stays in the history and the
-//! favourites as a row that looks it up again.
+//! §1214). Online lookups are off until the reader turns them on (§1236, the
+//! operator's answer to E-Q2): Ctrl+I, the status bar's switch, or the search
+//! screen's offer, which says in its own words that choosing it turns them on
+//! and sends the word. The choice is kept in `dictionary.yaml`. The answer
+//! becomes an entry like the others, saying where it came from, and a
+//! remembered word the list lacks stays in the history and the favourites as a
+//! row that looks it up again.
 //!
 //! # What wiring this up found
 //!
@@ -110,6 +114,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scrollbar;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -897,6 +903,9 @@ pub enum Target {
     NextFeatured,
     /// Open the featured word as a full entry.
     OpenFeatured,
+    /// The status bar's online-lookup switch: on, it names the server a word
+    /// is sent to; off, it says nothing is sent (§1236).
+    Online,
     /// The scrollbar's column beside a list or an entry, above or below the
     /// thumb: a page towards the press.
     ScrollTrack,
@@ -923,10 +932,6 @@ pub enum Action {
     OpenSelected,
     /// Move the selection within the current list.
     Move(Step),
-    /// Append a character to the query.
-    Type(char),
-    /// Drop the last character of the query.
-    Backspace,
     ClearQuery,
     ClearHistory,
     /// Add the open entry to the favourites, or take it out again.
@@ -943,6 +948,8 @@ pub enum Action {
     /// Look up the open entry's `n`th cross-reference online; see
     /// [`Dictionary::cross_ref`].
     LookUp(usize),
+    /// Turn online lookups on, or off (§1236).
+    ToggleOnline,
 }
 
 /// One row of a list screen.
@@ -1372,11 +1379,16 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Tab", "The next screen"),
     ("Up / Down", "Move through the list"),
     ("PageUp / PageDown", "A screen at a time"),
-    ("Home / End", "First / last"),
+    (
+        "Home / End",
+        "The query's start / end, or the list's first / last",
+    ),
+    ("Ctrl+Home / Ctrl+End", "The list's first / last"),
     ("Enter", "Open what is selected, or look it up online"),
     ("Backspace", "Rub out a letter, or go back"),
     ("Esc", "Clear the query, or go back"),
     ("Ctrl+D", "Favourite this word"),
+    ("Ctrl+I", "Online lookups on / off"),
     ("Ctrl+L / Ctrl+K / Ctrl+F", "Jump to the search box"),
     ("Ctrl+S", "Save the favourites"),
     ("Ctrl+O", "Open a word list"),
@@ -1452,12 +1464,24 @@ pub struct Dictionary {
     pub lookup: online::Lookup,
     /// The DICT server asked, as `host:port`.
     pub server: String,
+    /// Whether a word the built-in list lacks may be sent to [`Self::server`].
+    /// Off until the user turns it on, and remembered in their settings
+    /// (`dictionary.yaml`): no program contacts a website by default unless
+    /// that is what it is for, and a dictionary works without one
+    /// (design-decisions §1236).
+    pub online: bool,
     /// The lookup under way, if one is.
     pending: Option<Pending>,
     /// The last word WordNet did not have, and what it offered instead.
     miss: Option<Miss>,
     /// Wakes the window when a lookup's answer arrives.
     waker: Option<std::task::Waker>,
+    /// The query's editor -- its caret and selection over `query` --
+    /// reloaded when the query changed under it: cleared, or typed into from
+    /// another screen.
+    query_editor: TextInput,
+    /// What the query's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    clipboard: String,
 }
 
 /// The DICT server a lookup asks: dict.org -- or, under test, a port on
@@ -1466,6 +1490,13 @@ pub struct Dictionary {
 const DEFAULT_SERVER: &str = online::DICT_ORG;
 #[cfg(test)]
 const DEFAULT_SERVER: &str = "127.0.0.1:9";
+
+/// The name the dictionary's settings are kept under (`settingsfile`):
+/// `dictionary.yaml`.
+const CONFIG_NAME: &str = "dictionary";
+
+/// Where in `dictionary.yaml` the online-lookup switch is kept.
+const ONLINE_KEY: &[&str] = &["online_lookups"];
 
 /// A lookup under way.
 struct Pending {
@@ -1486,6 +1517,10 @@ struct Miss {
 
 /// The longest history the program keeps.
 const HISTORY_LIMIT: usize = 100;
+
+/// The most the query holds, in characters: a word or a phrase, and a
+/// paste of a page is neither.
+const QUERY_CAPACITY: usize = 256;
 
 impl Dictionary {
     #[must_use]
@@ -1519,9 +1554,12 @@ impl Dictionary {
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             lookup: online::look_up,
             server: String::from(DEFAULT_SERVER),
+            online: false,
             pending: None,
             miss: None,
             waker: None,
+            query_editor: TextInput::new(),
+            clipboard: String::new(),
         }
     }
 
@@ -1687,11 +1725,18 @@ impl Dictionary {
     }
 
     /// Open a row: its entry, or look its word up.
+    ///
+    /// With online lookups off, a row for a word not in the dictionary says
+    /// that choosing it turns them on and sends the word (`draw_lookup_row`),
+    /// so choosing it is the user's say-so: lookups go on, and it asks.
     fn activate(&mut self, row: &Row) {
         match row {
             Row::Entry(i) => self.open(*i),
             Row::LookUp(w) | Row::Suggestion(w) => {
                 let word = w.clone();
+                if !self.online && self.find_word(&word).is_none() {
+                    self.set_online(true);
+                }
                 self.look_up(&word);
             }
         }
@@ -1713,8 +1758,40 @@ impl Dictionary {
             .is_some_and(|p| p.word.eq_ignore_ascii_case(word.trim()))
     }
 
+    /// Read the online-lookup switch from the user's settings. Anything but
+    /// `true` there -- no file, no key, a word this does not know -- is off.
+    pub fn load_settings(&mut self, doc: &yamldoc::Document) {
+        self.online = doc.get_bool(ONLINE_KEY) == Some(true);
+    }
+
+    /// Turn online lookups on or off, keep the choice in the user's settings,
+    /// and say on the status line what it means.
+    ///
+    /// A lookup already under way is left to answer: its word has gone, and
+    /// its answer is no more sent than it was.
+    pub fn set_online(&mut self, on: bool) {
+        self.online = on;
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_bool(ONLINE_KEY, on);
+        let kept = settingsfile::store(CONFIG_NAME, &doc);
+        let host = self.server_name().to_owned();
+        self.status = match (on, kept) {
+            (true, Ok(())) => format!(
+                "Online lookups on: a word not in this dictionary is sent to {host} \u{2014} Ctrl+I turns them off"
+            ),
+            (false, Ok(())) => String::from(
+                "Online lookups off: nothing is sent anywhere \u{2014} Ctrl+I turns them on",
+            ),
+            (true, Err(e)) => format!("Online lookups on, but not kept for next time: {e}"),
+            (false, Err(e)) => format!("Online lookups off, but not kept for next time: {e}"),
+        };
+    }
+
     /// Look `word` up online -- or open it, if the dictionary already has
     /// it. The answer arrives on another thread, and wakes the window.
+    ///
+    /// With online lookups off, nothing is sent: the status line says the
+    /// word is not here and how to turn lookups on.
     pub fn look_up(&mut self, word: &str) {
         let word = word.trim();
         if let Some(index) = self.find_word(word) {
@@ -1722,6 +1799,12 @@ impl Dictionary {
             return;
         }
         if word.is_empty() || self.looking_up(word) {
+            return;
+        }
+        if !self.online {
+            self.status = format!(
+                "\u{201c}{word}\u{201d} is not in this dictionary \u{2014} online lookups are off; Ctrl+I turns them on"
+            );
             return;
         }
         let (tx, answer) = std::sync::mpsc::channel();
@@ -1917,21 +2000,10 @@ impl Dictionary {
                 }
             }
             Action::Move(step) => self.move_selection(step),
-            Action::Type(ch) => {
-                self.query.push(ch);
-                self.search();
-                self.screen = Screen::Search;
-            }
             Action::LookUp(n) => {
                 if let Some(word) = self.cross_ref(n).map(str::to_owned) {
                     self.look_up(&word);
                 }
-            }
-            Action::Backspace => {
-                if self.query.pop().is_some() {
-                    self.search();
-                }
-                self.screen = Screen::Search;
             }
             Action::ClearQuery => {
                 if self.query.is_empty() {
@@ -1952,7 +2024,72 @@ impl Dictionary {
             Action::Scroll(dy) => self.scroll_entry(dy),
             Action::ScrollRows(n) => self.scroll_rows(n),
             Action::StepFeatured(n) => self.step_featured(n),
+            Action::ToggleOnline => self.set_online(!self.online),
         }
+    }
+
+    /// The editor loaded with the query, unless it holds it already: the
+    /// caret after it.
+    fn load_query(&mut self) {
+        if self.query_editor.text() != self.query {
+            self.query_editor.set_text(&self.query);
+        }
+    }
+
+    /// A key for the query, drawn at `size`: the caret keys, Backspace and
+    /// Delete at the caret, Ctrl+A, C, X and V, and typing -- what AltGr
+    /// types among it, and no command's letter, which a chord carries as
+    /// text. Whether the query answered it; a key that changed the query has
+    /// it searched for again.
+    fn query_key(&mut self, ev: &KeyEvent, size: f32) -> bool {
+        self.load_query();
+        let edit = textline::apply_key(
+            &mut self.query_editor,
+            ev,
+            QUERY_CAPACITY,
+            &self.clipboard,
+            size,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if self.query_editor.text() != self.query {
+            self.query = self.query_editor.text().to_owned();
+            self.search();
+        }
+        edit.handled
+    }
+
+    /// Where the query's caret and selection anchor are: the editor's while
+    /// it holds the query, after it and none otherwise.
+    fn query_caret(&self) -> (text::TextCursor, Option<usize>) {
+        if self.query_editor.text() == self.query {
+            (
+                self.query_editor.cursor(),
+                self.query_editor.selection_anchor(),
+            )
+        } else {
+            (text::TextCursor::from(self.query.len()), None)
+        }
+    }
+
+    /// Where the query is drawn in the search field: inside its padding, up
+    /// to the Clear button while there is a query to clear, a line high and
+    /// centred. One answer for the drawing and for a press.
+    fn query_text_area(&self, l: &Layout) -> Rect {
+        let field = l.search_box();
+        let clear = if self.query.is_empty() {
+            0.0
+        } else {
+            clear_width(l, field)
+        };
+        let line = text::line_height(l.font, FontWeightHint::Regular);
+        Rect::new(
+            field.x + l.pad,
+            field.y + field.h / 2.0 - line / 2.0,
+            (field.w - l.pad * 2.0 - clear).max(0.0),
+            line,
+        )
     }
 
     fn go(&mut self, screen: Screen) {
@@ -2516,6 +2653,11 @@ fn label(
     });
 }
 
+/// How wide the search field's Clear button is, in the field at `field`.
+fn clear_width(l: &Layout, field: Rect) -> f32 {
+    (l.small * 4.0).min(field.w * 0.25)
+}
+
 /// A label centred in a horizontal span, clamped so a string wider than the
 /// span starts at the span's left edge instead of overhanging to its left.
 fn centred_in(
@@ -2768,31 +2910,62 @@ impl Dictionary {
             );
             f.hit(Target::SearchBox, field);
             let inner = l.pad;
-            let clear_w = (l.small * 4.0).min(field.w * 0.25);
-            let has_query = !self.query.is_empty();
-            let text_span =
-                (field.w - inner * 2.0 - if has_query { clear_w } else { 0.0 }).max(0.0);
-            let baseline =
-                field.y + field.h / 2.0 - text::line_height(l.font, FontWeightHint::Regular) / 2.0;
-            if has_query {
-                // The caret is drawn as part of the string rather than as a
-                // separate rectangle: there is no cursor to move in this field,
-                // so a caret anywhere but the end would be a lie -- and so
-                // would a caret while the keys go somewhere else.
-                let shown = if keyboard {
-                    format!("{}\u{2502}", self.query)
-                } else {
-                    self.query.clone()
-                };
+            let clear_w = clear_width(l, field);
+            let area = self.query_text_area(l);
+            let mut typed = RenderTree::new();
+            if self.query.is_empty() {
                 label(
                     f,
-                    field.x + inner,
-                    baseline,
-                    &shown,
+                    area.x,
+                    area.y,
+                    "Search a word\u{2026}",
                     l.font,
-                    self.palette.text,
+                    // What the field is for, faint but readable: overlay0 is
+                    // the disabled grey, 2.30:1 on the base.
+                    self.palette.subtext0,
                     FontWeightHint::Regular,
-                    Some(text_span),
+                    Some(area.w),
+                );
+                if keyboard {
+                    textedit::push_caret(
+                        &mut typed,
+                        area.x,
+                        area.y,
+                        area.h,
+                        self.palette.text,
+                        textedit::CARET_WIDTH,
+                    );
+                }
+            } else {
+                // The query, with its caret and selection where they are
+                // while the keys come here, scrolled so the caret stays in
+                // view; from its start while they do not. The caret was a
+                // `│` on the query's end, the only place the keys could type,
+                // and a long query was cut with an ellipsis at the letters
+                // being typed.
+                let (cursor, anchor) = if keyboard {
+                    self.query_caret()
+                } else {
+                    (text::TextCursor::default(), None)
+                };
+                textedit::draw(
+                    &mut typed,
+                    &textedit::SingleLine {
+                        text: &self.query,
+                        cursor,
+                        selection_anchor: anchor,
+                        focused: keyboard,
+                        x: area.x,
+                        y: area.y,
+                        width: area.w,
+                        line_height: area.h,
+                        font_size: l.font,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                        selection_bg: self.palette.accent,
+                        selection_fg: self.palette.crust,
+                        caret_width: textedit::CARET_WIDTH,
+                    },
                 );
                 let clear = Rect::new(
                     field.right() - inner - clear_w,
@@ -2809,17 +2982,9 @@ impl Dictionary {
                     true,
                     Target::ClearQuery,
                 );
-            } else {
-                label(
-                    f,
-                    field.x + inner,
-                    baseline,
-                    "Search a word\u{2026}",
-                    l.font,
-                    self.palette.overlay0,
-                    FontWeightHint::Regular,
-                    Some(text_span),
-                );
+            }
+            for command in typed.commands {
+                f.push(command);
             }
         }
         self.draw_rows(f, l, Screen::Search, l.list_pane(Screen::Search));
@@ -3032,13 +3197,28 @@ impl Dictionary {
         } else if matches!(row, Row::Suggestion(_)) {
             (
                 format!("Did you mean \u{201c}{word}\u{201d}?"),
-                format!("Look it up in WordNet, at {host}"),
+                if self.online {
+                    format!("Look it up in WordNet, at {host}")
+                } else {
+                    format!("Turns online lookups back on, and asks {host}")
+                },
             )
         } else if self.screen == Screen::Search {
-            (
-                format!("Look up \u{201c}{word}\u{201d} online"),
-                format!("In WordNet, at {host} \u{2014} the word is sent there"),
-            )
+            // With lookups off, the row says what choosing it does, because
+            // choosing it is what turns them on (`activate`).
+            if self.online {
+                (
+                    format!("Look up \u{201c}{word}\u{201d} online"),
+                    format!("In WordNet, at {host} \u{2014} the word is sent there"),
+                )
+            } else {
+                (
+                    format!("Turn on online lookups and look up \u{201c}{word}\u{201d}"),
+                    format!(
+                        "In WordNet, at {host} \u{2014} this word is sent there, and so is each word looked up after it"
+                    ),
+                )
+            }
         } else {
             let star = if self.favorites.iter().any(|w| w == word) {
                 "\u{2605} "
@@ -3047,7 +3227,13 @@ impl Dictionary {
             };
             (
                 format!("{star}{word}"),
-                format!("Not in the built-in list \u{2014} Enter looks it up at {host}"),
+                if self.online {
+                    format!("Not in the built-in list \u{2014} Enter looks it up at {host}")
+                } else {
+                    format!(
+                        "Not in the built-in list \u{2014} Enter turns online lookups on and asks {host}"
+                    )
+                },
             )
         };
         let inner = l.pad;
@@ -3258,15 +3444,68 @@ impl Dictionary {
         }
     }
 
+    /// The online-lookup switch's words: where a word goes, or that nothing
+    /// is sent.
+    #[must_use]
+    pub fn online_caption(&self) -> String {
+        if self.online {
+            format!("Online lookups: {}", self.server_name())
+        } else {
+            String::from("Online lookups: off")
+        }
+    }
+
     fn draw_status(&self, f: &mut Frame, l: &Layout) {
         fill(f, l.status, self.palette.crust, 0.0);
         let baseline = l.status.y + l.status.h / 2.0
             - text::line_height(l.small, FontWeightHint::Regular) / 2.0;
+        let mut room = (l.status.w - l.pad * 2.0).max(0.0);
+
+        // The online-lookup switch, at the right end, ahead of the hint: it
+        // is a control, and the hint is advice. Left out only when the bar
+        // has no room for it, and Ctrl+I still turns lookups on and off.
+        let caption = self.online_caption();
+        let caption_w = text::measure(&caption, l.small, FontWeightHint::Bold);
+        let switch_w = caption_w + l.pad * 2.0;
+        if switch_w > 0.0 && switch_w + l.pad * 4.0 <= room {
+            let switch = Rect::new(
+                l.status.right() - l.pad - switch_w,
+                l.status.y + l.status.h * 0.15,
+                switch_w,
+                l.status.h * 0.7,
+            );
+            fill(
+                f,
+                switch,
+                if self.online {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                (switch.h * 0.5).min(8.0),
+            );
+            label(
+                f,
+                switch.x + l.pad,
+                baseline,
+                &caption,
+                l.small,
+                if self.online {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                FontWeightHint::Bold,
+                Some(caption_w),
+            );
+            f.hit(Target::Online, switch);
+            room = (room - switch_w - l.pad).max(0.0);
+        }
+
         let hint = self.hint();
         // Measured, not guessed at: the old bar drew its right-hand half at
         // `width - 250`, which is a negative x on any window under 250 across.
         let hint_w = text::measure(hint, l.small, FontWeightHint::Regular);
-        let room = (l.status.w - l.pad * 2.0).max(0.0);
         let show_hint = hint_w > 0.0 && hint_w + l.pad * 4.0 <= room;
         label(
             f,
@@ -3285,7 +3524,7 @@ impl Dictionary {
         if show_hint {
             label(
                 f,
-                l.status.right() - l.pad - hint_w,
+                l.status.x + l.pad + room - hint_w,
                 baseline,
                 hint,
                 l.small,
@@ -3404,11 +3643,16 @@ impl Dictionary {
         }
 
         let m = ev.modifiers;
-        if m.alt || m.super_key {
+        // Alt's chords are the window's and the Windows key's the desktop's.
+        // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is AltGr+Z, a
+        // German `@` AltGr+Q -- and was refused with every key held with Alt.
+        if textline::is_alt_or_windows_chord(m) {
             return EventResult::Ignored;
         }
+        let font = self.layout().font;
 
-        if m.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr is Ctrl+Alt, and types.
+        if textline::is_ctrl_chord(m) {
             let action = match ev.key {
                 Key::Num1 => Some(Action::Go(Screen::Search)),
                 Key::Num2 => Some(Action::Go(Screen::Entry)),
@@ -3416,8 +3660,13 @@ impl Dictionary {
                 Key::Num4 => Some(Action::Go(Screen::Favorites)),
                 Key::Num5 => Some(Action::Go(Screen::Featured)),
                 Key::D => Some(Action::ToggleFavorite),
+                Key::I => Some(Action::ToggleOnline),
                 Key::L | Key::K | Key::F => Some(Action::Go(Screen::Search)),
                 Key::Backspace => Some(Action::ClearQuery),
+                // The list's ends, on any list screen: on the search screen
+                // Home and End are the query's.
+                Key::Home => Some(Action::Move(Step::First)),
+                Key::End => Some(Action::Move(Step::Last)),
                 // The two keys that let a word list outlive the window.
                 Key::S => {
                     self.picker_saves = true;
@@ -3431,13 +3680,24 @@ impl Dictionary {
                 }
                 _ => None,
             };
-            return match action {
-                Some(a) => {
-                    self.apply(a);
-                    EventResult::Consumed
-                }
-                None => EventResult::Ignored,
-            };
+            if let Some(a) = action {
+                self.apply(a);
+                return EventResult::Consumed;
+            }
+            // Ctrl+A, C, X and V are the query's, on the search screen.
+            if self.screen == Screen::Search && self.query_key(ev, font) {
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+
+        // The query, on the search screen, has the keys a text box has: the
+        // caret keys, Backspace and Delete at the caret, and typing -- what
+        // AltGr types among it. Up and Down, the page keys and Enter are the
+        // list's, and Ctrl+Home and Ctrl+End take it to its ends. The query
+        // took typing at its end and Backspace from it, and nothing else.
+        if self.screen == Screen::Search && self.query_key(ev, font) {
+            return EventResult::Consumed;
         }
 
         let action = match ev.key {
@@ -3455,8 +3715,8 @@ impl Dictionary {
                 Screen::Entry => Action::ToggleFavorite,
                 _ => Action::OpenSelected,
             }),
+            // Off the search screen, which has the query's Backspace.
             Key::Backspace => Some(match self.screen {
-                Screen::Search => Action::Backspace,
                 Screen::Entry => Action::Back,
                 _ => Action::Go(Screen::Search),
             }),
@@ -3478,14 +3738,14 @@ impl Dictionary {
             return EventResult::Consumed;
         }
 
-        // Anything that types goes into the query, from any screen — which is
-        // both what a reader expects and how the search field is reached
-        // without a pointer. `typed()` drops the control characters, so Enter
-        // and Tab cannot arrive here as text.
-        if ev.types_text() {
-            for ch in ev.typed() {
-                self.apply(Action::Type(ch));
-            }
+        // Anything typed on another screen goes on the query's end and shows
+        // the search -- which is both what a reader expects and how the search
+        // field is reached without a pointer. Enter and Tab are not typing,
+        // nor is a command's letter.
+        if textline::types_into_field(ev) {
+            self.screen = Screen::Search;
+            self.query_editor.set_text(&self.query);
+            self.query_key(ev, font);
             return EventResult::Consumed;
         }
         EventResult::Ignored
@@ -3548,23 +3808,28 @@ impl Dictionary {
             }
             Target::Link(index) => self.apply(Action::Open(index)),
             Target::Fetch(n) => self.apply(Action::LookUp(n)),
-            // The field is only ever drawn on the search screen, and typing
-            // already reaches the query from every screen, so `Go(Search)`
-            // was a hit box that could not do anything on any click that
-            // could reach it — fault two in miniature, recorded by the very
-            // rewrite that was meant to end it. A field with no caret cannot
-            // be focused, so the one useful thing a click here can do is say
-            // so, and say what to press instead.
+            // The caret under the pointer, measured against the query as it
+            // was drawn. The field had no caret to place, and a press said so.
             Target::SearchBox => {
-                self.screen = Screen::Search;
-                self.status = if self.query.is_empty() {
-                    "There is no caret to place \u{2014} just type, from any screen".to_string()
+                let l = self.layout();
+                let drawn = if self.search_has_keyboard() {
+                    self.query_caret().0
                 } else {
-                    format!(
-                        "\u{201c}{}\u{201d} \u{2014} keep typing to narrow it, Ctrl+K to clear",
-                        self.query
-                    )
+                    text::TextCursor::default()
                 };
+                self.screen = Screen::Search;
+                let area = self.query_text_area(&l);
+                self.load_query();
+                let cursor = textedit::cursor_at_click(
+                    &self.query,
+                    drawn,
+                    area.w,
+                    l.font,
+                    FontWeightHint::Regular,
+                    ev.x - area.x,
+                );
+                self.query_editor.set_selection_anchor(None);
+                self.query_editor.set_cursor(cursor);
             }
             Target::ClearQuery => self.apply(Action::ClearQuery),
             Target::ClearHistory => self.apply(Action::ClearHistory),
@@ -3573,6 +3838,7 @@ impl Dictionary {
             Target::PrevFeatured => self.apply(Action::StepFeatured(-1)),
             Target::NextFeatured => self.apply(Action::StepFeatured(1)),
             Target::OpenFeatured => self.apply(Action::Open(self.featured)),
+            Target::Online => self.apply(Action::ToggleOnline),
             Target::ScrollThumb => {
                 if let Some(bar) = self.current_bar() {
                     self.thumb_grab = Some(ev.y - bar.thumb.y);
@@ -3834,6 +4100,17 @@ pub fn handle_event(app: &mut Dictionary, event: &Event) -> EventResult {
             app.window_focused = false;
             EventResult::Consumed
         }
+        // Online lookups turned on or off in another window of the
+        // dictionary, or by hand in `dictionary.yaml`: this window follows.
+        Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+            let was = app.online;
+            app.load_settings(&settingsfile::load(CONFIG_NAME));
+            if app.online == was {
+                EventResult::Ignored
+            } else {
+                EventResult::Consumed
+            }
+        }
         _ => EventResult::Ignored,
     }
 }
@@ -3941,6 +4218,10 @@ impl Probe for Dictionary {
 
 fn main() -> ExitCode {
     let mut app = Dictionary::new();
+    // Whether online lookups were turned on in an earlier session. `new`
+    // reads no file, so a test's window starts with them off whatever the
+    // user running the tests has chosen.
+    app.load_settings(&settingsfile::load(CONFIG_NAME));
     app::launch("dictionary", &mut app)
 }
 
@@ -4007,22 +4288,25 @@ mod tests {
     /// elsewhere is correct.
     #[test]
     fn every_advertised_key_does_something() {
-        for (label, what) in SHORTCUTS {
-            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let answered = [Screen::Search, Screen::Entry, Screen::Featured]
-                    .into_iter()
-                    .any(|screen| {
-                        let mut app = Dictionary::new();
-                        app.screen = screen;
-                        probe::key(&mut app, &stroke) == EventResult::Consumed
-                    });
-                assert!(
-                    answered,
-                    "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
-                    stroke.key
-                );
+        // Ctrl+I keeps its choice in the settings: a scratch copy of them.
+        settingsfile::testing::with_scratch_config("dict_keys", |_| {
+            for (label, what) in SHORTCUTS {
+                for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                    let answered = [Screen::Search, Screen::Entry, Screen::Featured]
+                        .into_iter()
+                        .any(|screen| {
+                            let mut app = Dictionary::new();
+                            app.screen = screen;
+                            probe::key(&mut app, &stroke) == EventResult::Consumed
+                        });
+                    assert!(
+                        answered,
+                        "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
+                        stroke.key
+                    );
+                }
             }
-        }
+        });
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**
@@ -4287,6 +4571,145 @@ mod tests {
         assert_ne!(app().server, online::DICT_ORG);
     }
 
+    /// **Online lookups are off until the user turns them on** (§1236): a
+    /// word the built-in list lacks is not sent anywhere, the offer says
+    /// that choosing it turns lookups on, and the status bar says they are
+    /// off.
+    #[test]
+    fn online_lookups_are_off_until_turned_on() {
+        let mut d = app();
+        d.lookup = answers;
+        assert!(!d.online, "a new window starts with lookups on");
+        search_for(&mut d, "serenity");
+        d.look_up("serenity");
+        assert!(
+            !d.looking_up("serenity"),
+            "a word was sent with lookups off"
+        );
+        assert!(
+            d.status().contains("online lookups are off"),
+            "{}",
+            d.status()
+        );
+        let text = drawn_text(&d);
+        assert!(
+            text.iter()
+                .any(|t| t == "Turn on online lookups and look up \u{201c}serenity\u{201d}"),
+            "the offer does not say it turns lookups on: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t == "Online lookups: off"),
+            "the status bar does not say lookups are off"
+        );
+        // Settings that say nothing, or something else, are off as well.
+        for yaml in ["", "online_lookups: maybe\n", "online_lookups: false\n"] {
+            let mut d = app();
+            d.online = true;
+            d.load_settings(&yamldoc::Document::parse(yaml));
+            assert!(!d.online, "{yaml:?} read as on");
+        }
+    }
+
+    /// **Choosing the offer is the user's say-so**: lookups go on, are kept
+    /// for next time, and the word is asked for.
+    #[test]
+    fn choosing_the_offer_turns_lookups_on_and_asks() {
+        settingsfile::testing::with_scratch_config("dict_offer", |_| {
+            let mut d = app();
+            d.lookup = answers;
+            search_for(&mut d, "serenity");
+            probe::key(&mut d, &probe::press(Key::End));
+            probe::key(&mut d, &probe::press(Key::Enter));
+            assert!(d.online, "choosing the offer left lookups off");
+            assert!(d.looking_up("serenity"), "and did not ask");
+            assert_eq!(
+                settingsfile::load(CONFIG_NAME).get_bool(ONLINE_KEY),
+                Some(true),
+                "the choice was not kept"
+            );
+            settle(&mut d);
+            assert_eq!(d.screen(), Screen::Entry);
+        });
+    }
+
+    /// **Ctrl+I turns lookups on and off**, the choice is kept, and the next
+    /// window starts where the last one left it.
+    #[test]
+    fn ctrl_i_turns_lookups_on_and_off_and_the_choice_is_kept() {
+        settingsfile::testing::with_scratch_config("dict_ctrl_i", |_| {
+            let mut d = app();
+            let ctrl_i = probe::ctrl(Key::I);
+            assert_eq!(probe::key(&mut d, &ctrl_i), EventResult::Consumed);
+            assert!(d.online);
+            assert!(
+                d.status().starts_with("Online lookups on"),
+                "{}",
+                d.status()
+            );
+            let mut next = app();
+            next.load_settings(&settingsfile::load(CONFIG_NAME));
+            assert!(next.online, "the next window starts with lookups off");
+
+            probe::key(&mut d, &ctrl_i);
+            assert!(!d.online);
+            assert!(
+                d.status().starts_with("Online lookups off"),
+                "{}",
+                d.status()
+            );
+            let mut next = app();
+            next.online = true;
+            next.load_settings(&settingsfile::load(CONFIG_NAME));
+            assert!(!next.online, "turning them off was not kept");
+        });
+    }
+
+    /// **The status bar's switch turns lookups on**, and then names where a
+    /// word goes.
+    #[test]
+    fn the_status_bar_switch_turns_lookups_on_and_names_the_server() {
+        settingsfile::testing::with_scratch_config("dict_switch", |_| {
+            let mut d = app();
+            probe::click(&mut d, Target::Online);
+            assert!(d.online, "the switch did nothing");
+            assert!(
+                drawn_text(&d)
+                    .iter()
+                    .any(|t| t == "Online lookups: 127.0.0.1"),
+                "the switch does not name where a word goes"
+            );
+            probe::click(&mut d, Target::Online);
+            assert!(!d.online, "the switch does not turn them off again");
+        });
+    }
+
+    /// **Another window's choice is followed**: the desktop says
+    /// `dictionary.yaml` changed, and this window reads it.
+    #[test]
+    fn lookups_turned_on_in_another_window_are_on_here() {
+        settingsfile::testing::with_scratch_config("dict_reread", |_| {
+            let mut d = app();
+            let mut doc = settingsfile::load(CONFIG_NAME);
+            doc.set_bool(ONLINE_KEY, true);
+            settingsfile::store(CONFIG_NAME, &doc).expect("stored");
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            assert_eq!(
+                handle_event(&mut d, &announce(b"dictionary")),
+                EventResult::Consumed
+            );
+            assert!(d.online);
+            // Another program's settings are not the dictionary's.
+            assert_eq!(
+                handle_event(&mut d, &announce(b"weather")),
+                EventResult::Ignored
+            );
+        });
+    }
+
     /// **A word the built-in list lacks is offered for lookup, looked up,
     /// and opened** -- with where it came from said under it, and a place
     /// in the history like any other.
@@ -4294,6 +4717,7 @@ mod tests {
     fn a_word_the_list_lacks_is_looked_up_and_opened() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "serenity");
         assert!(
             d.find_word("serenity").is_none(),
@@ -4347,6 +4771,7 @@ mod tests {
     fn a_word_nobody_has_is_answered_with_what_is_near_it() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "nowhere");
         probe::key(&mut d, &probe::press(Key::End));
         probe::key(&mut d, &probe::press(Key::Enter));
@@ -4379,6 +4804,7 @@ mod tests {
         // it starts on a result, above them.
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "ker");
         assert_eq!(d.selected(Screen::Search), 0);
         assert!(
@@ -4403,6 +4829,7 @@ mod tests {
     fn a_lookup_that_fails_says_why_and_changes_nothing() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         let before = d.entries().len();
         d.look_up("offline");
         settle(&mut d);
@@ -4424,6 +4851,7 @@ mod tests {
     fn a_remembered_word_the_list_lacks_is_kept_and_looked_up() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         d.replace_lists(
             vec![String::from("serenity")],
             vec![String::from("serenity")],
@@ -4451,6 +4879,7 @@ mod tests {
     fn an_answer_for_a_reader_who_moved_on_does_not_take_the_screen() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "serenity");
         probe::key(&mut d, &probe::press(Key::End));
         probe::key(&mut d, &probe::press(Key::Enter));
@@ -4477,6 +4906,7 @@ mod tests {
         }
         let mut d = app();
         d.lookup = slow;
+        d.online = true;
         d.look_up("serenity");
         d.look_up("Serenity");
         settle(&mut d);
@@ -4502,6 +4932,7 @@ mod tests {
         let flag = Arc::new(Flag(AtomicBool::new(false)));
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         assert!(d.wants_waker());
         d.attach_waker(std::task::Waker::from(Arc::clone(&flag)));
         d.look_up("serenity");
@@ -4529,9 +4960,12 @@ mod tests {
     /// click instead of letting it fall through.
     fn describe(d: &Dictionary) -> String {
         format!(
-            "{:?}|{}|{:?}|{}|{:.2}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
+            "{}|{:?}|{}|{:?}|{:?}|{}|{:.2}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
+            d.online,
             d.screen(),
             d.query(),
+            // Where the query's caret and selection are drawn.
+            d.query_caret(),
             d.current(),
             d.featured(),
             d.entry_scroll(),
@@ -4627,12 +5061,16 @@ mod tests {
         )
     }
 
+    /// Every run of words the picture shows: labels, and the query as it is
+    /// typed, which is drawn in runs of colour so a selection can be.
     fn texts(d: &Dictionary, size: (f32, f32)) -> Vec<String> {
         d.frame(size.0, size.1)
             .commands()
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
                 _ => None,
             })
             .collect()
@@ -4847,37 +5285,48 @@ mod tests {
 
     #[test]
     fn every_control_the_program_draws_answers_a_click() {
-        for screen in Screen::ALL {
-            let reference = furnished(screen);
-            let targets: Vec<Target> = reference
-                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
-                .hits()
-                .iter()
-                .map(|(t, _)| *t)
-                .collect();
-            assert!(
-                !targets.is_empty(),
-                "{screen:?} records no hit boxes at all"
-            );
-            for target in targets {
-                // A tab whose whole job is "go to this screen", clicked while
-                // you are already on that screen, is entitled to do nothing.
-                // Every other control must answer — including the search
-                // field, which is drawn only on the screen it would take you
-                // to and so has to justify its hit box some other way.
-                if target == Target::Tab(screen.index()) {
-                    continue;
-                }
-                let mut d = furnished(screen);
-                let before = describe(&d);
-                probe::click(&mut d, target);
-                assert_ne!(
-                    describe(&d),
-                    before,
-                    "{screen:?}: clicking {target:?} changed nothing"
+        // The online-lookup switch keeps its choice in the settings: a
+        // scratch copy of them.
+        settingsfile::testing::with_scratch_config("dict_clicks", |_| {
+            for screen in Screen::ALL {
+                let reference = furnished(screen);
+                let targets: Vec<Target> = reference
+                    .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                    .hits()
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .collect();
+                assert!(
+                    !targets.is_empty(),
+                    "{screen:?} records no hit boxes at all"
                 );
+                for target in targets {
+                    // A tab whose whole job is "go to this screen", clicked
+                    // while you are already on that screen, is entitled to do
+                    // nothing. Every other control must answer — including
+                    // the search field, which is drawn only on the screen it
+                    // would take you to and so has to justify its hit box
+                    // some other way.
+                    if target == Target::Tab(screen.index()) {
+                        continue;
+                    }
+                    let mut d = furnished(screen);
+                    // The field answers a press by putting the caret under
+                    // it: from the query's start, so a press past its end
+                    // moves it.
+                    if target == Target::SearchBox {
+                        d.key_at(&probe::press(Key::Home), (WINDOW_WIDTH, WINDOW_HEIGHT));
+                    }
+                    let before = describe(&d);
+                    probe::click(&mut d, target);
+                    assert_ne!(
+                        describe(&d),
+                        before,
+                        "{screen:?}: clicking {target:?} changed nothing"
+                    );
+                }
             }
-        }
+        });
     }
 
     #[test]
@@ -4917,25 +5366,26 @@ mod tests {
         // dead `Go(Search)` survived the first mutation run. The rectangle
         // comes from the layout, the same one the drawing pass fills, so the
         // claim is "the pixels that look like a field behave like one".
-        for (query, expected) in [("", "no caret"), ("ker", "Ctrl+K")] {
-            let mut d = app();
-            search_for(&mut d, query);
-            let field = d.layout().search_box();
-            assert!(field.w > 0.0 && field.h > 0.0, "the field is not drawn");
-            let (x, y) = field.centre();
-            let before = describe(&d);
-            d.click_at(x, y, MouseButton::Left, Dictionary::SIZE);
-            assert_ne!(
-                describe(&d),
-                before,
-                "a click on the search field did nothing"
-            );
-            assert!(
-                d.status().contains(expected),
-                "the field answered {:?}, which does not mention {expected:?}",
-                d.status()
-            );
-        }
+        // The answer is the caret, put where the press lands: at the start of
+        // the query here, where the typing left it at the end.
+        let mut d = app();
+        search_for(&mut d, "ker");
+        let field = d.layout().search_box();
+        assert!(field.w > 0.0 && field.h > 0.0, "the field is not drawn");
+        let x = field.x + d.layout().pad + 0.5;
+        let before = describe(&d);
+        d.click_at(x, field.centre().1, MouseButton::Left, Dictionary::SIZE);
+        assert_ne!(
+            describe(&d),
+            before,
+            "a click on the search field did nothing"
+        );
+        search_for(&mut d, "<");
+        assert_eq!(
+            d.query(),
+            "<ker",
+            "the click did not put the caret under it"
+        );
     }
 
     #[test]
@@ -4992,6 +5442,7 @@ mod tests {
     fn a_chip_naming_a_word_the_dictionary_lacks_looks_it_up() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         open(&mut d, "algorithm");
         let n = d
             .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -5361,16 +5812,27 @@ mod tests {
 
     #[test]
     fn home_and_end_reach_both_ends_of_a_list() {
+        // On the search screen with Ctrl: Home and End are the query's there.
         let mut d = sized(SHORT);
         search_for(&mut d, "e");
         let len = d.rows(Screen::Search).len();
-        d.key_at(&probe::press(Key::End), SHORT);
+        d.key_at(&probe::ctrl(Key::End), SHORT);
         assert_eq!(d.selected(Screen::Search), len - 1);
         assert!(probe::is_visible_sized(&d, Target::Row(len - 1), SHORT));
-        d.key_at(&probe::press(Key::Home), SHORT);
+        d.key_at(&probe::ctrl(Key::Home), SHORT);
         assert_eq!(d.selected(Screen::Search), 0);
         assert_eq!(d.scroll_top(Screen::Search), 0);
         assert!(probe::is_visible_sized(&d, Target::Row(0), SHORT));
+        assert_eq!(d.query(), "e", "Ctrl+Home or Ctrl+End edited the query");
+
+        // On the other lists, plain.
+        let mut d = furnished(Screen::History);
+        let len = d.rows(Screen::History).len();
+        assert!(len > 1, "a history of one has its ends in one place");
+        d.key_at(&probe::press(Key::End), Dictionary::SIZE);
+        assert_eq!(d.selected(Screen::History), len - 1);
+        d.key_at(&probe::press(Key::Home), Dictionary::SIZE);
+        assert_eq!(d.selected(Screen::History), 0);
     }
 
     #[test]
@@ -5379,7 +5841,7 @@ mod tests {
         search_for(&mut d, "e");
         d.key_at(&probe::press(Key::Down), SHORT);
         let one = d.selected(Screen::Search);
-        d.key_at(&probe::press(Key::Home), SHORT);
+        d.key_at(&probe::ctrl(Key::Home), SHORT);
         d.key_at(&probe::press(Key::PageDown), SHORT);
         assert!(
             d.selected(Screen::Search) > one,
@@ -6053,7 +6515,7 @@ mod tests {
             ..idle
         };
         assert!(draws(&d, keyed), "the field the keys go to is not marked");
-        assert!(shows(&d, Dictionary::SIZE, "ker\u{2502}"), "no caret");
+        assert_eq!(carets_in(&d, field).len(), 1, "no caret");
 
         handle_event(&mut d, &Event::FocusOut);
         assert!(
@@ -6061,7 +6523,7 @@ mod tests {
             "the field is marked with the window in the background"
         );
         assert!(
-            !shows(&d, Dictionary::SIZE, "\u{2502}"),
+            carets_in(&d, field).is_empty(),
             "a caret with the window in the background"
         );
         handle_event(&mut d, &Event::FocusIn);
@@ -6754,6 +7216,197 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // ── The query edits at a caret ─────────────────────────────────────────────
+
+    /// The x of every caret drawn inside `area`.
+    fn carets_in(d: &Dictionary, area: Rect) -> Vec<f32> {
+        d.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && area.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn key(d: &mut Dictionary, event: &KeyEvent) {
+        d.key_at(event, Dictionary::SIZE);
+    }
+
+    fn press_at(d: &mut Dictionary, x: f32, y: f32) {
+        d.click_at(x, y, MouseButton::Left, Dictionary::SIZE);
+    }
+
+    /// **The query edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn where they are, and every edit searches
+    /// again. The query took typing at its end and Backspace from it, and
+    /// nothing else: "kenel" was fixed by rubbing out back to the `n`.
+    #[test]
+    fn the_query_edits_at_a_caret() {
+        let mut d = app();
+        search_for(&mut d, "kenel");
+        for _ in 0..3 {
+            key(&mut d, &probe::press(Key::Left));
+        }
+        search_for(&mut d, "r");
+        assert_eq!(d.query(), "kernel", "the caret did not move");
+        assert_eq!(
+            d.rows(Screen::Search).first(),
+            d.find_word("kernel").map(Row::Entry).as_ref(),
+            "the edit was not searched for"
+        );
+        let l = d.layout();
+        let area = d.query_text_area(&l);
+        let at = area.x
+            + text::caret_x(
+                "kernel",
+                text::TextCursor::from(3),
+                l.font,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&d, area);
+        assert_eq!(carets.len(), 1, "one caret in the field");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `ker` it follows at {at}"
+        );
+
+        key(&mut d, &probe::press(Key::Home));
+        key(&mut d, &probe::press(Key::Delete));
+        assert_eq!(d.query(), "ernel", "Delete at the caret");
+        search_for(&mut d, "k");
+        key(&mut d, &probe::ctrl(Key::A));
+        assert!(
+            d.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { text, spans, .. }
+                    if text == "kernel" && !spans.is_empty())),
+            "the selection is not drawn"
+        );
+        key(&mut d, &probe::ctrl(Key::C));
+        key(&mut d, &probe::ctrl(Key::X));
+        assert_eq!(d.query(), "", "Ctrl+A and Ctrl+X");
+        key(&mut d, &probe::ctrl(Key::V));
+        assert_eq!(d.query(), "kernel", "Ctrl+C or Ctrl+V");
+
+        // A press at the start of the query puts the caret there, and one
+        // past its end at its end.
+        let area = d.query_text_area(&d.layout());
+        let mid = area.y + area.h / 2.0;
+        press_at(&mut d, area.x + 0.5, mid);
+        search_for(&mut d, "<");
+        press_at(&mut d, area.right() - 1.0, mid);
+        search_for(&mut d, ">");
+        assert_eq!(
+            d.query(),
+            "<kernel>",
+            "a press did not put the caret where it landed"
+        );
+    }
+
+    /// **The list keeps its keys beside the query**: Up and Down move through
+    /// it while the caret stays put, and Home and End move the caret, not the
+    /// selection.
+    #[test]
+    fn the_list_keeps_its_keys_beside_the_query() {
+        let mut d = app();
+        search_for(&mut d, "e");
+        key(&mut d, &probe::press(Key::Down));
+        key(&mut d, &probe::press(Key::Down));
+        assert_eq!(d.selected(Screen::Search), 2);
+        key(&mut d, &probe::press(Key::Home));
+        assert_eq!(d.selected(Screen::Search), 2, "Home moved the selection");
+        search_for(&mut d, "k");
+        assert_eq!(d.query(), "ke", "Home did not take the caret to the start");
+    }
+
+    /// **AltGr types into the query, and Alt's chords do not**: AltGr
+    /// arrives as Ctrl+Alt -- Polish `ś` is AltGr+S -- and was refused with
+    /// every key held with Alt; nor is it Ctrl+S, which would save.
+    #[test]
+    fn altgr_types_into_the_query_and_is_not_a_ctrl_chord() {
+        let mut d = app();
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let held = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        key(&mut d, &held(Key::S, "\u{15b}", altgr));
+        key(&mut d, &held(Key::F, "f", Modifiers::alt()));
+        assert_eq!(
+            d.query(),
+            "\u{15b}",
+            "AltGr's letter was refused, or Alt's typed"
+        );
+        assert!(
+            !d.picker.is_open(),
+            "AltGr+S was Ctrl+S, and asked where to save"
+        );
+    }
+
+    /// **Typing on another screen goes on the query's end**, wherever the
+    /// caret was left in it, and shows the search.
+    #[test]
+    fn typing_on_another_screen_goes_on_the_querys_end() {
+        let mut d = app();
+        search_for(&mut d, "ker");
+        key(&mut d, &probe::press(Key::Home));
+        d.apply(Action::Go(Screen::History));
+        search_for(&mut d, "n");
+        assert_eq!(d.screen(), Screen::Search);
+        assert_eq!(
+            d.query(),
+            "kern",
+            "the typing went where the caret was left"
+        );
+    }
+
+    /// **An empty query shows its caret only while the keys come to it**:
+    /// before the placeholder, and not with the window in the background.
+    #[test]
+    fn an_empty_query_shows_its_caret_only_with_the_keyboard() {
+        let mut d = app();
+        let field = d.layout().search_box();
+        assert_eq!(carets_in(&d, field).len(), 1, "no caret in the empty field");
+        handle_event(&mut d, &Event::FocusOut);
+        assert!(
+            carets_in(&d, field).is_empty(),
+            "a caret with the window in the background"
+        );
+    }
+
+    /// **The query edits what it shows**, however it came to be what it is.
+    #[test]
+    fn the_query_edits_what_it_shows() {
+        let mut d = app();
+        search_for(&mut d, "ker");
+        key(&mut d, &probe::press(Key::Home));
+        d.query = String::from("cache");
+        search_for(&mut d, "s");
+        assert_eq!(
+            d.query(),
+            "caches",
+            "the key edited the query the editor held"
         );
     }
 }

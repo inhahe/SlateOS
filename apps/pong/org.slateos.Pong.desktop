@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pong
+Comment=Two paddles and a ball
+Icon=applications-games
+Exec=pong
+Categories=Game;ArcadeGame;
+Keywords=paddle;tennis;arcade;

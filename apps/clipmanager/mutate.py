@@ -41,16 +41,15 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types'],
     ),
-    (
-        "a command's letter is typed into a field",
-        '        if textline::types_into_field(key) {',
-        '        if key.types_text() {',
-        ['a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types'],
-    ),
+    # No row for "a command's letter is typed into a field": since 2026-10-04
+    # the boxes' typing is textline::apply_key's, which tells a command from
+    # AltGr itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types still
+    # holds the boxes to it.
     (
         "a chord works a field's own keys",
-        '        if !textline::is_plain(key.modifiers) {\n            return Action::None;\n        }\n',
-        '',
+        '        if textline::is_plain(key.modifiers) {\n            match key.key {\n                Key::Escape => {\n                    self.focus = None;',
+        '        if true {\n            match key.key {\n                Key::Escape => {\n                    self.focus = None;',
         ['a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types'],
     ),
     # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
@@ -111,6 +110,85 @@ MUTATIONS = [
         '                MouseEventKind::Scroll { .. } if self.show_help => Action::None,\n',
         '',
         ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else, with a `_`
+# typed onto the end for a caret.
+EDITS = "the_search_box_edits_at_a_caret"
+TEMPLATE = "a_templates_boxes_edit_at_a_caret"
+SHOWN = "a_box_edits_the_text_it_shows"
+
+MUTATIONS += [
+    (
+        "Ctrl+A, C, X and V are nobody's",
+        "                _ => {\n"
+        "                    return match self.focus.and_then(|field| self.box_key(field, key)) {\n",
+        "                _ => {\n"
+        "                    return match None::<bool> {\n",
+        [EDITS],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a search edited is not filtered by",
+        "            if field == Field::Search {\n"
+        "                self.scroll_offset = 0;\n"
+        "                self.refresh_filter();\n"
+        "            }\n"
+        "        }\n"
+        "        let editor = &self.editor;\n",
+        "        }\n"
+        "        let editor = &self.editor;\n",
+        ["typing_in_the_search_box_narrows_the_list_and_backspacing_widens_it"],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(field) || self.editor.text() != self.box_value(field) {\n",
+        "        if self.editor.text() != self.box_value(field) {\n",
+        [SHOWN],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(field) || self.editor.text() != self.box_value(field) {\n",
+        "        if self.editor_for != Some(field) {\n",
+        [SHOWN],
+    ),
+    (
+        "the caret is drawn at the start",
+        "        let (cursor, selection_anchor) = if focused {\n            text.caret\n",
+        "        let (cursor, selection_anchor) = if false {\n            text.caret\n",
+        [EDITS],
+    ),
+    (
+        "an empty box with the keyboard draws no caret",
+        "        if focused {\n            textedit::push_caret(\n",
+        "        if false {\n            textedit::push_caret(\n",
+        [TEMPLATE],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - area.x,\n",
+        "            0.0,\n",
+        [EDITS, TEMPLATE],
+    ),
+    (
+        "a press in a box does not place the caret",
+        "            self.press_box(field, rect, drawn, x);\n",
+        "            let _ = (field, rect, drawn);\n",
+        [EDITS, TEMPLATE],
+    ),
+    (
+        "the search's text is drawn over its label",
+        "            Self::Search => (72.0, 128.0),\n",
+        "            Self::Search => (6.0, 128.0),\n",
+        ["the_search_text_clears_its_label"],
     ),
 ]
 

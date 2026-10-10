@@ -107,11 +107,15 @@ MUTATIONS = [
         "    modifiers.ctrl && !modifiers.super_key\n}",
         [ALTGR, TABLE],
     ),
+    # This row, "a key held with Alt alone types" and "a key held with the
+    # Windows key types" name the modifier table alone: apply_key refuses
+    # Alt's and the Windows key's chords before it asks whether a key is a
+    # command, so the command test cannot see them.
     (
         "a Ctrl chord held with the Windows key is the program's",
         "    modifiers.ctrl && !modifiers.alt && !modifiers.super_key\n}",
         "    modifiers.ctrl && !modifiers.alt\n}",
-        [COMMAND, TABLE],
+        [TABLE],
     ),
     (
         "AltGr is a command",
@@ -123,13 +127,13 @@ MUTATIONS = [
         "a key held with Alt alone types",
         "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
         "    modifiers.super_key || (modifiers.ctrl && !modifiers.alt)",
-        [COMMAND, TABLE],
+        [TABLE],
     ),
     (
         "a key held with the Windows key types",
         "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
         "    modifiers.ctrl != modifiers.alt",
-        [COMMAND, TABLE],
+        [TABLE],
     ),
     (
         "a paste of nothing eats the selection",
@@ -202,6 +206,75 @@ MUTATIONS = [
         '    if is_alt_or_windows_chord(key.modifiers) {\n        return LineEdit::default();\n    }\n',
         '',
         ['a_key_held_with_alt_or_the_windows_key_edits_nothing'],
+    ),
+]
+
+# A masked field (2026-10-04): one mask for each character, the caret and the
+# selection on the same characters, a press mapped back, the arrows stepping a
+# character at a time, and nothing copied or cut.
+MASKS = "a_masked_field_masks_each_character_and_keeps_its_caret_on_it"
+STEPS = "a_masked_field_steps_by_character_and_gives_nothing_to_the_clipboard"
+
+MUTATIONS += [
+    (
+        "a mask for each byte",
+        "    let shown: String = text.chars().map(|_| mask).collect();\n",
+        "    let shown: String = text.bytes().map(|_| mask).collect();\n",
+        [MASKS],
+    ),
+    (
+        "the caret counted in characters, not the mask's bytes",
+        "        chars.saturating_mul(mask.len_utf8())\n",
+        "        chars\n",
+        [MASKS],
+    ),
+    (
+        "a press counted in the mask's bytes, not its characters",
+        "    let nth = at.checked_div(mask.len_utf8()).unwrap_or(0);\n",
+        "    let nth = at;\n",
+        [MASKS],
+    ),
+    (
+        "a press past the end is the start",
+        "        .map_or(text.len(), |(byte, _)| byte)\n",
+        "        .map_or(0, |(byte, _)| byte)\n",
+        [MASKS],
+    ),
+    (
+        "Alt+Left steps in a masked field",
+        "        Key::Left | Key::Right if !is_alt_or_windows_chord(key.modifiers) => {\n",
+        "        Key::Left | Key::Right => {\n",
+        [STEPS],
+    ),
+    (
+        "a masked field copies and cuts",
+        "        Key::C | Key::X if chord => LineEdit {\n",
+        "        Key::C | Key::X if false => LineEdit {\n",
+        [STEPS],
+    ),
+    (
+        "an unshifted arrow steps out of a selection",
+        "    if !shift && input.has_selection() {\n",
+        "    if false {\n",
+        [STEPS],
+    ),
+    (
+        "Shift does not select in a masked field",
+        "    textedit::begin_or_end_selection(shift, input.cursor(), &mut anchor);\n",
+        "",
+        [STEPS],
+    ),
+    (
+        "a step forward is a byte",
+        "            .map(|c| at.saturating_add(c.len_utf8()))\n",
+        "            .map(|_| at.saturating_add(1))\n",
+        [STEPS],
+    ),
+    (
+        "a step back is a byte",
+        "            .map(|c| at.saturating_sub(c.len_utf8()))\n",
+        "            .map(|_| at.saturating_sub(1))\n",
+        [STEPS],
     ),
 ]
 

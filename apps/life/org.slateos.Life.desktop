@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Game of Life
+Comment=Watch Conway's Game of Life evolve
+Icon=applications-science
+Exec=life
+Categories=Education;Science;
+Keywords=cellular;automaton;conway;

@@ -897,8 +897,8 @@ MUTATIONS = [
     ),
     (
         'Alt and a letter sends nothing',
-        '        if mods.alt && !mods.ctrl && event.types_text() {',
-        '        if mods.alt && !mods.ctrl && event.types_text() && mods.shift && !mods.shift {',
+        '        if mods.alt && !mods.ctrl && !meta.is_empty() {',
+        '        if mods.alt && !mods.ctrl && !meta.is_empty() && mods.shift && !mods.shift {',
         ['each_kind_of_chord_sends_what_a_shell_expects'],
     ),
     (
@@ -912,6 +912,35 @@ MUTATIONS = [
         '        let mut result = if mods.alt && !says_its_modifiers {',
         '        let mut result = if mods.alt {',
         ['each_kind_of_chord_sends_what_a_shell_expects'],
+    ),
+    # 2026-10-09: `terminal -e PROGRAM ARG...`, how the desktop starts a
+    # program whose entry says Terminal=true.
+    (
+        '-e is not looked for',
+        '        let at_e = args.iter().position(|a| a.as_encoded_bytes() == b"-e");\n',
+        '        let at_e: Option<usize> = None;\n',
+        ['dash_e_runs_the_program_after_it_with_every_argument_its_own'],
+    ),
+    (
+        "the program's own options are read as the terminal's",
+        '                let after = own.split_off(i);\n',
+        '                let after = own.clone().split_off(i);\n',
+        ['dash_e_runs_the_program_after_it_with_every_argument_its_own'],
+    ),
+    (
+        '-e with no program quietly starts the shell',
+        '                    return Err(String::from("-e needs a program to run, e.g. -e top"));\n',
+        '                    return Ok(Self {\n'
+        '                        display: None,\n'
+        '                        command: None,\n'
+        '                    });\n',
+        ['a_command_line_the_terminal_does_not_take_is_refused_by_name'],
+    ),
+    (
+        'a stray argument is ignored',
+        '        if let Some(stray) = parsed.rest.first() {\n',
+        '        if let Some(stray) = parsed.rest.first().filter(|_| false) {\n',
+        ['a_command_line_the_terminal_does_not_take_is_refused_by_name'],
     ),
 ]
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Reminders
+Comment=Keep tasks and be reminded of them
+Icon=appointment-new
+Exec=reminders
+Categories=Office;
+Keywords=tasks;todo;reminders;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Metronome
+Comment=Keep time while you play
+Icon=audio-x-generic
+Exec=metronome
+Categories=AudioVideo;Audio;
+Keywords=tempo;beat;music;

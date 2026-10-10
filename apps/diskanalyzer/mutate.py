@@ -78,6 +78,10 @@ MUTATIONS = [
 
 FIELD = "the_path_field_is_the_toolkits_field"
 TAIL = "a_long_path_shows_its_end_and_the_typing_its_caret"
+EDITS = "the_path_field_edits_at_a_caret"
+CTRL_L = "ctrl_l_selects_the_path"
+READS = "a_press_in_a_field_without_the_keyboard_lands_where_it_reads"
+SHOWN = "the_path_field_edits_the_path_it_shows"
 
 MUTATIONS += [
     # The path field is the toolkit's field (2026-10-04; lane C,
@@ -133,9 +137,75 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the typing",
-        "                    cursor: guitk::text::TextCursor::from(self.path_input.len()),\n",
-        "                    cursor: guitk::text::TextCursor::from(0),\n",
-        [TAIL],
+        "                    cursor: self.path_cursor(),\n",
+        "                    cursor: text::TextCursor::from(0),\n",
+        [TAIL, EDITS],
+    ),
+]
+
+# The path field edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+MUTATIONS += [
+    (
+        "Ctrl+L does not select the path",
+        "        self.path_editor.select_all();\n",
+        "",
+        [CTRL_L],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.path_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a caret moved is not drawn",
+        "        before\n            != (\n                self.path_editor.cursor(),\n                self.path_editor.selection_anchor(),\n            )\n    }\n",
+        "        false\n    }\n",
+        [CTRL_L],
+    ),
+    (
+        "a key that changes nothing is a redraw",
+        "        before\n            != (\n                self.path_editor.cursor(),\n                self.path_editor.selection_anchor(),\n            )\n    }\n",
+        "        edit.handled\n    }\n",
+        [CTRL_L],
+    ),
+    (
+        "a key finds the editor holding another path",
+        "    fn path_key(&mut self, key: &KeyEvent) -> bool {\n        if self.path_editor.text() != self.path_input {\n",
+        "    fn path_key(&mut self, key: &KeyEvent) -> bool {\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another path",
+        "        self.path_focused = true;\n        if self.path_editor.text() != self.path_input {\n",
+        "        self.path_focused = true;\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press in a field without the keyboard is read from its head",
+        "        if self.path_focused && self.path_editor.text() == self.path_input {\n            self.path_editor.cursor()\n        } else {\n            text::TextCursor::from(self.path_input.len())\n        }\n",
+        "        if self.path_focused && self.path_editor.text() == self.path_input {\n            self.path_editor.cursor()\n        } else {\n            text::TextCursor::default()\n        }\n",
+        [READS],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - PATH_TEXT_INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the field does not place the caret",
+        "                self.press_path(x, size.0);\n",
+        "                self.path_focused = true;\n",
+        [EDITS, SHOWN],
+    ),
+    (
+        "the selection is not drawn",
+        "                    selection_anchor: if self.path_editor.text() == self.path_input {\n",
+        "                    selection_anchor: if false {\n",
+        [EDITS],
     ),
 ]
 

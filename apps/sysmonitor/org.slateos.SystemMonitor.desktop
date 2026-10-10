@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System Monitor
+Comment=Watch the processor, memory, disks and network
+Icon=utilities-system-monitor
+Exec=sysmonitor
+Categories=System;Monitor;
+Keywords=cpu;memory;usage;

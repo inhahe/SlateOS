@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Batch Renamer
+Comment=Rename many files at once
+Icon=system-file-manager
+Exec=renamer
+Categories=System;FileTools;
+Keywords=rename;files;batch;

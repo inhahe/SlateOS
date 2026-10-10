@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Email
+Comment=Read and write email
+Icon=internet-mail
+Exec=email
+Categories=Network;Email;
+Keywords=mail;messages;

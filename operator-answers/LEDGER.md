@@ -45,11 +45,11 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | D-Q6 | D | -- | relayed 2026-10-09 (B) |
 | D-Q7 | D | -- | relayed 2026-10-09 (Claude's recommendation) |
 | D-Q8 | D | -- | relayed 2026-10-09 (B, with a question about swap files) |
-| E-Q1 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
-| E-Q2 | E | -- | relayed 2026-10-09 (Claude's recommendation, with three changes) |
-| E-Q3 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
-| E-Q4 | E | -- | relayed 2026-10-09 (Claude's recommendation, with a question) |
-| E-Q5 | E | -- | relayed 2026-10-09 (Claude's recommendation) |
+| E-Q1 | E | §1235 | recorded (whisper.cpp; the port is lane D's, the model package lane B's, the dictation front end lane E's) |
+| E-Q2 | E | §1236 | recorded: weather and the dictionary's online lookups off until turned on; the programs whose purpose is the internet (speed test, IRC, torrents, VPN, remote desktop, the scanner's WHOIS) unchanged. The table in §1236 says how "those three things" was read |
+| E-Q3 | E | §1237 | recorded (`pkg rollback` exists; a desktop entry for it waits on `requests/e-b-programs-can-ask-the-package-manager-to-roll-back.md`) |
+| E-Q4 | E | §1238 | recorded; the question back is answered there: yes, each drive's bin gets an age, a size and a count limit (`roadmap-detailed.md`) |
+| E-Q5 | E | §1239 | recorded (one window for the rest waits on `requests/e-cf-a-program-can-ask-to-have-only-one-window.md`) |
 | F-Q3 | F | §1371 (the person's action is the permission; scheduled capture asks once, for its run, or always, in A-Q26's store) | recorded |
 | F-Q4 | F | §1372 (rav1d's assembly) | recorded |
 | F-Q5 | F | §1373; the note in `deferred-questions/F-when-slateos-is-built-for-x86-64-v3-...` | recorded |

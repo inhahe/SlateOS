@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Text Editor
+Comment=Write and edit plain text and code
+Icon=accessories-text-editor
+Exec=editor %F
+Categories=Utility;TextEditor;
+Keywords=text;edit;code;
+MimeType=text/plain;

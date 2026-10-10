@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sliding Puzzle
+Comment=Slide the tiles back into order
+Icon=applications-games
+Exec=sliding
+Categories=Game;LogicGame;
+Keywords=fifteen;tiles;puzzle;

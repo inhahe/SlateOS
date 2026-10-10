@@ -589,12 +589,11 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
     ),
-    (
-        "a command's letter is typed",
-        '        if textline::types_into_field(event) {',
-        '        if event.types_text() {',
-        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
-    ),
+    # No row for "a command's letter is typed": since 2026-10-04 the boxes'
+    # typing is textline::apply_key's, which tells a command from AltGr
+    # itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types still
+    # holds the boxes to it.
     (
         'AltGr is taken for Ctrl',
         '        if textline::is_ctrl_chord(event.modifiers) {',
@@ -723,18 +722,8 @@ MUTATIONS = [
     ),
     (
         'the search box shows a caret under a cover',
-        '        let focused = state.focused;\n'
-        '        let inner = inset(l.search, 10.0);\n',
-        '        let focused = self.focus == Focus::Search;\n'
-        '        let inner = inset(l.search, 10.0);\n',
-        [FIELDS],
-    ),
-    (
-        "a form's box shows a caret under a cover",
-        '                let focused = state.focused;\n'
-        '                let value = self.field_value(field);\n',
-        '                let focused = self.focus == Focus::Field(field);\n'
-        '                let value = self.field_value(field);\n',
+        '        self.draw_box_text(f, inner, Focus::Search, "Search contacts...", state.focused);\n',
+        '        self.draw_box_text(f, inner, Focus::Search, "Search contacts...", self.focus == Focus::Search);\n',
         [FIELDS],
     ),
     (
@@ -742,6 +731,65 @@ MUTATIONS = [
         '        self.focus_ring_width = settings.focus_ring_width();\n',
         '        let _ = settings;\n',
         [FIELDS],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else; and Delete
+# under a box with the keyboard deleted the selected contact.
+LINE = "a_forms_line_edits_at_a_caret_and_delete_stays_in_it"
+SEARCH = "the_search_box_edits_at_a_caret"
+SHOWN = "a_box_edits_the_text_it_shows"
+
+MUTATIONS += [
+    (
+        "a plain key a box does not answer reaches the window's keys",
+        "            if !textline::is_ctrl_chord(event.modifiers) {\n                return;\n            }\n        }\n",
+        "        }\n",
+        [LINE],
+    ),
+    (
+        "a box's keys come after the window's",
+        "        if self.focus != Focus::None {\n            let focus = self.focus;\n",
+        "        if false {\n            let focus = self.focus;\n",
+        [LINE, SEARCH],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [LINE],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
+        "        if self.editor.text() != self.box_text(focus) {\n",
+        [SHOWN],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
+        "        if self.editor_for != Some(focus) {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - inner.x,\n",
+        "            0.0,\n",
+        [SEARCH],
+    ),
+    (
+        "a press in a box does not place the caret",
+        "        if let Some(rect) = frame.rect_of(|t| *t == target) {\n            self.press_box(focus, rect, event.x);\n        }\n",
+        "",
+        [LINE, SEARCH],
+    ),
+    (
+        "the caret is drawn at the start",
+        "            let (cursor, anchor) = if focused {\n                self.box_caret(focus)\n",
+        "            let (cursor, anchor) = if false {\n                self.box_caret(focus)\n",
+        [LINE],
     ),
 ]
 

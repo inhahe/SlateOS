@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Nim
+Comment=Take from the heaps; the last to take wins
+Icon=applications-games
+Exec=nim
+Categories=Game;LogicGame;
+Keywords=heaps;strategy;

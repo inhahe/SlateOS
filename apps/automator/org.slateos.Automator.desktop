@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Automator
+Comment=Record and play back keyboard and mouse macros
+Icon=system-run
+Exec=automator
+Categories=Utility;
+Keywords=macro;automation;record;

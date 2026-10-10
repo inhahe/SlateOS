@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Take photos and videos with a webcam
+Icon=camera-photo
+Exec=camera
+Categories=AudioVideo;Video;Recorder;
+Keywords=webcam;photo;video;

@@ -1,6 +1,8 @@
 ### [E] Twenty-nine applications' text boxes type only at the end -- 2026-10-04
 
-**Status:** OPEN
+**Status:** OPEN -- done on lane E's branch, 2026-10-04: every one of the
+twenty-nine edits at a caret. It moves to `known-issues-resolved/` once
+that is on `main` and boot-tested.
 
 **In short:** in twenty-nine applications a text box takes typing only at
 its end. There is no caret to move: the arrow keys, Home and End do nothing
@@ -16,18 +18,9 @@ look like boxes that can do all of this.
 and Backspace `pop`s it.
 
 **Found** 2026-10-04, adding vpnmanager's list of keys
-(`known-issues/E-thirty-applications-answer-f1-with-nothing.md`).
+(`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
-**The twenty-nine:** alarmclock (an alarm's label), charmap (search),
-clipmanager (its form), colorpicker (the hex value), contacts (search and
-the form), credmanager (the entry form, the master password, search),
-dbviewer (cell editing), defrag (the exclusion box), devicemanager (search),
-diagram (a shape's label), dictionary (the query), diskanalyzer (the path),
-editor (the find bar), filediff (search), filesearch (the query),
-hexeditor (search and Go To), ircclient (the message line), kanban (its
-input), lockscreen (the password), logviewer (search), mindmap
-(a node's text and its search), passwordgen (its input), startupmanager
-(the dialog and search), tmux (its command prompt), undelete (search).
+**The twenty-nine:** none left -- every one is done (below).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -80,4 +73,37 @@ keyboard); vpnmanager (2026-10-04: the profile form, its port and MTU as
 digits, the search and the split-tunnel range); taskscheduler (2026-10-04:
 the task dialog's boxes, the day of the month and the interval as digits);
 musicplayer (2026-10-04: the search box, which Enter now leaves on screen
-with the search it filters by).
+with the search it filters by); devicemanager (2026-10-04: the search box);
+filediff (2026-10-04: the find bar); ircclient (2026-10-04: the message
+line); logviewer (2026-10-04: the search box); diskanalyzer (2026-10-04: the
+path field); defrag (2026-10-04: the exclusion box); colorpicker
+(2026-10-04: the value box, its typing hex alone); editor (2026-10-04: the
+find bar's two fields); kanban (2026-10-04: the input dialog's box edits at
+a caret, and a command's letter no longer types into it); alarmclock
+(2026-10-04: the label box edits at a caret; AltGr+Q types an @ rather than
+quitting); hexeditor (2026-10-04: the find and go-to boxes edit at a caret;
+Ctrl+V in a box no longer pastes into the file); startupmanager (2026-10-04:
+the search box and the add/edit dialog's fields edit at a caret; Delete in
+the search no longer removes an entry); tmux (2026-10-04: the : prompt edits
+at a caret, never past its colon); contacts (2026-10-04: the search box and
+the form's lines edit at a caret; Delete in a box no longer deletes the
+contact); diagram (2026-10-04: a shape's or a line's label edits at a caret,
+pressed where it is drawn); mindmap (2026-10-04: a node's text and the find
+bar's query edit at a caret; the search reads the outline's order and
+follows changes); undelete (2026-10-04: the results' search edits at a
+caret; Ctrl+Home and Ctrl+End take the files to their ends); charmap
+(2026-10-04: the search edits at a caret; Ctrl+C still copies the character
+unless some of the query is selected); clipmanager (2026-10-04: the search,
+the tag box and the template's two boxes edit at a caret); filesearch
+(2026-10-04: the query edits at a caret; Ctrl+A and Ctrl+C are its own, and
+the two sorts on them take Shift (design-decisions 1233)); dbviewer
+(2026-10-04: the SQL editor and the filter's value edit at a caret -- not
+cell editing, as listed -- and the editor draws the query as it was typed);
+dictionary (2026-10-04: the query edits at a caret; AltGr types into it;
+Ctrl+Home and Ctrl+End take the list to its ends); lockscreen (2026-10-04:
+the password edits at a caret between its dots, a masked field's);
+passwordgen (2026-10-04: the analyser's box edits at a caret, a masked
+field's while hidden); credmanager (2026-10-04: the master password, the new
+vault's two, the entry form's fields, the search and a backup's password
+edit at a caret -- a secret one between its asterisks, a masked field's; a
+key the box answers puts the last refusal away).

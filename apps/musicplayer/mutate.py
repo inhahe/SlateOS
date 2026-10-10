@@ -230,6 +230,128 @@ MUTATIONS += [
     ),
 ]
 
+# A selection a list (2026-10-04): the library and the playlist had one row
+# number between them, so a selection in one showed in the other -- where
+# Delete took out a track nobody had chosen -- and a search moved it to
+# whatever track its row then held. And Enter and a double-click set the
+# player playing over silence, the claim toggle_play had been cured of.
+EACH = "each_list_keeps_its_own_selection_and_a_search_keeps_the_track"
+CHOOSE = "choosing_a_track_says_it_cannot_play_it"
+STAYS = "a_selection_stays_on_its_track"
+ARROWS = "the_arrows_go_through_the_list_on_screen"
+HAS = "a_selection_is_a_row_its_list_has"
+
+MUTATIONS += [
+    (
+        "the library's selection is read as a row of the search's list",
+        "                self.library_rows().iter().position(|&i| i == selected)\n",
+        "                Some(selected)\n",
+        [EACH],
+    ),
+    (
+        "the library's selection is stored as a row, not a track",
+        "                self.library_selection = row.and_then(|r| self.library_rows().get(r).copied());\n",
+        "                self.library_selection = row;\n",
+        [ENTER],
+    ),
+    (
+        "the playlist's selection is the library's",
+        "                self.playlist_selection = row.filter(|&r| r < self.playlist.len());\n",
+        "                self.library_selection = row.filter(|&r| r < self.playlist.len());\n",
+        [EACH],
+    ),
+    (
+        "a row past the playlist's end is kept for the track that comes",
+        "                self.playlist_selection = row.filter(|&r| r < self.playlist.len());\n",
+        "                self.playlist_selection = row;\n",
+        [HAS],
+    ),
+    (
+        "a row the playlist lost is shown",
+        "            Tab::Playlists => self.playlist_selection.filter(|&i| i < self.playlist.len()),\n",
+        "            Tab::Playlists => self.playlist_selection,\n",
+        [HAS],
+    ),
+    (
+        "a sort leaves the selection at its old place",
+        "        self.library_selection = self\n            .library_selection\n            .and_then(|sel| order.iter().position(|&i| i == sel));\n",
+        "",
+        [STAYS],
+    ),
+    (
+        "a removal above the selection leaves it on the row",
+        "            Some(sel) if sel > index => sel.checked_sub(1),\n",
+        "            Some(sel) if sel > index => Some(sel),\n",
+        [STAYS],
+    ),
+    (
+        "the selection's own track removed leaves it past the end",
+        "                (!self.playlist.is_empty()).then(|| sel.min(self.playlist.len().saturating_sub(1)))\n",
+        "                Some(sel)\n",
+        [STAYS],
+    ),
+    (
+        "a track moved up leaves the selection behind",
+        "        self.playlist_selection = swapped(self.playlist_selection, index, above);\n",
+        "",
+        [STAYS],
+    ),
+    (
+        "a track moved down leaves the selection behind",
+        "        self.playlist_selection = swapped(self.playlist_selection, index, below);\n",
+        "",
+        [STAYS],
+    ),
+    (
+        "a cleared playlist keeps its selection",
+        "        self.playlist.clear();\n        self.playlist_selection = None;\n",
+        "        self.playlist.clear();\n",
+        [STAYS],
+    ),
+    (
+        "Up with nothing selected asks whether the playlist is empty",
+        "            if count > 0 {\n                state.select_row(Some(row));\n",
+        "            if !state.playlist.is_empty() {\n                state.select_row(Some(row));\n",
+        [ARROWS],
+    ),
+    (
+        "Up does not move",
+        "                Some(row) if key_event.key == Key::Up => row.saturating_sub(1),\n",
+        "                Some(row) if key_event.key == Key::Up => row,\n",
+        [ARROWS],
+    ),
+    (
+        "Down runs off the end",
+        "                Some(row) => row.saturating_add(1).min(count.saturating_sub(1)),\n",
+        "                Some(row) => row.saturating_add(1),\n",
+        [ARROWS],
+    ),
+    (
+        "choosing a track claims to play it",
+        "        self.position_secs = 0.0;\n        self.status_message = String::from(NO_AUDIO);\n    }\n",
+        "        self.position_secs = 0.0;\n        self.playing = true;\n        self.status_message = String::from(NO_AUDIO);\n    }\n",
+        [CHOOSE],
+    ),
+    (
+        "choosing a track says nothing",
+        "        self.position_secs = 0.0;\n        self.status_message = String::from(NO_AUDIO);\n    }\n",
+        "        self.position_secs = 0.0;\n    }\n",
+        [CHOOSE],
+    ),
+    (
+        "the track double-clicked is not selected",
+        "        self.select_row(Some(row));\n        self.current_track_index = Some(index);\n",
+        "        self.current_track_index = Some(index);\n",
+        [CHOOSE],
+    ),
+    (
+        "Enter with nothing selected chooses the first track",
+        "        Key::Enter => {\n            if let Some(row) = state.selected_row() {\n",
+        "        Key::Enter => {\n            if let Some(row) = state.selected_row().or(Some(0)) {\n",
+        [EACH],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "musicplayer", timeout=600, only=only))

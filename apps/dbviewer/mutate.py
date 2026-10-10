@@ -470,12 +470,11 @@ MUTATIONS = [
         '',
         ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
     ),
-    (
-        "a command's letter is typed",
-        '        if textline::types_into_field(event)',
-        '        if event.types_text()',
-        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
-    ),
+    # No row for "a command's letter is typed": since 2026-10-04 the boxes'
+    # typing is textline::apply_key's, which tells a command from AltGr
+    # itself, in its own crate and with its own tests;
+    # f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing still
+    # holds the boxes to it.
     (
         'a chord works the letter shortcuts',
         '        if !plain {\n            return;\n        }\n        match event.key {\n            Key::N =>',
@@ -600,6 +599,128 @@ MUTATIONS = [
         '            if !matches!(event.kind, MouseEventKind::Leave) {\n'
         '                self.show_help = false;\n',
         ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+]
+
+# The SQL editor and the filter's value edit at a caret, and the editor draws
+# the query as typed (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): both
+# took typing at their end and Backspace from it, and nothing else; the editor
+# drew the lexer's tokens, not the text, with no caret; and a letter that typed
+# nothing was a shortcut under a box with the keyboard.
+SQL_EDITS = "the_sql_editor_edits_at_a_caret"
+AS_TYPED = "the_sql_editor_draws_the_query_as_it_was_typed"
+LEXED = "the_lexer_says_where_each_token_came_from"
+VALUE_EDITS = "the_filter_value_edits_at_a_caret"
+UNANSWERED = "a_key_the_box_does_not_answer_is_still_the_boxs"
+SHOWN = "a_box_edits_the_text_it_shows"
+
+MUTATIONS += [
+    # -- the lexer's bytes and the colours
+    (
+        "whitespace is read to where it began",
+        "            tokens.push((SqlToken::Whitespace, byte_at(start)..byte_at(i)));\n",
+        "            tokens.push((SqlToken::Whitespace, byte_at(i)..byte_at(i)));\n",
+        [LEXED],
+    ),
+    (
+        "an operator's bytes are empty",
+        "        if let Some(token) = token {\n            tokens.push((token, byte_at(start)..byte_at(i)));\n",
+        "        if let Some(token) = token {\n            tokens.push((token, byte_at(start)..byte_at(start)));\n",
+        [LEXED],
+    ),
+    (
+        "a character the lexer passes by takes the next token's colour",
+        "        if bytes.start > at {\n            spans.push(span_to(bytes.start, pal.text));\n        }\n",
+        "",
+        [AS_TYPED],
+    ),
+    (
+        "the query is drawn in one colour",
+        "    let mut spans = sql_spans(sql, pal);\n",
+        "    let mut spans = Vec::new();\n",
+        [AS_TYPED],
+    ),
+    (
+        "keywords are drawn as identifiers",
+        "        SqlToken::Keyword(_) => pal.mauve,\n",
+        "        SqlToken::Keyword(_) => pal.text,\n",
+        [AS_TYPED],
+    ),
+    # -- the selection and the caret, drawn
+    (
+        "the query's selection is not drawn",
+        "        spans = select_spans(&spans, sql.len(), (from, to), pal.text, pal.crust);\n",
+        "",
+        [SQL_EDITS],
+    ),
+    (
+        "the selection keeps the tokens' colours",
+        "            (start.max(from), end.min(to), selected),\n",
+        "            (start.max(from), end.min(to), color),\n",
+        [SQL_EDITS],
+    ),
+    (
+        "the query's caret is drawn at its end",
+        "                    self.drawn_caret(Focus::Editor),\n",
+        "                    (text::TextCursor::from(self.sql_input.len()), None),\n",
+        [SQL_EDITS],
+    ),
+    (
+        "the value's caret is drawn at its end",
+        "            let (cursor, selection_anchor) = self.drawn_caret(Focus::FilterValue);\n",
+        "            let (cursor, selection_anchor) = (text::TextCursor::from(self.filter_value.len()), None);\n",
+        [VALUE_EDITS],
+    ),
+    (
+        "the value is typed over its label",
+        "    let x = row.x + VALUE_TEXT_INSET + label;\n",
+        "    let x = row.x + VALUE_TEXT_INSET;\n",
+        [VALUE_EDITS],
+    ),
+    # -- the keys
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SQL_EDITS],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
+        "        if self.editor.text() != self.box_text(focus) {\n",
+        [SHOWN],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
+        "        if self.editor_for != Some(focus) {\n",
+        [SHOWN],
+    ),
+    (
+        "a key the box does not answer is a shortcut under it",
+        "            if !matches!(event.key, Key::PageUp | Key::PageDown) {\n                return;\n            }\n",
+        "",
+        [UNANSWERED],
+    ),
+    (
+        "the page keys stop at the box",
+        "            if !matches!(event.key, Key::PageUp | Key::PageDown) {\n",
+        "            if true {\n",
+        [UNANSWERED],
+    ),
+    # -- the pointer
+    (
+        "a press puts the caret at the start",
+        "            x - area.x,\n",
+        "            0.0,\n",
+        [SQL_EDITS],
+    ),
+    (
+        "a press in a box does not place the caret",
+        "            self.press_box(focus, (area, size), drawn, event.x);\n",
+        "            let _ = (focus, area, size, drawn);\n",
+        [SQL_EDITS, VALUE_EDITS],
     ),
 ]
 

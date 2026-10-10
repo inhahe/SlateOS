@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Media Converter
+Comment=Convert audio, video and pictures between formats
+Icon=applications-multimedia
+Exec=mediaconvert
+Categories=AudioVideo;
+Keywords=convert;audio;video;

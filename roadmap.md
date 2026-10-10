@@ -3437,7 +3437,12 @@ word; text inside them that says "lane C" is history.
   - adoption, program by program: the slider, the switch, checkbox, radio
     button and drop-down, and the dock (`c-e-the-toolkit-has-a-slider-now.md`,
     `c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`,
-    `c-e-the-toolkit-has-a-dock.md`);
+    `c-e-the-toolkit-has-a-dock.md`). The slider, 2026-10-04: the mixer's
+    faders, the video player's seek bar, volume and Adjustments, the
+    camera's seven settings and the password manager's generator length
+    (its auto-lock already was); `slides` and `photomanager` have no slider
+    -- lane C's counts matched "SlideRight" -- so left are settings,
+    colorpicker and paint;
   - lane B's two, forwarded by lane C (`c-b-your-two-requests-to-c-are-lane-es.md`;
     the requests themselves are on lane B's branch): the terminal answers
     how wide it will draw a run of text -- **done** (e99d960e6, OSC 7730,
@@ -3453,23 +3458,65 @@ word; text inside them that says "lane C" is history.
   file (f661f4c01); the three modules lane C's palette refusal waited on
   (16d1a710a).
 
-- `[ ]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
+- `[x]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
   file into frames, and lane F's Matroska reader stays as the tree's one
   (`requests/f-e-two-matroska-demuxers-which-stays.md`, answered
   2026-10-04):
-  - `[ ]` `apps/videoplayer` plays through `videocodec::Video` -- open,
+  - `[x]` `apps/videoplayer` plays through `videocodec::Video` -- open,
     `next_frame`, `seek`, late pictures dropped through `next_picture`
-    without their conversion -- keeping timing and display its own;
-  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`,
-    and `mkv/demux.rs` is retired with its mutation rows -- once lane F's
-    port of its test cases and its mutation sweep is on `main`.
+    without their conversion -- keeping timing and display its own --
+    2026-10-04 (design-decisions §1234): a film's pictures decode on a
+    thread of their own (`src/pictures.rs`), shown as the player's clock
+    reaches them; every jump of the clock moves the picture; a drag of the
+    seek bar shows key frames; the film ends when its last picture's time
+    is up. WebM, Matroska and MP4 in VP8, VP9 and AV1; H.264 and HEVC
+    files open and say why they show no picture;
+  - `[x]` `mkv/demux.rs` is retired with its tests and its mutation sweep,
+    lane F's port of both being on `main` -- 2026-10-04;
+    `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's pictures
+    now;
+  - `[x]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`
+    -- 2026-10-04: a Matroska file's length, title and tracks are the
+    demuxer's, so a track FFmpeg passes over is not listed, and a file the
+    player cannot open shows as Matroska with nothing known; `mkv/mod.rs`
+    keeps only the first look at the EBML header. The crate's mutation
+    sweep of its three header readers, lost 2026-10-03, is back. A
+    divergence from ffprobe found on the way -- a SeekHead `matroska`
+    refuses a whole file over -- is
+    `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
 
-- `[-]` `[E]` **Text boxes with a caret** --
+- `[ ]` `[E]` **The video player's sound and picture controls** -- what the
+  player still draws and does not do, each saying so where it is drawn
+  since 2026-10-04:
+  - `[ ]` the film's sound: `videocodec::Sound` (lane F,
+    `requests/f-e-a-videos-sound-decodes-now.md`) gives a film's Opus,
+    timed on the pictures' clock; it has nowhere to go until a program can
+    reach the sound device
+    (`requests/e-ad-no-application-can-reach-the-sound-device.md`). Then
+    the sound becomes the clock (design-decisions §1234), and the volume
+    and the Equalizer tab act;
+  - `[x]` the Adjustments tab's sliders move, and the picture is shown
+    through them -- brightness, contrast, saturation, hue, gamma and
+    sharpness, applied on the decoding thread -- 2026-10-04: the toolkit's
+    slider for each (and for the seek bar and the volume), the keys Up and
+    Down to choose one and its own keys to move it, Reset All; the grade
+    (`src/grade.rs`) is one table and one matrix a pixel, and a sharpening
+    pass where asked, and a paused picture is decoded again through it;
+  - `[ ]` a screenshot of the picture on screen, in the Settings tab's
+    format;
+  - `[ ]` Resume Playback: where a film was left is kept, and it opens
+    there.
+
+- `[x]` `[E]` **Text boxes with a caret** --
   `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
-  twenty-nine programs' boxes take typing only at their end, with no caret,
+  twenty-nine programs' boxes took typing only at their end, with no caret,
   selection or clipboard. One program at a time onto `textline::apply_key`
-  over a `TextInput`, as netscan's and sysmonitor's; emojipicker done
-  2026-10-04.
+  over a `TextInput`, as netscan's and sysmonitor's: all twenty-nine done
+  2026-10-04, listed in the known issue -- the masked boxes (passwordgen's
+  analyser, lockscreen's password, credmanager's secrets) through
+  `textline::apply_masked_key`, a caret that moves between the mask's
+  characters. The known issue moves to `known-issues-resolved/` once this
+  is on `main`.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

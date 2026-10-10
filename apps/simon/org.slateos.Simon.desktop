@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Simon
+Comment=Repeat the growing sequence of colours
+Icon=applications-games
+Exec=simon
+Categories=Game;
+Keywords=memory;colours;

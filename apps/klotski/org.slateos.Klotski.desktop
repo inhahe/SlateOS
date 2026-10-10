@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Klotski
+Comment=Slide the big block out of the frame
+Icon=applications-games
+Exec=klotski
+Categories=Game;LogicGame;
+Keywords=sliding;blocks;puzzle;

@@ -20,7 +20,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, Key, KeyEvent};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::field;
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
@@ -28,6 +28,7 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -2035,6 +2036,12 @@ struct KanbanApp {
     board_cursor: usize,
     show_filter_bar: bool,
     input_buffer: String,
+    /// The input dialog's editor -- its caret and selection over
+    /// `input_buffer` -- reloaded when the buffer changed under it: seeded
+    /// with a title to edit, or emptied.
+    input_editor: TextInput,
+    /// What the input dialog's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    input_clipboard: String,
     input_mode: InputMode,
     /// How wide the mark is round the input dialog's box while it has the
     /// keyboard: the user's focus width (`App::appearance_changed`), the
@@ -2117,6 +2124,8 @@ impl KanbanApp {
             board_cursor: 0,
             show_filter_bar: false,
             input_buffer: String::new(),
+            input_editor: TextInput::new(),
+            input_clipboard: String::new(),
             input_mode: InputMode::None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_stamp: 0,
@@ -4384,7 +4393,7 @@ fn input_field_rect(width: f32, height: f32) -> Rect {
 
 /// How the input dialog's box is drawn: with the keyboard -- every key that
 /// types goes into it -- unless the shortcut card is over it. Never lit under
-/// the pointer: it has no press of its own.
+/// the pointer: this window does not follow it.
 fn input_field_state(app: &KanbanApp) -> field::State {
     field::State {
         hovered: false,
@@ -4460,10 +4469,11 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
     });
 
     // Input field: the toolkit's field, with the keyboard unless the
-    // shortcut card is over the dialog, and the typing with its caret --
-    // scrolled so the end being typed stays in view. It was a card with no
-    // caret, and a long title was cut off with an ellipsis at the very
-    // letters being typed.
+    // shortcut card is over the dialog, and the text with its caret and
+    // selection where they are -- scrolled so the caret stays in view. It was
+    // a card with no caret, and a long title was cut off with an ellipsis at
+    // the very letters being typed; then a caret fixed at the end, the only
+    // place the keys could type.
     let input = input_field_rect(width, height);
     let state = input_field_state(app);
     field::draw(tree, &app.palette, input, state, app.focus_ring_width);
@@ -4472,13 +4482,18 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         tree,
         &textedit::SingleLine {
             text: &app.input_buffer,
-            // Typed and erased at its end, so the end is where the caret is.
-            cursor: text::TextCursor::from(app.input_buffer.len()),
-            selection_anchor: None,
+            cursor: input_cursor(app),
+            // The editor's selection only while it is the box's: a buffer
+            // changed under it has not been reloaded into it yet.
+            selection_anchor: if app.input_editor.text() == app.input_buffer {
+                app.input_editor.selection_anchor()
+            } else {
+                None
+            },
             focused: state.focused,
-            x: input.x + 8.0,
+            x: input.x + INPUT_TEXT_INSET,
             y: input.y + (input.h - line) / 2.0,
-            width: (input.w - 16.0).max(0.0),
+            width: (input.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
             line_height: line,
             font_size: 13.0,
             weight: FontWeightHint::Regular,
@@ -5250,17 +5265,87 @@ impl KanbanApp {
     }
 }
 
-/// Handle key events during input mode.
-fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
-    // What a key typed goes in -- AltGr's among it, and not a command's
-    // letter, which a chord carries: Ctrl+S typed an `s` into a card's title.
-    // The line's own keys are plain: Alt+Enter added the card.
-    if textline::types_into_field(key) {
-        app.input_buffer.extend(key.typed());
+/// The most the input dialog's box holds, in characters: a title, a name,
+/// a comment, a description -- and a paste of a page is none of them.
+const INPUT_CAPACITY: usize = 4096;
+/// The size the input dialog's text is drawn at, which the caret keys and a
+/// press measure against as well.
+const INPUT_TEXT_SIZE: f32 = 13.0;
+/// How far the input dialog's text sits inside each side of its box.
+const INPUT_TEXT_INSET: f32 = 8.0;
+
+/// A key for the input dialog's box: the caret keys, Backspace and Delete at
+/// the caret, Ctrl+A, C, X and V, and typing -- what `AltGr` types among it,
+/// and no command's letter (Ctrl+S typed an `s` into a card's title).
+/// Whether the text changed, or its caret or selection moved.
+///
+/// The box took typing at its end and Backspace from it, and nothing else:
+/// a typo at the start of a card's title was fixed by deleting the title.
+fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
+    if app.input_editor.text() != app.input_buffer {
+        app.input_editor.set_text(&app.input_buffer);
+    }
+    let before = (
+        app.input_editor.cursor(),
+        app.input_editor.selection_anchor(),
+    );
+    let edit = textline::apply_key(
+        &mut app.input_editor,
+        key,
+        INPUT_CAPACITY,
+        &app.input_clipboard,
+        INPUT_TEXT_SIZE,
+    );
+    if let Some(copied) = edit.copied {
+        app.input_clipboard = copied;
+    }
+    if app.input_editor.text() != app.input_buffer {
+        app.input_buffer = app.input_editor.text().to_owned();
         return true;
     }
+    before
+        != (
+            app.input_editor.cursor(),
+            app.input_editor.selection_anchor(),
+        )
+}
+
+/// Where the input dialog's caret is: the editor's, or the end of the text
+/// where the text changed under the editor -- a title to edit is edited from
+/// its end. One answer for the drawing and for a press.
+fn input_cursor(app: &KanbanApp) -> text::TextCursor {
+    if app.input_editor.text() == app.input_buffer {
+        app.input_editor.cursor()
+    } else {
+        text::TextCursor::from(app.input_buffer.len())
+    }
+}
+
+/// A press in the input dialog's box at `x`: the caret under the pointer,
+/// measured against the box as it was drawn.
+fn press_input(app: &mut KanbanApp, x: f32) {
+    let rect = input_field_rect(app.win_width, app.win_height);
+    let drawn = input_cursor(app);
+    if app.input_editor.text() != app.input_buffer {
+        app.input_editor.set_text(&app.input_buffer);
+    }
+    let cursor = textedit::cursor_at_click(
+        &app.input_buffer,
+        drawn,
+        (rect.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
+        INPUT_TEXT_SIZE,
+        FontWeightHint::Regular,
+        x - rect.x - INPUT_TEXT_INSET,
+    );
+    app.input_editor.set_selection_anchor(None);
+    app.input_editor.set_cursor(cursor);
+}
+
+/// Handle key events during input mode: Escape and Enter, plain -- Alt+Enter
+/// added the card -- and every other key the box's (`input_key`).
+fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
     if !textline::is_plain(key.modifiers) {
-        return false;
+        return input_key(app, key);
     }
     match key.key {
         Key::Escape => {
@@ -5346,11 +5431,7 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             }
             true
         }
-        Key::Backspace => {
-            app.input_buffer.pop();
-            true
-        }
-        _ => false,
+        _ => input_key(app, key),
     }
 }
 
@@ -5484,6 +5565,17 @@ impl KanbanApp {
                 } else {
                     Response::Idle
                 }
+            }
+            // The input dialog's box, while the dialog is up: the caret under
+            // the pointer. Nothing else here answers a press.
+            Event::Mouse(m)
+                if matches!(m.kind, MouseEventKind::Press(MouseButton::Left))
+                    && self.input_mode != InputMode::None
+                    && !self.show_help
+                    && input_field_rect(self.win_width, self.win_height).contains(m.x, m.y) =>
+            {
+                press_input(self, m.x);
+                Response::Redraw
             }
             _ => Response::Idle,
         }
@@ -9599,5 +9691,184 @@ mod tests {
             caret > rect.x && caret < rect.right(),
             "the caret of a long title is at {caret}, outside the box {rect:?}"
         );
+    }
+
+    // -- The input dialog's box edits at a caret --------------------------------
+
+    fn type_into(app: &mut KanbanApp, text: &str) {
+        handle_key_event(
+            app,
+            &KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: text.to_owned(),
+            },
+        );
+    }
+
+    fn press_box_at(app: &mut KanbanApp, x: f32) -> Response {
+        let rect = input_field_rect(app.win_width, app.win_height);
+        app.route_event(&Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// The x of every caret drawn in the input dialog's box.
+    fn box_carets(app: &KanbanApp) -> Vec<f32> {
+        let rect = input_field_rect(app.win_width, app.win_height);
+        render_app(app, app.win_width, app.win_height)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The input dialog's box edits at a caret**: the arrows, Home and End
+    /// move it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X
+    /// and V select, copy, cut and paste, a press puts it where it lands --
+    /// and it and the selection are drawn where they are. The box took
+    /// typing at its end and Backspace from it, and nothing else: a typo at
+    /// the start of a card's title was fixed by deleting the title.
+    #[test]
+    fn the_input_box_edits_at_a_caret() {
+        let mut app = KanbanApp::new();
+        handle_key_event(&mut app, &make_key(Key::N, Modifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::NewCardTitle);
+        type_into(&mut app, "Fx bug");
+        for _ in 0..5 {
+            handle_key_event(&mut app, &make_key(Key::Left, Modifiers::NONE));
+        }
+        type_into(&mut app, "i");
+        assert_eq!(app.input_buffer, "Fix bug", "the caret did not move");
+        let rect = input_field_rect(app.win_width, app.win_height);
+        let at = rect.x
+            + INPUT_TEXT_INSET
+            + text::measure("Fi", INPUT_TEXT_SIZE, FontWeightHint::Regular);
+        let carets = box_carets(&app);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Fi` it follows at {at}"
+        );
+
+        handle_key_event(&mut app, &make_key(Key::Home, Modifiers::NONE));
+        handle_key_event(&mut app, &make_key(Key::Delete, Modifiers::NONE));
+        assert_eq!(app.input_buffer, "ix bug", "Delete at the caret");
+        handle_key_event(&mut app, &make_key(Key::End, Modifiers::NONE));
+        handle_key_event(&mut app, &make_key(Key::Home, Modifiers::shift()));
+        let line = text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + INPUT_TEXT_INSET,
+            text::measure("ix bug", INPUT_TEXT_SIZE, FontWeightHint::Regular),
+        );
+        assert!(
+            render_app(&app, app.win_width, app.win_height)
+                .commands
+                .iter()
+                .any(|c| matches!(c,
+                RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        handle_key_event(&mut app, &make_key(Key::C, Modifiers::ctrl()));
+        type_into(&mut app, "F");
+        assert_eq!(app.input_buffer, "F", "Shift+Home did not select");
+        handle_key_event(&mut app, &make_key(Key::V, Modifiers::ctrl()));
+        assert_eq!(app.input_buffer, "Fix bug", "Ctrl+C or Ctrl+V");
+        handle_key_event(&mut app, &make_key(Key::A, Modifiers::ctrl()));
+        handle_key_event(&mut app, &make_key(Key::X, Modifiers::ctrl()));
+        assert_eq!(app.input_buffer, "", "Ctrl+A and Ctrl+X");
+        handle_key_event(&mut app, &make_key(Key::V, Modifiers::ctrl()));
+        assert_eq!(app.input_buffer, "Fix bug", "Ctrl+X took nothing");
+
+        // A press at the start of the text puts the caret there, and one past
+        // its end at its end.
+        assert_eq!(
+            press_box_at(&mut app, rect.x + INPUT_TEXT_INSET + 0.5),
+            Response::Redraw
+        );
+        type_into(&mut app, "<");
+        assert_eq!(
+            app.input_buffer, "<Fix bug",
+            "the press did not put the caret there"
+        );
+        press_box_at(&mut app, rect.right() - 2.0);
+        type_into(&mut app, ">");
+        assert_eq!(app.input_buffer, "<Fix bug>");
+        handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
+        assert!(
+            app.active_board()
+                .cards
+                .values()
+                .any(|c| c.title == "<Fix bug>"),
+            "the edited title is not the card's"
+        );
+    }
+
+    /// **A title to edit is edited from its end, and a key that changes
+    /// nothing in the box is not a redraw** -- while one that moves only the
+    /// caret is. And a press with no dialog up, or with the list of keys
+    /// over it, is nobody's: this window answered no press at all.
+    #[test]
+    fn a_title_to_edit_is_edited_from_its_end() {
+        let mut app = KanbanApp::new();
+        let id = app.add_card("Write tests", 0).expect("a card");
+        app.selected_card = Some(id);
+        // In the middle of where the box would be, which x = 400 was not in
+        // a window 1280 wide.
+        let rect = input_field_rect(app.win_width, app.win_height);
+        assert_eq!(
+            press_box_at(&mut app, rect.x + rect.w / 2.0),
+            Response::Idle,
+            "no dialog is up"
+        );
+        app.view = View::CardDetail;
+        handle_key_event(&mut app, &make_key(Key::E, Modifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::EditCardTitle);
+        assert!(
+            !handle_key_event(&mut app, &make_key(Key::Right, Modifiers::NONE)),
+            "an arrow at the end is a redraw"
+        );
+        type_into(&mut app, "!");
+        assert_eq!(app.input_buffer, "Write tests!");
+        assert!(
+            handle_key_event(&mut app, &make_key(Key::Left, Modifiers::NONE)),
+            "a caret moved is not drawn"
+        );
+        app.show_help = true;
+        assert_eq!(
+            press_box_at(&mut app, rect.x + INPUT_TEXT_INSET + 0.5),
+            Response::Idle,
+            "a press reached the box under the list of keys"
+        );
+    }
+
+    /// **The box edits the text it shows**, however the text came to be in
+    /// it: its editor is loaded from the box whenever a press or a key finds
+    /// the two apart.
+    #[test]
+    fn the_input_box_edits_the_text_it_shows() {
+        let mut app = KanbanApp::new();
+        handle_key_event(&mut app, &make_key(Key::N, Modifiers::NONE));
+        app.input_buffer = String::from("Plan");
+        let rect = input_field_rect(app.win_width, app.win_height);
+        press_box_at(&mut app, rect.x + INPUT_TEXT_INSET + 0.5);
+        type_into(&mut app, "<");
+        assert_eq!(app.input_buffer, "<Plan", "the press missed the shown text");
+        app.input_buffer = String::from("Ship");
+        type_into(&mut app, "?");
+        assert_eq!(app.input_buffer, "Ship?", "the key edited another text");
     }
 }

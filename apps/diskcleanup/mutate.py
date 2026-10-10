@@ -116,6 +116,20 @@ MUTATIONS = [
         "                self.show_help = false;\n",
         ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
     ),
+    # A bin on every drive (design-decisions §1238): a cleanup that looked
+    # only at home would leave what was deleted from a stick on the stick.
+    (
+        "the other drives' bins are not looked in",
+        "        self.scan_drive_bins();\n",
+        "",
+        ["a_drives_own_bin_is_scanned_and_cleaned_with_the_rest"],
+    ),
+    (
+        "a drive's bin is not said to be on its drive",
+        '            Some(drive) => format!("Deleted files awaiting permanent removal, on {drive}"),',
+        '            Some(_) => String::from("Deleted files awaiting permanent removal"),',
+        ["a_drives_own_bin_is_scanned_and_cleaned_with_the_rest"],
+    ),
 ]
 
 if __name__ == "__main__":

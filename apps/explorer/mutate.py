@@ -1004,6 +1004,38 @@ MAIN = [
         "        let command = false;\n",
         ["a_command_is_not_typed_into_a_name_box"],
     ),
+    # -- a bin on every drive (design-decisions §1238) --
+    (
+        "the bins are not held to their limits when opened",
+        "        let pruned = self\n            .recycle\n"
+        "            .prune_all(&recyclebin::Limits::user_default(), SystemTime::now());",
+        "        let pruned = Vec::new();",
+        ["opening_the_bin_holds_it_to_its_limits_and_says_so"],
+    ),
+    (
+        "what the limits took is not said",
+        "        self.status_message = pruned_message(&pruned).unwrap_or_default();",
+        "        self.status_message = pruned_message(&[]).unwrap_or_default();\n        let _ = pruned;",
+        ["opening_the_bin_holds_it_to_its_limits_and_says_so"],
+    ),
+    (
+        "a recycle's undo names the home bin",
+        "                            bin: went.bin.root().to_path_buf(),",
+        "                            bin: self.recycle.home().bin.root().to_path_buf(),",
+        ["a_file_on_another_drive_is_binned_and_brought_back_on_that_drive"],
+    ),
+    (
+        "Restore looks in the home bin",
+        "            match item.bin.restore(&entry.id) {",
+        "            match self.recycle.home().bin.restore(&entry.id) {",
+        ["a_file_on_another_drive_is_binned_and_brought_back_on_that_drive"],
+    ),
+    (
+        "Delete permanently looks in the home bin",
+        "            match id.bin().delete(&id.id) {",
+        "            match self.recycle.home().bin.delete(&id.id) {",
+        ["a_file_on_another_drive_is_binned_and_brought_back_on_that_drive"],
+    ),
 ]
 
 COLUMNS = [
@@ -1328,13 +1360,20 @@ FILEOPS = [
         "    if false {",
         [TOO_DEEP],
     ),
+    (
+        "a recycle is undone from a bin the record does not name",
+        "                        RecycleBin::new(bin.clone()).restore(id)?;",
+        '                        RecycleBin::new(PathBuf::from("nowhere")).restore(id)?;\n'
+        "                        let _ = bin;",
+        ["undoing_a_recycle_restores_from_the_bin_it_names"],
+    ),
 ]
 
 BINVIEW = [
     (
         "choosing a row keeps the old choice",
-        "        self.chosen.clear();\n        self.chosen.insert(entry.id.clone());",
-        "        self.chosen.insert(entry.id.clone());",
+        "        self.chosen.clear();\n        self.chosen.insert(key);",
+        "        self.chosen.insert(key);",
         [BIN_CHOOSE],
     ),
     (
@@ -1351,7 +1390,8 @@ BINVIEW = [
     ),
     (
         "the choice keeps entries that are gone",
-        "        self.chosen.retain(|id| present.contains(id.as_str()));\n",
+        "        self.chosen\n"
+        "            .retain(|key| present.contains(&(key.bin.as_path(), key.id.as_str())));\n",
         "        let _ = &present;\n",
         [BIN_RESTORE],
     ),
@@ -1375,9 +1415,41 @@ BINVIEW = [
     ),
     (
         "a damaged entry may be put back",
-        "            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => {",
+        "            BinButton::Restore if !self.chosen().iter().any(|e| e.entry.is_readable()) => {",
         "            BinButton::Restore if false => {",
         [BIN_BUTTONS],
+    ),
+    # -- a bin on every drive (design-decisions §1238) --
+    (
+        "an entry is known by its id alone",
+        "        self.entry.id == key.id && self.bin.root() == key.bin.as_path()",
+        "        self.entry.id == key.id",
+        ["entries_of_two_drives_with_one_id_are_two_entries"],
+    ),
+    (
+        "a key leaves out the bin",
+        "            bin: self.bin.root().to_path_buf(),\n            id: self.entry.id.clone(),",
+        "            bin: PathBuf::new(),\n            id: self.entry.id.clone(),",
+        ["entries_of_two_drives_with_one_id_are_two_entries"],
+    ),
+    (
+        "an unreadable bin hides the others",
+        '                Err(e) => unread.push(format!("{}: {e}", drive.label())),',
+        '                Err(e) => {\n                    entries.clear();\n'
+        '                    unread.push(format!("{}: {e}", drive.label()));\n                }',
+        ["a_bin_that_cannot_be_read_hides_none_of_the_others"],
+    ),
+    (
+        "an unreadable bin is not said beside the others' rows",
+        '                summary.push_str(&format!(" -- {error}"));',
+        "                let _ = error;",
+        ["a_bin_that_cannot_be_read_hides_none_of_the_others"],
+    ),
+    (
+        "the drives are not counted",
+        "        } else if drives.len() > 1 {",
+        "        } else if drives.len() > 99 {",
+        ["entries_of_two_drives_with_one_id_are_two_entries"],
     ),
     (
         "the folder column shows the whole path",

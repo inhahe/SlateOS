@@ -2,7 +2,7 @@
 name = "recyclebin"
 version = "0.1.0"
 edition = "2024"
-description = "The recycle bin: files moved aside, restorable, emptied or aged out -- shared by the file manager and the image viewer"
+description = "The recycle bins, one a drive: files moved aside, restorable, emptied or aged out by each drive's own limits -- shared by the file manager, the image viewer and Disk Cleanup"
 
 [dependencies]
 # Names are shown through `pathtext`: a byte that is not text, or a control
@@ -11,9 +11,17 @@ pathtext = { path = "../pathtext" }
 # A path written into meta.txt without destroying it: a name may hold any
 # byte but `/` and NUL.
 pathcodec = { path = "../../gui/pathcodec" }
+# The drive's limits file and the mount table are read with a cap, and the
+# limits file is written whole or not at all.
+safeio = { path = "../safeio" }
+# A drive's limits, in YAML that keeps a user's comments.
+yamldoc = { path = "../../yamldoc" }
+# The user's default limits, in their settings.
+settingsfile = { path = "../../gui/settingsfile" }
 
 [dev-dependencies]
 scratchdir = { path = "../../userspace/scratchdir" }
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

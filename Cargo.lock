@@ -3344,7 +3344,10 @@ version = "0.1.0"
 dependencies = [
  "pathcodec",
  "pathtext",
+ "safeio",
  "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

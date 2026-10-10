@@ -7844,10 +7844,9 @@ fn create_vault(state: &mut AppState) {
     }
     let password = std::mem::take(&mut form.password);
     form.confirm.clear();
-    match Vault::create("My Vault", &password, state.new_vault_kdf, salt) {
+    match Vault::create("My Vault", &password, state.new_vault_kdf, salt, state.now) {
         Ok(vault) => {
             state.vault = vault;
-            state.vault.touch(state.now);
             state.gate = Gate::Unlock;
             state.saved = None;
             state.keep_if_changed();

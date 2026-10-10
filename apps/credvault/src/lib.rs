@@ -502,8 +502,9 @@ impl Drop for Vault {
 }
 
 impl Vault {
-    /// A new vault, unlocked and empty, whose key `master_password` makes
-    /// under `kdf` and `salt`.
+    /// A new vault named `name`, unlocked and empty, whose key
+    /// `master_password` makes under `kdf` and `salt`, made at `now` (Unix
+    /// seconds) -- which its auto-lock counts from, as from an unlocking.
     ///
     /// The salt is the caller's to draw, from the system's secure random
     /// source: this runs under test too, where that source is not reachable.
@@ -516,12 +517,16 @@ impl Vault {
         master_password: &str,
         kdf: seal::KdfParams,
         salt: [u8; seal::SALT_LEN],
+        now: u64,
     ) -> Result<Self, vaultfile::OpenError> {
-        let key = vaultfile::key_for(master_password, kdf, &salt)?;
+        let mut key = vaultfile::key_for(master_password, kdf, &salt)?;
         let mut vault = Self::locked(kdf, salt, Vec::new());
         vault.name = name.to_string();
         vault.key = Some(key);
+        // `seal::Key` is an array: storing it copied it, and the copy goes too.
+        wipe(&mut key);
         vault.state = VaultState::Unlocked;
+        vault.last_access = now;
         Ok(vault)
     }
 
@@ -568,7 +573,7 @@ impl Vault {
         reason = "a test fixture: the cheapest key derivation, sealed once"
     )]
     pub fn for_test(name: &str, master_password: &str) -> Self {
-        let mut vault = Self::create(name, master_password, TEST_KDF, [0x5A; seal::SALT_LEN])
+        let mut vault = Self::create(name, master_password, TEST_KDF, [0x5A; seal::SALT_LEN], 0)
             .expect("the test vault's key");
         vault
             .reseal([0x11; seal::NONCE_LEN])
@@ -595,7 +600,11 @@ impl Vault {
     /// been changed), or what it holds is not a vault this program reads.
     /// Nothing about the vault changes then.
     pub fn open(&mut self, password: &str, now: u64) -> Result<(), vaultfile::OpenError> {
-        let mut key = vaultfile::key_for(password, self.kdf, &self.salt)?;
+        // The header first: bytes that are no vault are told so before a
+        // second of key derivation is spent on them -- and the key is made as
+        // the bytes being opened say, not as anything else does.
+        let header = vaultfile::Header::parse(&self.sealed)?;
+        let mut key = vaultfile::key_for(password, header.kdf, &header.salt)?;
         let opened = vaultfile::open_file(&self.sealed, &key).and_then(|text| {
             let contents = vaultfile::parse_contents(&text).map_err(vaultfile::OpenError::Contents);
             // The whole vault in the clear, overwritten once it is read.
@@ -688,14 +697,11 @@ impl Vault {
         Some(due.saturating_sub(now))
     }
 
-    /// Check if auto-lock timeout has been exceeded.
+    /// Whether the auto-lock is due at `now` (Unix seconds): the vault is
+    /// open and has sat unused for its timeout -- [`auto_lock_in`](Self::auto_lock_in)
+    /// at nought, so the two never disagree.
     pub fn should_auto_lock(&self, now: u64) -> bool {
-        if self.state == VaultState::Locked {
-            return false;
-        }
-        let elapsed_seconds = now.saturating_sub(self.last_access);
-        let timeout_seconds = u64::from(self.auto_lock_minutes) * 60;
-        elapsed_seconds >= timeout_seconds
+        self.auto_lock_in(now) == Some(0)
     }
 
     pub fn touch(&mut self, now: u64) {
@@ -1273,8 +1279,8 @@ mod tests {
     /// precomputed table opens all of them.
     #[test]
     fn two_vaults_with_one_password_do_not_share_a_key() {
-        let a = Vault::create("A", "correct horse", TEST_KDF, [1; seal::SALT_LEN]).unwrap();
-        let b = Vault::create("B", "correct horse", TEST_KDF, [2; seal::SALT_LEN]).unwrap();
+        let a = Vault::create("A", "correct horse", TEST_KDF, [1; seal::SALT_LEN], 0).unwrap();
+        let b = Vault::create("B", "correct horse", TEST_KDF, [2; seal::SALT_LEN], 0).unwrap();
         assert_ne!(a.key, b.key, "the salt did not reach the key");
     }
 
@@ -1417,6 +1423,40 @@ mod tests {
             !printed.contains(&format!("{key:?}")),
             "the key was printed"
         );
+    }
+
+    /// **A vault just made counts its auto-lock from when it was made**, as
+    /// one just opened does -- not from the start of time, when it would be
+    /// due to lock at once.
+    #[test]
+    fn a_new_vault_counts_its_auto_lock_from_when_it_was_made() {
+        let v = Vault::create("V", "correct horse", TEST_KDF, [3; seal::SALT_LEN], 1_000).unwrap();
+        assert!(
+            !v.should_auto_lock(1_000),
+            "a vault just made is due to lock"
+        );
+        assert_eq!(
+            v.auto_lock_in(1_000),
+            Some(u64::from(DEFAULT_AUTO_LOCK_MINUTES) * 60)
+        );
+    }
+
+    /// **Bytes that are no vault are refused before any key is made**: the
+    /// header is read first, so they answer `NotAVault` whatever they are
+    /// held with -- here parameters no key could be made under, which would
+    /// fail the key's making first.
+    #[test]
+    fn bytes_that_are_no_vault_are_refused_before_any_key_is_made() {
+        let kdf = seal::KdfParams {
+            memory_kib: 0,
+            iterations: 0,
+            lanes: 0,
+        };
+        let mut v = Vault::locked(kdf, [0; seal::SALT_LEN], b"not a vault".to_vec());
+        assert!(matches!(
+            v.open("pw", 0),
+            Err(vaultfile::OpenError::NotAVault)
+        ));
     }
 
     /// `wipe` overwrites every byte it is given.

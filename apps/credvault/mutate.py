@@ -32,6 +32,8 @@ AUTO_LOCK = "test_vault_auto_lock"
 FOLDERS = "a_folder_edit_leaves_a_vault_that_opens"
 NO_SECRET = "a_debug_print_shows_no_secret"
 WIPE = "wipe_overwrites_every_byte"
+MADE_AT = "a_new_vault_counts_its_auto_lock_from_when_it_was_made"
+HEADER_FIRST = "bytes_that_are_no_vault_are_refused_before_any_key_is_made"
 
 MUTATIONS = [
     (
@@ -126,6 +128,20 @@ MODEL_MUTATIONS = [
         "        unsafe { core::ptr::write_volatile(byte, 0) };\n",
         "        let _ = byte;\n",
         [WIPE],
+    ),
+    (
+        "a new vault's auto-lock counts from nought",
+        "        vault.last_access = now;\n        Ok(vault)\n",
+        "        Ok(vault)\n",
+        [MADE_AT],
+    ),
+    (
+        "the key is made before the header is read",
+        "        let header = vaultfile::Header::parse(&self.sealed)?;\n"
+        "        let mut key = vaultfile::key_for(password, header.kdf, &header.salt)?;\n",
+        "        let mut key = vaultfile::key_for(password, self.kdf, &self.salt)?;\n"
+        "        let _header = vaultfile::Header::parse(&self.sealed)?;\n",
+        [HEADER_FIRST],
     ),
 ]
 

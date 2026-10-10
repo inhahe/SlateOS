@@ -1,0 +1,23 @@
+[package]
+name = "credvault"
+version = "0.1.0"
+edition = "2024"
+description = "The SlateOS password vault -- its entries and its sealed file -- shared by the password manager and the credential service"
+publish = false
+
+[features]
+# `Vault::for_test`, `Vault::unlock`, `TEST_KDF` and `TEST_MASTER_PASSWORD`:
+# a vault the cheapest key derivation opens, for the tests of the programs
+# built on this one.
+testing = []
+
+[dependencies]
+# The cipher and the key derivation: XChaCha20-Poly1305 and Argon2id, vendored
+# from RustCrypto (design-decisions.md §539, §1218).
+seal = { path = "../../rustcrypto/seal" }
+# The contents are tab-separated records, escaped the way every program's
+# record files are.
+textfmt = { path = "../../textfmt" }
+
+[lints]
+workspace = true

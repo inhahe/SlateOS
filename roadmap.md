@@ -3432,6 +3432,20 @@ word; text inside them that says "lane C" is history.
     2026-09-29** (3a7073848): a morning and an evening picture, each with
     its time, and the picture and the rotation saying when a schedule hides
     them;
+  - ~~window frames, the taskbar panel and the cursor theme chosen in
+    Settings (`c-e-choose-the-window-frames-in-settings.md`,
+    `c-e-choose-the-taskbar-panel-in-settings.md`,
+    `c-e-choose-the-cursor-theme-in-settings.md`)~~ **done 2026-10-10**:
+    three rows on the Themes page, each list holding every installed theme
+    and choosing that axis alone;
+  - ~~how long notifications are kept
+    (`c-e-a-setting-for-how-long-notifications-are-kept.md`)~~ **done
+    2026-10-10**: Keep for, on the Notifications page;
+  - ~~the password vault shared with the credential service
+    (`c-e-share-the-password-vault-with-the-credential-service.md`)~~
+    **done 2026-10-10**: `apps/credvault`, the vault's model and its file
+    format moved out of the password manager into a library both build on,
+    so the service reads the vault with the very code that writes it;
   - the editor and the markdown editor onto the toolkit's code editor
     (`c-e-the-toolkit-has-a-code-editor.md`);
   - adoption, program by program: the slider, the switch, checkbox, radio

@@ -782,6 +782,7 @@ name = "credmanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "credvault",
  "guitk",
  "oswindow",
  "pathtext",
@@ -792,6 +793,14 @@ dependencies = [
  "sha2",
  "textfmt",
  "textline",
+]
+
+[[package]]
+name = "credvault"
+version = "0.1.0"
+dependencies = [
+ "seal",
+ "textfmt",
 ]
 
 [[package]]

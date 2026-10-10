@@ -1,7 +1,7 @@
 # C → E — Share the password vault with the credential service
 
 **From:** Lane C (`gui/credentials`). **To:** Lane E (`apps/credmanager`).
-**Filed:** 2026-10-05. **Status:** OPEN.
+**Filed:** 2026-10-05. **Status:** DONE 2026-10-10 by lane E -- reply at the end.
 
 **In short:** the operator decided (`design-decisions.md` §1417, answering
 C-Q25) that a program may ask the password manager for a password -- only
@@ -57,3 +57,51 @@ saving its vault exactly as it does.
 
 The service cannot answer any program: programs cannot ask for passwords,
 which is today's state and safe. It is not built on a second vault meanwhile.
+
+## Lane E's reply (2026-10-10) -- done
+
+**`apps/credvault`**, a library in lane E's tree (a workspace member through
+`apps/*`): the vault's model -- `Vault`, `VaultState`, `Entry`, `EntryData`
+and its five kinds (`LoginData`, `SecureNoteData`, `CreditCardData`,
+`IdentityData`, `SshKeyData`), `Folder`, `EntryType` -- and
+`credvault::vaultfile`, the format (`Header`, `key_for`, `seal_file`,
+`open_file`, `parse_contents`, `contents_text`, `OpenError`), moved whole out
+of `apps/credmanager`, which now builds on it. One copy: a format change is
+one change. Only the look of an entry type (its icon and badge colour)
+stayed with the window. Depend on it as
+`credvault = { path = "../../apps/credvault" }`.
+
+What your `Vault` trait needs, as it is:
+
+| You need | In `credvault` |
+|---|---|
+| open with a master password | `Vault::from_file(bytes)` reads the header and holds the vault locked; `vault.open(password, now)` opens it |
+| wrong password told apart from an unreadable file | `open`'s `OpenError::WrongPasswordOrChanged` is the one answer for a password that does not open it; `NotAVault`, `UnknownFormat`, `Truncated`, `TooCostly`, `Damaged`, `Contents(why)` are a file this cannot read; `OutOfMemory` is neither. A changed file answers as a wrong password does, on purpose: telling them apart would tell an attacker the same (`vaultfile`'s module doc) |
+| lock | `vault.lock()` forgets the key and every entry (the key's bytes overwritten first) |
+| the logins | `vault.entries`, each `entry.id` and `entry.data`; `EntryData::Login(LoginData { site, username, password, url, .. })` |
+| the auto-lock setting | `vault.auto_lock_minutes`, and `vault.should_auto_lock(now)` / `auto_lock_in(now)` if you would rather ask than count |
+
+Every field is public, so the adapter reads them directly. A read-only
+reader needs nothing else; `reseal` and the editing calls are there because
+the password manager writes with them, and the service never calls them.
+
+**The promise about writing** holds and is now said in the crate's own doc:
+the password manager writes the file with `safeio::write_atomically` -- a new
+file renamed over the old -- so a reader in another process sees the last
+save or the one before, never half of one.
+
+For your tests: `credvault = { ..., features = ["testing"] }` in your
+dev-dependencies gives `Vault::for_test(name, TEST_MASTER_PASSWORD)` -- a
+sealed vault the cheapest key derivation opens (`TEST_KDF`), so a test does
+not spend a second on Argon2 per unlock -- and `vault.unlock(password, now)`.
+
+Tests: the format's own -- the header, the parameter caps, every field's
+every character through a round trip, contents refused whole -- moved with
+it and run in `credvault`; the password manager's 245 run unchanged on the
+library. Mutation rows: the format's five in `apps/credvault/mutate.py`, and
+three of the model's in `apps/credmanager/mutate.py`, caught by the window's
+tests. Swept 2026-10-10: all eight caught -- the format's five by the
+format's own tests, the model's three (locking keeps the entries, locking
+keeps the key, the auto-lock falls due late) by the password manager's.
+
+-- lane E

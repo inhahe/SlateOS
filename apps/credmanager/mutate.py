@@ -28,8 +28,10 @@ Two tables:
   a number nothing set and a knob drawn for nothing: the toolkit's slider,
   showing and setting the vault's own time, keeping a drag only when let go,
   and dead under a dialog, another panel or the lock screen.
-* **vaultfile.rs** -- the file itself: a header that asks for too much work is
-  refused before any is done, and contents are read whole or not at all.
+* **../../credvault/src/lib.rs** -- the vault's model, which moved to its own
+  crate on 2026-10-10: locking forgets the key and every entry, and the
+  auto-lock falls due at the last use -- caught by this program's tests.
+  The file's format, with its own tests, is `apps/credvault/mutate.py`.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -55,8 +57,6 @@ JUNK = "a_file_that_is_not_a_vault_is_left_alone"
 FORGETS = "locking_forgets_the_key_and_every_entry"
 ENTROPY = "without_secure_randomness_nothing_is_sealed_and_the_window_says_so"
 CLOSE = "a_close_that_could_not_save_says_so_once"
-REFUSED_WHOLE = "contents_that_are_not_understood_are_refused_whole"
-COSTLY = "a_file_asking_too_much_work_is_refused_before_any_is_done"
 EXPORT_CHARS = "an_export_keeps_every_character_of_every_password"
 EXPORT_WARNING = "export_comes_only_after_the_warning_says_what_it_is"
 RESTORE = "a_restore_needs_the_backups_password_and_asks_before_replacing"
@@ -95,18 +95,6 @@ MAIN = [
         "    let Some((label, value)) = fields.get(index) else {\n        return false;\n    };",
         "    let Some((label, value)) = fields.get(index).or(fields.first()) else {\n        return false;\n    };",
         [PAST_END],
-    ),
-    (
-        "locking keeps the entries",
-        "        self.key = None;\n        self.entries.clear();\n",
-        "        self.key = None;\n",
-        [FORGETS],
-    ),
-    (
-        "locking keeps the key",
-        "        self.key = None;\n        self.entries.clear();\n",
-        "        self.entries.clear();\n",
-        [FORGETS],
     ),
     (
         "a change is not saved",
@@ -305,12 +293,6 @@ MAIN = [
         '            .auto_lock_in(self.now)\n'
         '            .map(std::time::Duration::from_secs)\n',
         '        None\n',
-        [LOCKS_ITSELF],
-    ),
-    (
-        "the auto-lock falls due at the last use, not a timeout after it",
-        '        let due = self.last_access.saturating_add(timeout_seconds);\n',
-        '        let due = self.last_access;\n',
         [LOCKS_ITSELF],
     ),
     (
@@ -887,42 +869,35 @@ MAIN += [
     ),
 ]
 
-VAULTFILE = [
+
+# The vault's model moved to apps/credvault (2026-10-10,
+# requests/c-e-share-the-password-vault-with-the-credential-service.md); these
+# rows break it there and are caught by this program's tests, which drive it
+# through the window as a user does.
+LIBRARY = [
     (
-        "a file asking any amount of memory is opened",
-        "        if kdf.memory_kib > MAX_MEMORY_KIB\n",
-        "        if false\n",
-        [COSTLY],
+        "locking keeps the entries",
+        "        self.key = None;\n        self.entries.clear();\n",
+        "        self.key = None;\n",
+        [FORGETS],
     ),
     (
-        "a record not understood is skipped",
-        '            _ => return Err(bad("a record this program does not know")),',
-        "            _ => {}",
-        [REFUSED_WHOLE],
+        "locking keeps the key",
+        "        self.key = None;\n        self.entries.clear();\n",
+        "        self.entries.clear();\n",
+        [FORGETS],
     ),
     (
-        "an escape never written is read anyway",
-        '            textfmt::tsv::unescape(raw).ok_or_else(|| bad("a field is not escaped as written"))',
-        "            Ok((*raw).to_string())",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "the next id may be one in use",
-        "    if contents.next_id <= highest {",
-        "    if false {",
-        [REFUSED_WHOLE],
-    ),
-    (
-        "an entry may be in a folder that is not there",
-        "            if let Some(f) = folder_id\n                && !c.folders.iter().any(|folder| folder.id == f)\n",
-        "            if let Some(f) = folder_id\n                && false\n",
-        [REFUSED_WHOLE],
+        "the auto-lock falls due at the last use, not a timeout after it",
+        '        let due = self.last_access.saturating_add(timeout_seconds);\n',
+        '        let due = self.last_access;\n',
+        [LOCKS_ITSELF],
     ),
 ]
 
 TABLES = {
     "main.rs": MAIN,
-    "vaultfile.rs": VAULTFILE,
+    "../../credvault/src/lib.rs": LIBRARY,
 }
 
 if __name__ == "__main__":

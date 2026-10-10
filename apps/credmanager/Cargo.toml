@@ -6,6 +6,10 @@ edition = "2024"
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+# The vault -- its entries and its sealed file -- shared with the credential
+# service, which reads it with the very code that writes it
+# (requests/c-e-share-the-password-vault-with-the-credential-service.md).
+credvault = { path = "../credvault" }
 # The vault's cipher and its key derivation: XChaCha20-Poly1305 and Argon2id,
 # vendored from RustCrypto (design-decisions.md §539, §1218). This crate
 # checked its master password against pwkdf's verifier until 2026-09-27, and
@@ -31,6 +35,8 @@ textline = { path = "../textline" }
 [dev-dependencies]
 # Scratch folders for the vault file, so no test reads or writes a real one.
 scratchdir = { path = "../../userspace/scratchdir" }
+# The vault the cheapest key derivation opens, for this program's tests.
+credvault = { path = "../credvault", features = ["testing"] }
 
 [lints]
 workspace = true

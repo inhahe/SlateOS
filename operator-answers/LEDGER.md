@@ -26,7 +26,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 |---|---|---|---|
 | B-Q23: Claude's recommendation -- E, the installer's question decides what is installed, with B as what "desktop" means | B | -- | relayed 2026-10-10 |
 | B-Q24: A -- the second of `answers.txt`'s two "B-Q24" lines; the first was B-Q23's | B | §1070 | recorded (lane B took A on 2026-10-09) |
-| Questions already answered should not show among the open ones, though their lanes are rate-limited for days | F | `scripts/questions-for-you.py` | **a proposal waits on you** (lane F, in chat 2026-10-10): `questions-for-you/` in the integration tree, only the questions still waiting on you, rebuilt every 10 minutes by a Windows scheduled task -- not by the lanes' routine check, which stops when every lane is rate-limited |
+| Questions already answered should not show among the open ones, though their lanes are rate-limited for days | F | `scripts/questions-for-you.py` | recorded: `questions-for-you/` in the integration tree, only the questions still waiting on you, rebuilt when you run the `update.bat` you keep there -- no scheduled task ("nah, i'll just run update.bat ... when i want it updated", later the same day: `operator-answers/2026-10-10-chat-to-lane-f-2.txt`) |
 
 ## chat, 2026-10-10: a consent prompt takes no keystrokes
 

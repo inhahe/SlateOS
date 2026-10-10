@@ -33,7 +33,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::convert::{self as libyuv, Constants, Eight, Planes, Rows, Ten};
-use crate::hdr::ToneMap;
 use crate::{Plane, PlaneBuf, Sample};
 
 // H.273's matrix coefficients, as libavif names them.
@@ -161,12 +160,6 @@ pub trait Reformat: Sample + sealed::Sealed {
         first: usize,
         out: &mut [u32],
     ) -> (bool, bool);
-
-    /// [`crate::hdr`]'s conversion for this sample size, of the band of rows
-    /// `out` holds from `first`, once its checks have passed: libyuv's
-    /// chroma upsampling for the size, and Chrome's handling of the light.
-    #[doc(hidden)]
-    fn hdr(picture: &Picture<'_, Self>, map: &ToneMap<'_>, first: usize, out: &mut [u32]);
 }
 
 impl Reformat for u8 {
@@ -178,10 +171,6 @@ impl Reformat for u8 {
     ) -> (bool, bool) {
         libyuv_eight(picture, k, first, out)
     }
-
-    fn hdr(picture: &Picture<'_, Self>, map: &ToneMap<'_>, first: usize, out: &mut [u32]) {
-        crate::hdr::convert::<Eight>(picture, map, first, out);
-    }
 }
 
 impl Reformat for u16 {
@@ -192,15 +181,6 @@ impl Reformat for u16 {
         out: &mut [u32],
     ) -> (bool, bool) {
         libyuv_deep(picture, k, first, out)
-    }
-
-    /// Every depth of 16-bit samples upsamples as 10-bit ones do (libyuv's
-    /// `I010` filters, which are the same for any sample under 16 bits) --
-    /// bilinearly at 12 bits too, where libyuv's ordinary conversion takes
-    /// the nearest chroma sample, as a GPU's filtering of Chrome's video does
-    /// not.
-    fn hdr(picture: &Picture<'_, Self>, map: &ToneMap<'_>, first: usize, out: &mut [u32]) {
-        crate::hdr::convert::<Ten>(picture, map, first, out);
     }
 }
 
@@ -952,9 +932,104 @@ fn chroma_row<T: Sample>(
     out.extend((0..count).map(|c| lookup(table, samples.get(c).copied().unwrap_or_default(), max)));
 }
 
+/// The chroma rows [`chroma_of_row`] reads a row's chroma from, kept from row
+/// to row: the nearest chroma row's table values and the adjacent one's, of
+/// each plane.
+#[derive(Default)]
+pub(crate) struct ChromaRows {
+    near_u: Vec<f32>,
+    far_u: Vec<f32>,
+    near_v: Vec<f32>,
+    far_v: Vec<f32>,
+}
+
+/// libavif's slow path's chroma for row `j` of `picture`, which has chroma:
+/// the first `n` pixels' Cb and Cr table values into `cbs` and `crs`. For
+/// 4:4:4, the sample's own; otherwise 9:3:3:1 of the four nearest -- the
+/// nearest, the column and the row next to it towards the pixel, and the
+/// sample between those -- where at the picture's edges, and down 4:2:2's
+/// columns, the next is the nearest again. What [`slow_path`] weighs, and
+/// `crate::hdr` too for a picture Chrome decodes through libavif.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::too_many_arguments,
+    reason = "indices stay within the rows by the adjacency rules (and the rows hold one column past the last the picture reads); the arguments are the slow path's own state"
+)]
+pub(crate) fn chroma_of_row<T: Sample>(
+    picture: &Picture<'_, T>,
+    state: &State,
+    chroma: &[f32],
+    rows: &mut ChromaRows,
+    j: usize,
+    n: usize,
+    cbs: &mut [f32],
+    crs: &mut [f32],
+) {
+    let (width, height) = (picture.width, picture.height);
+    let max = state.max_channel;
+    let (shift_x, shift_y) = (state.shift_x, state.shift_y);
+    let (u_plane, v_plane) = (picture.u, picture.v);
+    let ChromaRows {
+        near_u,
+        far_u,
+        near_v,
+        far_v,
+    } = rows;
+    let uv_j = j >> shift_y;
+    // Chroma columns a row reads: up to one past the nearest of its last
+    // pixel.
+    let columns = (width.saturating_sub(1) >> shift_x) + 2;
+    chroma_row(chroma, u_plane, uv_j, max, near_u, columns);
+    chroma_row(chroma, v_plane, uv_j, max, near_v, columns);
+    if picture.format == Format::Yuv444 {
+        for (i, (cb, cr)) in cbs.iter_mut().zip(crs.iter_mut()).enumerate().take(n) {
+            let uv_i = i >> shift_x;
+            *cb = near_u.get(uv_i).copied().unwrap_or(0.0);
+            *cr = near_v.get(uv_i).copied().unwrap_or(0.0);
+        }
+        return;
+    }
+    // The chroma row next to the nearest, towards this one; at the
+    // picture's first and last rows, and across 4:2:2, the nearest again.
+    // (The whole picture's height: the adjacency at its last row depends on
+    // it, whichever band this is.)
+    let adj_row = if j == 0
+        || (j == height - 1 && !j.is_multiple_of(2))
+        || picture.format == Format::Yuv422
+    {
+        uv_j
+    } else if !j.is_multiple_of(2) {
+        uv_j + 1
+    } else {
+        uv_j - 1
+    };
+    chroma_row(chroma, u_plane, adj_row, max, far_u, columns);
+    chroma_row(chroma, v_plane, adj_row, max, far_v, columns);
+    for (i, (cb, cr)) in cbs.iter_mut().zip(crs.iter_mut()).enumerate().take(n) {
+        let uv_i = i >> shift_x;
+        // And the column next to the nearest, likewise.
+        let adj_col = if i == 0 || (i == width - 1 && !i.is_multiple_of(2)) {
+            uv_i
+        } else if !i.is_multiple_of(2) {
+            uv_i + 1
+        } else {
+            uv_i - 1
+        };
+        let weigh = |near: &[f32], far: &[f32]| {
+            let at = |r: &[f32], c: usize| r.get(c).copied().unwrap_or(0.0);
+            (at(near, uv_i) * (9.0 / 16.0))
+                + (at(near, adj_col) * (3.0 / 16.0))
+                + (at(far, uv_i) * (3.0 / 16.0))
+                + (at(far, adj_col) * (1.0 / 16.0))
+        };
+        *cb = weigh(near_u, far_u);
+        *cr = weigh(near_v, far_v);
+    }
+}
+
 /// `avifImageYUVAnyToRGBAnySlow`: every combination, one pixel at a time --
-/// chroma upsampled bilinearly from the four nearest samples, and alpha
-/// premultiplication undone in floating point.
+/// chroma upsampled bilinearly from the four nearest samples
+/// ([`chroma_of_row`]), and alpha premultiplication undone in floating point.
 ///
 /// A row at a time, as [`fast_path`] goes: the two chroma rows a row weighs
 /// looked up once (libavif looks up four samples of each plane for every
@@ -963,9 +1038,8 @@ fn chroma_row<T: Sample>(
 /// Looked up and computed in one loop per pixel, a 1080p frame took 92 ms on
 /// one thread.
 #[allow(
-    clippy::arithmetic_side_effects,
     clippy::cast_precision_loss,
-    reason = "indices stay within the rows by the adjacency rules (and the rows hold one column past the last the picture reads), and samples are under 2^16, exact as f32"
+    reason = "samples are under 2^16, exact as f32"
 )]
 fn slow_path<T: Sample>(
     picture: &Picture<'_, T>,
@@ -978,23 +1052,13 @@ fn slow_path<T: Sample>(
     let (luma, chroma) = tables(state);
     let max = state.max_channel;
     let max_f = max as f32;
-    let (u_plane, v_plane) = (picture.u, picture.v);
-    let has_color = u_plane.is_some() && v_plane.is_some() && picture.format != Format::Yuv400;
-    // The whole picture's height: the adjacency at its last row depends on
-    // it, whichever band this is.
-    let height = picture.height;
-    let (shift_x, shift_y) = (state.shift_x, state.shift_y);
-    // Chroma columns a row reads: up to one past the nearest of its last
-    // pixel.
-    let columns = (width.saturating_sub(1) >> shift_x) + 2;
-    let (mut near_u, mut far_u, mut near_v, mut far_v) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let has_color = picture.u.is_some() && picture.v.is_some() && picture.format != Format::Yuv400;
+    let mut rows = ChromaRows::default();
     let mut ys = vec![0f32; width];
     let mut unorm = vec![0u32; width];
     let mut cbs = vec![0.5f32; width];
     let mut crs = vec![0.5f32; width];
     for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
-        let uv_j = if has_color { j >> shift_y } else { 0 };
         let y_row = picture.y.row(j);
         let n = row.len().min(y_row.len());
         for ((o, u), &y) in ys.iter_mut().zip(unorm.iter_mut()).zip(y_row) {
@@ -1003,51 +1067,7 @@ fn slow_path<T: Sample>(
             *o = lookup(&luma, y, max);
         }
         if has_color {
-            chroma_row(&chroma, u_plane, uv_j, max, &mut near_u, columns);
-            chroma_row(&chroma, v_plane, uv_j, max, &mut near_v, columns);
-            if picture.format == Format::Yuv444 {
-                for (i, (cb, cr)) in cbs.iter_mut().zip(crs.iter_mut()).enumerate().take(n) {
-                    let uv_i = i >> shift_x;
-                    *cb = near_u.get(uv_i).copied().unwrap_or(0.0);
-                    *cr = near_v.get(uv_i).copied().unwrap_or(0.0);
-                }
-            } else {
-                // The chroma row next to the nearest, towards this one; at
-                // the picture's first and last rows, and across 4:2:2, the
-                // nearest again.
-                let adj_row = if j == 0
-                    || (j == height - 1 && j % 2 != 0)
-                    || picture.format == Format::Yuv422
-                {
-                    uv_j
-                } else if j % 2 != 0 {
-                    uv_j + 1
-                } else {
-                    uv_j - 1
-                };
-                chroma_row(&chroma, u_plane, adj_row, max, &mut far_u, columns);
-                chroma_row(&chroma, v_plane, adj_row, max, &mut far_v, columns);
-                for (i, (cb, cr)) in cbs.iter_mut().zip(crs.iter_mut()).enumerate().take(n) {
-                    let uv_i = i >> shift_x;
-                    // And the column next to the nearest, likewise.
-                    let adj_col = if i == 0 || (i == width - 1 && i % 2 != 0) {
-                        uv_i
-                    } else if i % 2 != 0 {
-                        uv_i + 1
-                    } else {
-                        uv_i - 1
-                    };
-                    let weigh = |near: &[f32], far: &[f32]| {
-                        let at = |r: &[f32], c: usize| r.get(c).copied().unwrap_or(0.0);
-                        (at(near, uv_i) * (9.0 / 16.0))
-                            + (at(near, adj_col) * (3.0 / 16.0))
-                            + (at(far, uv_i) * (3.0 / 16.0))
-                            + (at(far, adj_col) * (1.0 / 16.0))
-                    };
-                    *cb = weigh(&near_u, &far_u);
-                    *cr = weigh(&near_v, &far_v);
-                }
-            }
+            chroma_of_row(picture, state, &chroma, &mut rows, j, n, &mut cbs, &mut crs);
         }
         let alpha = if unmultiply {
             picture.alpha.map(|a| a.row(j))

@@ -12,10 +12,10 @@ And NAME.chrome.png: its first frame as Chrome shows it on an sRGB screen
 (design-decisions 1378), which `tests/hdr.rs` holds videocodec's pixels to,
 within one. Made from ffmpeg's decoding of the frame (libdav1d's and
 FFmpeg's VP9, which videocodec's decoders match bit for bit), its chroma
-upsampled as libyuv's bilinear 4:2:0 conversion upsamples it, Y'CbCr to
-R'G'B' as libavif's floating point computes it, and from there Chrome's
-handling of the light, in double precision (`chrome_hdr.py`), by the light
-ffprobe says the frame has.
+upsampled as Chrome's GPU samples it (centred bilinear, in floating point),
+Y'CbCr to R'G'B' as libavif's floating point computes it, and from there
+Chrome's handling of the light, in double precision (`chrome_hdr.py`), by
+the light ffprobe says the frame has.
 
 Where the answers come from -- none of it from the crate itself: ffprobe's
 `-show_frames`, whose frames carry what the bitstream says (AV1's sequence
@@ -194,64 +194,47 @@ def answer(name, frames):
 
 # --- the pixels, as Chrome shows them -------------------------------------------
 
-def up2_linear(src, w):
-    """libyuv's ScaleRowUp2_Linear_Any_C: a chroma row doubled to `w`, each
-    new sample 3:1 of its two nearest, the ends copied."""
-    dst = [0] * w
-    dst[0] = src[0]
-    work = (w - 1) & ~1
-    for k in range(min(work // 2, len(src) - 1)):
-        s0, s1 = src[k], src[k + 1]
-        dst[1 + 2 * k] = (s0 * 3 + s1 + 2) >> 2
-        dst[2 + 2 * k] = (s0 + s1 * 3 + 2) >> 2
-    dst[w - 1] = src[(w - 1) // 2]
-    return dst
+def chroma_value(code):
+    """A 10-bit studio-range chroma sample as a fraction of its range."""
+    return (code - 512) / 896
 
 
-def up2_bilinear(sa, sb, w):
-    """libyuv's ScaleRowUp2_Bilinear_Any_C: two chroma rows to the two rows
-    between them, 9:3:3:1, each row's ends 3:1 of the column there."""
-    da, db = [0] * w, [0] * w
-    da[0] = (sa[0] * 3 + sb[0] + 2) >> 2
-    db[0] = (sa[0] + sb[0] * 3 + 2) >> 2
-    work = (w - 1) & ~1
-    for k in range(min(work // 2, len(sa) - 1, len(sb) - 1)):
-        s0, s1, t0, t1 = sa[k], sa[k + 1], sb[k], sb[k + 1]
-        da[1 + 2 * k] = (s0 * 9 + s1 * 3 + t0 * 3 + t1 + 8) >> 4
-        da[2 + 2 * k] = (s0 * 3 + s1 * 9 + t0 + t1 * 3 + 8) >> 4
-        db[1 + 2 * k] = (s0 * 3 + s1 + t0 * 9 + t1 * 3 + 8) >> 4
-        db[2 + 2 * k] = (s0 + s1 * 3 + t0 * 3 + t1 * 9 + 8) >> 4
-    last = (w - 1) // 2
-    a, b = sa[last], sb[last]
-    da[w - 1] = (a * 3 + b + 2) >> 2
-    db[w - 1] = (a + b * 3 + 2) >> 2
-    return da, db
-
-
-def chroma_rows_420(plane, width, height):
-    """Each picture row's chroma at full width, as libyuv's
-    I010ToARGBMatrixBilinear walks a 4:2:0 picture: the first row from the
-    first chroma row alone, each later pair 3:1 and 1:3 of the two chroma
-    rows around it, an even height's last row from the last alone."""
-    chroma_height = (height + 1) // 2
-    rows = []
-    for row in range(height):
-        c = max(row - 1, 0) // 2
-        if row == 0 or c + 1 >= chroma_height:
-            rows.append(up2_linear(plane[c], width))
+def upsampled(plane, width, height):
+    """4:2:0 chroma at every pixel, as Chrome brings it up on the GPU:
+    bilinear sampling sited at the centre of the luma samples each chroma
+    sample covers, clamped at the edges -- 9:3:3:1 of the four nearest
+    samples' values, in floating point (libavif's slow path, to the letter):
+    the nearest, the column and the row next to it towards the pixel, and the
+    sample between those; at the picture's edges the nearest again."""
+    out = []
+    for j in range(height):
+        uv_j = j >> 1
+        if j == 0 or (j == height - 1 and j % 2 != 0):
+            adj_j = uv_j
         else:
-            upper, lower = up2_bilinear(plane[c], plane[c + 1], width)
-            rows.append(upper if row % 2 == 1 else lower)
-    return rows
+            adj_j = uv_j + 1 if j % 2 != 0 else uv_j - 1
+        row = []
+        for i in range(width):
+            uv_i = i >> 1
+            if i == 0 or (i == width - 1 and i % 2 != 0):
+                adj_i = uv_i
+            else:
+                adj_i = uv_i + 1 if i % 2 != 0 else uv_i - 1
+            row.append(chroma_value(plane[uv_j][uv_i]) * 9 / 16
+                       + chroma_value(plane[uv_j][adj_i]) * 3 / 16
+                       + chroma_value(plane[adj_j][uv_i]) * 3 / 16
+                       + chroma_value(plane[adj_j][adj_i]) * 1 / 16)
+        out.append(row)
+    return out
 
 
-def rgb_of(y, u, v):
-    """10-bit studio-range BT.2020 NCL Y'CbCr to R'G'B' as libavif's
-    floating point computes it (`(code - bias) / range`, then its colour
-    difference equations), in double precision, clamped to [0, 1]."""
+def rgb_of(y, cb, cr):
+    """A 10-bit studio-range luma sample and its pixel's chroma values, BT.2020
+    NCL, to R'G'B' as libavif's floating point computes it, in double
+    precision, clamped to [0, 1]."""
     kr, kb = 0.2627, 0.0593
     kg = 1.0 - kr - kb
-    yv, cb, cr = (y - 64) / 876, (u - 512) / 896, (v - 512) / 896
+    yv = (y - 64) / 876
     r = yv + 2 * (1 - kr) * cr
     b = yv + 2 * (1 - kb) * cb
     g = yv - 2 * (kr * (1 - kr) * cr + kb * (1 - kb) * cb) / kg
@@ -306,7 +289,7 @@ def chrome_frame(t, name):
     if (matrix, primaries) != (9, 9) or transfer not in (16, 18):
         raise SystemExit(f"{name}: chrome_hdr.py has only BT.2020's PQ and HLG")
     width, height, y, u, v = first_frame(t, name)
-    us, vs = chroma_rows_420(u, width, height), chroma_rows_420(v, width, height)
+    us, vs = upsampled(u, width, height), upsampled(v, width, height)
     max_cll, mastering_peak = frame_light(frame)
     headroom = chrome_hdr.baseline_headroom(chrome_hdr.peak_luminance(max_cll, mastering_peak))
     points = chrome_hdr.rwtmo_alt0(headroom, half=True)

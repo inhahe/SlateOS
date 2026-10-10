@@ -16,9 +16,9 @@
 //! pixel:
 //!
 //! 1. Y'CbCr to R'G'B' in floating point, by the picture's matrix and range
-//!    as libavif's floating-point path computes it, each row's chroma
-//!    upsampled as libyuv upsamples it for the same picture's ordinary
-//!    conversion ([`crate::convert`]'s walks), clamped to [0, 1].
+//!    as libavif's floating-point path computes it, subsampled chroma
+//!    brought up as Chrome's GPU samples it -- bilinear, centred, which is
+//!    libavif's slow path's 9:3:3:1 -- and clamped to [0, 1].
 //! 2. Its light. PQ: skcms's `PQish` curve, light over 10 000 cd/m2. HLG: its
 //!    `HLGish` curve over 12 (BT.2100's inverse OETF: the scene's light), then
 //!    BT.2100's OOTF for a 1000 cd/m2 display, `Y^(gamma - 1)` with gamma 1.2
@@ -67,7 +67,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::Sample;
-use crate::convert::{self, Depth, Planes, Rows};
 use crate::reformat::{self, Error, Format, Mode, Picture, Reformat};
 
 /// The HDR reference white, cd/m2: what 1.0 is in the working space, and
@@ -1042,20 +1041,22 @@ impl Channels {
 // --- step 1, and the walk --------------------------------------------------------------
 
 /// `picture`'s rows from `first` into `out` (whole rows) by `map`: what
-/// [`to_argb_rows`] does once its checks have passed, for samples of depth
-/// `D` -- whose upsampling is the only thing `D` decides.
+/// [`to_argb_rows`] does once its checks have passed.
+///
+/// Subsampled chroma is brought to the picture's size as Chrome brings it
+/// on the GPU: bilinear sampling of the chroma, sited at the centre of the
+/// luma samples it covers, clamped at the picture's edges -- 9:3:3:1 of the
+/// four nearest samples, in floating point, which is libavif's slow path's
+/// upsampling to the letter (`reformat::chroma_of_row`). Chrome's pixels for
+/// 4:2:0 HDR pictures of noise agree: an AVIF's in 98.8% of channels and a
+/// video's in 98.8% (once its 10-bit samples are cut to 8, which headless
+/// Chrome's 4:2:0 video does and a GPU's does not), the rest by one; libyuv's
+/// integer upsampling, the ordinary conversion's, agrees in 76% and 40%.
 #[allow(
     clippy::cast_precision_loss,
     reason = "a depth's largest code is under 2^16, exact in f32"
 )]
-pub(crate) fn convert<D: Depth>(
-    picture: &Picture<'_, D::Sample>,
-    map: &ToneMap<'_>,
-    first: usize,
-    out: &mut [u32],
-) where
-    D::Sample: Sample,
-{
+fn convert<S: Sample>(picture: &Picture<'_, S>, map: &ToneMap<'_>, first: usize, out: &mut [u32]) {
     let Ok(state) = reformat::prepare(picture) else {
         return;
     };
@@ -1071,35 +1072,18 @@ pub(crate) fn convert<D: Depth>(
         unmultiply,
         channels: Channels::new(width),
     };
-    let rows = Rows {
-        first,
-        height: picture.height,
-    };
-    let (u, v) = match (picture.format, picture.u, picture.v) {
-        (Format::Yuv400, _, _) | (_, None, _) | (_, _, None) => {
-            for (j, dst) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
-                let alpha = picture.alpha.map(|a| a.row(j));
-                row.grey(picture.y.row(j), alpha, dst);
-            }
-            return;
+    let grey = picture.format == Format::Yuv400 || picture.u.is_none() || picture.v.is_none();
+    if grey {
+        for (j, dst) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
+            let alpha = picture.alpha.map(|a| a.row(j));
+            row.grey(picture.y.row(j), alpha, dst);
         }
-        (_, Some(u), Some(v)) => (u, v),
-    };
-    let planes = Planes {
-        y: picture.y,
-        u,
-        v,
-        a: picture.alpha,
-    };
-    let each = |y: &[D::Sample],
-                u: &[D::Sample],
-                v: &[D::Sample],
-                a: Option<&[D::Sample]>,
-                dst: &mut [u32]| row.colour(y, u, v, a, dst);
-    match picture.format {
-        Format::Yuv420 => convert::walk_420::<D>(&planes, width, rows, out, each),
-        Format::Yuv422 => convert::walk_422::<D>(&planes, width, rows, out, each),
-        Format::Yuv444 | Format::Yuv400 => convert::walk_444(&planes, width, rows, out, each),
+        return;
+    }
+    let (_, chroma) = reformat::tables(&state);
+    let mut chroma_rows = reformat::ChromaRows::default();
+    for (j, dst) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
+        row.colour(picture, &chroma, &mut chroma_rows, j, dst);
     }
 }
 
@@ -1132,29 +1116,41 @@ struct Row<'a> {
 }
 
 impl Row<'_> {
-    /// A row with colour: luma, and chroma at full width.
+    /// Row `j` of `picture`, its chroma upsampled (see [`convert`]) from the
+    /// chroma `table`'s values.
+    fn colour<S: Sample>(
+        &mut self,
+        picture: &Picture<'_, S>,
+        table: &[f32],
+        chroma_rows: &mut reformat::ChromaRows,
+        j: usize,
+        dst: &mut [u32],
+    ) {
+        let max = self.max;
+        let y = picture.y.row(j);
+        let n = y.len().min(dst.len());
+        let Some(dst) = dst.get_mut(..n) else {
+            return;
+        };
+        let (luma, _) = self.ranges();
+        let Channels { r, g, b, .. } = &mut self.channels;
+        fraction(y, r, luma, max);
+        reformat::chroma_of_row(picture, self.state, table, chroma_rows, j, n, g, b);
+        let alpha = picture.alpha.map(|a| a.row(j));
+        self.matrix(y, alpha, dst);
+    }
+
+    /// The row's Y, Cb and Cr, in the channels, to R'G'B' there by the
+    /// matrix, in place; then the rest of the way into `dst`.
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "floating-point arithmetic, which cannot overflow into undefined behaviour"
     )]
-    fn colour<S: Sample>(&mut self, y: &[S], u: &[S], v: &[S], a: Option<&[S]>, dst: &mut [u32]) {
+    fn matrix<S: Sample>(&mut self, y: &[S], a: Option<&[S]>, dst: &mut [u32]) {
         let state = self.state;
         let (kr, kg, kb) = (state.kr, state.kg, state.kb);
         let (max, max_f) = (self.max, self.max_f);
-        // Only as many pixels as there are samples: the channels' floats past
-        // them are another row's.
-        let n = y.len().min(u.len()).min(v.len());
-        let Some(dst) = dst.get_mut(..n.min(dst.len())) else {
-            return;
-        };
-        let (luma, chroma) = self.ranges();
         let Channels { r, g, b, .. } = &mut self.channels;
-        // Y, Cb and Cr as fractions of their ranges, in the channels; then
-        // the matrix, in place. Each a loop of one kind, which the compiler
-        // runs several pixels at a time.
-        fraction(y, r, luma, max);
-        fraction(u, g, chroma, max);
-        fraction(v, b, chroma, max);
         let channels = r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut());
         match state.mode {
             Mode::Coefficients => {
@@ -1301,7 +1297,7 @@ pub fn to_argb_into<T: Reformat>(
     let (_, count) = reformat::check(picture)?;
     out.try_reserve_exact(count).map_err(|_| Error::Size)?;
     out.resize(count, 0);
-    T::hdr(picture, map, 0, out);
+    convert(picture, map, 0, out);
     Ok(())
 }
 
@@ -1320,7 +1316,7 @@ pub fn to_argb_rows<T: Reformat>(
     out: &mut [u32],
 ) -> Result<(), Error> {
     reformat::check_band(picture, first, out.len())?;
-    T::hdr(picture, map, first, out);
+    convert(picture, map, first, out);
     Ok(())
 }
 
@@ -1853,6 +1849,65 @@ mod tests {
             to_argb_rows(&picture, &map, 0, &mut ragged),
             Err(Error::Size)
         );
+    }
+
+    /// 4:2:0's chroma is brought up 9:3:3:1, in floating point, centred:
+    /// each pixel is its own computation from the four nearest samples --
+    /// at a corner the one sample alone, inside the nearest 9/16, the
+    /// column and row towards the pixel 3/16 each, and between them 1/16.
+    #[test]
+    fn chroma_is_upsampled_nine_three_three_one() {
+        fn plane(samples: &[u16], w: usize, h: usize) -> Plane<'_, u16> {
+            Plane {
+                samples,
+                stride: w,
+                width: w,
+                height: h,
+            }
+        }
+        // Grey luma; Cb varying across a 2x2 chroma plane, Cr neutral.
+        let (width, height) = (4usize, 4usize);
+        let (y, u, v) = ([502u16; 16], [600u16, 700, 500, 400], [512u16; 4]);
+        let picture = Picture {
+            width,
+            height,
+            depth: 10,
+            format: Format::Yuv420,
+            matrix: 9,
+            primaries: 9,
+            full_range: false,
+            y: plane(&y, width, height),
+            u: Some(plane(&u, 2, 2)),
+            v: Some(plane(&v, 2, 2)),
+            alpha: None,
+            alpha_premultiplied: false,
+        };
+        let signal = Signal::new(Transfer::Pq);
+        let map = ToneMap::new(&signal, 9, Light::default());
+        let out = to_argb(&picture, &map).unwrap();
+        let state = reformat::prepare(&picture).unwrap();
+        let t = |code: u16| (f32::from(code) - 512.0) / 896.0;
+        let luma = (502.0f32 - 64.0) / 876.0;
+        let want = |cb: f32| {
+            let rgb = reformat::rgb_of(state.kr, state.kg, state.kb, luma, cb, 0.0);
+            map.pixel(rgb.map(reformat::clamp_unit)) | 0xff00_0000
+        };
+        // The corner: the one sample.
+        assert_eq!(out[0], want(t(600)));
+        // Pixel (1, 1): nearest (0, 0), its column and row neighbours
+        // towards the pixel (1, 0) and (0, 1), and (1, 1) between them.
+        let inside = t(600) * (9.0 / 16.0)
+            + t(700) * (3.0 / 16.0)
+            + t(500) * (3.0 / 16.0)
+            + t(400) * (1.0 / 16.0);
+        assert_eq!(out[width + 1], want(inside));
+        // Pixel (2, 0), on the top row: nearest (1, 0), the column towards
+        // it (0, 0); the row is the nearest's own.
+        let top = t(700) * (9.0 / 16.0)
+            + t(600) * (3.0 / 16.0)
+            + t(700) * (3.0 / 16.0)
+            + t(600) * (1.0 / 16.0);
+        assert_eq!(out[2], want(top));
     }
 
     /// Alpha is carried as libavif carries it: 10-bit alpha rescaled in

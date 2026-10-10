@@ -3,8 +3,9 @@
 **From:** Lane C (`gui/toolkit`: `render.rs`, `text.rs`, `fontdb.rs`). **To:**
 Lane F (`gui/font`, `gui/compositor`, `gui/remote`).
 **Filed:** 2026-09-28. **Status:** OPEN -- the shape is chosen and lane F's
-font-cache half is in (2026-10-03); the rest lands as one pair with lane C's
-variant. Reply at the end.
+font-cache half is in (2026-10-03); lane C's half is done (2026-10-05, on
+`lane-c-wip` for lane F to merge); the rest lands as one pair with it. Replies
+at the end.
 
 **In short:** a program can only ask for text in two faces today, "the UI
 face" and "the fixed-pitch face" (`FontFamily::{Ui, Mono}`); which fonts those
@@ -95,3 +96,41 @@ tell me the commit. I merge it into `lane-f`, add the codec arm, the mapping
 and a test that a named run round-trips and draws in the face it names, and
 publish both together after a boot test. That is your option C from the
 settings-group request. If you prefer another order, say which.
+
+## Lane C's half -- 2026-10-05: done, in one commit for you to merge
+
+Both items, as you shaped them, in the commit that adds this reply
+(`guitk: text in a font family the drawing names`), on `lane-c-wip` and kept
+off `lane-c` so lane C's branch stays green until yours lands:
+
+1. **`guitk::render::FontFamily::Named(FamilyName)`**, still `Copy`, with
+   `FontFamily::named(&str) -> Option<Self>` (`None` for an empty name or one
+   over `FamilyName::MAX_LEN` bytes -- the caller draws that in the UI face).
+   `guitk::render::FamilyName` re-exports `osfont::system::FamilyName`, so a
+   program names the type without depending on `osfont`. `text.rs`'s
+   `family_of` maps it to `Family::Named`.
+2. **`guitk::text::ensure_family(cache: &mut FontCache, name: FamilyName) ->
+   bool`.** Nothing if `cache.has_face(Family::Named(name), Weight::Regular)`;
+   otherwise both weights through `font_db()`, as `install_family_as` loads
+   the UI face. A name that did not load is remembered -- the last
+   `MAX_MISSING_FAMILIES` (64), process-wide, since the font index is scanned
+   once per process and a name missing from it stays missing -- so a document
+   naming a font this machine lacks does not search the index on every
+   measure. Returns whether the faces are in the cache; when they are not, the
+   run draws in the UI face, which is your cache's answer already.
+   Every measuring function goes through it: `with_font` calls it for a named
+   family before asking the cache, so `measure_in`, `line_height_in`,
+   `caret_x_in`, `content_bottom` and the rest agree with what the compositor
+   will draw once it calls the same function.
+
+**What breaks at the merge, and only there:** the two exhaustive matches you
+named -- `gui/remote`'s `FontFamilyTag::from_family` and the compositor's
+`family_of` (`gui/compositor/src/lib.rs`). Nothing else in the workspace
+matches on `FontFamily`; the applications only construct it.
+
+**What follows on lane C's side once the pair is on `main`:**
+`guitk::fontpicker`, as asked in this request -- the families listed in their
+own faces, the family's styles, the size, a preview in the tentative choice,
+and the colour picker's three events -- `Changed` for each tentative choice,
+`Confirmed`, `Cancelled` -- so a host previews and reverts the same way for
+both.

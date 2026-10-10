@@ -8,6 +8,9 @@ the operator, rebuilt from every lane's branch and the operator's answers.
     python scripts/questions-for-you.py --print    show its index, write nothing
     python scripts/questions-for-you.py --selftest
 
+The operator runs it by hand, with an `update.bat` kept in the folder
+(2026-10-10): nothing else runs it.
+
 Why
 ---
 `open-questions/` in the integration tree shows the main line. A question
@@ -35,34 +38,39 @@ own copy, so it is read on every lane's branch and on main:
 * A row whose first cell starts with a question's id answers that question,
   unless its state is in bold. Bold that names another question ("waits on
   you as C-Q31") leaves the row's own question answered and that one waiting.
+  Bold used for anything else reads as waiting too: the question shows, with
+  the row beside it in the index.
 * Where branches disagree about a row, the question's own lane has the last
-  word -- it is the lane that records the answer or asks again -- then main,
-  then whichever branch says the question still waits.
-* Of a question's rows, the newest section's decides: by the section's first
-  date, then by how high in the ledger it sits (newest first, by its rule).
+  word -- it is the lane that records the answer or asks again -- then
+  `origin/main`, then `main` (the integration tree's checkout, which can lag
+  it), then whichever branch says the question still waits.
+* Of a question's rows, the newest section's decides: the later date; on the
+  same day, the one higher in a ledger that holds both (newest first, by its
+  rule), else the later time where both give one. Where that leaves more than
+  one, any of them saying the question waits is enough.
 * A section about a lane's reply to the operator (`claude-answers.txt`)
   answers nothing, whatever its rows say: lane A's account relayed to lane D
   is not the operator choosing.
 
-An answers file in the integration tree that no ledger records yet -- one the
-operator has just written, or added to -- answers what it names at once
-(keyed by id or by title, as `check-lane-signals.py` reads them), unless the
-ledger has a newer word on that question. Its lines that a ledger section
-about the same file already has rows for were processed before, and the
-ledger decides those. A question nothing answers is waiting.
+An answers file in the integration tree whose content no ledger records yet
+-- one the operator has just written, or added to -- answers, at once, each
+question its new lines name: by id (`D-Q3:`, in either case) or by title, as
+`check-lane-signals.py` reads them. A line is new unless the same line is in
+one of the verbatim copies in `operator-answers/` on any branch, which are
+what the lanes have processed. Such a line beats the ledger, which by then
+can only be answering something older, unless the file was last written
+before the day of the ledger's word. A question nothing answers is waiting.
 
 The folder
 ----------
 It writes nothing but that folder, which it tells git to ignore
 (`.git/info/exclude`, shared by every worktree). Each copy opens with a line
 saying it is one and where answers go, and is read-only, since an edit there
-would be lost at the next refresh; a file in the folder that is not the
-script's own is left alone and named in the index, because nothing reads it.
-A file is rewritten only when its text changes (the index's "Last changed"
-line aside), and a failed refresh says so at the top of the index rather than
-leaving the last good one looking current.
-
-What runs it is the operator's choice; until it is made, it runs by hand.
+would be lost at the next refresh. Other files in the folder are left alone;
+one holding answers is named in the index, because nothing reads it. A file is
+rewritten only when its text changes (the index's "Last changed" line aside),
+and a refresh that fails says so at the top of the index and in its exit
+status, rather than leaving the last good index looking current.
 """
 
 from __future__ import annotations
@@ -94,9 +102,8 @@ QUESTION_ID = re.compile(r"\b([A-F]-Q[0-9]+)\b")
 #: mentioned.
 LEADING_IDS = re.compile(r"^[\s*`]*([A-F]-Q[0-9]+(?:\s*,\s*[A-F]-Q[0-9]+)*)\b")
 BOLD = re.compile(r"\*\*(.+?)\*\*")
-DATE = re.compile(r"\b(20[0-9]{2})-([0-9]{2})-([0-9]{2})\b")
-#: A lane's reply to the operator, saved beside the answers files: no answers.
-LANE_REPLY = re.compile(r"\bclaude[^\s/]*\.txt\b", re.IGNORECASE)
+#: A date, and the time of day if one follows it.
+WHEN = re.compile(r"\b(20[0-9]{2})-([0-9]{2})-([0-9]{2})(?:[ T]([0-9]{2}):([0-9]{2}))?\b")
 
 
 def _load(name: str, file: str):
@@ -111,10 +118,21 @@ def _load(name: str, file: str):
 
 
 #: Whose rules for answers files this shares, so the two never disagree about
-#: one: their names, the ledger's hash of each, the answer lines in them --
-#: and its git environment, clean of any `GIT_DIR` a hook exports.
+#: one: which files they are, the ledger's hash of each, the shape of an
+#: answer line -- and its git environment, clean of any `GIT_DIR` a hook
+#: exports.
 SIGNALS = _load("check_lane_signals", "check-lane-signals.py")
 LEDGER = SIGNALS.ANSWERS_LEDGER
+COPIES = str(Path(LEDGER).parent)
+#: `check-lane-signals.py`'s answer by id, in either case: the operator types
+#: `b-q23` as readily as `B-Q23`.
+ANSWER_ID = re.compile(SIGNALS._ANSWER_ID.pattern, re.MULTILINE | re.IGNORECASE)
+
+
+def lane_reply(path: str) -> bool:
+    """Whether `path` names a lane's reply to the operator, saved beside the
+    answers files (`claude-answers.txt`): no answers of the operator's."""
+    return Path(path.strip("`")).name.lower().startswith("claude")
 
 
 class GitError(RuntimeError):
@@ -161,7 +179,8 @@ class Object:
 
 
 def read_objects(tree: Path, names: list[str]) -> dict[str, Object]:
-    """Each `rev:path` of `names` that exists, from one `git cat-file --batch`."""
+    """Each object of `names` -- `rev:path`, or an object id -- that exists,
+    from one `git cat-file --batch`."""
     if not names:
         return {}
     out = _git(["cat-file", "--batch"], tree, "".join(f"{n}\n" for n in names).encode("utf-8"))
@@ -182,16 +201,17 @@ def read_objects(tree: Path, names: list[str]) -> dict[str, Object]:
     return found
 
 
-def tree_entries(obj: Object) -> list[str]:
-    """The names in a tree object: each entry is its mode, a space, its name,
-    a NUL, and an object id."""
-    names, at = [], 0
+def tree_entries(obj: Object) -> list[tuple[str, str]]:
+    """The entries of a tree object, as name and object id: each is its mode,
+    a space, its name, a NUL, and the id."""
+    entries, at = [], 0
     while at < len(obj.data):
         space = obj.data.index(b" ", at)
         nul = obj.data.index(b"\0", space)
-        names.append(obj.data[space + 1:nul].decode("utf-8", "replace"))
+        name = obj.data[space + 1:nul].decode("utf-8", "replace")
+        entries.append((name, obj.data[nul + 1:nul + 1 + obj.id_size].hex()))
         at = nul + 1 + obj.id_size
-    return names
+    return entries
 
 
 @dataclass
@@ -212,20 +232,25 @@ class Section:
     key: str
     heading: str
     #: The start of its first date, local time; 0 if it has none.
-    day: int
+    day: int = 0
+    #: The time of day given with that date, in minutes; None if none is.
+    minute: int | None = None
     rows: dict[str, Row] = field(default_factory=dict)
 
 
-def _day(text: str) -> int:
-    """The start of the first date in `text`, local time, as a timestamp; 0
-    if it has none."""
-    m = DATE.search(text)
+def _when(text: str) -> tuple[int, int | None] | None:
+    """The first date in `text` -- the start of its day, local time, as a
+    timestamp -- and the time of day after it in minutes, if there is one."""
+    m = WHEN.search(text)
     if not m:
-        return 0
+        return None
+    y, mo, d = (int(g) for g in m.groups()[:3])
     try:
-        return int(dt.datetime(*(int(g) for g in m.groups())).timestamp())
+        day = int(dt.datetime(y, mo, d).timestamp())
     except (ValueError, OverflowError, OSError):
-        return 0
+        return None
+    minute = int(m.group(4)) * 60 + int(m.group(5)) if m.group(4) else None
+    return day, minute
 
 
 def sections(text: str) -> list[Section]:
@@ -234,19 +259,21 @@ def sections(text: str) -> list[Section]:
     built: list[tuple[Section, dict[str, Row], dict[str, Row]]] = []
     for line in text.splitlines():
         if line.startswith("## "):
-            built.append((Section(key="", heading=line[3:].strip(), day=_day(line)), {}, {}))
-            continue
+            heading = line[3:].strip()
+            built.append((Section(key="", heading=heading), {}, {}))
         if not built:
             continue
         sec, owns, named = built[-1]
         if not line.startswith("|"):
-            sec.day = sec.day or _day(line)
+            when = None if sec.day else _when(line)
+            if when:
+                sec.day, sec.minute = when
             m = None if sec.key else SIGNALS._LEDGER_SHA256.search(line)
             if m:
                 sec.key = m.group(1)
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) < 4 or LANE_REPLY.search(sec.heading):
+        if len(cells) < 4 or lane_reply(sec.heading.split(maxsplit=1)[0] if sec.heading else ""):
             continue
         state = cells[3]
         bold = " ".join(BOLD.findall(state))
@@ -273,43 +300,51 @@ class Ledgers:
 
     #: Each branch's sections, by the branch's name in `branch_refs`.
     by_branch: dict[str, list[Section]]
-    #: Each section's place in time: its day, then its height in the ledgers
-    #: that hold it -- how many sections sit below it, at most.
-    rank: dict[str, tuple[int, int]]
     #: Every answers-file hash any branch's ledger records.
     recorded: set[str]
+
+    def newer(self, a: Section, b: Section) -> bool | None:
+        """Whether section `a` is newer than `b`; None when nothing tells."""
+        if a.day != b.day:
+            return a.day > b.day
+        for secs in self.by_branch.values():
+            keys = [s.key for s in secs]
+            if a.key in keys and b.key in keys:
+                return keys.index(a.key) < keys.index(b.key)
+        if a.minute is not None and b.minute is not None and a.minute != b.minute:
+            return a.minute > b.minute
+        return None
 
 
 def read_ledgers(texts: dict[str, str]) -> Ledgers:
     """`texts`, each branch's ledger by the branch's name, read."""
-    by_branch = {name: sections(text) for name, text in texts.items()}
-    rank: dict[str, tuple[int, int]] = {}
-    for secs in by_branch.values():
-        for i, sec in enumerate(secs):
-            day, height = rank.get(sec.key, (0, -1))
-            rank[sec.key] = (max(day, sec.day), max(height, len(secs) - 1 - i))
-    return Ledgers(by_branch, rank, SIGNALS.recorded_keys(list(texts.values())))
+    return Ledgers({name: sections(text) for name, text in texts.items()},
+                   SIGNALS.recorded_keys(list(texts.values())))
 
 
-def ledger_word(ledgers: Ledgers, qid: str, lane: str) -> tuple[tuple[int, int], Row] | None:
+def ledger_word(ledgers: Ledgers, qid: str, lane: str) -> tuple[Section, Row] | None:
     """The ledger's last word on `qid`, a question of lane `lane`, and the
-    rank of the section it is in; None if no row names it. The newest
-    section's row, as the question's own lane has it, else main, else
-    whichever branch says the question still waits."""
-    said: dict[str, dict[str, Row]] = {}
+    section it is in; None if no row names it."""
+    said: dict[str, tuple[Section, dict[str, Row]]] = {}
     for branch, secs in ledgers.by_branch.items():
         for sec in secs:
             if qid in sec.rows:
-                said.setdefault(sec.key, {})[branch] = sec.rows[qid]
+                said.setdefault(sec.key, (sec, {}))[1][branch] = sec.rows[qid]
     if not said:
         return None
-    key = max(said, key=lambda k: ledgers.rank[k])
-    rows = said[key]
-    for branch in (lane, "main", "origin/main"):
-        if branch in rows:
-            return ledgers.rank[key], rows[branch]
-    waiting = [r for r in rows.values() if not r.answered]
-    return ledgers.rank[key], (waiting or list(rows.values()))[0]
+    words = []
+    for key, (sec, rows) in said.items():
+        if any(ledgers.newer(other, sec) for k, (other, _) in said.items() if k != key):
+            continue
+        for branch in (lane, "origin/main", "main"):
+            if branch in rows:
+                words.append((sec, rows[branch]))
+                break
+        else:
+            waiting = [r for r in rows.values() if not r.answered]
+            words.append((sec, (waiting or list(rows.values()))[0]))
+    waiting_words = [w for w in words if not w[1].answered]
+    return (waiting_words or words)[0]
 
 
 @dataclass
@@ -345,31 +380,44 @@ def by_title(match: re.Match[str], listed: list[Question]) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def new_answers(tree: Path, ledgers: Ledgers, listed: list[Question]) -> dict[str, tuple[int, str]]:
-    """The questions an answers file in `tree` answers that no ledger records
-    yet, each with when the file was last written and its name -- leaving out
-    the lines a ledger section about the same file has rows for, which were
-    processed before."""
+def answer_lines(text: str, listed: list[Question]) -> list[tuple[str, str | None]]:
+    """Each answer line of an answers file, with the question it answers if
+    that is one of `listed`'s or has an id."""
+    found = []
+    for line in text.splitlines():
+        m = ANSWER_ID.match(line)
+        if m:
+            found.append((line, m.group(1).upper() if "-" in m.group(1) else None))
+            continue
+        t = SIGNALS._ANSWER_TITLED.match(line)
+        if t:
+            found.append((line, by_title(t, listed)))
+    return found
+
+
+def processed_lines(copies: list[str]) -> set[str]:
+    """The answer lines of every verbatim copy in `operator-answers/`: what
+    the lanes have processed, compared as `_plain` text."""
+    return {_plain(line) for text in copies for line, _ in answer_lines(text, [])}
+
+
+def new_answers(tree: Path, ledgers: Ledgers, listed: list[Question],
+                processed: set[str]) -> dict[str, tuple[int, str]]:
+    """The questions answered by a line no lane has processed, in an answers
+    file of `tree` whose content no ledger records: each with when its file
+    was last written, and the file's name."""
     found: dict[str, tuple[int, str]] = {}
-    for path in sorted({p for pattern in SIGNALS.ANSWERS_GLOBS for p in tree.glob(pattern)}):
+    for path, _ in SIGNALS.unrecorded_answers(tree, ledgers.recorded):
         rel = path.relative_to(tree).as_posix()
-        if LANE_REPLY.search(rel):
+        if lane_reply(rel):
             continue
         try:
-            data = path.read_bytes()
+            text = path.read_bytes().decode("utf-8", "replace")
             when = int(path.stat().st_mtime)
         except OSError:
             continue  # Gone, or held: the next refresh reads it.
-        if SIGNALS.answers_key(data) in ledgers.recorded:
-            continue
-        before = {q for secs in ledgers.by_branch.values() for sec in secs
-                  if rel in sec.heading for q in sec.rows}
-        text = data.decode("utf-8", "replace")
-        qids = [m.group(1) for m in SIGNALS._ANSWER_ID.finditer(text) if "-" in m.group(1)]
-        qids += [q for q in (by_title(m, listed) for m in SIGNALS._ANSWER_TITLED.finditer(text))
-                 if q]
-        for qid in qids:
-            if qid not in before and found.get(qid, (-1, ""))[0] < when:
+        for line, qid in answer_lines(text, listed):
+            if qid and _plain(line) not in processed and found.get(qid, (-1, ""))[0] < when:
                 found[qid] = (when, rel)
     return found
 
@@ -381,7 +429,7 @@ class View:
     waiting: list[Question]
     #: Answered, and still among their lane's questions.
     answered: list[Question]
-    #: Files in the folder that are not this script's.
+    #: Files in the folder, not this script's, that hold answers nobody reads.
     stray: list[str]
 
 
@@ -391,38 +439,58 @@ def build(tree: Path) -> View:
     refs = branch_refs(tree)
     lanes = [lane for lane in LANES if lane in refs]
     first = read_objects(tree, [f"{refs[lane]}:open-questions" for lane in lanes]
-                         + [f"{ref}:{LEDGER}" for ref in refs.values()])
+                         + [f"{ref}:{LEDGER}" for ref in refs.values()]
+                         + [f"{ref}:{COPIES}" for ref in refs.values()])
     wanted = []
     for lane in lanes:
         folder = first.get(f"{refs[lane]}:open-questions")
-        for name in tree_entries(folder) if folder and folder.kind == "tree" else []:
+        for name, _ in tree_entries(folder) if folder and folder.kind == "tree" else []:
             m = QUESTION_FILE.match(name)
             if m and m.group(1) == lane:
                 wanted.append((name[:-3], lane, f"{refs[lane]}:open-questions/{name}"))
-    blobs = read_objects(tree, [w[2] for w in wanted])
+    copies = set()
+    for ref in refs.values():
+        folder = first.get(f"{ref}:{COPIES}")
+        for name, oid in tree_entries(folder) if folder and folder.kind == "tree" else []:
+            if name.endswith(".txt"):
+                copies.add(oid)
+    blobs = read_objects(tree, [w[2] for w in wanted] + sorted(copies))
     listed = [Question(qid, lane, blobs[name].data.decode("utf-8", "replace"))
               for qid, lane, name in sorted(wanted, key=lambda w: _order(w[0])) if name in blobs]
     ledgers = read_ledgers({branch: first[f"{ref}:{LEDGER}"].data.decode("utf-8", "replace")
                             for branch, ref in refs.items() if f"{ref}:{LEDGER}" in first})
-    fresh = new_answers(tree, ledgers, listed)
-    view = View(waiting=[], answered=[], stray=strays(tree))
+    processed = processed_lines([blobs[oid].data.decode("utf-8", "replace")
+                                 for oid in sorted(copies) if oid in blobs])
+    fresh = new_answers(tree, ledgers, listed, processed)
+    view = View(waiting=[], answered=[], stray=strays(tree, listed))
     for q in listed:
         word = ledger_word(ledgers, q.qid, q.lane)
         answered = word is not None and word[1].answered
         q.why = word[1].state if word else ""
-        if q.qid in fresh and (word is None or fresh[q.qid][0] >= word[0][0]):
+        if q.qid in fresh and (word is None or fresh[q.qid][0] >= word[0].day):
             answered, q.why = True, f"answered in `{fresh[q.qid][1]}`"
         (view.answered if answered else view.waiting).append(q)
     return view
 
 
-def strays(tree: Path) -> list[str]:
-    """The files in the folder that are not this script's."""
+def strays(tree: Path, listed: list[Question]) -> list[str]:
+    """The files in the folder, not this script's, that hold answer lines:
+    an answers file saved there, which nothing reads."""
+    found = []
     try:
-        return sorted(p.name for p in (tree / VIEW).iterdir()
-                      if p.name != INDEX and not QUESTION_FILE.match(p.name))
+        entries = sorted((tree / VIEW).iterdir())
     except OSError:
         return []
+    for path in entries:
+        if path.name == INDEX or QUESTION_FILE.match(path.name) or not path.is_file():
+            continue
+        try:
+            text = path.read_bytes()[:1 << 16].decode("utf-8", "replace")
+        except OSError:
+            continue
+        if answer_lines(text, listed):
+            found.append(path.name)
+    return found
 
 
 def _order(qid: str) -> tuple[str, int]:
@@ -470,7 +538,7 @@ def index(view: View, now: dt.datetime) -> str:
         "",
     ]
     if view.stray:
-        out += ["**Nothing reads these files here:** "
+        out += ["**Nothing reads the answers in these files here:** "
                 + ", ".join(f"`{name}`" for name in view.stray)
                 + ". Answers go in `open-questions/`.", ""]
     out += [f"## Waiting on you ({len(view.waiting)})", ""]
@@ -501,24 +569,45 @@ def copy_text(q: Question) -> str:
 
 def write(tree: Path, view: View, now: dt.datetime) -> list[str]:
     """The folder brought to `view`: each file written whose text differs,
-    each question file no longer waiting removed. Returns what changed."""
+    each question file no longer waiting removed. Returns what changed;
+    OSError, after doing what it can, naming what it could not."""
     folder = tree / VIEW
     folder.mkdir(exist_ok=True)
+    changed: list[str] = []
+    failed: list[str] = []
+
+    def attempt(done: bool | None, name: str) -> None:
+        if done is None:
+            failed.append(name)
+        elif done:
+            changed.append(name)
+
     wanted = {f"{q.qid}.md": copy_text(q) for q in view.waiting}
-    changed = [name for name, text in wanted.items() if _put(folder / name, text)]
+    for name, text in wanted.items():
+        attempt(_try(_put, folder / name, text), name)
     for old in sorted(folder.iterdir()):
-        if QUESTION_FILE.match(old.name) and old.name not in wanted and _remove(old):
-            changed.append(f"-{old.name}")
+        if QUESTION_FILE.match(old.name) and old.name not in wanted:
+            attempt(_try(_remove, old), f"-{old.name}")
     text = index(view, now)
-    if _unstamped(_read(folder / INDEX)) != _unstamped(text) and _put(folder / INDEX, text):
-        changed.append(INDEX)
+    if _unstamped(_read(folder / INDEX)) != _unstamped(text):
+        attempt(_try(_put, folder / INDEX, text), INDEX)
     _ignore(tree)
+    if failed:
+        raise OSError(f"could not write {', '.join(failed)} in {folder}")
     return changed
+
+
+def _try(action, *args) -> bool | None:
+    """`action(*args)`; None if it raised OSError."""
+    try:
+        return action(*args)
+    except OSError:
+        return None
 
 
 def _failed(tree: Path, error: str, now: dt.datetime) -> None:
     """A failed refresh, said at the top of the index above the last good
-    one -- which is otherwise left as it was."""
+    one -- which is otherwise left as it was. OSError if it cannot be."""
     path = tree / VIEW / INDEX
     if not path.parent.is_dir():
         return
@@ -541,30 +630,23 @@ def _read(path: Path) -> str:
 
 
 def _put(path: Path, text: str) -> bool:
-    """`path` holding `text`, read-only; whether it was written. A file held
-    open elsewhere is left for the next refresh."""
+    """`path` holding `text`, read-only; whether it had to be written."""
     data = text.encode("utf-8")
-    try:
-        if path.exists():
-            if path.read_bytes() == data:
-                os.chmod(path, stat.S_IREAD)
-                return False
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-        path.write_bytes(data)
-        os.chmod(path, stat.S_IREAD)
-        return True
-    except OSError:
-        return False
+    if path.exists():
+        if path.read_bytes() == data:
+            os.chmod(path, stat.S_IREAD)
+            return False
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    path.write_bytes(data)
+    os.chmod(path, stat.S_IREAD)
+    return True
 
 
 def _remove(path: Path) -> bool:
-    """`path` removed, read-only or not; whether it was."""
-    try:
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-        path.unlink()
-        return True
-    except OSError:
-        return False  # Held open elsewhere; the next refresh removes it.
+    """`path` removed, read-only or not."""
+    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    path.unlink()
+    return True
 
 
 def _ignore(tree: Path) -> None:
@@ -583,6 +665,13 @@ def _ignore(tree: Path) -> None:
         pass  # Untracked either way; `git status` only shows it.
 
 
+def _snapshot(tree: Path) -> dict[str, tuple[int, int]]:
+    """Every file under `tree` but `.git` and the folder: size and mtime."""
+    return {p.relative_to(tree).as_posix(): (p.stat().st_size, p.stat().st_mtime_ns)
+            for p in tree.rglob("*")
+            if p.is_file() and p.relative_to(tree).parts[0] not in (".git", VIEW)}
+
+
 def _fixture(tree: Path, check) -> None:
     """The self-test's checks, in a throwaway repository at `tree`."""
     tree.mkdir()
@@ -593,7 +682,8 @@ def _fixture(tree: Path, check) -> None:
             env.update(GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
         r = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c",
                             "commit.gpgsign=false", *args], cwd=str(tree), env=env,
-                           capture_output=True, text=True, check=False)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           check=False)
         if r.returncode != 0:
             raise SystemExit(f"self-test: git {args}: {r.stderr}")
 
@@ -609,55 +699,81 @@ def _fixture(tree: Path, check) -> None:
 
     git("init", "-q", "-b", "main")
     put("open-questions/README.md", "rules\n")
-    ask("B-Q1", "Answered in a new version of an answers file")
+    ask("B-Q1", "Answered in a new line, its id in lower case")
     ask("B-Q2", "Still open, though a lane's reply names it")
     ask("B-Q3", "Answered by its title alone")
+    ask("B-Q4", "Answered in a file whose name ends in claude")
+    ask("B-Q5", "Asked again on origin/main, which main lags")
     git("add", "-A")
     git("commit", "-q", "-m", "b", when="2026-10-01T12:00:00")
     git("branch", "lane-b")
     for n, about in enumerate(["Relayed as answered", "Asked again by its own lane",
-                               "Not answered, whatever a lane's reply says",
+                               "Not answered, then answered in a line added to the file",
                                "Answered, then asked again in a newer section",
                                "Questions back, then answered in a newer section",
                                "Answered in a row that mentions another",
-                               "Mentioned only in another question's row",
-                               "Recorded, the rest carried by another", "Carrying the rest"],
-                              start=1):
+                               "Mentioned only, and in files that answer nothing",
+                               "Recorded, the rest carried by another", "Carrying the rest",
+                               "Asked back in a row, then answered in a line added"], start=1):
         ask(f"C-Q{n}", about)
-    old = b"C-Q1: A\nC-Q3: I cannot decide\n"
-    second = "C-Q4: which one?\nC-Q5: A\nC-Q7: A\n"
+    old = "C-Q1: A\nC-Q3: I cannot decide\n"
+    second = "C-Q4: which one?\nC-Q5: A\n"
+    zero = "C-Q7: A\n"
     table = "| Answer | Lane | Recorded in | State |\n|---|---|---|---|\n"
     reply = (f"## open-questions/claude-answers.txt\n\n- **Written:** 2026-10-06, a lane's reply.\n"
              f"- **Content:** sha256 `{'c' * 64}`\n\n{table}"
-             "| C-Q3 | C | -- | relayed 2026-10-06 (lane A's account) |\n\n")
+             "| C-Q7 | C | -- | relayed 2026-10-06 (lane A's account) |\n\n")
     # Newer than `first` the same day -- higher in the ledger -- and, like a
     # section a lane has not published yet, on lane C's branch alone.
     newer = (f"## open-questions/answers.2.txt\n\n- **Written:** 2026-10-05 16:15\n"
+             f"- **Copy:** `operator-answers/2026-10-05-open-questions-answers.2.txt`\n"
              f"- **Content:** sha256 `{SIGNALS.answers_key(second.encode())}`\n\n{table}"
              "| C-Q4 | C | -- | relayed 2026-10-05; **asked again: which one?** |\n"
-             "| C-Q5 | C | -- | relayed 2026-10-05 (A) |\n\n")
+             "| C-Q5 | C | -- | relayed 2026-10-05 (A) |\n"
+             "| \"...a question of your own?\" | C | -- | **Answered, with one question back to "
+             "you: C-Q10.** |\n\n")
     first = (f"## open-questions/answers.txt\n\n- **Written:** 2026-10-05\n"
-             f"- **Content:** sha256 `{SIGNALS.answers_key(old)}`\n\n{table}"
+             f"- **Copy:** `operator-answers/2026-10-05-open-questions-answers.txt`\n"
+             f"- **Content:** sha256 `{SIGNALS.answers_key(old.encode())}`\n\n{table}"
              "| C-Q1 | C | -- | relayed 2026-10-05 (A) |\n"
              "| C-Q2 | C | -- | relayed 2026-10-05 (B) |\n"
              "| C-Q3 | C | -- | **not answered** in this file |\n"
              "| C-Q4 | C | -- | relayed 2026-10-05 (A) |\n"
              "| C-Q5 | C | -- | relayed 2026-10-05; **questions back, no option chosen yet** |\n"
              "| C-Q6: A -- the line read as C-Q7's was C-Q6's | C | -- | relayed 2026-10-05 |\n"
-             "| C-Q8 | C | §1 | recorded; **the rest waits on you as C-Q9** |\n")
-    put(LEDGER, f"# ledger\n\n{reply}{first}")
+             "| C-Q8 | C | §1 | recorded; **the rest waits on you as C-Q9** |\n"
+             "| B-Q5 | B | -- | relayed 2026-10-05 (A) |\n\n")
+    # Recorded, with no copy kept: its lines must not count as new.
+    unkept = (f"## open-questions/answers.0.txt\n\n- **Written:** 2026-10-04\n"
+              f"- **Content:** sha256 `{SIGNALS.answers_key(zero.encode())}`\n")
+    put(LEDGER, f"# ledger\n\n{reply}{first}{unkept}")
+    put("operator-answers/2026-10-05-open-questions-answers.txt", old)
     git("add", "-A")
     git("commit", "-q", "-m", "c", when="2026-10-02T12:00:00")
     git("branch", "lane-c")
     git("checkout", "-q", "lane-c")
     put("open-questions/C-Q2.md", "## C-Q2 — [C] Asked again by its own lane\n\nAsked again.\n")
     put(LEDGER, f"# ledger\n\n{reply}{newer}" + first.replace(
-        "relayed 2026-10-05 (B) |", "relayed 2026-10-05; **asked again after your answer** |"))
+        "relayed 2026-10-05 (B) |", "relayed 2026-10-05; **asked again after your answer** |")
+        + unkept)
+    put("operator-answers/2026-10-05-open-questions-answers.2.txt", second)
     git("add", "-A")
     git("commit", "-q", "-m", "c asks again", when="2026-10-07T12:00:00")
+    # origin/main a commit ahead of main, as when the integration tree has
+    # not been fast-forwarded: there, B-Q5 -- whose lane's branch holds no
+    # ledger -- is asked again.
+    git("checkout", "-q", "-b", "ahead", "main")
+    put(LEDGER, f"# ledger\n\n{reply}" + first.replace(
+        "| B-Q5 | B | -- | relayed 2026-10-05 (A) |", "| B-Q5 | B | -- | **asked again** |")
+        + unkept)
+    git("commit", "-q", "-am", "b-q5 asked again", when="2026-10-08T12:00:00")
+    git("update-ref", "refs/remotes/origin/main", "refs/heads/ahead")
     git("checkout", "-q", "main")
-    (tree / "open-questions" / "answers.txt").write_bytes(old + b"B-Q1: A\n")
-    put("open-questions/answers.2.txt", second)
+    git("branch", "-q", "-D", "ahead")
+    put("open-questions/answers.txt", old + "b-q1: A\nC-Q3: B\n")
+    put("open-questions/answers.2.txt", second + "C-Q10: no\n")
+    put("open-questions/answers.0.txt", zero)
+    put("open-questions/answers-for-claude.txt", "B-Q4: A\n")
     put("open-questions/claude-answers.txt", "B-Q2: a lane's remark, not an answer\n")
     late = put("open-questions-answers.3.txt",
                "C-Q4: A\nAnswered by its title alone (lane B, 2026-10-01): yes\n")
@@ -665,12 +781,16 @@ def _fixture(tree: Path, check) -> None:
     os.utime(late, (stamp, stamp))
 
     view = build(tree)
-    check("waiting", [q.qid for q in view.waiting], ["B-Q2", "C-Q2", "C-Q3", "C-Q4", "C-Q7", "C-Q9"])
-    check("answered", [q.qid for q in view.answered], ["B-Q1", "B-Q3", "C-Q1", "C-Q5", "C-Q6", "C-Q8"])
+    check("waiting", [q.qid for q in view.waiting],
+          ["B-Q2", "B-Q5", "C-Q2", "C-Q4", "C-Q7", "C-Q9"])
+    check("answered", [q.qid for q in view.answered],
+          ["B-Q1", "B-Q3", "B-Q4", "C-Q1", "C-Q3", "C-Q5", "C-Q6", "C-Q8", "C-Q10"])
     why = {q.qid: q.why for q in view.waiting + view.answered}
-    check("a new answer says where", why["B-Q1"], "answered in `open-questions/answers.txt`")
-    check("the ledger's word", (why["C-Q5"], why["C-Q3"]),
-          ("relayed 2026-10-05 (A)", "**not answered** in this file"))
+    check("where each new answer is", (why["B-Q1"], why["C-Q3"], why["C-Q10"]),
+          ("answered in `open-questions/answers.txt`", "answered in `open-questions/answers.txt`",
+           "answered in `open-questions/answers.2.txt`"))
+    check("the ledger's word", (why["C-Q5"], why["C-Q4"]),
+          ("relayed 2026-10-05 (A)", "relayed 2026-10-05; **asked again: which one?**"))
     check("in short", in_short(view.waiting[0].text),
           "**In short:** still open, though a lane's reply names it.")
     check("title", title(view.waiting[0].text), "[B] Still open, though a lane's reply names it")
@@ -678,25 +798,29 @@ def _fixture(tree: Path, check) -> None:
     folder = tree / VIEW
     put(f"{VIEW}/B-Q1.md", "left from an earlier refresh\n")
     put(f"{VIEW}/answers.txt", "C-Q9: A\n")
+    put(f"{VIEW}/update.bat", "py questions-for-you.py\npause\n")
+    before = _snapshot(tree)
     view = build(tree)
     check("strays", view.stray, ["answers.txt"])
     now = dt.datetime(2026, 10, 10, 12, 0)
     check("written", sorted(write(tree, view, now)),
-          sorted(["-B-Q1.md", "B-Q2.md", "C-Q2.md", "C-Q3.md", "C-Q4.md", "C-Q7.md", "C-Q9.md",
+          sorted(["-B-Q1.md", "B-Q2.md", "B-Q5.md", "C-Q2.md", "C-Q4.md", "C-Q7.md", "C-Q9.md",
                   INDEX]))
     check("the folder", sorted(p.name for p in folder.iterdir()),
-          sorted([INDEX, "answers.txt", "B-Q2.md", "C-Q2.md", "C-Q3.md", "C-Q4.md", "C-Q7.md",
-                  "C-Q9.md"]))
+          sorted([INDEX, "answers.txt", "update.bat", "B-Q2.md", "B-Q5.md", "C-Q2.md", "C-Q4.md",
+                  "C-Q7.md", "C-Q9.md"]))
     copy = _read(folder / "C-Q2.md")
     check("a copy says so, then holds its lane's text",
           (copy.startswith("> A copy of lane C's question"), copy.endswith("Asked again.\n")),
           (True, True))
     check("and is read-only", os.access(folder / "C-Q2.md", os.W_OK), False)
     text = _read(folder / INDEX)
-    for what, line in (("lists the waiting", "- **C-Q3** (C-Q3.md): [C] Not answered"),
-                       ("with the ledger's word", "  *The ledger:* **not answered** in this file"),
+    for what, line in (("lists the waiting", "- **C-Q4** (C-Q4.md): [C] Answered, then asked"),
+                       ("with the ledger's word",
+                        "  *The ledger:* relayed 2026-10-05; **asked again: which one?**"),
                        ("and the answered", "- C-Q5: relayed 2026-10-05 (A)"),
-                       ("names a stray", "**Nothing reads these files here:** `answers.txt`")):
+                       ("names a stray", "**Nothing reads the answers in these files here:** "
+                                         "`answers.txt`.")):
         check(f"the index {what}", any(x.startswith(line) for x in text.splitlines()), True)
     check("a second refresh changes nothing", write(tree, build(tree), now), [])
     exclude = tree / ".git" / "info" / "exclude"
@@ -706,6 +830,7 @@ def _fixture(tree: Path, check) -> None:
     status = _git(["status", "--porcelain", "--untracked-files=all"], tree).decode()
     check("git status shows the untracked answers but not the folder",
           ("open-questions/answers.txt" in status, VIEW in status), (True, False))
+    check("nothing outside the folder written", _snapshot(tree), before)
 
     # Lane C records C-Q1: no question file here changes, but the index must.
     git("checkout", "-q", "lane-c")
@@ -714,19 +839,28 @@ def _fixture(tree: Path, check) -> None:
     git("checkout", "-q", "main")
     later = dt.datetime(2026, 10, 10, 13, 0)
     check("a recorded answer rewrites only the index", write(tree, build(tree), later), [INDEX])
-    text = _read(folder / INDEX)
-    check("which no longer lists it", ("C-Q1" in text, f"{STAMP}2026-10-10 13:00" in text),
-          (False, True))
+    lines = _read(folder / INDEX).splitlines()
+    check("which no longer lists it", (any(x.startswith("- C-Q1:") for x in lines),
+                                       f"{STAMP}2026-10-10 13:00." in lines), (False, True))
 
     _failed(tree, "git cat-file --batch: broken", dt.datetime(2026, 10, 10, 14, 0))
     lines = _read(folder / INDEX).splitlines()
     check("a failure is said at the top",
           (lines[0], lines[1].startswith(f"{FAILED} (2026-10-10 14:00): git cat-file")),
           ("# Questions waiting on you", True))
-    check("over the last good index", "- **C-Q3** (C-Q3.md): [C] Not answered" in "\n".join(lines),
+    check("over the last good index", "- **C-Q4** (C-Q4.md): [C] Answered" in "\n".join(lines),
           True)
     check("and goes at the next good refresh", write(tree, build(tree), later), [INDEX])
     check("for good", FAILED in _read(folder / INDEX), False)
+
+    _remove(folder / INDEX)
+    (folder / INDEX).mkdir()
+    try:
+        write(tree, build(tree), later)
+        check("an index that cannot be written fails the refresh", False, True)
+    except OSError as e:
+        check("an index that cannot be written fails the refresh", INDEX in str(e), True)
+    (folder / INDEX).rmdir()
     try:
         _git(["rev-parse", "--verify", "--quiet", "refs/heads/no-such-branch"], tree)
         check("a failed git command raises", False, True)
@@ -758,6 +892,18 @@ def _self_test() -> int:
     return 1 if failures else 0
 
 
+def _report(tree: Path, error: Exception, now: dt.datetime, in_index: bool) -> int:
+    """A failed refresh, on stderr and, when `in_index`, at the top of the
+    index; the exit status for it."""
+    print(f"questions-for-you: {error}", file=sys.stderr)
+    if in_index:
+        try:
+            _failed(tree, str(error), now)
+        except OSError:
+            pass  # The index itself cannot be written: stderr is all there is.
+    return 1
+
+
 def main(argv: list[str]) -> int:
     sys.path.insert(0, str(HERE))
     import selftestflag  # noqa: E402 -- scripts/ is put on the path just above
@@ -776,14 +922,14 @@ def main(argv: list[str]) -> int:
     try:
         view = build(tree)
     except (GitError, OSError) as e:
-        print(f"questions-for-you: {e}", file=sys.stderr)
-        if "--print" not in argv:
-            _failed(tree, str(e), now)
-        return 1
+        return _report(tree, e, now, "--print" not in argv)
     if "--print" in argv:
         sys.stdout.buffer.write(index(view, now).encode("utf-8"))
         return 0
-    changed = write(tree, view, now)
+    try:
+        changed = write(tree, view, now)
+    except OSError as e:
+        return _report(tree, e, now, True)
     print(f"questions-for-you: {len(view.waiting)} waiting on the operator, "
           f"{len(view.answered)} answered and not yet recorded"
           + (f"; changed {', '.join(changed)}" if changed else ""))

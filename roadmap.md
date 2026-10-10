@@ -4772,6 +4772,12 @@ lane C's `guitk`.
   named family with the toolkit's own `ensure_family`, so a run is drawn in
   the face it was measured in, at most four new families a frame.
 
+- `[x]` `[F]` **A shaped glyph's outline** -- done 2026-10-10, for lane C's
+  `requests/c-f-an-outline-for-each-shaped-glyph.md` (SVG text drawn as
+  paths: a gradient, a stroke, a clip on the letters). `SystemFont::outline`
+  gives any glyph the font shaped as a path in pixels, y up, from whichever
+  face drew it and at that face's weight, unhinted.
+
 - `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
   F's part** (the operator's rule, `design-decisions.md` §1242;
   `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).

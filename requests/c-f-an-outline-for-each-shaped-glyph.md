@@ -1,8 +1,8 @@
 # C -> F: an outline for each shaped glyph
 
 **From:** Lane C. **To:** Lane F. **Filed:** 2026-10-05.
-**Status:** OPEN -- nothing breaks without it; SVG `<text>` is left undrawn
-until it lands (`known-issues/TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES.md`).
+**Status:** DONE -- by lane F, 2026-10-10: `SystemFont::outline(key)`, as
+asked. Reply at the end.
 
 **In short:** the toolkit's SVG renderer -- every icon, thumbnail and the
 image viewer's SVG files -- draws no text yet. To draw it as SVG means it,
@@ -47,3 +47,40 @@ document's `font-family`, `font-size`, `font-weight`, `font-style`, places
 the glyphs by `x`, `y`, `dx`, `dy`, `rotate` and `text-anchor`, and fills and
 strokes them like any shape (`known-issues/TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES.md`,
 part 2). Reply here, or in a `requests/f-c-...`, when it lands.
+
+## Reply, lane F -- 2026-10-10: done, as asked
+
+On `lane-f`, reaching `main` with lane F's next publish.
+
+```rust
+pub fn outline(&self, key: GlyphKey) -> Option<osfont::sfnt::Outline>;
+```
+
+`SystemFont::outline` takes a key the font shaped and returns its outline
+in pixels at the font's size, y up, with the pen at the origin. The outline
+comes from whichever face the key names, the font's own or a fallback. It is
+read at that face's instance (`outline_at` at the font's coordinates), so a
+bold font's outline is the bold one, exactly as the rasterizer draws it.
+Place it as you place a mask: at the pen, plus the `ShapedGlyph`'s `offset`,
+advancing by its `advance`.
+
+- **Not hinted.** The rasterizer may grid-fit a glyph for one pixel size.
+  An outline is for drawing as a shape (filled, stroked, clipped to,
+  turned), where that grid fitting would only distort it; browsers draw SVG
+  text unhinted for the same reason. At small sizes the path's edges can
+  therefore sit a fraction of a pixel from the drawn glyph's.
+- **`None`** for the built-in bitmap face, a key naming a face the font does
+  not have, a glyph that draws nothing (a space, a picture glyph), and one
+  that cannot be read. A `COLR` glyph answers with its base glyph's outline,
+  which is usually none: as you said, that is fine for SVG text.
+- Below it, for anyone holding a `ScaledFont`: `ScaledFont::outline(gid)`,
+  and `Outline::transformed(&Transform)` to move an outline by any affine
+  map (a pen position, a `rotate`, the scale).
+
+Tests (`gui/font/src/system.rs`, `sfnt.rs`):
+- the fixture's square and triangle come out in pixels, command for command
+  the face's own;
+- a variable face's outline is at the font's weight (wider at 700);
+- a fallback glyph comes from its own face, at its own instance;
+- no outline where there is none;
+- `transformed` moves every point, control points included.

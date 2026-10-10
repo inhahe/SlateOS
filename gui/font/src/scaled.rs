@@ -47,7 +47,7 @@ use crate::norm::{Ignorable, Piece};
 use crate::phase::{Phase, Timer};
 use crate::raster::{GlyphMask, Rendering, rasterize_with};
 use crate::script::{self, ScriptTags};
-use crate::sfnt::{Face, PathCmd, SfntError};
+use crate::sfnt::{Face, Outline, PathCmd, SfntError, Transform};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 use crate::thai;
 use crate::var;
@@ -569,6 +569,31 @@ impl ScaledFont {
     #[must_use]
     pub fn units_per_em(&self) -> u16 {
         self.face.units_per_em()
+    }
+
+    /// The outline of glyph `gid`: in pixels at this font's size, y up, the
+    /// pen at the origin -- at this font's instance of a variable face (the
+    /// weight it was made, say), the shape [`glyph`](Self::glyph) rasterizes.
+    ///
+    /// Not hinted. Hinting fits a glyph to the pixel grid at one size, and an
+    /// outline is for drawing as a shape -- filled, stroked, clipped to,
+    /// scaled and turned as a caller likes -- where a grid fitted for one
+    /// size and angle would only distort it; SVG renderers draw text
+    /// unhinted for the same reason.
+    ///
+    /// `None` for a glyph that draws nothing -- a space, a face's picture
+    /// glyph -- and for one that cannot be read.
+    #[must_use]
+    pub fn outline(&self, gid: u16) -> Option<Outline> {
+        let outline = self.face.outline_at(gid, &self.coords).ok()?;
+        if outline.is_empty() {
+            return None;
+        }
+        Some(outline.transformed(&Transform {
+            a: self.scale,
+            d: self.scale,
+            ..Transform::IDENTITY
+        }))
     }
 
     /// Read a font file and pin it to a size in one step.

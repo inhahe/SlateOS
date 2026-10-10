@@ -905,10 +905,12 @@ def _self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "probe"
         (probe / "src").mkdir(parents=True)
-        (probe / "src" / "tests.rs").write_text("fn t() { press(Key::A); }", encoding="utf-8")
-        (probe / "src" / "lib.rs").write_text(nl.join(["#[cfg(test)]", "mod tests;"]), encoding="utf-8")
+        tests_rs = probe / "src" / "tests.rs"
+        lib_rs = probe / "src" / "lib.rs"
+        tests_rs.write_text("fn t() { press(Key::A); }", encoding="utf-8", newline="")
+        lib_rs.write_text(nl.join(["#[cfg(test)]", "mod tests;"]), encoding="utf-8", newline="")
         gated = survey(probe)
-        (probe / "src" / "lib.rs").write_text("mod tests;", encoding="utf-8")
+        lib_rs.write_text("mod tests;", encoding="utf-8", newline="")
         ungated = survey(probe)
     surveyed: list[tuple[object, object, str]] = [
         (gated, None, "the survey skips a test module's file"),

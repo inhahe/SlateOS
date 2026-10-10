@@ -3302,9 +3302,10 @@ word; text inside them that says "lane C" is history.
   - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
     written here rather than ported: a treemap, a sortable file list and an
     extension breakdown.
-  - **First step:** compare the fork's features with diskanalyzer's. Then
-    either port the fork's logic or bring its features to diskanalyzer; if
-    neither is clearly better, it is a question for the operator.
+  - **First step, done 2026-10-10:** the fork's features compared with
+    diskanalyzer's. Diskanalyzer has a small part of them. Whether to port
+    the fork's code or bring its features to diskanalyzer is put to the
+    operator in `open-questions/E-Q6.md`, recommending the second.
 
   QDirStat, the other route the operator named, is built on Qt, which
   nothing here has ported.

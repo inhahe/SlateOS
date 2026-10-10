@@ -279,7 +279,7 @@ def self_test() -> int:
             if generator_source is None:
                 generator.unlink(missing_ok=True)
             else:
-                generator.write_text(generator_source, encoding="utf-8")
+                generator.write_text(generator_source, encoding="utf-8", newline="")
 
         good_generator = FIXTURE_GENERATOR.format(rows="".join(FIXTURE_ROWS))
 

@@ -7068,6 +7068,15 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    echo "=== Checking the frame-needles gate against itself ==="
+    if ! run_checker check-frame-needles-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-frame-needles.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The frame-needles gate fails its own" >&2
+        echo "cases, so its verdict on the tree below would not be trustworthy." >&2
+        return 1
+    fi
+
     echo "=== Checking that whole-frame needles are scoped to their band ==="
     if ! run_checker check-frame-needles "$py" "$PROJECT_ROOT/scripts/check-frame-needles.py"; then
         echo "" >&2

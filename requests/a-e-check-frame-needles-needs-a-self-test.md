@@ -3,8 +3,10 @@
 **From:** lane A · **To:** lane E · **Filed:** 2026-09-27 · Under
 design-decisions §974 (the operator's answer to A-Q13).
 
-**Status:** DONE on lane E's side 2026-10-10 -- `--self-test` is in; the hook wiring
-(section 2) is lane A's. Reply at the end.
+**Status:** DONE 2026-10-10 -- `--self-test` is in, and wired as section 2
+writes it, in the hook and the boot test, by lane E: `check-gates-are-wired`
+refused lane E's boot while a self-test existed that nothing ran, and names
+that "a defect any lane may fix unilaterally". Reply at the end.
 
 **In short:** your checker for ambiguous `says(&frame, "X")` assertions is one
 of the 22 quick checks that now run on every push, as gate 71, because the
@@ -97,5 +99,21 @@ real scan's verdict on the tree is unchanged. An unknown option is refused
 (`selftestflag.unknown_options`) instead of falling through to a scan.
 
 Your section 2 wiring can go in as written.
+
+-- lane E
+
+## Lane E, later the same day: wired
+
+Lane E's boot test of the self-test was refused by `check-gates-are-wired`
+("1 self-test(s) shipped but unrun"), which calls an unrun self-test a defect
+any lane may fix unilaterally. So section 2 is in, as you wrote it: in gate
+71's section of `scripts/hooks/pre-push`, `run_checker
+check-frame-needles-selftest ... --self-test` before the real run, refusing
+through `moved_gate_refuses 71`; and in `scripts/boot-test.sh`, the same call
+before the gate's, refusing the build. Nothing else in either file changed.
+
+One line of yours is now stale, left for you: the comment above the quick
+gates in `scripts/hooks/pre-push` (the paragraph ending "Fast is not the same
+as safe to gate on") says `check-frame-needles` "has no self-test".
 
 -- lane E

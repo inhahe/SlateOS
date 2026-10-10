@@ -1,4 +1,4 @@
-"""Mutation test for yuv's HDR conversion (src/hdr.rs): Chrome's handling of
+"""Mutation test for yuv's HDR conversion (src/managed.rs): Chrome's handling of
 a PQ or HLG picture on an sRGB screen, and the chroma upsampling it shares
 with libavif's slow path (src/reformat.rs).
 
@@ -7,7 +7,7 @@ Skia's misremembered, a step of its tone map dropped, a rounding done
 otherwise -- and names the tests that have to notice: the module's own, which
 hold it to Chrome 154's pixels for 40 patches, to Skia's control points, and
 to a double-precision transcription of the whole conversion.  The AVX2
-passes (src/hdr/avx2.rs) have rows of their own, each a slip of vector code
+passes (src/managed/avx2.rs) have rows of their own, each a slip of vector code
 that the tests holding them to the scalar passes' bits have to notice.
 
 Breaks one piece of production code at a time and checks that the tests
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src"
-# The unit tests: hdr.rs's and reformat.rs's.
+# The unit tests: managed.rs's and reformat.rs's.
 TARGETS = ("--lib",)
 
 PQ = "pq_is_chrome_s_pixel_for_pixel"
@@ -169,7 +169,7 @@ CHROMA = [
     ),
 ]
 
-# The AVX2 passes (hdr/avx2.rs), which must give the scalar passes' bits.
+# The AVX2 passes (managed/avx2.rs), which must give the scalar passes' bits.
 # Each row is a slip easy to make in vector code -- an operand order, an
 # ordered or unordered comparison, a rounding mode, an association, the
 # tail of a row -- that changes some value's bits.  The intrinsics a row
@@ -294,9 +294,9 @@ if __name__ == "__main__":
     # harness refuses a filter that selects nothing.
     only = sys.argv[1:]
     tables = [
-        (SRC / "hdr.rs", HDR),
+        (SRC / "managed.rs", HDR),
         (SRC / "reformat.rs", CHROMA),
-        (SRC / "hdr" / "avx2.rs", AVX),
+        (SRC / "managed" / "avx2.rs", AVX),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

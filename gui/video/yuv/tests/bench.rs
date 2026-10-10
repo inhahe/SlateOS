@@ -28,7 +28,7 @@
 
 use std::time::{Duration, Instant};
 
-use yuv::hdr::{self, Light, Signal, ToneMap, Transfer};
+use yuv::managed::{self, Conversion, Light, Signal, Transfer};
 use yuv::reformat::{self, Format, Picture, Reformat};
 use yuv::{Plane, PlaneBuf};
 
@@ -192,15 +192,15 @@ fn run<T: Noise>(case: &Case) -> f64 {
 
 /// Milliseconds to convert `picture`, an HDR picture, once by `map`: as
 /// [`millis`].
-fn millis_hdr(picture: &Picture<'_, u16>, map: &ToneMap<'_>) -> f64 {
+fn millis_hdr(picture: &Picture<'_, u16>, map: &Conversion<'_>) -> f64 {
     let mut out = Vec::new();
-    hdr::to_argb_into(picture, map, &mut out).unwrap();
+    managed::to_argb_into(picture, map, &mut out).unwrap();
     let mut best = f64::MAX;
     for _ in 0..3 {
         let start = Instant::now();
         let mut n = 0u32;
         while start.elapsed() < Duration::from_millis(500) {
-            hdr::to_argb_into(picture, map, &mut out).unwrap();
+            managed::to_argb_into(picture, map, &mut out).unwrap();
             n += 1;
         }
         best = best.min(start.elapsed().as_secs_f64() * 1000.0 / f64::from(n));
@@ -224,7 +224,7 @@ fn run_hdr(transfer: Transfer, max_cll: f32, luma_max: u16, grey: bool) -> f64 {
         v.samples.fill(512);
     }
     let signal = Signal::new(transfer);
-    let map = ToneMap::new(
+    let map = Conversion::new(
         &signal,
         9,
         Light {
@@ -267,7 +267,7 @@ fn bench_reformat() {
         "  libavif, 8-bit 4:2:0 BT.709: {:.2} (libyuv's C), {:.2} (libyuv's x86 SIMD)",
         LIBAVIF.0, LIBAVIF.1
     );
-    println!("HDR, 10-bit 4:2:0 BT.2020, as Chrome shows it (`yuv::hdr`):");
+    println!("HDR, 10-bit 4:2:0 BT.2020, as Chrome shows it (`yuv::managed`):");
     let cases = [
         (Transfer::Pq, 1000.0, 1023, false, "PQ, MaxCLL 1000, noise"),
         (Transfer::Pq, 4000.0, 1023, false, "PQ, MaxCLL 4000, noise"),

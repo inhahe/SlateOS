@@ -67,7 +67,7 @@ Chromium:
   texts:
     - chromium-LICENSE
 
-# SkExif::Parse (src/orientation.rs); and gui/video/yuv's src/hdr.rs, Skia's
+# SkExif::Parse (src/orientation.rs); and gui/video/yuv's src/managed.rs, Skia's
 # colour conversion and HDR tone map with its skcms, whose manifest does not
 # name Skia again, as gather-notices.py requires each project named once.
 Skia:

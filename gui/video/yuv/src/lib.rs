@@ -11,7 +11,7 @@
 //!   an sRGB screen: Skia's colour conversion and its default tone map
 //!   (design-decisions §1378), over the same chroma upsampling. What a
 //!   caller calls instead of [`reformat`] for a picture whose transfer
-//!   [`hdr::Transfer::from_h273`] names.
+//!   [`managed::Transfer::from_h273`] names.
 //! - [`convert`]: libyuv's conversions beneath it, as libyuv's x86 code
 //!   computes them (its C copies the x86 formulation): BT.601, BT.709 and
 //!   BT.2020 at limited and full range ([`convert::I601`] and its siblings),
@@ -44,7 +44,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod convert;
-pub mod hdr;
+pub mod managed;
 pub mod reformat;
 pub mod scale;
 

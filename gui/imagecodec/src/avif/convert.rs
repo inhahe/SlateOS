@@ -11,7 +11,7 @@
 //!
 //! An HDR picture -- PQ or HLG by its code points -- is shown as Chrome
 //! shows it on an sRGB screen instead (design-decisions §1378):
-//! `yuv::hdr`, by the `clli` box's MaxCLL, the one HDR metadata Chrome's AVIF
+//! `yuv::managed`, by the `clli` box's MaxCLL, the one HDR metadata Chrome's AVIF
 //! decoder takes. Which pictures those are is Chrome's call too
 //! (`AVIFImageDecoder`'s `GetColorSpace`): unspecified code points are
 //! MIAF's defaults (BT.709 primaries, the sRGB curve, BT.601's matrix); code
@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use super::Error;
 use super::decode::{Decoded, Plane, Yuv};
 use super::setup::YuvFormat;
-use yuv::hdr::{self, Light, Signal, ToneMap, Transfer};
+use yuv::managed::{self, Conversion, Light, Signal, Transfer};
 use yuv::reformat::{self, Format, Picture, Reformat};
 
 /// Why a picture cannot be converted: `AVIF_RESULT_REFORMAT_FAILED`.
@@ -85,7 +85,7 @@ fn convert<T: Reformat>(image: &Yuv<T>) -> Result<Vec<u32>, Error> {
                 max_cll: image.light.map_or(0.0, |(max_cll, _)| f32::from(max_cll)),
                 mastering_peak: 0.0,
             };
-            hdr::to_argb(&picture, &ToneMap::new(&signal, primaries, light))
+            managed::to_argb(&picture, &Conversion::new(&signal, primaries, light))
         }
     };
     converted.map_err(|e| match e {

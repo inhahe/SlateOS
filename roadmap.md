@@ -4672,10 +4672,10 @@ lane C's `guitk`.
     HLG curves, its RWTMO tone map by the content's peak, BT.2020 to sRGB,
     chroma upsampled as Chrome's GPU samples it; on every HDR video frame
     and HDR AVIF (its `clli`), held to Chrome 154's own pixels
-    (`gui/video/yuv/src/hdr.rs`).
+    (`gui/video/yuv/src/managed.rs`).
   - `[x]` HDR's speed: AVX2 gathers (run-time detected, §1373) for the six
     table lookups a pixel, to the scalar passes' bits -- steps 2 to 5 1.7
-    to 3.6 times faster (`gui/video/yuv/src/hdr/avx2.rs`).
+    to 3.6 times faster (`gui/video/yuv/src/managed/avx2.rs`).
   - `[ ]` HDR's speed, the rest: step 1 (Y'CbCr and its chroma in floating
     point, some two fifths of a frame now) and the tone map's `exp2f` in
     its curved middle, eight pixels at a time to the same bits.

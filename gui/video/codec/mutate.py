@@ -1732,8 +1732,8 @@ SHOWN = [
     ),
     (
         "HDR's primaries are taken for BT.709's",
-        "let map = ToneMap::new(signal(transfer), colour.primaries, hdr_light(look.light));",
-        "let map = ToneMap::new(signal(transfer), 1, hdr_light(look.light));",
+        "let map = Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));",
+        "let map = Conversion::new(signal(transfer), 1, hdr_light(look.light));",
         [CHROME],
     ),
 ]

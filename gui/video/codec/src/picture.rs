@@ -7,7 +7,7 @@
 //!
 //! The conversion is `gui/video/yuv`'s port of libavif's, by the colour
 //! [`crate::colour`] settles on -- or, for HDR (a PQ or HLG transfer),
-//! `yuv::hdr`'s transcription of Chrome's, by the colour and the light the
+//! `yuv::managed`'s transcription of Chrome's, by the colour and the light the
 //! picture says it holds (design-decisions §1378). A frame large enough to be
 //! worth it is converted in bands of rows, one to each core (`to_argb_rows`,
 //! whose every band is exactly those rows of the whole picture). VP9's 4:4:0
@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::thread;
 
 use rav1d::safe as av1;
-use yuv::hdr::{self, Signal, ToneMap, Transfer};
+use yuv::managed::{self, Conversion, Signal, Transfer};
 use yuv::reformat::{self, Format, Reformat};
 use yuv::{Plane, PlaneBuf};
 
@@ -178,7 +178,7 @@ struct Look {
 #[derive(Clone, Copy)]
 enum Way<'a> {
     Ordinary,
-    Hdr(&'a ToneMap<'a>),
+    Hdr(&'a Conversion<'a>),
 }
 
 impl Way<'_> {
@@ -191,7 +191,7 @@ impl Way<'_> {
     ) -> Result<(), reformat::Error> {
         match self {
             Self::Ordinary => reformat::to_argb_rows(picture, first, out),
-            Self::Hdr(map) => hdr::to_argb_rows(picture, map, first, out),
+            Self::Hdr(map) => managed::to_argb_rows(picture, map, first, out),
         }
     }
 }
@@ -209,7 +209,7 @@ fn signal(transfer: Transfer) -> &'static Signal {
     cell.get_or_init(|| Signal::new(transfer))
 }
 
-/// The light `yuv::hdr` reads: MaxCLL and the mastering display's peak, as
+/// The light `yuv::managed` reads: MaxCLL and the mastering display's peak, as
 /// Chrome takes them from FFmpeg's numbers, in single precision; `0.0` for
 /// what is not said.
 #[allow(
@@ -217,8 +217,8 @@ fn signal(transfer: Transfer) -> &'static Signal {
     clippy::cast_possible_truncation,
     reason = "cd/m2, kept in single precision as Chrome keeps them; past 2^24 a MaxCLL is rounded as C's conversion rounds it"
 )]
-fn hdr_light(light: Light) -> hdr::Light {
-    hdr::Light {
+fn hdr_light(light: Light) -> managed::Light {
+    managed::Light {
         max_cll: light.content.map_or(0.0, |c| c.max_cll as f32),
         mastering_peak: light
             .mastering
@@ -287,7 +287,7 @@ impl<T: Sample> Planar<'_, T> {
         match Transfer::from_h273(colour.transfer) {
             None => in_bands(&picture, Way::Ordinary, out),
             Some(transfer) => {
-                let map = ToneMap::new(signal(transfer), colour.primaries, hdr_light(look.light));
+                let map = Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));
                 in_bands(&picture, Way::Hdr(&map), out)
             }
         }
@@ -753,8 +753,8 @@ mod tests {
                 alpha_premultiplied: false,
             };
             let whole = reformat::to_argb(&picture).unwrap();
-            let map = ToneMap::new(signal(Transfer::Pq), 9, hdr::Light::default());
-            let hdr_whole = hdr::to_argb(&picture, &map).unwrap();
+            let map = Conversion::new(signal(Transfer::Pq), 9, managed::Light::default());
+            let hdr_whole = managed::to_argb(&picture, &map).unwrap();
             for bands in [1, 2, 3, 5, 11, 12, 40] {
                 let mut out = Vec::new();
                 split(&picture, Way::Ordinary, &mut out, bands).unwrap();

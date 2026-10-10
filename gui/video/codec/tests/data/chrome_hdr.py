@@ -5,7 +5,7 @@ transcribed from Skia in double precision: the reference `gui/video/yuv`'s
 
 Checked against Chrome 154 itself: lossless 10-bit 4:4:4 AVIFs of 24 PQ and
 16 HLG patches, shown in headless Chrome and read back from its screenshots,
-agree with `pixel` exactly (the same patches are `yuv::hdr`'s unit tests);
+agree with `pixel` exactly (the same patches are `yuv::managed`'s unit tests);
 and VP9 WebMs of them, played in a <video>, within one (Chrome's video path
 converts Y'CbCr on the GPU).
 
@@ -25,7 +25,7 @@ converts Y'CbCr on the GPU).
   4. To sRGB: Skia's gamut matrices (to XYZ D50) and the sRGB curve's
      inverse; clamped; 8 bits.
 
-Only BT.2020's primaries are here; `yuv::hdr` carries the others as Skia
+Only BT.2020's primaries are here; `yuv::managed` carries the others as Skia
 does, and its unit tests check them.
 """
 import math

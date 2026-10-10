@@ -55,7 +55,7 @@
 //! ones run several pixels at a time by the compiler. The table passes --
 //! the transfer curves, HLG's OOTF power, the tone map's gain and the 8-bit
 //! encoding, six lookups a pixel -- run eight pixels at a time with AVX2
-//! where the processor has it (`hdr/avx2.rs`: chosen at run time, and to
+//! where the processor has it (`managed/avx2.rs`: chosen at run time, and to
 //! the scalar passes' bits, §1380). That takes steps 2 to 5 from 1.7 to
 //! 3.6 times faster on an i7-8700K (`bench_avx2_against_scalar`; least
 //! where much of the light is in the tone map's curved middle, whose
@@ -88,7 +88,7 @@ use avx2::Avx2;
 #[derive(Clone, Copy, Debug)]
 enum Avx2 {}
 
-/// The AVX2 passes (`hdr/avx2.rs`), where they may run.
+/// The AVX2 passes (`managed/avx2.rs`), where they may run.
 fn simd() -> Option<Avx2> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -198,7 +198,7 @@ impl Light {
 
 // --- step 2: the transfer curves, tabulated -----------------------------------
 
-/// What every [`ToneMap`] of one transfer shares, made once: the transfer's
+/// What every [`Conversion`] of one transfer shares, made once: the transfer's
 /// curve from a sample to its light, and the 8-bit sRGB encoder.
 #[derive(Clone, Debug)]
 pub struct Signal {
@@ -877,7 +877,7 @@ fn half(v: f32) -> f32 {
 /// needs -- cheap to make for each picture, its tables borrowed from the
 /// transfer's [`Signal`].
 #[derive(Clone, Debug)]
-pub struct ToneMap<'a> {
+pub struct Conversion<'a> {
     signal: &'a Signal,
     /// Linear light in the picture's primaries to the working space: to
     /// BT.2020's, and times 10000/203 (PQ) or 1000/203 (HLG).
@@ -891,7 +891,7 @@ pub struct ToneMap<'a> {
     to_srgb: Matrix,
 }
 
-impl<'a> ToneMap<'a> {
+impl<'a> Conversion<'a> {
     /// The map for pictures of `signal`'s transfer whose primaries are
     /// H.273's `primaries`, and which say `light` of their light.
     #[must_use]
@@ -1039,7 +1039,7 @@ fn scale(r: &mut [f32], g: &mut [f32], b: &mut [f32], k: &[f32]) {
     }
 }
 
-// The table passes: AVX2's where `simd` is one (`hdr/avx2.rs`, the same
+// The table passes: AVX2's where `simd` is one (`managed/avx2.rs`, the same
 // bits), else these loops.
 
 /// [`interpolate`] at every value, in place.
@@ -1162,7 +1162,7 @@ impl Channels {
 /// and the tests each way in turn.
 fn convert<S: Sample>(
     picture: &Picture<'_, S>,
-    map: &ToneMap<'_>,
+    map: &Conversion<'_>,
     first: usize,
     out: &mut [u32],
     simd: Option<Avx2>,
@@ -1218,7 +1218,7 @@ fn fraction<S: Sample>(samples: &[S], out: &mut [f32], (bias, range): (f32, f32)
 /// map, the row's floats, and the way its table passes run.
 struct Row<'a> {
     state: &'a reformat::State,
-    map: &'a ToneMap<'a>,
+    map: &'a Conversion<'a>,
     max: u32,
     max_f: f32,
     depth: u8,
@@ -1388,7 +1388,7 @@ impl Row<'_> {
 /// smaller than the picture.
 pub fn to_argb<T: Reformat>(
     picture: &Picture<'_, T>,
-    map: &ToneMap<'_>,
+    map: &Conversion<'_>,
 ) -> Result<Vec<u32>, Error> {
     let mut out = Vec::new();
     to_argb_into(picture, map, &mut out)?;
@@ -1402,7 +1402,7 @@ pub fn to_argb<T: Reformat>(
 /// As [`to_argb`]; `out` is then empty.
 pub fn to_argb_into<T: Reformat>(
     picture: &Picture<'_, T>,
-    map: &ToneMap<'_>,
+    map: &Conversion<'_>,
     out: &mut Vec<u32>,
 ) -> Result<(), Error> {
     out.clear();
@@ -1423,7 +1423,7 @@ pub fn to_argb_into<T: Reformat>(
 /// or rows past the picture's last.
 pub fn to_argb_rows<T: Reformat>(
     picture: &Picture<'_, T>,
-    map: &ToneMap<'_>,
+    map: &Conversion<'_>,
     first: usize,
     out: &mut [u32],
 ) -> Result<(), Error> {
@@ -1543,7 +1543,7 @@ mod tests {
     /// [`to_argb`] of `picture` with its table passes run `way`.
     fn converted<T: Reformat>(
         picture: &Picture<'_, T>,
-        map: &ToneMap<'_>,
+        map: &Conversion<'_>,
         way: Option<Avx2>,
     ) -> Vec<u32> {
         let (_, count) = reformat::check(picture).unwrap();
@@ -1554,7 +1554,7 @@ mod tests {
 
     /// `picture` converted each of [`ways`], which must agree with each
     /// other and with [`to_argb`]: their pixels.
-    fn both<T: Reformat>(picture: &Picture<'_, T>, map: &ToneMap<'_>) -> Vec<u32> {
+    fn both<T: Reformat>(picture: &Picture<'_, T>, map: &Conversion<'_>) -> Vec<u32> {
         let public = to_argb(picture, map).unwrap();
         for way in ways() {
             assert_eq!(converted(picture, map, way), public, "{way:?}");
@@ -1566,7 +1566,7 @@ mod tests {
         let samples: Vec<[u16; 3]> = patches.iter().map(|p| p.0).collect();
         let planes = planes_of(&samples);
         let signal = Signal::new(transfer);
-        let map = ToneMap::new(&signal, 9, Light::default());
+        let map = Conversion::new(&signal, 9, Light::default());
         let picture = row_picture(&planes);
         for way in ways() {
             let out = converted(&picture, &map, way);
@@ -1807,7 +1807,7 @@ mod tests {
 
     /// The whole of a pixel's arithmetic in double precision, from the same
     /// control points and matrices: `chrome_hdr.py`'s `pixel`.
-    fn reference(map: &ToneMap<'_>, rgb: [f32; 3]) -> [u32; 3] {
+    fn reference(map: &Conversion<'_>, rgb: [f32; 3]) -> [u32; 3] {
         let f = |m: &Matrix| m.map(|r| r.map(f64::from));
         let mul =
             |m: &[[f64; 3]; 3], v: [f64; 3]| m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2]);
@@ -1866,7 +1866,7 @@ mod tests {
         for transfer in [Transfer::Pq, Transfer::Hlg] {
             let signal = Signal::new(transfer);
             for max_cll in [0.0, 250.0, 600.0, 4000.0, 10_000.0] {
-                let map = ToneMap::new(
+                let map = Conversion::new(
                     &signal,
                     9,
                     Light {
@@ -1945,7 +1945,7 @@ mod tests {
                         max_cll,
                         ..Light::default()
                     };
-                    let map = ToneMap::new(&signal, primaries, light);
+                    let map = Conversion::new(&signal, primaries, light);
                     for len in [1usize, 7, 8, 9, 15, 16, 17, 64, 1001] {
                         let mut channel = |k: usize| -> Vec<f32> {
                             (0..len)
@@ -2113,7 +2113,7 @@ mod tests {
         same(&want, &got, "HLG's power of red");
         let (g, b) = (turned(&r, 5), turned(&r, 11));
         for primaries in [9, 1] {
-            let weights = ToneMap::new(&hlg_signal, primaries, Light::default()).ootf;
+            let weights = Conversion::new(&hlg_signal, primaries, Light::default()).ootf;
             power_all(None, power, weights, [&r, &g, &b], &mut want);
             power_all(Some(proof), power, weights, [&r, &g, &b], &mut got);
             same(&want, &got, &format!("HLG's power, primaries {primaries}"));
@@ -2193,7 +2193,7 @@ mod tests {
                 max_cll,
                 ..Light::default()
             };
-            let map = ToneMap::new(&signal, 9, light);
+            let map = Conversion::new(&signal, 9, light);
             let mut channels = Channels::new(WIDTH);
             let mut out = vec![0u32; WIDTH];
             let mut frame = |simd: Option<Avx2>| {
@@ -2224,7 +2224,7 @@ mod tests {
     #[test]
     fn the_curve_ends_at_white_and_keeps_the_dark_s_proportions() {
         let signal = Signal::new(Transfer::Pq);
-        let map = ToneMap::new(
+        let map = Conversion::new(
             &signal,
             9,
             Light {
@@ -2293,7 +2293,7 @@ mod tests {
             alpha_premultiplied: false,
         };
         let signal = Signal::new(Transfer::Pq);
-        let map = ToneMap::new(&signal, 9, Light::default());
+        let map = Conversion::new(&signal, 9, Light::default());
         let whole = to_argb(&picture, &map).unwrap();
         for first in 0..height {
             for count in 1..=height - first {
@@ -2351,7 +2351,7 @@ mod tests {
             alpha_premultiplied: false,
         };
         let signal = Signal::new(Transfer::Pq);
-        let map = ToneMap::new(&signal, 9, Light::default());
+        let map = Conversion::new(&signal, 9, Light::default());
         let out = both(&picture, &map);
         let state = reformat::prepare(&picture).unwrap();
         let t = |code: u16| (f32::from(code) - 512.0) / 896.0;
@@ -2394,7 +2394,7 @@ mod tests {
             height: 1,
         });
         let signal = Signal::new(Transfer::Pq);
-        let map = ToneMap::new(&signal, 9, Light::default());
+        let map = Conversion::new(&signal, 9, Light::default());
         let straight = both(&picture, &map);
         assert_eq!(straight[0], 0xffbc_bcbc, "203 cd/m2 grey, opaque");
         assert_eq!(straight[1] >> 24, 128);
@@ -2416,7 +2416,7 @@ mod tests {
     #[test]
     fn grey_and_identity_pictures_convert() {
         let signal = Signal::new(Transfer::Pq);
-        let map = ToneMap::new(&signal, 9, Light::default());
+        let map = Conversion::new(&signal, 9, Light::default());
         fn one(samples: &[u16]) -> Plane<'_, u16> {
             Plane {
                 samples,
@@ -2469,7 +2469,7 @@ mod tests {
     fn other_primaries_take_their_own_matrix() {
         let signal = Signal::new(Transfer::Pq);
         let light = Light::default();
-        let white = |primaries: u16| ToneMap::new(&signal, primaries, light).pixel([0.58; 3]);
+        let white = |primaries: u16| Conversion::new(&signal, primaries, light).pixel([0.58; 3]);
         let grey = white(9);
         for primaries in [1, 4, 5, 6, 7, 8, 10, 11, 12, 22] {
             let px = white(primaries);
@@ -2482,7 +2482,7 @@ mod tests {
             }
         }
         let red =
-            |primaries: u16| ToneMap::new(&signal, primaries, light).pixel([0.58, 0.0, 0.0]) >> 16;
+            |primaries: u16| Conversion::new(&signal, primaries, light).pixel([0.58, 0.0, 0.0]) >> 16;
         assert!(
             red(12) < red(9),
             "P3 {} against BT.2020 {}",
@@ -2493,7 +2493,7 @@ mod tests {
         assert_eq!(red(200), red(9));
         // BT.709's primaries are sRGB's: its red, carried into BT.2020 for
         // the tone map and back out, is the screen's red and nothing else.
-        let bt709_red = ToneMap::new(&signal, 1, light).pixel([0.58, 0.0, 0.0]);
+        let bt709_red = Conversion::new(&signal, 1, light).pixel([0.58, 0.0, 0.0]);
         assert!(bt709_red >> 16 > 0, "{bt709_red:06x}");
         assert_eq!(bt709_red & 0xffff, 0, "{bt709_red:06x}: green or blue lit");
     }

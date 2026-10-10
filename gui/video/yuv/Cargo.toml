@@ -9,7 +9,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-# The HDR conversion's pow, exp and log (src/hdr.rs) -- `core` has none, and
+# The HDR conversion's pow, exp and log (src/managed.rs) -- `core` has none, and
 # the crate is no_std.
 libm = "0.2"
 

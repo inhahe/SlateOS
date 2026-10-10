@@ -22,8 +22,9 @@ different approximation from libm's, operations get reordered for speed. On
 8-bit output most such differences vanish, but some straddle a rounding
 boundary and change a pixel by one.
 
-**Decision.** `gui/video/yuv/src/hdr/avx2.rs` computes each table pass
-operation for operation as the scalar pass does: no fused multiply-add, the
+**Decision.** `gui/video/yuv/src/managed/avx2.rs` (first `hdr/avx2.rs`)
+computes each table pass operation for operation as the scalar pass does:
+no fused multiply-add, the
 same order, the scalar cast's saturation reproduced lane by lane (NaN and
 negative indices to 0, large ones to the last), and where the scalar code
 calls libm's `exp2f` -- the tone map's curved middle -- the lanes there go

@@ -3,7 +3,7 @@
 **Status:** OPEN (lane F), in part -- **HDR is done**: PQ and HLG video and
 AVIF are shown as Chrome shows them on an ordinary screen, tone mapped by the
 light they say they hold, BT.2020's colours carried to sRGB's, and held to
-Chrome's own pixels (design-decisions §1378, §1379; `gui/video/yuv/src/hdr.rs`).
+Chrome's own pixels (design-decisions §1378, §1379; `gui/video/yuv/src/managed.rs`).
 What remains is below. **Decided 2026-10-09** (F-Q10, §1378): colour
 management copies Chrome's -- skcms for pictures' profiles, Chrome's own
 handling for video.
@@ -48,7 +48,7 @@ SDR wide-gamut video and profiled pictures show with the wrong saturation.
 **And HDR's speed.** The HDR conversion is floating point where the
 ordinary one is libyuv's fixed point. Its six table lookups a pixel run
 eight pixels at a time with AVX2 (detected at run time, §1373;
-`gui/video/yuv/src/hdr/avx2.rs`, to the scalar passes' bits), which takes
+`gui/video/yuv/src/managed/avx2.rs`, to the scalar passes' bits), which takes
 steps 2 to 5 from 1.7 to 3.6 times faster; a 1080p frame took 40-60 ms on
 one thread before (its bands run one to each core, as the ordinary
 conversion's do), where 4K at 60 frames a second wants several times less.

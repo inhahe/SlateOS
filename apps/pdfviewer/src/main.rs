@@ -6769,6 +6769,7 @@ mod tests {
             | RenderCommand::Text { y, .. }
             | RenderCommand::RichText { y, .. }
             | RenderCommand::Image { y, .. }
+            | RenderCommand::WindowPicture { y, .. }
             | RenderCommand::BoxShadow { y, .. }
             | RenderCommand::PushClip { y, .. } => Some(y),
             RenderCommand::Line { y1, .. } => Some(y1),

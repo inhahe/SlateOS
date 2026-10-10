@@ -53,7 +53,7 @@ use guiremote::control::{
 use guiremote::frame::{Frame, try_decode_any};
 use guiremote::submit::Submission;
 use guiremote::window_list::encode_window_list_into;
-use guitk::render::RenderTree;
+use guitk::render::{RenderCommand, RenderTree};
 
 use crate::{Compositor, CompositorRequest, CompositorResponse, WindowId};
 
@@ -1286,7 +1286,15 @@ impl Compositor {
             return;
         }
         let Submission { commands, .. } = submission;
-        let RenderTree { commands } = commands;
+        let RenderTree { mut commands } = commands;
+        // A picture of another window is a stronger read than its title, so it
+        // is honoured only from a shell -- the check the window list goes
+        // through -- and drawn as nothing in anyone else's frame. Removed here,
+        // where the frame arrives, so the compositor never holds a picture a
+        // client was not entitled to.
+        if link.require_shell().is_err() {
+            commands.retain(|c| !matches!(c, RenderCommand::WindowPicture { .. }));
+        }
         // The error is the same "no such window" that `owns` just ruled out,
         // save for a window destroyed between the check and here, which is not
         // something a client can be told about on a frame with no reply.
@@ -1852,6 +1860,66 @@ mod tests {
         assert!(
             !link.has_outgoing(),
             "a submission has no seq and so gets no reply, refused or not"
+        );
+    }
+
+    /// A picture of another window is a shell's to draw: from a client that
+    /// fails the shell check it is dropped where the frame arrives, and the
+    /// rest of the frame lands; from the shell it is kept.
+    #[test]
+    fn only_a_shell_may_picture_another_window() {
+        let kept = |holds_key: Option<bool>| {
+            let (mut comp, mut link) = wired();
+            let mine = open(&mut comp, &mut link, "Panel");
+            let mut other = ClientLink::new(99);
+            let theirs = open(&mut comp, &mut other, "Password manager");
+            link.attest(
+                Some(PeerCred {
+                    pid: 300,
+                    uid: 1000,
+                    gid: 1000,
+                }),
+                holds_key,
+            );
+            link.set_shell_gate(ShellGate::KeyHolders);
+
+            let mut tree = RenderTree::new();
+            tree.fill_rect(0.0, 0.0, 10.0, 10.0, Color::from_hex(0x11_22_33));
+            tree.commands.push(RenderCommand::WindowPicture {
+                window: theirs,
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 40.0,
+            });
+            link.receive(&encode_submit(mine, &tree));
+            comp.serve(&mut link).expect("serves");
+            let commands = &comp
+                .window_ref(WindowId::from_raw(mine))
+                .expect("window")
+                .render_tree
+                .commands;
+            (
+                commands.len(),
+                commands
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::WindowPicture { .. })),
+            )
+        };
+        assert_eq!(
+            kept(Some(false)),
+            (1, false),
+            "a program's picture was kept"
+        );
+        assert_eq!(
+            kept(None),
+            (1, false),
+            "an unvouched client's picture was kept"
+        );
+        assert_eq!(
+            kept(Some(true)),
+            (2, true),
+            "the shell's picture was dropped"
         );
     }
 

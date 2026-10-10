@@ -199,6 +199,36 @@ pub enum RenderCommand {
         image_id: u64,
     },
 
+    /// Draw a live picture of another window's content: the taskbar's
+    /// preview, Aero Peek, the overview's cards and Alt-Tab.
+    ///
+    /// The compositor draws it from that window's latest frame -- its client
+    /// area, scaled down to fit the rectangle with its proportions kept and
+    /// centred in it -- and draws it again whenever that window changes, so
+    /// the picture is as live as the window. The pixels never travel to the
+    /// program drawing the picture; it names the window and the compositor
+    /// does the rest.
+    ///
+    /// **Honoured only from a shell.** A picture of a window is a stronger
+    /// read than its title, so the compositor draws this only in a window
+    /// whose program passes its shell check -- the one the window list
+    /// already goes through -- and as nothing in anyone else's. It draws as
+    /// nothing, too, for a window that is gone, minimised or unknown: a
+    /// preview raced by a window closing is ordinary, not an error.
+    ///
+    /// A renderer with no windows to picture -- every one but the
+    /// compositor's -- draws nothing for it, which leaves a card blank rather
+    /// than its layout wrong.
+    WindowPicture {
+        /// The compositor's id of the window to picture, as the window list
+        /// gives it.
+        window: u64,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
+
     /// Draw a line.
     Line {
         x1: f32,
@@ -323,10 +353,10 @@ impl RenderCommand {
     /// The same command with every colour it draws `alpha` times as opaque
     /// (0 to 1): what a widget faded by its style's opacity draws.
     ///
-    /// A picture has no colour here to fade, and is drawn as it is -- the
-    /// protocol carries no opacity for images, which would be the
-    /// compositor's to apply (lane F's). Commands that draw nothing pass
-    /// through unchanged.
+    /// An image, or a picture of a window, has no colour here to fade, and is
+    /// drawn as it is -- the protocol carries no opacity for either, which
+    /// would be the compositor's to apply (lane F's). Commands that draw
+    /// nothing pass through unchanged.
     #[must_use]
     pub fn faded(mut self, alpha: f32) -> Self {
         let fade = |c: &mut Color| {
@@ -353,6 +383,7 @@ impl RenderCommand {
                 }
             }
             Self::Image { .. }
+            | Self::WindowPicture { .. }
             | Self::PushClip { .. }
             | Self::PopClip
             | Self::PushTranslate { .. }
@@ -787,7 +818,8 @@ pub fn content_bottom(cmds: &[RenderCommand]) -> Option<f32> {
             }
             RenderCommand::FillRect { y, height, .. }
             | RenderCommand::StrokeRect { y, height, .. }
-            | RenderCommand::Image { y, height, .. } => sink(translate + y + height),
+            | RenderCommand::Image { y, height, .. }
+            | RenderCommand::WindowPicture { y, height, .. } => sink(translate + y + height),
             RenderCommand::Text {
                 y,
                 font_size,

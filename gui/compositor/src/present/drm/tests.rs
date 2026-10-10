@@ -2290,6 +2290,7 @@ fn arrow_at(x: i32, y: i32) -> crate::PointerSprite {
                 fill: 0xFFFF_FFFF,
                 outline: 0xFF00_0000,
             },
+            themed: None,
         })
         .expect("an arrow")
 }

@@ -4827,6 +4827,16 @@ lane C's `guitk`.
   to its parent on leaving, and is minimised and restored with it. Not yet:
   keeping such windows off the taskbar (a window-list field).
 
+- `[x]` `[F]` **The pointer is drawn from the user's cursor theme** -- done
+  2026-10-10, for lane C's
+  `requests/c-f-draw-the-pointer-from-the-cursor-theme.md` (§1459: Adwaita,
+  Breeze, Bibata install as they are). The theme's picture for each shape at
+  the user's size times the display's scale, read once and kept; scaled when
+  the theme's nearest size is not the one asked for; animated pointers frame
+  by frame on the compositor's clock, the loop woken for each frame with no
+  damage; the colour scheme for the built-in art only; the pictures dropped
+  on every `ReloadAppearance`. A shape the theme lacks is the built-in art.
+
 - `[F]` Port FreeRDP (line ~5058)
 
 `open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C

@@ -1309,6 +1309,7 @@ mod tests {
                     fill: 0xFFFF_FFFF,
                     outline: 0xFF00_0000,
                 },
+                themed: None,
             })
             .expect("an arrow")
     }

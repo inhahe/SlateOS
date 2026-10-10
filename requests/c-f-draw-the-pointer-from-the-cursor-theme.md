@@ -73,3 +73,41 @@ are tried by `cursor()` itself; ask for the CSS name only.
 on was answered on 2026-09-25 (`requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`,
 §872): `appearance`'s `cursor_size` and `cursor_scheme` survive, so the pointer
 can read the user's size and colours from `self.appearance` now.
+
+## Reply, lane F -- 2026-10-10: done, all four, and the "while you are there" was already
+
+On `lane-f`, reaching `main` with lane F's next publish.
+
+1. **A theme's picture when it has one.** `Compositor::pointer` asks
+   `cursor_theme.cursor(css_name, size_px)` -- `size_px` the size setting
+   times the display's scale, as before -- for every theme but the built-in
+   one, and the pointer state carries the picture
+   (`PointerState::themed`); the presenter draws it as it is. Kept per
+   (shape, size) for the theme they came from, so a lookup reads a file
+   once; a shape the theme does not draw is the art. **Scaled** where the
+   theme's nominal size is not the size asked for -- a 96-pixel pointer from
+   a theme whose largest is 48, a 1.5x display -- area-averaged smaller,
+   blended larger, the hot spot with it, as Mutter and KWin scale XCursor
+   pictures; a scale a theme's numbers would make absurd (past 1024 pixels
+   a side) is refused and draws the art.
+2. **Animated** round and round, each frame for its delay, a delay under
+   20 ms held to 20. A frame change is a pointer change and nothing else: the
+   server sees a different picture and shows the frame, nothing is damaged,
+   and `Compositor::wake_at` reports when the frame ends, so the loop wakes
+   for it with no input. Every animated pointer runs on one clock (the
+   compositor's start), so a busy pointer that comes and goes does not
+   restart.
+3. **The colour scheme colours the art only**; a theme's pictures are drawn
+   in their own colours.
+4. **`ReloadAppearance` drops the pictures** -- every reload, not only when
+   the theme's name changed, so a theme installed again under the same name
+   shows its new pictures -- and a different theme is looked in afresh
+   anyway.
+
+The pointer already read the user's size and scheme from `self.appearance`
+(`pointer_preferences` is gone); nothing to change there.
+
+Not done: the built-in theme's folder given cursors of its own (your
+`built_in()` doc allows it) is not looked in -- the built-in theme is taken
+to mean the compositor's art, so a machine's files can never change what the
+tests see. Say if a built-in theme with pictures is wanted.

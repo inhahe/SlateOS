@@ -102,6 +102,74 @@ pub(crate) fn downscale(src: &[u32], sw: u32, sh: u32, dw: u32, dh: u32) -> Opti
     Some(out)
 }
 
+/// `src` -- `sw` by `sh` packed `0xAARRGGBB` pixels -- scaled to `dw` by `dh`:
+/// area averaging ([`downscale`]) when neither side grows, bilinear
+/// interpolation ([`upscale`]) otherwise. For a cursor theme's picture drawn
+/// at another size than the one asked for. Premultiplied pixels stay
+/// premultiplied: both filters are linear in every channel alike.
+pub(crate) fn resample(src: &[u32], sw: u32, sh: u32, dw: u32, dh: u32) -> Option<Vec<u32>> {
+    if dw <= sw && dh <= sh {
+        downscale(src, sw, sh, dw, dh)
+    } else {
+        upscale(src, sw, sh, dw, dh)
+    }
+}
+
+/// `src` scaled to `dw` by `dh` by bilinear interpolation: each destination
+/// pixel's centre mapped into the source, and the four source pixels around
+/// it mixed by distance, the edges clamped. `None` if the source is not
+/// `sw * sh` pixels or either size is empty.
+///
+/// For enlarging -- where an area average has nothing to average -- and
+/// correct for shrinking too, only less smooth than [`downscale`].
+pub(crate) fn upscale(src: &[u32], sw: u32, sh: u32, dw: u32, dh: u32) -> Option<Vec<u32>> {
+    let (sw_us, sh_us) = (usize::try_from(sw).ok()?, usize::try_from(sh).ok()?);
+    let (dw_us, dh_us) = (usize::try_from(dw).ok()?, usize::try_from(dh).ok()?);
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() != sw_us.checked_mul(sh_us)? {
+        return None;
+    }
+    // For an axis of `from` source pixels drawn as `to`, where destination
+    // pixel `d` samples: the two source pixels and the second's weight.
+    let taps = |from: usize, to: usize| -> Vec<(usize, usize, f32)> {
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "pixel positions of a picture well under 2^24 pixels wide, clamped to the source first"
+        )]
+        (0..to)
+            .map(|d| {
+                let at = ((d as f64 + 0.5) * from as f64 / to as f64 - 0.5)
+                    .clamp(0.0, (from - 1) as f64);
+                let first = at.floor() as usize;
+                let second = (first + 1).min(from - 1);
+                (first, second, (at - first as f64) as f32)
+            })
+            .collect()
+    };
+    let (xs, ys) = (taps(sw_us, dw_us), taps(sh_us, dh_us));
+    let sample = |x: usize, y: usize| src.get(y * sw_us + x).copied().map_or([0.0; 4], channels);
+    let mut out = Vec::with_capacity(dw_us.checked_mul(dh_us)?);
+    for &(y0, y1, fy) in &ys {
+        for &(x0, x1, fx) in &xs {
+            let (a, b, c, d) = (
+                sample(x0, y0),
+                sample(x1, y0),
+                sample(x0, y1),
+                sample(x1, y1),
+            );
+            let top = a.iter().zip(b).map(|(a, b)| a + (b - a) * fx);
+            let bottom = c.iter().zip(d).map(|(c, d)| c + (d - c) * fx);
+            let mut mixed = [0f32; 4];
+            for (m, (top, bottom)) in mixed.iter_mut().zip(top.zip(bottom)) {
+                *m = top + (bottom - top) * fy;
+            }
+            out.push(pack(mixed));
+        }
+    }
+    Some(out)
+}
+
 /// The source pixels one destination pixel covers along one axis, with the
 /// weight of each: whole pixels inside count 1, the partly covered ones at
 /// either end their covered fraction.
@@ -300,5 +368,38 @@ mod tests {
             "larger than the source"
         );
         assert_eq!(downscale(&[0; 4], 2, 2, 0, 1), None, "empty");
+    }
+
+    /// Enlarging keeps a flat picture flat, keeps the corners where they
+    /// were, and blends between neighbours rather than repeating them.
+    #[test]
+    fn an_upscale_blends_between_neighbours() {
+        let flat = vec![0x8040_2010; 4];
+        assert_eq!(upscale(&flat, 2, 2, 5, 3).unwrap(), vec![0x8040_2010; 15]);
+
+        // Black on the left, white on the right, opaque.
+        let src = [0xFF00_0000, 0xFFFF_FFFF];
+        let out = upscale(&src, 2, 1, 4, 1).unwrap();
+        assert_eq!(out[0], 0xFF00_0000, "the left edge stays black");
+        assert_eq!(out[3], 0xFFFF_FFFF, "the right edge stays white");
+        let grey = |px: u32| px & 0xFF;
+        assert!(grey(out[1]) > 0 && grey(out[1]) < grey(out[2]) && grey(out[2]) < 255);
+    }
+
+    #[test]
+    fn a_resample_shrinks_by_averaging_and_grows_by_blending() {
+        let src = [0xFF00_0000, 0xFFFF_FFFF, 0xFF00_0000, 0xFFFF_FFFF];
+        // Halved: the mean of the two.
+        assert_eq!(
+            resample(&src, 4, 1, 2, 1).unwrap(),
+            downscale(&src, 4, 1, 2, 1).unwrap()
+        );
+        // Doubled: blended.
+        assert_eq!(
+            resample(&src, 4, 1, 8, 1).unwrap(),
+            upscale(&src, 4, 1, 8, 1).unwrap()
+        );
+        assert_eq!(upscale(&src, 3, 1, 6, 1), None, "not width times height");
+        assert_eq!(upscale(&src, 4, 1, 0, 1), None, "empty");
     }
 }

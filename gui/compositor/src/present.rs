@@ -850,6 +850,7 @@ mod tests {
                     fill: 0xFFFF_FFFF,
                     outline: 0xFF00_0000,
                 },
+                themed: None,
             })
             .expect("an arrow");
         let picture = vec![0xFF20_4060u32; 64 * 64];

@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -106,7 +107,9 @@ use repaint::{Change, DamageHistory, Region};
 // The mouse pointer: its artwork, and the plane it is drawn on over the frame
 // rather than into it. See the module docs.
 pub mod cursor;
-pub use cursor::{CursorCache, CursorImage, CursorStyle, PointerSprite, PointerState};
+pub use cursor::{
+    CursorCache, CursorImage, CursorStyle, PointerSprite, PointerState, ThemedCursor, ThemedImage,
+};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
 // The one piece of keyboard state that spans two events. `keymap` is a pure
@@ -5799,6 +5802,23 @@ struct Thumbnail {
     image: ImageAsset,
 }
 
+/// The user's cursor theme's pictures, by pointer shape and size in pixels:
+/// `None` where the theme has no picture and the built-in art is drawn.
+#[derive(Debug, Default)]
+struct ThemedCursors {
+    /// The theme they were read from. A different one -- the user chose
+    /// another -- empties the rest before it is looked in.
+    theme: Option<appearance::cursors::CursorTheme>,
+    pictures: HashMap<(CursorShape, u32), Option<Arc<cursor::ThemedCursor>>>,
+}
+
+impl ThemedCursors {
+    /// Pictures held before starting again from empty: thirteen shapes at a
+    /// few sizes is far below it, so reaching it means the size is changing
+    /// continuously, and starting over is the right response.
+    const CAPACITY: usize = 64;
+}
+
 /// The main compositor state machine.
 pub struct Compositor {
     /// All managed windows (ordered by creation, z_order field determines draw order).
@@ -5827,6 +5847,11 @@ pub struct Compositor {
     /// window again gives the same handle -- and a window's entry goes when it
     /// closes, so this is bounded by the window count.
     exports: Vec<(ExportedWindow, WindowId)>,
+    /// The user's cursor theme's pictures, as the pointer has needed them
+    /// (lane C's cursor themes, §1459): a lookup reads a file, so each is
+    /// read once. Behind a lock because the pointer is asked for through
+    /// `&self` -- the server's `show` holds the compositor shared.
+    themed_cursors: std::sync::Mutex<ThemedCursors>,
     /// The pictures windows' commands name ([`RenderCommand::WindowPicture`]),
     /// made at the size they are drawn at: keyed by the viewer, the pictured
     /// window and that size, and remade when the pictured window's content
@@ -6296,6 +6321,7 @@ impl Compositor {
             focus_history: Vec::new(),
             activation: activation::Activations::new(),
             exports: Vec::new(),
+            themed_cursors: std::sync::Mutex::new(ThemedCursors::default()),
             thumbnails: HashMap::new(),
             backend,
             display_manager,
@@ -6852,6 +6878,12 @@ impl Compositor {
     /// a user who has never opened the Personalization page is the ordinary
     /// case, not a failure to report.
     pub fn reload_appearance(&mut self) {
+        // The cursor theme's pictures are read again: a theme installed again
+        // under the same name -- a new version -- would otherwise go on
+        // showing the old pictures until the compositor restarted.
+        if let Ok(mut cache) = self.themed_cursors.lock() {
+            *cache = ThemedCursors::default();
+        }
         self.set_appearance(appearance::AppearanceFile::load().settings);
     }
 
@@ -9895,8 +9927,8 @@ impl Compositor {
     }
 
     /// When something the compositor is waiting on by the clock next comes
-    /// due: a keystroke's slow-keys threshold, or a window's idle deadline.
-    /// `None` if nothing is.
+    /// due: a keystroke's slow-keys threshold, a window's idle deadline, or
+    /// the next frame of an animated theme pointer. `None` if nothing is.
     ///
     /// Nothing else would wake a loop for these. To a loop that waits for
     /// input, a key waiting out its threshold is perfect quiet — no input, no
@@ -9921,7 +9953,8 @@ impl Compositor {
             .filter(|watch| !watch.fired)
             .filter_map(|watch| self.last_input.checked_add(watch.after))
             .min();
-        present::earliest(key, idle)
+        let frame = self.pointer_frame_due(Instant::now());
+        present::earliest(present::earliest(key, idle), frame)
     }
 
     /// Replace the accessibility settings.
@@ -12760,8 +12793,19 @@ impl Compositor {
     /// size is scaled by the display the pointer is on, so a pointer crossing
     /// onto a 2x monitor doubles as it crosses, exactly as the window
     /// decorations there do.
+    ///
+    /// With a cursor theme chosen, the state carries the theme's picture for
+    /// the shape and size -- for an animated pointer, the frame showing now
+    /// (lane C's cursor themes, §1459) -- and the built-in art otherwise.
     #[must_use]
     pub fn pointer(&self) -> Option<PointerState> {
+        self.pointer_at(Instant::now())
+    }
+
+    /// [`Self::pointer`] as it is at `now`, which decides the frame an
+    /// animated theme pointer shows.
+    #[must_use]
+    pub fn pointer_at(&self, now: Instant) -> Option<PointerState> {
         // A crosshair while a pick is open, over whatever window: the
         // compositor's own mark that the next click is not the window's, so
         // no program can draw it to fake the mode, nor hide it.
@@ -12784,6 +12828,11 @@ impl Compositor {
         )]
         let size_px = (size.pixels() as f32 * scale).round() as u32;
         let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
+        let themed = self.themed_cursor(shape, size_px).and_then(|cursor| {
+            cursor
+                .frame_at(self.ms_since_start(now))
+                .map(|(image, _)| ThemedImage(Arc::clone(image)))
+        });
         Some(PointerState {
             shape,
             x,
@@ -12793,7 +12842,60 @@ impl Compositor {
                 fill,
                 outline,
             },
+            themed,
         })
+    }
+
+    /// Milliseconds from this compositor's start to `now`: the clock an
+    /// animated theme pointer's frames are counted on, so every animated
+    /// pointer runs in step whenever it appears.
+    fn ms_since_start(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.started_at).as_millis())
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The user's cursor theme's pictures for `shape` at `size_px`, read the
+    /// first time they are wanted and kept: `None` for the built-in theme --
+    /// the compositor's own art -- and for a shape the theme does not draw.
+    fn themed_cursor(&self, shape: CursorShape, size_px: u32) -> Option<Arc<ThemedCursor>> {
+        let theme = &self.appearance.cursor_theme;
+        if theme.is_built_in() {
+            return None;
+        }
+        let name = cursor::css_name(shape)?;
+        // A poisoned lock -- a lookup panicked -- draws the art rather than
+        // trusting what the panic left behind.
+        let mut cache = self.themed_cursors.lock().ok()?;
+        if cache.theme.as_ref() != Some(theme) {
+            cache.pictures.clear();
+            cache.theme = Some(theme.clone());
+        }
+        if let Some(found) = cache.pictures.get(&(shape, size_px)) {
+            return found.clone();
+        }
+        let found = theme
+            .cursor(name, size_px)
+            .and_then(|images| ThemedCursor::new(&images, size_px))
+            .map(Arc::new);
+        if cache.pictures.len() >= ThemedCursors::CAPACITY {
+            cache.pictures.clear();
+        }
+        cache.pictures.insert((shape, size_px), found.clone());
+        found
+    }
+
+    /// When an animated theme pointer showing at `now` changes frame -- a
+    /// deadline the loop wakes for, so the next frame is shown without any
+    /// input to prompt it. `None` when no pointer, or a still one, is up.
+    fn pointer_frame_due(&self, now: Instant) -> Option<Instant> {
+        let state = self.pointer_at(now)?;
+        state.themed.as_ref()?;
+        let cursor = self.themed_cursor(state.shape, state.style.size_px)?;
+        if !cursor.is_animated() {
+            return None;
+        }
+        let (_, left) = cursor.frame_at(self.ms_since_start(now))?;
+        now.checked_add(Duration::from_millis(left))
     }
 
     /// The pointer's fill and outline for `scheme`, as `0xAARRGGBB`: white
@@ -20959,6 +21061,124 @@ mod tests {
             action: ShellControlAction::ReturnKeyboard,
         });
         assert_eq!(comp.focused_window, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cursor themes (lane C's §1459)
+    // -----------------------------------------------------------------------
+
+    /// An XCursor file of `frames` -- each `(side, delay_ms, colour)`, a
+    /// square of one colour at nominal size `side`, hot spot at the corner --
+    /// in the layout `appearance::cursors::xcursor` reads.
+    fn xcursor(frames: &[(u32, u32, u32)]) -> Vec<u8> {
+        const IMAGE: u32 = 0xfffd_0002;
+        let mut out = b"Xcur".to_vec();
+        let push = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+        let count = frames.len() as u32;
+        push(&mut out, 16);
+        push(&mut out, 0x0001_0000);
+        push(&mut out, count);
+        let mut position = 16 + 12 * count;
+        for &(side, _, _) in frames {
+            push(&mut out, IMAGE);
+            push(&mut out, side);
+            push(&mut out, position);
+            position += 36 + 4 * side * side;
+        }
+        for &(side, delay, colour) in frames {
+            for word in [36, IMAGE, side, 1, side, side, 0, 0, delay] {
+                push(&mut out, word);
+            }
+            for _ in 0..side * side {
+                push(&mut out, colour);
+            }
+        }
+        out
+    }
+
+    /// A cursor theme in a scratch folder: `cursors` is (file name, file).
+    struct ScratchTheme {
+        root: std::path::PathBuf,
+    }
+
+    impl ScratchTheme {
+        fn new(tag: &str, theme: &str, cursors: &[(&str, Vec<u8>)]) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("slateos-compositor-{tag}-{}", std::process::id()));
+            let dir = root.join("icons").join(theme).join("cursors");
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, bytes) in cursors {
+                std::fs::write(dir.join(name), bytes).unwrap();
+            }
+            Self { root }
+        }
+
+        fn theme(&self, id: &str) -> appearance::cursors::CursorTheme {
+            appearance::cursors::CursorTheme::named(
+                std::ffi::OsStr::new(id),
+                appearance::themes::ThemeDirs {
+                    user: None,
+                    system: self.root.join("system"),
+                },
+                vec![self.root.join("icons")],
+            )
+        }
+    }
+
+    impl Drop for ScratchTheme {
+        fn drop(&mut self) {
+            // Scratch only: a leftover folder in the temp directory is
+            // harmless, and a test must not fail on tidying up.
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The theme's picture is drawn instead of the art, an animated one
+    /// frame by frame -- each frame a different pointer, so a frame change
+    /// is a frame owed -- and the loop is woken for the next frame; a shape
+    /// the theme does not draw is the art; and another theme chosen is
+    /// looked in afresh, not served the last one's pictures.
+    #[test]
+    fn a_cursor_themes_pictures_are_drawn_and_animated() {
+        let scratch = ScratchTheme::new(
+            "busy-theme",
+            "Busy",
+            &[(
+                "default",
+                xcursor(&[(24, 100, 0xFF00_00FF), (24, 100, 0xFF00_FF00)]),
+            )],
+        );
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.appearance.cursor_theme = scratch.theme("Busy");
+        comp.handle_input(InputEvent::MouseMove { x: 10, y: 10 });
+
+        let start = comp.started_at;
+        let first = comp.pointer_at(start).unwrap();
+        let picture = first.themed.clone().expect("the theme's picture");
+        assert_eq!(picture.0.pixels[0], 0xFF00_00FF);
+        let second = comp.pointer_at(start + Duration::from_millis(150)).unwrap();
+        assert_eq!(second.themed.as_ref().unwrap().0.pixels[0], 0xFF00_FF00);
+        assert_ne!(first, second, "a frame change is a pointer change");
+        assert_eq!(
+            comp.pointer_at(start + Duration::from_millis(210)).unwrap(),
+            first,
+            "round again, and the very same picture"
+        );
+        assert!(
+            comp.pointer_frame_due(start).is_some(),
+            "nothing wakes the loop for the next frame"
+        );
+
+        comp.cursor_shape = CursorShape::Text;
+        assert_eq!(comp.pointer_at(start).unwrap().themed, None, "the art");
+
+        comp.cursor_shape = CursorShape::Arrow;
+        comp.appearance.cursor_theme = scratch.theme("Other");
+        assert_eq!(
+            comp.pointer_at(start).unwrap().themed,
+            None,
+            "another theme was served the last one's picture"
+        );
     }
 
     // -----------------------------------------------------------------------

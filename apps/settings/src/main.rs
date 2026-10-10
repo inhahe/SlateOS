@@ -902,10 +902,13 @@ impl DropdownLayout {
 pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
-    /// When quiet hours begin.
+    /// How long notifications are kept, also across restarts
+    /// (`notifsettings::HistoryRetention`, design-decisions §1468).
+    NotifHistory,
     /// How long each picture in a rotation stays up.
     RotationInterval,
     LoginBackground,
+    /// When quiet hours begin.
     QuietStart,
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
@@ -997,9 +1000,10 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 27] = [
+    pub const FIXED: [Self; 28] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::NotifHistory,
         Self::TimeZone,
         Self::AddClock,
         Self::AutoLightFrom,
@@ -3081,6 +3085,37 @@ const LOGIN_BACKGROUNDS: [&str; 4] = [
     "Same as my desktop",
     "A picture",
 ];
+
+/// The lengths of notification history the Notifications page offers, in
+/// days (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+/// The desktop keeps up to `notifsettings::HistoryRetention::MAX_DAYS`.
+const HISTORY_DAYS: [u16; 6] = [0, 1, 7, 30, 90, 365];
+
+/// The lengths offered for keeping notifications: [`HISTORY_DAYS`], with
+/// `current` among them, in its place, when it is none of them -- a value
+/// written into `notifications.yaml` by hand shows as itself, not as the
+/// nearest length on the list, and opening the list changes nothing.
+fn history_choices(current: u16) -> Vec<u16> {
+    let mut days = HISTORY_DAYS.to_vec();
+    if !days.contains(&current) {
+        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());
+        days.insert(at, current);
+    }
+    days
+}
+
+/// How a length of notification history reads on the page.
+fn history_label(days: u16) -> String {
+    match days {
+        0 => String::from("Don't keep"),
+        1 => String::from("1 day"),
+        7 => String::from("1 week"),
+        30 => String::from("1 month"),
+        90 => String::from("3 months"),
+        365 => String::from("1 year"),
+        n => format!("{n} days"),
+    }
+}
 
 /// The Date & Time page's row for the machine's own zone -- the default, and
 /// what the C library and `date` use.
@@ -6171,6 +6206,23 @@ impl SettingsState {
         s.pill_row("On", PillId::QuietDays, &days);
         s.gap();
 
+        // How long the pane keeps what arrived, also across restarts
+        // (`notifsettings::HistoryRetention`, design-decisions §1468): until
+        // now a choice made only by editing `notifications.yaml` by hand.
+        s.section("History");
+        s.note(
+            "Notifications are kept for this long after they arrive, also across \
+             restarts. Don't keep also clears the ones kept so far; those showing \
+             now stay until they are dismissed or the desktop restarts.",
+            44.0,
+        );
+        s.dropdown_row(
+            "Keep for",
+            DropdownId::NotifHistory,
+            &history_label(self.notif.settings.history.days),
+        );
+        s.gap();
+
         s.section("Programs");
         if self.notif.settings.apps.is_empty() {
             s.note(
@@ -6314,6 +6366,12 @@ impl SettingsState {
                     })
                     .unwrap_or(0);
                 (items, at)
+            }
+            DropdownId::NotifHistory => {
+                let current = self.notif.settings.history.days;
+                let choices = history_choices(current);
+                let at = choices.iter().position(|d| *d == current).unwrap_or(0);
+                (choices.into_iter().map(history_label).collect(), at)
             }
             DropdownId::QuietStart | DropdownId::QuietEnd => {
                 let window = self.notif.settings.quiet_hours.window;
@@ -7632,6 +7690,12 @@ impl SettingsState {
                         } else {
                             notifsettings::DailyWindow::new(hours.start(), *chosen)
                         };
+                }
+            }
+            DropdownId::NotifHistory => {
+                let current = self.notif.settings.history.days;
+                if let Some(days) = history_choices(current).get(index) {
+                    self.notif.settings.history.days = *days;
                 }
             }
             DropdownId::QuietStart | DropdownId::QuietEnd => {
@@ -9648,6 +9712,103 @@ mod tests {
                 "the desktop was never told to re-read the file"
             );
         });
+    }
+
+    /// Press the `item`-th entry of the open dropdown where the popup drew it.
+    fn press_dropdown_item(state: &mut SettingsState, item: usize) {
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        let row = item
+            .checked_sub(layout.window.start)
+            .expect("the entry is in the popup's window");
+        let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: layout.x + 20.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **How long notifications are kept is chosen on the Notifications
+    /// page**, and the choice is written to `notifications.yaml`, which the
+    /// desktop obeys (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+    /// It could be chosen only by editing the file by hand.
+    #[test]
+    fn how_long_notifications_are_kept_is_chosen_and_written() {
+        with_scratch_config("settings-notif-history", |_root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Notifications;
+            let (cx, cy) = center_of(&app, RowHit::Dropdown(DropdownId::NotifHistory))
+                .expect("the page draws no row for the history");
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(app.open_dropdown, Some(DropdownId::NotifHistory));
+            let layout = app.dropdown_layout().expect("it has no layout");
+            assert_eq!(
+                layout.items,
+                [
+                    "Don't keep",
+                    "1 day",
+                    "1 week",
+                    "1 month",
+                    "3 months",
+                    "1 year"
+                ]
+            );
+            assert_eq!(layout.selected, 2, "the default week is not the one chosen");
+
+            press_dropdown_item(&mut app, 3);
+            assert_eq!(app.notif.settings.history.days, 30);
+            assert_eq!(
+                notifsettings::NotifFile::load().settings.history.days,
+                30,
+                "the choice was not written"
+            );
+            assert!(
+                app.take_notifications_change(),
+                "the desktop was never told to read the file again"
+            );
+
+            app.show_dropdown(DropdownId::NotifHistory);
+            press_dropdown_item(&mut app, 0);
+            assert_eq!(
+                notifsettings::NotifFile::load().settings.history.days,
+                0,
+                "Don't keep was not written"
+            );
+        });
+    }
+
+    /// A length written into the file by hand that is none on the list shows
+    /// as itself -- "12 days" -- in its place among them, and stays chosen;
+    /// the row says so too.
+    #[test]
+    fn a_history_length_not_on_the_list_is_shown_as_itself() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        app.notif.settings.history.days = 12;
+        app.show_dropdown(DropdownId::NotifHistory);
+        let layout = app.dropdown_layout().expect("it has no layout");
+        assert_eq!(
+            layout.items,
+            [
+                "Don't keep",
+                "1 day",
+                "1 week",
+                "12 days",
+                "1 month",
+                "3 months",
+                "1 year"
+            ]
+        );
+        assert_eq!(layout.selected, 3);
+        app.open_dropdown = None;
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "12 days"),
+            "the row does not say 12 days"
+        );
     }
 
     // ---- Measured widths ----

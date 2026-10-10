@@ -730,6 +730,57 @@ MUTATIONS += [
     ),
 ]
 
+# -- how long notifications are kept (2026-10-10; lane C,
+# c-e-a-setting-for-how-long-notifications-are-kept): a choice made only by
+# editing notifications.yaml by hand.
+HISTORY = "how_long_notifications_are_kept_is_chosen_and_written"
+HISTORY_OFF_LIST = "a_history_length_not_on_the_list_is_shown_as_itself"
+
+MUTATIONS += [
+    (
+        "the history row opens another dropdown",
+        '            "Keep for",\n            DropdownId::NotifHistory,',
+        '            "Keep for",\n            DropdownId::NotifImportance(usize::MAX),',
+        [HISTORY],
+    ),
+    (
+        "a length chosen is not kept",
+        "                    self.notif.settings.history.days = *days;",
+        "                    let _ = days;",
+        [HISTORY],
+    ),
+    (
+        "a length written by hand snaps to the list",
+        "    if !days.contains(&current) {\n        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());",
+        "    if false {\n        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());",
+        [HISTORY_OFF_LIST],
+    ),
+    (
+        "a length written by hand goes at the end of the list",
+        "        let at = days.iter().position(|d| *d > current).unwrap_or(days.len());",
+        "        let at = days.len();",
+        [HISTORY_OFF_LIST],
+    ),
+    (
+        "a week reads as seven days",
+        '        7 => String::from("1 week"),',
+        '        7 => String::from("7 days"),',
+        [HISTORY],
+    ),
+    (
+        "nothing kept reads as zero days",
+        '        0 => String::from("Don\'t keep"),',
+        '        0 => String::from("0 days"),',
+        [HISTORY],
+    ),
+    (
+        "the list opens on the first length, not the one kept",
+        "                let at = choices.iter().position(|d| *d == current).unwrap_or(0);\n                (choices.into_iter().map(history_label).collect(), at)",
+        "                let _ = current;\n                (choices.into_iter().map(history_label).collect(), 0)",
+        [HISTORY, HISTORY_OFF_LIST],
+    ),
+]
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",

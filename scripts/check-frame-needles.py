@@ -33,10 +33,23 @@ Usage:
 
     python scripts/check-frame-needles.py                # every app that has one
     python scripts/check-frame-needles.py gomoku chess   # named crates only
+    python scripts/check-frame-needles.py --self-test    # check the checker
 
 Exit status is 1 when any needle has more than one painter, so it can gate a
-commit.  It is a heuristic, not a proof -- read the flagged lines rather than
-trusting the count.
+commit, and 2 for an app name or an option it does not know.  It is a
+heuristic, not a proof -- read the flagged lines rather than trusting the
+count.
+
+`--self-test` builds small fixture crates in a temporary folder and checks
+the verdict on each: two painters reported, one painter passed, `says_in`
+passed, a needle that appears only in a comment or only in the test module
+passed, and a crate named on the command line scanned while one not named is
+not (requests/a-e-check-frame-needles-needs-a-self-test.md).  It runs at push
+time, before the real scan is trusted (design-decisions §974).
+
+Comments are blanked out before literals are collected: a literal in a
+comment -- `// the header used to say "White is thinking" too` -- paints
+nothing, and counted, it made one painter look like two.
 
 Two deliberate limits, both of which cost recall rather than precision:
 
@@ -55,10 +68,14 @@ Two deliberate limits, both of which cost recall rather than precision:
     real ambiguity.  Read the line before believing it.
 """
 
+import contextlib
 import io
 import pathlib
 import re
 import sys
+import tempfile
+
+import selftestflag  # scripts/selftestflag.py
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 APPS = REPO / "apps"
@@ -158,8 +175,65 @@ def needle_of(arg):
     return m.group(1) if m else None
 
 
+def strip_comments(src):
+    """`src` with its comments and char literals blanked out and its string
+    literals kept.
+
+    `//` runs to the end of the line (the line break stays, so `FN`'s `^`
+    still finds the next line); `/* */` nests, as Rust's does, and becomes a
+    space.  String literals are copied whole, so a `//` inside
+    `"http://..."` is not taken for a comment.  A char literal becomes `'_'`:
+    it paints nothing, and the quote in `'"'` would otherwise open a string
+    for `LIT` that swallows the real literal after it.  A `'` that does not
+    open a char literal is a lifetime and is copied as it is.
+    """
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '"':
+            j = i + 1
+            while j < n and src[j] != '"':
+                j += 2 if src[j] == "\\" else 1
+            out.append(src[i : j + 1])
+            i = j + 1
+        elif c == "'":
+            if i + 1 < n and src[i + 1] == "\\":
+                # '\n', '\'', '\u{1F4B0}': up to the quote after the escape.
+                close = src.find("'", i + 3)
+                close = n - 1 if close < 0 else close
+                out.append("'_'")
+                i = close + 1
+            elif i + 2 < n and src[i + 2] == "'":
+                out.append("'_'")
+                i += 3
+            else:
+                out.append(c)
+                i += 1
+        elif src.startswith("//", i):
+            end = src.find("\n", i)
+            i = n if end < 0 else end
+        elif src.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if src.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif src.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            out.append(" ")
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def fn_literals(prod):
-    """(name, [string literals]) for every fn in the production half."""
+    """(name, [string literals]) for every fn in the production half,
+    comments left out (`strip_comments`)."""
+    prod = strip_comments(prod)
     starts = [(m.group(1), m.start()) for m in FN.finditer(prod)]
     out = []
     for i, (name, at) in enumerate(starts):
@@ -215,9 +289,15 @@ def check(path):
     return bad
 
 
-def main(argv):
+def main(argv, apps=APPS):
+    unknown = selftestflag.unknown_options(argv[1:])
+    if unknown:
+        print("unrecognised option(s): %s" % ", ".join(unknown))
+        return 2
+    if selftestflag.wants_selftest(argv[1:]):
+        return self_test()
     wanted = set(argv[1:])
-    sources = sorted(APPS.glob("*/src/main.rs"))
+    sources = sorted(apps.glob("*/src/main.rs"))
     if wanted:
         sources = [p for p in sources if p.parent.parent.name in wanted]
         missing = wanted - {p.parent.parent.name for p in sources}
@@ -234,6 +314,184 @@ def main(argv):
         return 1
     print("no whole-frame needle is painted in more than one place.")
     return 0
+
+
+# ── The self-test's fixtures ─────────────────────────────────────────────────
+#
+# Each is the production half of a crate, or its test module, as an app's
+# `main.rs` has them: methods four spaces in (what `FN` finds), and a test
+# module holding the `says` helper.
+
+PROD_TWO_PAINTERS = """
+impl Game {
+    fn draw_header(&self, f: &mut Frame) {
+        f.text("White is thinking");
+    }
+    fn draw_status(&self, f: &mut Frame) {
+        f.text("White is thinking about its move");
+    }
+}
+"""
+
+PROD_ONE_PAINTER = """
+impl Game {
+    fn draw_header(&self, f: &mut Frame) {
+        f.text("Gomoku");
+    }
+    fn draw_status(&self, f: &mut Frame) {
+        f.text("White is thinking");
+    }
+}
+"""
+
+# The needle in comments of the header -- a line comment, and a block comment
+# beside a real literal. One painter, as far as anything is painted.
+PROD_IN_COMMENTS = """
+impl Game {
+    fn draw_header(&self, f: &mut Frame) {
+        // The header used to say "White is thinking" too.
+        f.text("Gomoku"); /* not "White is thinking" any more */
+    }
+    fn draw_status(&self, f: &mut Frame) {
+        f.text("White is thinking");
+    }
+}
+"""
+
+# Two painters, one with a char literal that is a quote before its literal:
+# taken for the start of a string, it hides the second painter.
+PROD_QUOTE_CHAR = """
+impl Game {
+    fn draw_header(&self, f: &mut Frame) {
+        f.text("White is thinking");
+    }
+    fn draw_status(&self, f: &mut Frame) {
+        let quote = '"';
+        f.text("White is thinking about its move");
+    }
+}
+"""
+
+TESTS_SAYS = """
+mod tests {
+    use super::*;
+
+    fn says(frame: &Frame, needle: &str) -> bool {
+        frame.texts().iter().any(|t| t.contains(needle))
+    }
+
+    #[test]
+    fn the_status_band_says_white_is_thinking() {
+        let frame = Frame::new();
+        assert!(says(&frame, "White is thinking"), "the status band said nothing");
+    }
+}
+"""
+
+TESTS_SAYS_IN = """
+mod tests {
+    use super::*;
+
+    fn says(frame: &Frame, needle: &str) -> bool {
+        frame.texts().iter().any(|t| t.contains(needle))
+    }
+
+    fn says_in(frame: &Frame, needle: &str, r: Rect) -> bool {
+        frame.texts_in(r).iter().any(|t| t.contains(needle))
+    }
+
+    #[test]
+    fn the_status_band_says_white_is_thinking() {
+        let frame = Frame::new();
+        assert!(says_in(&frame, "White is thinking", status_band()));
+    }
+}
+"""
+
+# The needle in the test module's own functions as well as its call: what the
+# tests say is not what the program paints.
+TESTS_SAYS_WITH_A_TEST_PAINTER = """
+mod tests {
+    use super::*;
+
+    fn says(frame: &Frame, needle: &str) -> bool {
+        frame.texts().iter().any(|t| t.contains(needle))
+    }
+
+    fn expected_status() -> &'static str {
+        "White is thinking"
+    }
+
+    #[test]
+    fn the_status_band_says_white_is_thinking() {
+        let frame = Frame::new();
+        assert!(says(&frame, "White is thinking"), "{}", expected_status());
+    }
+}
+"""
+
+
+def write_crate(apps, name, prod, tests):
+    """`apps/<name>/src/main.rs` holding `prod` then `tests`; its path."""
+    src = apps / name / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    path = src / "main.rs"
+    path.write_bytes((prod + "\n#[cfg(test)]\n" + tests).encode("utf-8"))
+    return path
+
+
+def self_test():
+    """Check the checker's verdicts on fixture crates. 0 when every one is
+    right; 1, naming the wrong ones, otherwise."""
+    cases = [
+        ("two painters of a bare says() needle are reported", PROD_TWO_PAINTERS, TESTS_SAYS, 1),
+        ("one painter is passed", PROD_ONE_PAINTER, TESTS_SAYS, 0),
+        ("says_in names the band, and is passed", PROD_TWO_PAINTERS, TESTS_SAYS_IN, 0),
+        ("a needle that is only in comments paints nothing", PROD_IN_COMMENTS, TESTS_SAYS, 0),
+        ("a quote in a char literal hides no painter", PROD_QUOTE_CHAR, TESTS_SAYS, 1),
+        (
+            "a needle the test module itself spells is not a painter",
+            PROD_ONE_PAINTER,
+            TESTS_SAYS_WITH_A_TEST_PAINTER,
+            0,
+        ),
+    ]
+    failures = []
+    ran = 0
+    with tempfile.TemporaryDirectory(prefix="check-frame-needles-") as tmp:
+        apps = pathlib.Path(tmp) / "apps"
+        for n, (what, prod, tests, want) in enumerate(cases):
+            path = write_crate(apps, "case%d" % n, prod, tests)
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = check(path)
+            ran += 1
+            if got != want:
+                failures.append("%s: %d ambiguous needle(s), want %d" % (what, got, want))
+
+        # Which crates a run scans: only those named, every one when none is.
+        named = pathlib.Path(tmp) / "named"
+        write_crate(named, "alpha", PROD_ONE_PAINTER, TESTS_SAYS)
+        write_crate(named, "beta", PROD_TWO_PAINTERS, TESTS_SAYS)
+        for argv, want, what in [
+            (["alpha"], 0, "a crate not named is not scanned"),
+            (["beta"], 1, "a crate named is scanned"),
+            ([], 1, "with none named, every crate is scanned"),
+            (["gamma"], 2, "a name no crate has is refused"),
+            (["--slef-test"], 2, "an option it does not know is refused"),
+        ]:
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = main(["check-frame-needles.py", *argv], apps=named)
+            ran += 1
+            if got != want:
+                failures.append("%s: exit %d, want %d" % (what, got, want))
+
+    for failure in failures:
+        print("FAIL %s" % failure)
+    print(
+        "check-frame-needles self-test: %d case(s) ran, %d wrong"
+        % (ran, len(failures))
+    )
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

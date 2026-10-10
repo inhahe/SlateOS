@@ -179,6 +179,25 @@ pub fn apply_key(
     }
 }
 
+/// [`apply_key`] on the program's clipboard (`guitk::clipboard`): Ctrl+V
+/// pastes it, and what Ctrl+C or Ctrl+X takes is put on it as well as
+/// handed back. It is the clipboard a field's right-click menu copies to and
+/// pastes from (`TextInput::edit_command`), so the keys and the menu agree;
+/// a window keeping a clipboard of its own for the keys has two that do not.
+pub fn apply_key_on_clipboard(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    font_size: f32,
+) -> LineEdit {
+    let clipboard = guitk::clipboard::text();
+    let edit = apply_key(input, key, capacity, &clipboard, font_size);
+    if let Some(copied) = &edit.copied {
+        guitk::clipboard::set_text(copied);
+    }
+    edit
+}
+
 /// Type `typed` into `input` over its selection, stopping at `capacity`
 /// characters -- counted in characters, not bytes, so a limit cannot cut a
 /// character in half. A control character -- a newline in a paste -- is left
@@ -459,6 +478,40 @@ mod tests {
         // With nothing selected, a copy takes nothing.
         let none = apply_key(&mut input, &key(Key::C, "c", true, false), 10, "", 13.0);
         assert_eq!(none.copied, None);
+    }
+
+    /// **On the program's clipboard, the keys and a field's right-click menu
+    /// agree**: Ctrl+C puts the selection there, the menu's Paste pastes it
+    /// into another field, and what the menu copies Ctrl+V pastes.
+    #[test]
+    fn the_keys_and_the_menu_share_the_programs_clipboard() {
+        let mut from = field("hello");
+        let mut to = field("");
+        apply_key_on_clipboard(&mut from, &key(Key::A, "a", true, false), 10, 13.0);
+        let copied = apply_key_on_clipboard(&mut from, &key(Key::C, "c", true, false), 10, 13.0);
+        assert_eq!(
+            copied.copied.as_deref(),
+            Some("hello"),
+            "the copy is not handed back"
+        );
+        assert_eq!(guitk::clipboard::text(), "hello");
+        let _pasted = to.edit_command(guitk::editmenu::EditCommand::Paste.id());
+        assert_eq!(
+            to.text(),
+            "hello",
+            "the menu did not paste what the key copied"
+        );
+
+        let mut other = field("world");
+        other.select_all();
+        let _copied = other.edit_command(guitk::editmenu::EditCommand::Copy.id());
+        let mut last = field("");
+        apply_key_on_clipboard(&mut last, &key(Key::V, "v", true, false), 3, 13.0);
+        assert_eq!(
+            last.text(),
+            "wor",
+            "the key did not paste what the menu copied, to the capacity"
+        );
     }
 
     #[test]

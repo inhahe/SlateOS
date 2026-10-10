@@ -179,8 +179,52 @@ pub(crate) struct SliceContext {
     /// them for what a broken stream's scan positions may write.
     pub(crate) mb: Box<[i32; 16 * 48 + 256]>,
     pub(crate) mb_luma_dc: [[i32; 16]; 3],
-    /// Where an I_PCM macroblock's samples start, in bits.
+    /// Where an I_PCM macroblock's samples start in the slice's data, in
+    /// bytes (`intra_pcm_ptr`).
     pub(crate) intra_pcm_pos: usize,
+    /// Each macroblock's bottom row before the loop filter, for the row
+    /// below to predict from: luma, Cb, Cr, as samples
+    /// (`top_borders`); for an MBAFF frame a second set for the pair's
+    /// fields. Kept from slice to slice and picture to picture, grown as
+    /// FFmpeg grows them -- zeroed only then.
+    pub(crate) top_borders: [Vec<[u16; 48]>; 2],
+    pub(crate) top_borders_allocated: [usize; 2],
+}
+
+impl SliceContext {
+    /// `alloc_scratch_buffers`' top borders: `av_fast_mallocz` of 96 bytes
+    /// a macroblock, which grows a sixteenth and 32 bytes past what is
+    /// asked, zeroed, and keeps what it holds while it is big enough.
+    pub(crate) fn alloc_top_borders(&mut self, mb_width: usize) {
+        let min_size = mb_width.saturating_mul(96);
+        for (borders, allocated) in self
+            .top_borders
+            .iter_mut()
+            .zip(&mut self.top_borders_allocated)
+        {
+            if min_size > *allocated {
+                let size = min_size + min_size / 16 + 32;
+                *borders = vec![[0; 48]; size / 96];
+                *allocated = size;
+            }
+        }
+    }
+}
+
+/// The reference-cache entries right of blocks 5, 7 and 13 marked
+/// unavailable, once for the decoder's size (`ff_h264_slice_context_init`).
+/// Nothing writes them after: they stand for the macroblock to the right,
+/// never decoded yet, which is the above-right neighbour of blocks 7 and 13
+/// and of the bottom-right 8x8 partition, so their vectors are predicted
+/// from the above-left instead.
+fn slice_context_init(sl: &mut SliceContext) {
+    use crate::mbtype::SCAN8;
+    use crate::mvpred::PART_NOT_AVAILABLE;
+    for list in &mut sl.ref_cache {
+        for block in [5, 7, 13] {
+            list[SCAN8[block] + 1] = PART_NOT_AVAILABLE;
+        }
+    }
 }
 
 impl Default for SliceContext {
@@ -243,6 +287,8 @@ impl Default for SliceContext {
             mb: Box::new([0; 16 * 48 + 256]),
             mb_luma_dc: [[0; 16]; 3],
             intra_pcm_pos: 0,
+            top_borders: [Vec::new(), Vec::new()],
+            top_borders_allocated: [0; 2],
         }
     }
 }
@@ -363,6 +409,43 @@ pub(crate) struct Context {
     /// allocated for it carries (`last_pkt_props`).
     pub(crate) pkt_time: i64,
     pub(crate) pkt_duration: u64,
+
+    // The macroblock layer's tables (`ff_h264_alloc_tables`).
+    /// Each macroblock's first motion vector entry (`mb2b_xy`), and its
+    /// place in the two rows of intra modes and vector differences kept
+    /// (`mb2br_xy`, eight entries a macroblock, alternate rows reused).
+    pub(crate) mb2b_xy: Vec<u32>,
+    pub(crate) mb2br_xy: Vec<u32>,
+    /// Motion vectors a row of the picture holds: four a macroblock
+    /// (`b_stride`).
+    pub(crate) b_stride: i32,
+    /// The bottom row and right column of each macroblock's 4x4 intra
+    /// modes, for the next row and macroblock to predict from.
+    pub(crate) intra4x4_pred_mode: Vec<i8>,
+    /// Each macroblock's coefficient counts, `scan8` rows laid flat.
+    pub(crate) non_zero_count: Vec<[u8; 48]>,
+    /// Each macroblock's coded block pattern; CAVLC 4:4:4 keeps its luma
+    /// 8x8 pattern from bit 12 for the loop filter.
+    pub(crate) cbp_table: Vec<u16>,
+    /// CABAC's chroma prediction modes and vector differences, and its
+    /// direct flags of each 8x8 block.
+    pub(crate) chroma_pred_mode_table: Vec<u8>,
+    pub(crate) mvd_table: [Vec<[u8; 2]>; 2],
+    pub(crate) direct_table: Vec<u8>,
+    /// How many lists each macroblock's slice had.
+    pub(crate) list_counts: Vec<u8>,
+    /// The coefficient scans for the stream (`init_scan_tables`).
+    pub(crate) scans: crate::scan::ScanTables,
+    /// Whether samples are 16 bits (`pixel_shift`).
+    pub(crate) pixel_shift: i32,
+    /// Each 4x4 block's place in its macroblock -- luma, Cb, Cr -- for a
+    /// frame macroblock, then for a field one (`block_offset`), in samples.
+    pub(crate) block_offset: [usize; 2 * 48],
+    /// The picture FFmpeg keeps for concealing lost slices of pictures
+    /// without references (`last_pic_for_ec`) while it is still a live
+    /// slot; copied into its own slot when that slot is let go.
+    pub(crate) last_pic_for_ec: Option<usize>,
+
     /// FFmpeg's `-debug pict` lines, one a slice, for the tests to hold to
     /// FFmpeg's.
     #[cfg(test)]
@@ -370,6 +453,9 @@ pub(crate) struct Context {
     /// FFmpeg's `-debug mmco` lines, without their pointers.
     #[cfg(test)]
     pub(crate) debug_mmco: Vec<String>,
+    /// Where slices stopped decoding, for the tests to report.
+    #[cfg(test)]
+    pub(crate) debug_errors: Vec<String>,
 }
 
 impl Default for Context {
@@ -452,10 +538,26 @@ impl Default for Context {
             nb_slice_ctx_queued: 0,
             pkt_time: 0,
             pkt_duration: 0,
+            mb2b_xy: Vec::new(),
+            mb2br_xy: Vec::new(),
+            b_stride: 0,
+            intra4x4_pred_mode: Vec::new(),
+            non_zero_count: Vec::new(),
+            cbp_table: Vec::new(),
+            chroma_pred_mode_table: Vec::new(),
+            mvd_table: [Vec::new(), Vec::new()],
+            direct_table: Vec::new(),
+            list_counts: Vec::new(),
+            scans: crate::scan::ScanTables::default(),
+            pixel_shift: 0,
+            block_offset: [0; 2 * 48],
+            last_pic_for_ec: None,
             #[cfg(test)]
             debug: Vec::new(),
             #[cfg(test)]
             debug_mmco: Vec::new(),
+            #[cfg(test)]
+            debug_errors: Vec::new(),
         };
         h.flush_change();
         h
@@ -721,8 +823,9 @@ impl Context {
     }
 
     /// The decoder set up for a new SPS (`h264_slice_header_init`): the
-    /// aspect ratio, the frame rate, tables for its size, its depth.
-    fn slice_header_init(&mut self, sps: &Sps) -> Result<(), DecodeError> {
+    /// aspect ratio, the frame rate, tables for its size, its depth, and
+    /// the slice context's fixed cache entries.
+    fn slice_header_init(&mut self, sl: &mut SliceContext, sps: &Sps) -> Result<(), DecodeError> {
         // ff_set_sar: an aspect ratio the picture cannot be shown at is
         // taken as unknown.
         self.avctx.sample_aspect_ratio =
@@ -766,6 +869,9 @@ impl Context {
         self.cur_chroma_format_idc = sps.chroma_format_idc;
         self.chroma_format_idc = sps.chroma_format_idc;
         self.bit_depth_luma = sps.bit_depth_luma;
+        self.pixel_shift = i32::from(sps.bit_depth_luma > 8);
+        self.scans = crate::scan::ScanTables::new(sps.transform_bypass != 0);
+        slice_context_init(sl);
         self.context_initialized = true;
         Ok(())
     }
@@ -774,12 +880,40 @@ impl Context {
     /// the slice table, every entry "none", two rows and a macroblock to
     /// spare above for the neighbours of the first rows.
     fn alloc_tables(&mut self) -> Result<(), DecodeError> {
-        #[allow(clippy::cast_sign_loss, reason = "a macroblock count from the SPS")]
-        let len = (self.mb_stride * (self.mb_height + 1) + self.mb_stride) as usize;
-        let mut table = Vec::new();
-        table.try_reserve_exact(len).map_err(|_| DecodeError)?;
-        table.resize(len, 0xFFFF);
-        self.slice_table = table;
+        #[allow(clippy::cast_sign_loss, reason = "macroblock counts from the SPS")]
+        let (big_mb_num, row_mb_num, mb_stride) = (
+            (self.mb_stride * (self.mb_height + 1)) as usize,
+            2 * self.mb_stride as usize,
+            self.mb_stride as usize,
+        );
+        fn zeroed<T: Clone>(len: usize, v: T) -> Result<Vec<T>, DecodeError> {
+            let mut table = Vec::new();
+            table.try_reserve_exact(len).map_err(|_| DecodeError)?;
+            table.resize(len, v);
+            Ok(table)
+        }
+        self.slice_table = zeroed(big_mb_num + mb_stride, 0xFFFF)?;
+        self.intra4x4_pred_mode = zeroed(row_mb_num * 8, 0)?;
+        self.non_zero_count = zeroed(big_mb_num, [0; 48])?;
+        self.cbp_table = zeroed(big_mb_num, 0)?;
+        self.chroma_pred_mode_table = zeroed(big_mb_num, 0)?;
+        self.mvd_table = [
+            zeroed(row_mb_num * 8, [0; 2])?,
+            zeroed(row_mb_num * 8, [0; 2])?,
+        ];
+        self.direct_table = zeroed(big_mb_num * 4, 0)?;
+        self.list_counts = zeroed(big_mb_num, 0)?;
+        self.mb2b_xy = zeroed(big_mb_num, 0)?;
+        self.mb2br_xy = zeroed(big_mb_num, 0)?;
+        self.b_stride = self.mb_width * 4;
+        #[allow(clippy::cast_sign_loss, reason = "macroblock coordinates")]
+        for y in 0..self.mb_height {
+            for x in 0..self.mb_width {
+                let mb_xy = (x + y * self.mb_stride) as usize;
+                self.mb2b_xy[mb_xy] = (4 * x + 4 * y * self.b_stride) as u32;
+                self.mb2br_xy[mb_xy] = (8 * (mb_xy % row_mb_num)) as u32;
+            }
+        }
         Ok(())
     }
 
@@ -788,7 +922,7 @@ impl Context {
     /// (`h264_init_ps`).
     pub(crate) fn init_ps(
         &mut self,
-        sl: &SliceContext,
+        sl: &mut SliceContext,
         first_slice: bool,
     ) -> Result<(), DecodeError> {
         let mut needs_reinit = false;
@@ -893,7 +1027,7 @@ impl Context {
                 self.flush_change();
             }
             self.avctx.pix_fmt = self.get_pixel_format(&sps)?;
-            self.slice_header_init(&sps)?;
+            self.slice_header_init(sl, &sps)?;
         }
         Ok(())
     }
@@ -982,11 +1116,11 @@ impl Context {
         pic.props.chroma_location = a.chroma_sample_location;
         pic.props.time = self.pkt_time;
         pic.props.duration = self.pkt_duration;
-        pic.qscale_table = Some(Arc::new(vec![0; big_mb_num + mb_stride]));
-        pic.mb_type = Some(Arc::new(vec![0; big_mb_num + mb_stride]));
+        pic.qscale_table = vec![0; big_mb_num + mb_stride];
+        pic.mb_type = vec![0; big_mb_num + mb_stride];
         for list in 0..2 {
-            pic.motion_val[list] = Some(Arc::new(vec![[0; 2]; b4_array_size + 4]));
-            pic.ref_index[list] = Some(Arc::new(vec![0; 4 * mb_array_size]));
+            pic.motion_val[list] = vec![[0; 2]; b4_array_size + 4];
+            pic.ref_index[list] = vec![0; 4 * mb_array_size];
         }
         pic.pps = self.ps.pps.clone();
         pic.mb_width = self.mb_width;
@@ -1032,6 +1166,23 @@ impl Context {
             return Err(DecodeError);
         }
         self.cur_pic_ptr = Some(slot);
+
+        // Each block's place in its macroblock, at the picture's strides.
+        let strides = self.pics[slot]
+            .f
+            .as_deref()
+            .map_or((0, 0), |f| (f.stride(0), f.stride(1)));
+        for i in 0..16 {
+            let d = crate::mbtype::SCAN8[i] - crate::mbtype::SCAN8[0];
+            let x = 4 * (d & 7);
+            let row = d >> 3;
+            self.block_offset[i] = x + 4 * strides.0 * row;
+            self.block_offset[48 + i] = x + 8 * strides.0 * row;
+            self.block_offset[16 + i] = x + 4 * strides.1 * row;
+            self.block_offset[32 + i] = x + 4 * strides.1 * row;
+            self.block_offset[48 + 16 + i] = x + 8 * strides.1 * row;
+            self.block_offset[48 + 32 + i] = x + 8 * strides.1 * row;
+        }
 
         let pic = &mut self.pics[slot];
         // Marked no reference once allocated, so that an error before it

@@ -293,13 +293,13 @@ pub(crate) struct Picture {
     /// The quantizer of each macroblock (`qscale_table`), and the
     /// macroblock types (`mb_type`): both `mb_stride` wide, starting two
     /// rows and a macroblock into their allocation ([`TABLE_OFFSET`]).
-    pub(crate) qscale_table: Option<Arc<Vec<i8>>>,
-    pub(crate) mb_type: Option<Arc<Vec<u32>>>,
+    pub(crate) qscale_table: Vec<i8>,
+    pub(crate) mb_type: Vec<u32>,
     /// Each list's motion vectors, 4 per macroblock across and down
     /// (`motion_val`), starting 4 into their allocation.
-    pub(crate) motion_val: [Option<Arc<Vec<[i16; 2]>>>; 2],
+    pub(crate) motion_val: [Vec<[i16; 2]>; 2],
     /// Each list's reference index of each 8x8 block (`ref_index`).
-    pub(crate) ref_index: [Option<Arc<Vec<i8>>>; 2],
+    pub(crate) ref_index: [Vec<i8>; 2],
 
     /// The top and bottom field's order counts, and the lower of them.
     pub(crate) field_poc: [i32; 2],

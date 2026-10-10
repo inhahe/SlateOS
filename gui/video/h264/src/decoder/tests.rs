@@ -73,6 +73,8 @@ struct Stream {
     packets: Vec<(usize, String)>,
     /// What the decoder that shows the stream is opened with.
     extradata: Option<Vec<u8>>,
+    /// The size it is opened with: what probing found (`.size`).
+    size: Option<(u32, u32)>,
 }
 
 impl Stream {
@@ -96,11 +98,33 @@ impl Stream {
             })
             .collect();
         let extradata = std::fs::read(sibling(&made, ".extradata")).ok();
+        let size = std::fs::read_to_string(sibling(&made, ".size"))
+            .ok()
+            .map(|s| {
+                let (w, h) = s.trim().split_once(' ').unwrap();
+                (w.parse().unwrap(), h.parse().unwrap())
+            });
         Self {
             data,
             packets,
             extradata,
+            size,
         }
+    }
+
+    /// The decoder that shows the stream, opened as FFmpeg's command line
+    /// opens it: holding back `delay` pictures, with the size probing found
+    /// and the extradata.
+    fn open(&self, delay: u32) -> Decoder {
+        let mut d = Decoder::new();
+        d.set_reorder_delay(delay);
+        if let Some((w, h)) = self.size {
+            d.set_container_size(w, h);
+        }
+        if let Some(extradata) = &self.extradata {
+            d.configure(extradata);
+        }
+        d
     }
 
     /// Each packet in turn with its index.
@@ -121,11 +145,7 @@ impl Stream {
 /// and whether it is a key frame, interlaced, top field first, and how many
 /// fields it repeats -- and each marking line.
 fn run(s: &Stream, delay: u32) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut d = Decoder::new();
-    d.set_reorder_delay(delay);
-    if let Some(extradata) = &s.extradata {
-        d.configure(extradata);
-    }
+    let mut d = s.open(delay);
     let mut frames = Vec::new();
     let row = |p: crate::Picture| {
         let o = &p.out;
@@ -245,7 +265,10 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
     let dump = std::env::var_os("H264_DUMP").map(PathBuf::from);
     let mut files = Vec::new();
     pict_files(&pict, &mut files);
-    files.retain(|f| only.as_ref().is_none_or(|o| f.to_string_lossy().contains(o.as_str())));
+    files.retain(|f| {
+        let f = f.to_string_lossy().replace('\\', "/");
+        only.as_ref().is_none_or(|o| f.contains(o.as_str()))
+    });
     files.sort();
     assert!(!files.is_empty(), "no .pict files under {}", pict.display());
 
@@ -265,8 +288,16 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
         if let Some(dump) = &dump {
             let to = dump.join(&name);
             std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-            for (suffix, got) in [(".pict", &got_slices), (".frames", &got_frames), (".mmco", &got_mmco)] {
-                let text: String = got.iter().map(|l| format!("{l}\n")).collect();
+            for (suffix, got) in [
+                (".pict", &got_slices),
+                (".frames", &got_frames),
+                (".mmco", &got_mmco),
+            ] {
+                let mut text = String::new();
+                for l in got {
+                    text.push_str(l);
+                    text.push('\n');
+                }
                 std::fs::write(sibling(&to, suffix), text).unwrap();
             }
         }
@@ -284,7 +315,12 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
             probes += 1;
             let mut probe = probe.lines();
             let read: usize = probe.next().unwrap().parse().unwrap();
-            let parser_b: Vec<bool> = probe.next().unwrap_or("").bytes().map(|b| b == b'B').collect();
+            let parser_b: Vec<bool> = probe
+                .next()
+                .unwrap_or("")
+                .bytes()
+                .map(|b| b == b'B')
+                .collect();
             let got = probe_delay(&stream, read, &parser_b);
             if i64::from(got) != i64::from(delay) {
                 found.push(Some(format!(
@@ -301,5 +337,157 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
          probes):\n{report}",
         failures.len(),
         files.len()
+    );
+}
+
+/// Adler-32 as FFmpeg's `framecrc` muxer takes it: `av_adler32_update`
+/// started from 0, not the standard 1.
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (0u32, 0u32);
+    for &x in data {
+        a = (a + u32::from(x)) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+/// A picture as FFmpeg's `framecrc` muxer sums it: its planes end to end,
+/// cropped, rows unpadded, 16-bit samples little-endian; the size and the
+/// Adler-32.
+fn picture_sum(p: &crate::Picture) -> String {
+    let bytes = picture_bytes(p);
+    format!("{}, 0x{:08x}", bytes.len(), adler32(&bytes))
+}
+
+/// A picture's planes end to end, as FFmpeg's raw video holds them.
+fn picture_bytes(p: &crate::Picture) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for i in 0..3 {
+        if let Some(v) = p.plane8(i) {
+            for row in 0..v.height {
+                bytes.extend_from_slice(&v.data[row * v.stride..row * v.stride + v.width]);
+            }
+        } else if let Some(v) = p.plane16(i) {
+            for row in 0..v.height {
+                for &s in &v.data[row * v.stride..row * v.stride + v.width] {
+                    bytes.extend_from_slice(&s.to_le_bytes());
+                }
+            }
+        }
+    }
+    bytes
+}
+
+/// Each picture this decoder shows of a stream, summed, and whether the
+/// stream is coded with CABAC -- not yet translated, so not yet compared.
+/// With `raw`, the pictures themselves end to end too.
+fn sums(s: &Stream, delay: u32, mut raw: Option<&mut Vec<u8>>) -> (Vec<String>, bool, Vec<String>) {
+    let mut d = s.open(delay);
+    let mut out = Vec::new();
+    let mut cabac = false;
+    let mut take = |p: crate::Picture, out: &mut Vec<String>| {
+        out.push(picture_sum(&p));
+        if let Some(raw) = raw.as_deref_mut() {
+            raw.extend_from_slice(&picture_bytes(&p));
+        }
+    };
+    for (i, packet) in s.each() {
+        if let Ok(Some(p)) = d.decode(packet, i64::try_from(i).unwrap(), 1) {
+            take(p, &mut out);
+        }
+        cabac |= d.h.ps.pps.as_ref().is_some_and(|pps| pps.cabac != 0);
+    }
+    while let Some(p) = d.drain() {
+        take(p, &mut out);
+    }
+    (out, cabac, std::mem::take(&mut d.h.debug_errors))
+}
+
+/// Every picture's samples FFmpeg's, as its `framecrc` sums them
+/// (`.crc`, `tools/pict_expect.py --add-crc`). Streams coded with CABAC
+/// are counted apart until it is translated.
+#[test]
+#[ignore = "needs FFmpeg's FATE samples and tools/pict_expect.py's lines: set H264_FATE and H264_PICT"]
+fn pictures_are_ffmpegs_sample_for_sample() {
+    let fate =
+        PathBuf::from(std::env::var("H264_FATE").expect("H264_FATE: the fate-suite directory"));
+    let pict =
+        PathBuf::from(std::env::var("H264_PICT").expect("H264_PICT: pict_expect.py's output"));
+    // H264_ONLY picks the streams whose names contain it, or with a
+    // leading `=` the one so named; under H264_DUMP each differing
+    // stream's pictures are written raw (`<name>.yuv`), for
+    // `tools/yuv_diff.py`.
+    let only = std::env::var("H264_ONLY").ok();
+    let dump = std::env::var_os("H264_DUMP").map(PathBuf::from);
+    let mut files = Vec::new();
+    pict_files(&pict, &mut files);
+    files.retain(|f| {
+        let f = f.to_string_lossy().replace('\\', "/");
+        only.as_ref().is_none_or(|o| match o.strip_prefix('=') {
+            Some(exact) => f.ends_with(&format!("/{exact}.pict")),
+            None => f.contains(o.as_str()),
+        })
+    });
+    files.sort();
+    let (mut compared, mut cabac_streams, mut pictures, mut matching) = (0, 0, 0, 0);
+    let mut undefined = 0;
+    let mut failures = Vec::new();
+    for file in &files {
+        let rel = file.strip_prefix(&pict).unwrap();
+        let name = rel
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches(".pict")
+            .to_owned();
+        let base = pict.join(&name);
+        let Ok(want) = std::fs::read_to_string(sibling(&base, ".crc")) else {
+            continue;
+        };
+        let want: Vec<String> = want.lines().map(str::to_owned).collect();
+        let stream = Stream::load(&fate, &pict, &name);
+        let delay = number(&sibling(&base, ".delay")).unwrap_or(0);
+        let mut raw = Vec::new();
+        let (mut got, cabac, errors) = sums(&stream, delay, dump.as_ref().map(|_| &mut raw));
+        if cabac {
+            cabac_streams += 1;
+            continue;
+        }
+        // `<size>, ?`: a picture with samples FFmpeg never wrote, which it
+        // leaves undefined -- any of that size will do.
+        for (w, g) in want.iter().zip(&mut got) {
+            if let Some(size) = w.strip_suffix(", ?") {
+                undefined += 1;
+                if g.split(", ").next() == Some(size) {
+                    g.clone_from(w);
+                }
+            }
+        }
+        compared += 1;
+        pictures += want.len();
+        matching += want.iter().zip(&got).filter(|(w, g)| w == g).count();
+        if let Some(d) = first_difference("picture", &want, &got) {
+            let why = errors.first().map_or(String::new(), |e| {
+                format!(" ({} slices failed; first: {e})", errors.len())
+            });
+            failures.push(format!("{name}: {d}{why}"));
+            if let Some(dump) = &dump {
+                let to = sibling(&dump.join(&name), ".yuv");
+                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+                std::fs::write(to, &raw).unwrap();
+            }
+        }
+    }
+    let report = failures.join("\n");
+    println!(
+        "{compared} streams compared, {} differ; {matching} of {pictures} pictures match \
+         ({undefined} of them only in size, FFmpeg leaving their samples undefined); \
+         {cabac_streams} CABAC streams not compared",
+        failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {compared} streams differ ({matching} of {pictures} pictures match; {cabac_streams} \
+         CABAC streams not compared):\n{report}",
+        failures.len()
     );
 }

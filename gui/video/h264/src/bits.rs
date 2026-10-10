@@ -254,6 +254,20 @@ impl<'a> Bits<'a> {
         self.advance(n);
     }
 
+    /// The zeros before the next 1 as the 32-bit cache shows them, read
+    /// along with the 1 (`get_level_prefix` in `h264_cavlc.c`). The cache
+    /// is the stream's for only its top `32 - (index & 7)` bits, the rest
+    /// zero; a cache of zeros reads as 31, having moved 32 bits.
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "av_log2 of a u32 is 0 to 31, so the count is 1 to 32"
+    )]
+    pub(crate) fn level_prefix(&mut self) -> i32 {
+        let log = 32 - av_log2(self.cache());
+        self.advance(log as u32);
+        log - 1
+    }
+
     /// Skip `n` bits, back for a negative `n`, no further than the buffer's
     /// start or (checked) eight bits past its end (`skip_bits_long`).
     #[allow(

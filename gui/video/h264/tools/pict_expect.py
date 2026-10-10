@@ -2,6 +2,8 @@
 src/decoder/tests.rs to hold the decoder's handling of pictures to.
 
     python gui/video/h264/tools/pict_expect.py <fate-suite> <out> [--jobs N]
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-crc [--crc-wsl DIR]
+    python gui/video/h264/tools/pict_expect.py <fate-suite> <out> --add-size
 
 `ffmpeg` (built with libx264) and `ffprobe` must be on PATH. The streams,
 each named by its path under <out>:
@@ -64,10 +66,19 @@ Generated streams are written under <out> by their names. For each stream:
               short- and long-term reference lists as each slice's lists
               are built and after each picture is marked, and each marking
               operation as it is carried out.
+  .crc        written by `--add-crc` over streams already described: each
+              picture FFmpeg hands out, summed as its `framecrc` muxer sums
+              it (see `framecrc`) -- from FFmpeg 8.1.3's own build in WSL
+              when `--crc-wsl` names its directory, and then `<size>, ?`
+              for a picture with samples FFmpeg never wrote, whose content
+              FFmpeg leaves undefined.
+  .size       written by `--add-size`: the width and height probing finds,
+              which FFmpeg's command line opens the decoder with.
 """
 import base64
 import json
 import re
+import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -513,6 +524,142 @@ def sources(fate: Path) -> list[tuple[str, Path, bool]]:
     return found
 
 
+# Where FFmpeg 8.1.3's own build is, in WSL, when `--crc-wsl <dir>` names
+# it: the `.crc` lines are then that build's (`tools/ffdbg/build.sh`).
+CRC_WSL: str | None = None
+
+
+def wsl_path(p: Path) -> str:
+    s = p.resolve().as_posix()
+    return f"/mnt/{s[0].lower()}{s[2:]}"
+
+
+# FFmpeg's options for summing a stream's pictures (see `framecrc`), around
+# its `-i`. -noautoscale: a picture of a new size is summed as the decoder
+# made it, not scaled back to the first picture's size for the encoder.
+CRC_HEAD = ["-hide_banner", "-loglevel", "error", "-cpuflags", "0", "-threads", "1",
+            "-flags", "unaligned"]
+CRC_TAIL = ["-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale", "-f", "framecrc", "-"]
+
+
+def crc_lines(out: str) -> list[str]:
+    """The size and sum of each picture in a `framecrc` muxer's output."""
+    return [", ".join(f.strip() for f in l.split(",")[4:6])
+            for l in out.splitlines() if l.strip() and not l.startswith("#")]
+
+
+def framecrc(path: Path) -> list[str]:
+    """Each picture FFmpeg decodes, as its `framecrc` muxer sums it: the
+    size and Adler-32 of its planes end to end, cropped, rows unpadded,
+    16-bit samples little-endian. FFmpeg's C routines only (`-cpuflags 0`),
+    one thread, every picture kept (`-fps_mode passthrough`) at the size it
+    was decoded (`-noautoscale`), and cropped exactly as the SPS says
+    (`-flags unaligned`: otherwise FFmpeg keeps a left crop that would
+    leave its planes unaligned short, and the picture wider). This is the
+    FFmpeg on PATH; `wsl_framecrc` is the one `.crc` comes from."""
+    return crc_lines(run(["ffmpeg", *CRC_HEAD, *raw_format(path), "-i", str(path),
+                          *CRC_TAIL]).stdout)
+
+
+def wsl_framecrc(paths: list[Path], scratch: Path, jobs: int) -> list[list[str]]:
+    """`framecrc` for each of `paths` from FFmpeg 8.1.3's own build in WSL,
+    in `CRC_WSL` (`tools/ffdbg/build.sh`): the release this decoder is a
+    translation of, built with no assembly at all. Another build parts from
+    it where FFmpeg has changed since -- the March 2026 snapshot `.crc` was
+    first made with shows four cut streams' pictures differently.
+
+    That build fills every picture it starts with one byte; each stream is
+    run with one byte and then with another. A picture whose sum moves with
+    the byte holds samples FFmpeg never wrote -- handed out undecoded, or
+    part of it reached by no slice -- which in an ordinary build are
+    whatever memory its buffer pool hands back, and differ from run to run:
+    it is `<size>, ?`.
+
+    The runs are one bash script, `jobs` chains of them at once, started by
+    a single `wsl.exe`: with ten `wsl.exe` at once, some exit -1 partway
+    through their output."""
+    # A build that does not run would sum nothing, which some streams also
+    # sum -- FFmpeg shows none of a stream it never recovers in.
+    subprocess.run(["wsl", "-d", "Ubuntu", "--exec", f"{CRC_WSL}/ffmpeg", "-hide_banner",
+                    "-version"], stdin=subprocess.DEVNULL, capture_output=True, check=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    chains: list[list[str]] = [[] for _ in range(jobs)]
+    for i, path in enumerate(paths):
+        for fill in (0, 255):
+            args = [f"FFDBG_FILL={fill}", f"{CRC_WSL}/ffmpeg", "-nostdin", *CRC_HEAD,
+                    *raw_format(path), "-i", wsl_path(path), *CRC_TAIL]
+            target = wsl_path(scratch / f"{i}.{fill}")
+            chains[i % jobs].append(" ".join(shlex.quote(a) if not a.startswith("FFDBG_") else a
+                                             for a in args) + f" > {shlex.quote(target)} 2>/dev/null")
+    script = ["#!/bin/bash"]
+    for chain in chains:
+        if chain:
+            script.append("(\n" + "\n".join(chain) + "\n) &")
+    script.append("wait")
+    script_file = scratch / "run.sh"
+    script_file.write_bytes(("\n".join(script) + "\n").encode())
+    subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "bash", wsl_path(script_file)],
+                   stdin=subprocess.DEVNULL, check=True)
+    result = []
+    for i, path in enumerate(paths):
+        a, b = (crc_lines((scratch / f"{i}.{fill}").read_text(encoding="utf-8", errors="replace"))
+                for fill in (0, 255))
+        if len(a) != len(b):
+            raise SystemExit(f"{path}: {len(a)} pictures with one fill, {len(b)} with the other")
+        result.append([x if x == y else f"{x.split(',')[0]}, ?" for x, y in zip(a, b)])
+    for f in scratch.iterdir():
+        f.unlink()
+    scratch.rmdir()
+    return result
+
+
+def add_crc(fate: Path, out: Path, jobs: int) -> None:
+    """`.crc` beside every stream already described under `out`: the
+    stream made here if it is there, else the FATE sample of its name."""
+    names = sorted(str(p.relative_to(out).as_posix())[:-len(".packets")]
+                   for p in out.rglob("*.packets"))
+    paths = [(out / n) if (out / n).is_file() else fate / n for n in names]
+    if CRC_WSL:
+        sums = wsl_framecrc(paths, out / ".crc-scratch", jobs)
+    else:
+        with ThreadPoolExecutor(jobs) as pool:
+            sums = list(pool.map(framecrc, paths))
+    # The pictures summed are the pictures ffprobe saw handed out (`.frames`):
+    # a count that differs is a run that failed, or a build that decodes
+    # differently from the one `.frames` came from.
+    wrong = []
+    for name, lines in zip(names, sums):
+        shown = sibling(out / name, ".frames").read_text(encoding="utf-8").splitlines()
+        if len(lines) != len(shown):
+            wrong.append(f"{name}: {len(lines)} pictures summed, {len(shown)} in .frames")
+    if wrong:
+        raise SystemExit("\n".join(wrong))
+    for name, lines in zip(names, sums):
+        write_lines(sibling(out / name, ".crc"), lines)
+    print(f"{len(names)} streams summed")
+
+
+def add_size(fate: Path, out: Path, jobs: int) -> None:
+    """`.size` beside every stream already described under `out`: the
+    width and height probing finds, which FFmpeg's command line opens the
+    decoder that shows the stream with (`width_from_caller`)."""
+    names = sorted(str(p.relative_to(out).as_posix())[:-len(".packets")]
+                   for p in out.rglob("*.packets"))
+
+    def one(name: str) -> None:
+        made = out / name
+        path = made if made.is_file() else fate / name
+        got = run(["ffprobe", "-v", "error", *raw_format(path), "-select_streams", "v:0",
+                   "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)]).stdout
+        w, _, h = got.strip().partition(",")
+        if w.isdigit() and h.isdigit() and int(w) and int(h):
+            write_lines(sibling(out / name, ".size"), [f"{w} {h}"])
+
+    with ThreadPoolExecutor(jobs) as pool:
+        list(pool.map(one, names))
+    print(f"{len(names)} streams sized")
+
+
 def main() -> None:
     args = sys.argv[1:]
     jobs = 4
@@ -520,7 +667,24 @@ def main() -> None:
         at = args.index("--jobs")
         jobs = int(args[at + 1])
         del args[at:at + 2]
+    crc_only = "--add-crc" in args
+    if crc_only:
+        args.remove("--add-crc")
+    if "--crc-wsl" in args:
+        global CRC_WSL
+        at = args.index("--crc-wsl")
+        CRC_WSL = args[at + 1]
+        del args[at:at + 2]
+    size_only = "--add-size" in args
+    if size_only:
+        args.remove("--add-size")
     fate, out = Path(args[0]), Path(args[1])
+    if crc_only:
+        add_crc(fate, out, jobs)
+        return
+    if size_only:
+        add_size(fate, out, jobs)
+        return
     streams = sources(fate) + [(n, p, False) for n, p in make_x264(out)]
 
     def base(item: tuple[str, Path, bool]) -> list[tuple[str, Path]]:

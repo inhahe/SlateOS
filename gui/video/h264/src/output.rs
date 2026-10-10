@@ -393,7 +393,54 @@ impl Context {
                 duplicate_field(Arc::make_mut(f), missing_top);
             }
         }
+        #[cfg(test)]
+        if std::env::var_os("H264_OUT").is_some() {
+            self.debug_out(out);
+        }
         self.output_frame(out)
+    }
+
+    /// Under H264_OUT, the line `tools/ffdbg`'s FFDBG_OUT prints in FFmpeg,
+    /// for `tools/h264cmp.py`: picture `out`'s POCs and an Adler-32 of each
+    /// field's luma, coded size.
+    #[cfg(test)]
+    fn debug_out(&self, out: usize) {
+        fn fields<P: crate::picture::Pixel>(
+            p: &crate::picture::FrameBuf<P>,
+            w: usize,
+            h: usize,
+        ) -> [u32; 2] {
+            let plane = &p.planes[0];
+            let wide = std::mem::size_of::<P>() > 1;
+            std::array::from_fn(|par| {
+                let (mut a, mut b) = (1u32, 0u32);
+                for y in (par..h).step_by(2) {
+                    for x in 0..w {
+                        let v = plane.data[y * plane.stride + x].int() as u32;
+                        let bytes: &[u32] = if wide { &[v & 0xFF, v >> 8] } else { &[v] };
+                        for &byte in bytes {
+                            a = (a + byte) % 65521;
+                            b = (b + a) % 65521;
+                        }
+                    }
+                }
+                (b << 16) | a
+            })
+        }
+        let pic = &self.pics[out];
+        let (w, h) = (
+            (16 * self.mb_width) as usize,
+            (16 * self.mb_height) as usize,
+        );
+        let s = match pic.f.as_deref() {
+            Some(crate::picture::AnyFrame::Eight(f)) => fields(f, w, h),
+            Some(crate::picture::AnyFrame::High(f)) => fields(f, w, h),
+            None => [0, 0],
+        };
+        eprintln!(
+            "OUT poc={} fpoc={},{} top={:08x} bot={:08x}",
+            pic.poc, pic.field_poc[0], pic.field_poc[1], s[0], s[1]
+        );
     }
 
     /// The frame and its properties as handed out (`output_frame`).

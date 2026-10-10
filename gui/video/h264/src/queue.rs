@@ -307,9 +307,12 @@ impl Context {
         sl: &mut SliceContext,
         gb: &mut Bits<'_>,
     ) -> Result<(), DecodeError> {
+        sl.next_slice_idx = i32::MAX;
         if self.nb_slice_ctx_queued < 1 {
             return Ok(());
         }
+        // One slice context: the slice may run to the picture's end.
+        sl.next_slice_idx = self.mb_width * self.mb_height;
         self.postpone_filter = false;
         let r = self.decode_slice(sl, gb);
         self.mb_y = sl.mb_y;
@@ -317,19 +320,23 @@ impl Context {
         r
     }
 
-    /// A slice's macroblocks decoded (`decode_slice`): the macroblock
-    /// layer, the next part of the translation. Until it is in, a slice
-    /// sets up its picture and decodes nothing.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "decoding macroblocks fails; setting nothing up does not"
-    )]
+    /// A slice's macroblocks decoded (`decode_slice`, in `slicedata`).
     fn decode_slice(
         &mut self,
-        _sl: &mut SliceContext,
-        _gb: &mut Bits<'_>,
+        sl: &mut SliceContext,
+        gb: &mut Bits<'_>,
     ) -> Result<(), DecodeError> {
-        Ok(())
+        sl.alloc_top_borders(usize::try_from(self.mb_width).unwrap_or(0));
+        let r = self.decode_slice_data(sl, gb);
+        #[cfg(test)]
+        if r.is_err() {
+            let at = format!(
+                "slice {} stopped at macroblock ({}, {})",
+                sl.slice_num, sl.mb_x, sl.mb_y
+            );
+            self.debug_errors.push(at);
+        }
+        r
     }
 }
 

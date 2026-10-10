@@ -38,8 +38,29 @@
 //! - `queue`: `h264_slice_init`, `ff_h264_queue_decode_slice` and
 //!   `ff_h264_execute_decode_slices` in `h264_slice.c` -- each slice made
 //!   ready and decoded.
-//! - `direct`: `h264_direct.c` -- direct prediction's scale factors and
-//!   the map from the co-located picture's references.
+//! - `direct`: `h264_direct.c` -- direct prediction's scale factors, the
+//!   map from the co-located picture's references, and a direct
+//!   macroblock's vectors, spatial or temporal.
+//! - `slicedata`: `decode_slice` and `loop_filter` in `h264_slice.c` -- a
+//!   slice's macroblocks decoded in turn and filtered a row behind.
+//! - `cavlc`: `h264_cavlc.c` -- a macroblock's syntax coded with CAVLC:
+//!   its type, prediction modes, references, vectors and residual.
+//! - `mbtype`: the macroblock and sub-macroblock types of `h264dec.h`,
+//!   `h264data.c` and `mpegutils.h`, and `scan8`.
+//! - `mvpred`: `h264_mvpred.h` -- what a macroblock's neighbours hold,
+//!   gathered for it, and its vectors predicted from them.
+//! - `scan`: `init_scan_tables` in `h264_slice.c` -- the zigzag and field
+//!   scans, and their forms for lossless coding.
+//! - `mb`: `h264_mb.c` and `h264_mb_template.c` -- a macroblock made
+//!   samples: predicted, its residual added, its borders kept for the
+//!   macroblocks below.
+//! - `pred`: `h264pred.c` and its template -- intra prediction.
+//! - `idct`: `h264idct_template.c` -- the inverse transforms.
+//! - `mc`: `mc_dir_part`, `mc_part` and `hl_motion` in `h264_mb.c` --
+//!   inter prediction, with `h264qpel`, `h264chroma` and the weighting of
+//!   `h264dsp`.
+//! - `loopfilter`: `h264_loopfilter.c` and the deblocking of
+//!   `h264dsp_template.c`.
 //! - `output`: `h264dec.c`'s packet loop -- extradata, NAL units handed to
 //!   their parts, pictures finished and handed out, the last ones drained.
 //! - `side_data`: what FFmpeg attaches to a frame from SEI -- stereo
@@ -47,16 +68,12 @@
 //! - `vlc`: `vlc.c`'s table building and `get_vlc2` -- variable-length
 //!   codes read as FFmpeg reads them, the invalid ones included.
 //!
-//! The rest is being translated in this order, each part against FFmpeg's
-//! output before the next: CAVLC and CABAC (`h264_cavlc.c`, `cabac.c`,
-//! `h264_cabac.c`), motion vector prediction (`h264_mvpred.h`, the
-//! macroblock part of `h264_direct.c`), reconstruction (`h264_mb.c` and
-//! its templates, with `h264pred`, `h264qpel`, `h264chroma`, `h264idct`
-//! and `h264dsp`), the loop filter (`h264_loopfilter.c`), and error
-//! concealment (`error_resilience.c`). Until then each slice's macroblocks
-//! are skipped (`queue`'s `decode_slice`), so the pictures handed out are
-//! the right pictures in the right order with the right properties, but
-//! without their samples.
+//! Two parts are still to be translated: CABAC (`cabac.c`,
+//! `h264_cabac.c`), whose slices are refused until it is, so a stream coded
+//! with it has the right pictures with no samples; and error concealment
+//! (`error_resilience.c`), without which the macroblocks of a slice that is
+//! lost or refused are left unwritten rather than guessed from their
+//! neighbours.
 
 #![forbid(unsafe_code)]
 // The decoder is translated a module at a time, and each module's parts are
@@ -68,19 +85,29 @@
 )]
 
 mod bits;
+mod cavlc;
 mod decoder;
 mod direct;
 mod field;
+mod idct;
+mod loopfilter;
+mod mb;
+mod mbtype;
+mod mc;
+mod mvpred;
 mod nal;
 mod output;
 mod picture;
 mod poc;
+mod pred;
 mod ps;
 mod queue;
 mod refs;
+mod scan;
 mod sei;
 mod side_data;
 mod slice;
+mod slicedata;
 mod tables;
 mod vlc;
 #[cfg(test)]
@@ -182,6 +209,20 @@ impl Decoder {
     /// decoder raises it as the stream asks; it is never lowered.
     pub fn set_reorder_delay(&mut self, frames: u32) {
         self.h.avctx.has_b_frames = i32::try_from(frames).unwrap_or(i32::MAX);
+    }
+
+    /// The picture size the caller has for the stream -- its container's,
+    /// or what probing the stream found -- before the first packet
+    /// (FFmpeg's `width` and `height` as the decoder is opened with them:
+    /// `h264_decode_init`'s `width_from_caller`). Where the parameter sets
+    /// crop nothing off the top or left, and this size is no larger than
+    /// theirs and rounds up to the same macroblocks, pictures are cropped
+    /// to it: a stream coded 1920x1088 in an MP4 that says 1920x1080 is
+    /// shown 1080 high. Once the stream's size stops fitting it, it is
+    /// forgotten for good, as FFmpeg forgets it.
+    pub fn set_container_size(&mut self, width: u32, height: u32) {
+        self.h.width_from_caller = i32::try_from(width).unwrap_or(0);
+        self.h.height_from_caller = i32::try_from(height).unwrap_or(0);
     }
 
     /// At the end of the stream, the next picture still held back: call

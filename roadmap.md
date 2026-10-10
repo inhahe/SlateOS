@@ -4533,9 +4533,28 @@ lane C's `guitk`.
         (`-debug mmco`), every shown picture's order and flags (ffprobe),
         and FFmpeg's probe emulated packet by packet for the reorder delay
         it finds. 27 of 27 mutants caught.
-      - `[ ]` CAVLC and CABAC, prediction, reconstruction, the loop filter,
-        error concealment -- the macroblock layer, which turns the set-up
-        pictures into samples.
+      - `[-]` The macroblock layer, which turns the set-up pictures into
+        samples.
+        - `[x]` CAVLC, prediction, reconstruction and the loop filter
+          (2026-10-10): `decode_slice`, `h264_cavlc.c`, `h264_mvpred.h`,
+          the macroblock part of `h264_direct.c`, `h264_mb.c` and its
+          templates with `h264pred`, `h264idct`, `h264qpel`, `h264chroma`
+          and `h264dsp`, and `h264_loopfilter.c`. Held to FFmpeg sample for
+          sample (`framecrc`) on every CAVLC stream of the 716: 317 of the
+          318 match in every picture (16,335 of 16,521 pictures); the 318th,
+          `FM1_FT_E`, uses FMO, which FFmpeg does not decode but conceals,
+          and parts at picture 119, where its error concealment takes over.
+          The checksums are FFmpeg 8.1.3's own C build's (in WSL,
+          `tools/ffdbg/build.sh`), not the March 2026 snapshot's, which
+          shows four cut streams differently; a picture with samples FFmpeg
+          never writes, which it leaves to its buffer pool, is checked for
+          its size only (953 pictures in 37 streams). `tools/h264cmp.py`
+          runs both decoders on a stream and names the first macroblock
+          that parts -- its reconstruction, its filtering, its vectors.
+        - `[ ]` CABAC (`cabac.c`, `h264_cabac.c`): its slices are refused
+          until then, so 398 streams have the right pictures but no samples.
+        - `[ ]` Error concealment (`error_resilience.c`): a lost or refused
+          slice's macroblocks are left unwritten rather than guessed.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point

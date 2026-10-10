@@ -433,7 +433,7 @@ impl Context {
     /// The first slice of a frame or field taken up (`h264_field_start`).
     pub(crate) fn field_start(
         &mut self,
-        sl: &SliceContext,
+        sl: &mut SliceContext,
         nal: &Nal,
         first_slice: bool,
     ) -> Result<(), DecodeError> {

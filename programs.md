@@ -387,7 +387,7 @@ two disagree.
 | `finance` | Personal Finance — budget tracking and expense management. |  |  |  |
 | `flashcards` | Spaced-repetition study application. |  |  |  |
 | `flood` | Flood It — a colour-flooding puzzle. |  |  |  |
-| `fontmanager` | Font Manager — Graphical Font Management and Preview |  |  |  |
+| `fontmanager` | Font Manager: the fonts on this machine, each shown in its own letters; a font file installed; the user's own fonts removed. |  |  |  |
 | `freecell` | Classic FreeCell card game. |  |  |  |
 | `game2048` | Slide the tiles together until two of them make 2048. |  |  |  |
 | `gomoku` | Gomoku (five in a row) -- a 15x15 Go-style board against a minimax opponent, in a real window. |  |  |  |

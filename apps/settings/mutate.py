@@ -1394,7 +1394,8 @@ MUTATIONS += [
 # Not rows: whether a preview is *played* (`play_previews`, set by `main`) is
 # unobservable here -- on this host `sound::play` answers "no device" at once,
 # and a test plays nothing aloud by design -- so the gate and `main`'s line
-# setting it have no test that could fail.
+# setting it have no test that could fail. That the event seam takes the
+# preview it was asked for is observable, and has rows.
 SOUNDS_CHOSEN = "the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file"
 SOUNDS_OFF = "with_system_sounds_off_the_rest_of_the_section_is_not_offered"
 SOUNDS_HEARD = "a_sound_is_heard_as_it_is_chosen"
@@ -1596,14 +1597,26 @@ MUTATIONS += [
     ),
     (
         "a preview is not recorded",
-        "        self.previewed = Some((sound.clone(), volume));\n",
+        "        self.pending_preview = Some((sound, volume));\n",
         "",
         [SOUNDS_HEARD],
     ),
     (
         "a preview plays at full volume",
-        "        let volume = self.appearance.settings.sounds.volume;\n        self.previewed",
-        "        let volume = 1.0;\n        self.previewed",
+        "        let volume = self.appearance.settings.sounds.volume;\n        self.pending_preview",
+        "        let volume = 1.0;\n        self.pending_preview",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "the event seam does not play the preview it was asked for",
+        "        let result = self.handle_event(event);\n        self.play_pending_preview();\n",
+        "        let result = self.handle_event(event);\n",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a preview played is left waiting, to play again",
+        "        let Some((sound, volume)) = self.pending_preview.take() else {",
+        "        let Some((sound, volume)) = self.pending_preview.clone() else {",
         [SOUNDS_HEARD],
     ),
     (

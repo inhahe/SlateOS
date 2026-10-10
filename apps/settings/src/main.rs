@@ -853,13 +853,14 @@ pub struct SettingsState {
     /// (`appearance::sounds::available`); a test points it at scratch ones,
     /// so the page lists no theme of the machine running it.
     sound_roots: Option<Vec<PathBuf>>,
-    /// The sound last played as a preview, and at what volume: what a test
-    /// reads, since the sound itself is heard only where there is a sound
-    /// device, and only from the real program ([`Self::play_previews`]).
-    previewed: Option<(sound::Sound, f32)>,
-    /// Whether a preview is played as well as recorded. `main` sets it, so a
-    /// test run plays nothing on the machine running it -- the desktop's
-    /// rule too (`event_sounds::allow_playback`).
+    /// The sound a change asked to be heard, and at what volume, not yet
+    /// played: [`Self::preview`] puts it here and the window's event seam
+    /// (`App::on_event`) plays it once the event is handled -- the handler
+    /// decides, the seam does the device's I/O. A test reads it here.
+    pending_preview: Option<(sound::Sound, f32)>,
+    /// Whether a preview is played at all. `main` sets it, so a test run
+    /// plays nothing on the machine running it, even through the event
+    /// seam -- the desktop's rule too (`event_sounds::allow_playback`).
     play_previews: bool,
     /// The window rules, highest priority first, as the Window Rules page
     /// shows them: the user's own, or the built-in ones while their file says
@@ -1916,7 +1917,16 @@ impl SettingsState {
             appearance::sounds::SoundChoice::Silent => return,
         };
         let volume = self.appearance.settings.sounds.volume;
-        self.previewed = Some((sound.clone(), volume));
+        self.pending_preview = Some((sound, volume));
+    }
+
+    /// Play the preview a change asked for, if any, and forget it: called
+    /// by the event seam once an event is handled. Nothing is played unless
+    /// [`Self::play_previews`].
+    fn play_pending_preview(&mut self) {
+        let Some((sound, volume)) = self.pending_preview.take() else {
+            return;
+        };
         if self.play_previews {
             // Busy, no sound device, no thread: each means the preview is
             // not heard, which the page cannot mend and the choice does not
@@ -2473,7 +2483,7 @@ impl SettingsState {
             thumbs: thumbs::Thumbs::new(),
             sound_themes: Vec::new(),
             sound_roots: None,
-            previewed: None,
+            pending_preview: None,
             play_previews: false,
             rules: Vec::new(),
             rules_built_in: false,
@@ -10230,7 +10240,9 @@ impl oswindow::app::App for SettingsState {
         // `CloseRequested` is not answered with `Exit` because it does not need
         // to be: `EventLoop::run_batched` closes on it whatever the application
         // says, so that a title-bar X cannot be a button that does nothing.
-        match self.handle_event(event) {
+        let result = self.handle_event(event);
+        self.play_pending_preview();
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -15843,20 +15855,20 @@ mod tests {
                 .expect("the scratch theme is offered");
             press_dropdown_item(&mut state, at);
             assert_eq!(
-                state.previewed,
+                state.pending_preview,
                 Some((sound::Sound::File(chime.clone()), 0.25)),
                 "choosing a theme did not play its notification"
             );
 
             // Off plays nothing; the theme's again plays the theme's.
-            state.previewed = None;
+            state.pending_preview = None;
             press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
             press_dropdown_item(&mut state, 1);
-            assert_eq!(state.previewed, None, "silence was played");
+            assert_eq!(state.pending_preview, None, "silence was played");
             press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
             press_dropdown_item(&mut state, 0);
             assert_eq!(
-                state.previewed,
+                state.pending_preview,
                 Some((sound::Sound::File(chime), 0.25)),
                 "the theme's sound, chosen again, was not played"
             );
@@ -15867,13 +15879,13 @@ mod tests {
             let ding = dir.dir().join("ding.oga");
             state.apply_dialog_answer(DialogAction::Selected(ding.clone()));
             assert_eq!(
-                state.previewed,
+                state.pending_preview,
                 Some((sound::Sound::File(ding), 0.25)),
                 "the file chosen was not played"
             );
 
             // The volume, when its handle is let go -- not while it moves.
-            state.previewed = None;
+            state.pending_preview = None;
             let (track_x, track_y) = state
                 .anchor_at(AnchorId::Slider(SliderId::SoundVolume))
                 .expect("the page draws the volume");
@@ -15887,7 +15899,7 @@ mod tests {
                     kind,
                 }));
                 assert_eq!(
-                    state.previewed, None,
+                    state.pending_preview, None,
                     "the volume sounded before it was let go"
                 );
             }
@@ -15903,9 +15915,33 @@ mod tests {
             let tick = sound::BuiltIn::for_event("audio-volume-change")
                 .expect("a built-in sound for a volume change");
             assert_eq!(
-                state.previewed,
+                state.pending_preview,
                 Some((sound::Sound::BuiltIn(tick), volume)),
                 "letting the volume go did not play the volume's sound at it"
+            );
+
+            // The program is handed its events through the window's seam,
+            // which plays what the handler asked for -- aloud only in the real
+            // program -- and leaves nothing waiting for the next event.
+            state.pending_preview = None;
+            for kind in [
+                MouseEventKind::Press(MouseButton::Left),
+                MouseEventKind::Release(MouseButton::Left),
+            ] {
+                oswindow::app::App::on_event(
+                    &mut state,
+                    &Event::Mouse(MouseEvent {
+                        x: track_x + SLIDER_WIDTH / 4.0,
+                        y: track_y + 2.0,
+                        kind,
+                    }),
+                );
+            }
+            let moved = state.appearance.settings.sounds.volume;
+            assert!(moved < 0.4, "the seam did not handle the events: {moved}");
+            assert_eq!(
+                state.pending_preview, None,
+                "the seam left the preview waiting"
             );
         });
     }
@@ -17816,7 +17852,7 @@ mod tests {
             kind: MouseEventKind::Release(MouseButton::Left),
         }));
         assert_eq!(
-            state.previewed, None,
+            state.pending_preview, None,
             "letting go of a slider that is not the sounds' volume played a sound"
         );
         state.handle_event(&Event::Mouse(MouseEvent {

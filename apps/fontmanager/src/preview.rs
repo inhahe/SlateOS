@@ -1,9 +1,14 @@
 //! A line of text in a family, drawn into a picture: the preview.
 //!
-//! The window's render commands draw text in the interface's own fonts only,
-//! so a family is shown by drawing it here -- shaped and rasterized by the
-//! font crate every program draws with (`osfont::scaled`) -- and handing the
-//! compositor the pixels, as a picture viewer hands it a photograph.
+//! Drawn here -- shaped and rasterized by the font crate every program draws
+//! with (`osfont::scaled`) -- and handed to the compositor as pixels, as a
+//! picture viewer hands it a photograph, rather than as text in the family
+//! (`RenderCommand::PushFont` with `FontFamily::Named`). The compositor finds
+//! a named family in the font index it built when it started, so text named
+//! in a family installed since -- what this program installs -- would come
+//! out in the interface's face; and a name longer than
+//! `FamilyName::MAX_LEN` cannot be named at all. The face drawn here is read
+//! from this program's own index, read again after every change.
 //!
 //! Drawn on the panel's own colour rather than on nothing: the rasterizer
 //! writes every pixel it touches opaque, so a transparent picture would come
@@ -47,6 +52,8 @@ pub fn line(
     background: u32,
     ink: u32,
 ) -> Option<Picture> {
+    // `shared` refuses only a size that is not finite and positive: a size no
+    // face can be drawn at, which is this function's `None`.
     let mut font = ScaledFont::shared(Arc::clone(face), size).ok()?;
     let metrics = font.metrics();
     let (ascent, descent) = (metrics.ascent, metrics.descent);

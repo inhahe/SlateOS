@@ -4,11 +4,9 @@ Breaks one piece of production code at a time and checks that the tests
 which claim to cover it are the ones that fail.  A test that passes against
 a broken program is not testing the program.
 
-The program was rewritten on 2026-10-10 over the machine's real fonts
-(known issue E-the-font-manager-lists-invented-fonts-and-installs-
-nothing), and these rows with it: the list and its filters, the search,
-the keys, the panel, the preview's pictures, installing and removing, and
-the shortcut card's hold on the keys and the pointer.
+The rows: the list and its filters, the search, the keys, the panel, the
+preview's pictures, installing and removing, whose fonts are whose, and the
+shortcut card's hold on the keys and the pointer.
 
 Not rows:
 - the 128 MB cap on a font file read to install (`MAX_FONT_BYTES`), which a
@@ -39,6 +37,14 @@ W_INSTALL = "a_font_file_is_installed_from_the_picker"
 W_REMOVE = "your_font_is_removed_after_asking"
 W_SCROLL = "a_long_list_scrolls"
 W_CARD = "the_card_is_modal"
+W_ROW_EDGES = "a_row_is_pressed_only_where_it_shows"
+W_REDRAW = "an_install_redraws_the_chosen_familys_pictures"
+W_REMOVE_LAST = "a_removal_leaves_the_choice_in_view"
+W_REMOVE_PARTLY = "removing_your_faces_of_a_system_family_says_the_systems_stays"
+W_SEARCH_CARET = "a_caret_key_in_the_search_leaves_the_list_where_it_is"
+W_CLIPBOARD = "the_search_box_uses_the_programs_clipboard"
+W_UNREADABLE = "a_font_that_cannot_be_read_says_why"
+W_SETTLE = "a_family_chosen_for_one_taken_away_is_scrolled_to"
 
 # (name, old, new, [tests that must fail])
 MAIN = [
@@ -62,7 +68,7 @@ MAIN = [
     ),
     (
         "the choice is left on a font not shown",
-        "        if self.chosen_index().is_none() {\n            self.selected = self.visible().first().map(|f| f.name.clone());\n        }\n",
+        "        if self.chosen_index().is_none() {\n            self.selected = self.visible().first().map(|f| f.name.clone());\n            self.list_scroll = 0.0;\n        }\n",
         "",
         [W_FILTERS],
     ),
@@ -110,8 +116,8 @@ MAIN = [
     ),
     (
         "a press on a row chooses nothing",
-        "        if let Some((_, index)) = layout.rows.iter().find(|(r, _)| r.contains(x, y)) {\n            self.choose(*index);\n",
-        "        if let Some((_, index)) = layout.rows.iter().find(|(r, _)| r.contains(x, y)) {\n            let _ = index;\n",
+        "            && let Some((_, index)) = layout.rows.iter().find(|(r, _)| r.contains(x, y))\n        {\n            self.choose(*index);\n",
+        "            && let Some((_, index)) = layout.rows.iter().find(|(r, _)| r.contains(x, y))\n        {\n            let _ = index;\n",
         [W_KEYS],
     ),
     (
@@ -236,8 +242,8 @@ MAIN = [
     ),
     (
         "the pictures keep the old panel's colour",
-        "            .map(|family| (family.name.clone(), background, ink, width));\n",
-        "            .map(|family| (family.name.clone(), 0, ink, width));\n",
+        "            .map(|family| (family.name.clone(), generation, background, ink, width));\n",
+        "            .map(|family| (family.name.clone(), generation, 0, ink, width));\n",
         [W_PREVIEW],
     ),
     (
@@ -258,6 +264,54 @@ MAIN = [
         "            if plain && matches!(key.key, Key::Escape | Key::Enter) {\n                self.show_help = false;\n            }\n",
         [W_CARD],
     ),
+    (
+        "a press over the toolbar chooses the row under it",
+        "        if layout.list.contains(x, y)\n            && let Some((_, index))",
+        "        if true\n            && let Some((_, index))",
+        [W_ROW_EDGES],
+    ),
+    (
+        "an install keeps the pictures of the face before it",
+        "            .map(|family| (family.name.clone(), generation, background, ink, width));\n",
+        "            .map(|family| (family.name.clone(), 0, background, ink, width));\n",
+        [W_REDRAW],
+    ),
+    (
+        "a removal leaves the choice on the list's first",
+        "        if self.chosen_index().is_none()\n            && let Some(at) = at\n",
+        "        if false\n            && let Some(at) = at\n",
+        [W_REMOVE_LAST],
+    ),
+    (
+        "a family chosen for one taken away is left off screen",
+        "            self.selected = self.visible().first().map(|f| f.name.clone());\n            self.list_scroll = 0.0;\n",
+        "            self.selected = self.visible().first().map(|f| f.name.clone());\n",
+        [W_SETTLE],
+    ),
+    (
+        "removing the user's faces of a system family says it is gone",
+        "        let stays = self.library.family(&removal.family).is_some();\n",
+        "        let stays = false;\n",
+        [W_REMOVE_PARTLY],
+    ),
+    (
+        "a caret key in the search scrolls the list to its top",
+        "        if self.search.text() != before {\n",
+        "        if true {\n",
+        [W_SEARCH_CARET],
+    ),
+    (
+        "the search box keeps a clipboard of its own",
+        "            textline::apply_key_on_clipboard(&mut self.search, key, SEARCH_CAPACITY, TEXT_SIZE);\n",
+        "            textline::apply_key(&mut self.search, key, SEARCH_CAPACITY, \"\", TEXT_SIZE);\n",
+        [W_CLIPBOARD],
+    ),
+    (
+        "a face that cannot be read is not said why",
+        "                self.previews.why_not = Some(why_not_drawn(&e));\n",
+        "                self.previews.why_not = None;\n",
+        [W_UNREADABLE],
+    ),
 ]
 
 # --- the fonts (library.rs) -------------------------------------------------
@@ -269,12 +323,16 @@ L_REFUSED = "what_is_not_a_font_is_refused_and_nothing_is_written"
 L_REMOVE = "your_fonts_are_removed_and_the_systems_are_not"
 L_SHARING = "a_file_another_family_shares_is_named"
 L_STYLES = "styles_are_named_as_people_name_them"
+L_LISTED_NAME = "a_font_is_installed_by_the_name_it_is_listed_by"
+L_OWN_FOLDERS = "every_one_of_your_fonts_folders_is_yours"
+L_GONE = "a_file_deleted_already_is_removed"
+L_GENERATION = "every_reading_of_the_folders_is_a_new_generation"
 
 LIBRARY = [
     (
         "a font in the user's folder is not theirs",
-        "                        own: own.is_some_and(|own| face.path.starts_with(own)),\n",
-        "                        own: own.is_some_and(|own| face.path.starts_with(own) && own.as_os_str().is_empty()),\n",
+        "            own: own.iter().any(|dir| face.path.starts_with(dir)),\n",
+        "            own: own.iter().any(|dir| face.path.starts_with(dir) && dir.as_os_str().is_empty()),\n",
         [L_LISTED],
     ),
     (
@@ -291,8 +349,8 @@ LIBRARY = [
     ),
     (
         "a font with no family name is installed",
-        "            .ok_or(InstallError::NoFamilyName)?;\n",
-        "            .unwrap_or_default();\n",
+        "        let family = names.first().cloned().ok_or(InstallError::NoFamilyName)?;\n",
+        "        let family = names.first().cloned().unwrap_or_default();\n",
         [L_REFUSED],
     ),
     (
@@ -372,6 +430,44 @@ LIBRARY = [
         "        words.push(\"Italic\");\n",
         "",
         [L_STYLES],
+    ),
+    (
+        "a font's family is its raw name",
+        "        let family = names.first().cloned().ok_or(InstallError::NoFamilyName)?;\n",
+        "        let family = face.family().ok_or(InstallError::NoFamilyName)?;\n",
+        [L_LISTED_NAME],
+    ),
+    (
+        "only the first of the user's folders is theirs",
+        "            own: own.iter().any(|dir| face.path.starts_with(dir)),\n",
+        "            own: own.first().is_some_and(|dir| face.path.starts_with(dir)),\n",
+        [L_OWN_FOLDERS],
+    ),
+    (
+        "a folder reached by two paths is read twice",
+        "            if walked.contains(&real) {\n",
+        "            if false {\n",
+        [L_OWN_FOLDERS],
+    ),
+    (
+        "a file deleted already fails the removal",
+        "                Err(error) if error.kind() == io::ErrorKind::NotFound => {\n"
+        "                    deleted = deleted.saturating_add(1);\n"
+        "                }\n",
+        "",
+        [L_GONE],
+    ),
+    (
+        "a reading of the folders keeps the generation",
+        "        self.generation = self.generation.wrapping_add(1);\n",
+        "",
+        [L_GENERATION, W_REDRAW],
+    ),
+    (
+        "a face is listed under its first name only",
+        "        for name in &face.display {\n",
+        "        for name in face.display.iter().take(1) {\n",
+        [L_SHARING],
     ),
 ]
 

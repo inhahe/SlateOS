@@ -21,7 +21,7 @@ pub(crate) fn test_font(family: &str, bold: bool, italic: bool, fixed: bool) -> 
     named_font(&[(name_id::FAMILY, family)], bold, italic, fixed)
 }
 
-/// [`font`] with the names given: `(name id, name)` each.
+/// [`test_font`] with the names given: `(name id, name)` each.
 fn named_font(names: &[(u16, &str)], bold: bool, italic: bool, fixed: bool) -> Vec<u8> {
     let square = {
         let mut g = Vec::new();
@@ -181,8 +181,8 @@ impl ScratchFonts {
 
     pub(crate) fn places(&self) -> FontPlaces {
         FontPlaces {
-            dirs: vec![self.system.clone(), self.own.clone()],
-            own: Some(self.own.clone()),
+            system: vec![self.system.clone()],
+            own: vec![self.own.clone()],
         }
     }
 
@@ -214,7 +214,7 @@ fn the_fonts_listed_are_the_ones_in_the_folders() {
     assert_eq!(gamma.style_names(), ["Italic"]);
     assert_eq!(gamma.own_files(), [machine.own.join("Gamma.ttf")]);
     assert!(
-        library.load("Alpha").is_some(),
+        library.load("Alpha").is_ok(),
         "a family listed cannot be drawn"
     );
 }
@@ -226,8 +226,7 @@ fn a_font_file_is_installed_into_your_fonts_folder() {
     let machine = ScratchFonts::new("fontmanager-install");
     let fresh = machine.own.parent().unwrap().join("new-fonts");
     let mut places = machine.places();
-    places.own = Some(fresh.clone());
-    places.dirs.push(fresh.clone());
+    places.own.insert(0, fresh.clone());
     let mut library = Library::scan(places);
     let from = machine.download("Delta-Bold.otf", &test_font("Delta", true, false, false));
     let installed = library.install(&from).expect("installed");
@@ -328,13 +327,148 @@ fn what_is_not_a_font_is_refused_and_nothing_is_written() {
     );
 
     let mut homeless = machine.places();
-    homeless.own = None;
+    homeless.own.clear();
     let mut library = Library::scan(homeless);
     let delta = machine.download("Delta.ttf", &test_font("Delta", false, false, false));
     assert!(matches!(
         library.install(&delta),
         Err(InstallError::NoFontsFolder)
     ));
+}
+
+/// **A font is installed by the name it is listed by** -- trimmed, and its
+/// typographic family where it has one -- and **a name that is only spaces is
+/// no name**: refused, and nothing written, since the index would never list
+/// it.
+#[test]
+fn a_font_is_installed_by_the_name_it_is_listed_by() {
+    let machine = ScratchFonts::new("fontmanager-listed-name");
+    let mut library = Library::scan(machine.places());
+    let spaced = machine.download(
+        "Delta.ttf",
+        &named_font(&[(name_id::FAMILY, "Delta ")], false, false, false),
+    );
+    let installed = library.install(&spaced).expect("installed");
+    assert_eq!(installed.family, "Delta", "the name was not trimmed");
+    assert!(
+        library.family(&installed.family).is_some(),
+        "not listed by it"
+    );
+
+    let typographic = machine.download(
+        "Epsilon-Bold.ttf",
+        &named_font(
+            &[
+                (name_id::FAMILY, "Epsilon Bold"),
+                (name_id::TYPOGRAPHIC_FAMILY, "Epsilon"),
+            ],
+            true,
+            false,
+            false,
+        ),
+    );
+    assert_eq!(library.install(&typographic).unwrap().family, "Epsilon");
+
+    let before = std::fs::read_dir(&machine.own).unwrap().count();
+    let blank = machine.download(
+        "Blank.ttf",
+        &named_font(&[(name_id::FAMILY, "  ")], false, false, false),
+    );
+    assert!(
+        matches!(library.install(&blank), Err(InstallError::NoFamilyName)),
+        "a font named only spaces was installed"
+    );
+    assert_eq!(
+        std::fs::read_dir(&machine.own).unwrap().count(),
+        before,
+        "a font no list can show was written"
+    );
+}
+
+/// **Every one of the user's fonts folders is theirs**: a font in the
+/// second -- `~/.fonts` beside `~/.local/share/fonts` -- is listed as theirs
+/// and removed, and **a folder reached by two paths is read once**.
+#[test]
+fn every_one_of_your_fonts_folders_is_yours() {
+    let machine = ScratchFonts::new("fontmanager-own-folders");
+    let second = machine.own.parent().unwrap().join("dot-fonts");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(
+        second.join("Zeta.ttf"),
+        test_font("Zeta", false, false, false),
+    )
+    .unwrap();
+    let mut places = machine.places();
+    places.own.push(second.clone());
+    // The first folder again, by another spelling of its path.
+    places.own.push(machine.own.join("."));
+    let mut library = Library::scan(places);
+    let zeta = library.family("Zeta").expect("listed");
+    assert!(zeta.all_own(), "a font in the second folder is not theirs");
+    assert_eq!(
+        library.family("Gamma").unwrap().faces.len(),
+        1,
+        "a folder reached by two paths was read twice"
+    );
+    assert_eq!(library.remove("Zeta").expect("theirs to remove"), 1);
+    assert!(!second.join("Zeta.ttf").exists());
+}
+
+/// **A file deleted already is removed**, not a failure: what was asked for
+/// is so.
+#[test]
+fn a_file_deleted_already_is_removed() {
+    let machine = ScratchFonts::new("fontmanager-gone");
+    let mut library = Library::scan(machine.places());
+    std::fs::remove_file(machine.own.join("Gamma.ttf")).unwrap();
+    assert_eq!(library.remove("Gamma").expect("removed"), 1);
+    assert!(library.family("Gamma").is_none());
+}
+
+/// **Every reading of the folders is a new generation**, so what was drawn
+/// from the last can tell it is stale.
+#[test]
+fn every_reading_of_the_folders_is_a_new_generation() {
+    let machine = ScratchFonts::new("fontmanager-generation");
+    let mut library = Library::scan(machine.places());
+    let first = library.generation();
+    library
+        .install(&machine.download("Delta.ttf", &test_font("Delta", false, false, false)))
+        .unwrap();
+    let second = library.generation();
+    assert_ne!(first, second, "an install left the generation");
+    library.remove("Delta").unwrap();
+    assert_ne!(
+        second,
+        library.generation(),
+        "a removal left the generation"
+    );
+}
+
+/// **A face the index cannot open says why**: a file gone since the folders
+/// were read, told apart from one that is not a font.
+#[test]
+fn a_face_that_cannot_be_opened_says_why() {
+    let machine = ScratchFonts::new("fontmanager-load");
+    let library = Library::scan(machine.places());
+    std::fs::remove_file(machine.own.join("Gamma.ttf")).unwrap();
+    assert!(matches!(
+        library.load("Gamma"),
+        Err(LoadError::Unreadable { .. })
+    ));
+    std::fs::write(machine.system.join("Beta-Mono.ttf"), b"not a font now").unwrap();
+    assert!(matches!(
+        library.load("Beta"),
+        Err(LoadError::Unparsable { .. })
+    ));
+    assert!(library.load("Alpha").is_ok());
+}
+
+/// **What the install refuses a name by is said from the same list** it
+/// refuses by.
+#[test]
+fn the_extensions_are_said_as_a_sentence() {
+    assert_eq!(extensions_in_words(), ".ttf, .otf, .ttc or .otc");
 }
 
 /// **The user's own fonts are removed, and the system's are not.**

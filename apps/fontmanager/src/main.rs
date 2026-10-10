@@ -7,10 +7,10 @@
 //! draws from (`guitk::fontdb`), over the same folders -- through
 //! [`library::Library`]: by name, filtered to all of them, the user's own or
 //! the fixed-pitch ones, and searched by name. The family chosen is shown in
-//! its own letters at three sizes, drawn by the font crate every program
-//! draws with ([`preview`]) and handed to the compositor as pictures, since a
-//! window's text commands draw in the interface's fonts only; beside them,
-//! its styles, whether it is fixed-pitch, whose it is and its files.
+//! its own letters at three sizes, drawn here by the font crate every program
+//! draws with and handed to the compositor as pictures -- see [`preview`] for
+//! why not as text; beside them, its styles, whether it is fixed-pitch, whose
+//! it is and its files.
 //!
 //! # What it changes
 //!
@@ -22,19 +22,10 @@
 //!   it. The system's fonts are not this program's to delete, and its Remove
 //!   says so.
 //!
-//! A program reads the fonts once, when it starts, so a change here is seen by
-//! programs started afterwards; the window says so after each.
-//!
-//! # What it no longer pretends
-//!
-//! Until 2026-10-10 this program listed nineteen fonts written into its
-//! source, whatever the machine had; its Install added a line to that list and
-//! copied no file, and its Remove took the line away; its preview drew every
-//! family in the interface's own font; and its rendering settings -- hinting,
-//! antialiasing, subpixel order, a default size -- were kept by nothing and
-//! read by nothing. All of that is gone: the list, the files and the preview
-//! are the machine's, and the settings wait for something to obey them
-//! (known issue `E-the-font-manager-lists-invented-fonts-and-installs-nothing`).
+//! Every process reads the fonts once, when it starts -- the compositor, which
+//! draws every program's text, too -- so a change here is drawn once SlateOS
+//! restarts; the window says so after each (known issue
+//! `E-a-font-installed-is-drawn-only-after-slateos-restarts`).
 
 mod library;
 mod preview;
@@ -90,6 +81,10 @@ const FILES_LISTED: usize = 6;
 
 /// The longest search typed, in characters.
 const SEARCH_CAPACITY: usize = 128;
+
+/// When a change of fonts reaches the programs, for the sentences that say
+/// one was made.
+const WHEN_SEEN: &str = "once SlateOS restarts";
 
 /// The keys this window answers, as a reader sees them.
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -159,19 +154,21 @@ pub struct Removal {
     pub sharing: Vec<String>,
 }
 
-/// The pictures of the family shown: which family they are of, in which
-/// colours and how wide, and their ids, so they are made again only when one
-/// of those changes.
+/// The pictures of the family shown: which family they are of, from which
+/// reading of the folders, in which colours and how wide, and their ids, so
+/// they are made again only when one of those changes.
 #[derive(Debug, Default)]
 struct Previews {
-    /// What the pictures show: the family, the panel's colour, the ink, and
-    /// the width they were drawn for.
-    key: Option<(String, u32, u32, u32)>,
+    /// What the pictures show: the family, the reading of the folders its
+    /// face was found in ([`Library::generation`]), the panel's colour, the
+    /// ink, and the width they were drawn for.
+    key: Option<(String, u64, u32, u32, u32)>,
     /// Each picture's id and size, in [`PREVIEW_LINES`]'s order; `None` for a
     /// line the face could not be drawn at.
     shown: Vec<Option<(u64, u32, u32)>>,
-    /// Whether the family's face could not be read at all.
-    unreadable: bool,
+    /// Why the family's face could not be read at all, as a clause to follow
+    /// "This font cannot be drawn:" ([`why_not_drawn`]); `None` when it could.
+    why_not: Option<String>,
     /// The next id to give a picture: never reused.
     next_id: u64,
     /// What the compositor is to be told, oldest first.
@@ -213,8 +210,6 @@ pub struct FontManager {
     confirm: Option<Removal>,
     /// Whether the shortcut card is up.
     show_help: bool,
-    /// The window's clipboard, for the search box's copy and paste.
-    clipboard: String,
     /// The pictures of the family shown.
     previews: Previews,
     window_width: f32,
@@ -239,7 +234,6 @@ impl FontManager {
             dialog: None,
             confirm: None,
             show_help: false,
-            clipboard: String::new(),
             previews: Previews {
                 next_id: 1,
                 ..Previews::default()
@@ -295,11 +289,13 @@ impl FontManager {
             .position(|family| family.name.eq_ignore_ascii_case(chosen))
     }
 
-    /// Keep the choice among the families shown -- the first, if the filter
-    /// or the search took it away -- and the list within its rows.
+    /// Keep the choice among the families shown -- the first, scrolled to,
+    /// if the filter or the search took it away -- and the list within its
+    /// rows.
     fn settle(&mut self) {
         if self.chosen_index().is_none() {
             self.selected = self.visible().first().map(|f| f.name.clone());
+            self.list_scroll = 0.0;
         }
         let rows = f32_count(self.visible().len());
         let most = (rows * ROW_HEIGHT - self.list_rect().h).max(0.0);
@@ -320,9 +316,15 @@ impl FontManager {
             .filter(|downloads| downloads.is_dir())
             .or(home)
             .unwrap_or_else(std::env::temp_dir);
+        // The files the install takes, by the list it refuses others by.
+        let patterns: Vec<String> = library::FONT_EXTENSIONS
+            .iter()
+            .map(|ext| format!("*.{ext}"))
+            .collect();
+        let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
         let mut dialog = FileDialog::open()
             .with_initial_path(start)
-            .with_filter("Fonts", &["*.ttf", "*.otf", "*.ttc", "*.otc"]);
+            .with_filter("Fonts", &patterns);
         dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
         self.dialog = Some(dialog);
     }
@@ -359,7 +361,7 @@ impl FontManager {
                 }
                 Message {
                     text: format!(
-                        "Installed {} {}. Programs started from now on can use it.",
+                        "Installed {} {}. Programs can use it {WHEN_SEEN}.",
                         installed.family, installed.style
                     ),
                     failed: false,
@@ -389,25 +391,49 @@ impl FontManager {
         });
     }
 
-    /// Remove the family asked about, and say what happened.
+    /// Remove the family asked about, and say what happened. A family gone
+    /// from the list leaves the choice on the one that took its place.
     fn remove_confirmed(&mut self) {
         let Some(removal) = self.confirm.take() else {
             return;
         };
-        self.message = Some(match self.library.remove(&removal.family) {
-            Ok(deleted) => Message {
-                text: format!(
-                    "Removed {}: {deleted} file{} deleted. Programs started from now on will not have it.",
-                    removal.family,
+        let at = self.chosen_index();
+        let result = self.library.remove(&removal.family);
+        // What is left of it: the system's faces of a family that was only
+        // partly the user's.
+        let stays = self.library.family(&removal.family).is_some();
+        self.message = Some(match result {
+            Ok(deleted) => {
+                let files = format!(
+                    "{deleted} file{} deleted",
                     if deleted == 1 { "" } else { "s" }
-                ),
-                failed: false,
-            },
+                );
+                Message {
+                    text: if stays {
+                        format!(
+                            "Removed your fonts of {0}: {files}. The system's {0} stays.",
+                            removal.family
+                        )
+                    } else {
+                        format!(
+                            "Removed {}: {files}. Programs stop using it {WHEN_SEEN}.",
+                            removal.family
+                        )
+                    },
+                    failed: false,
+                }
+            }
             Err(e) => Message {
                 text: format!("{} was not removed: {e}.", removal.family),
                 failed: true,
             },
         });
+        if self.chosen_index().is_none()
+            && let Some(at) = at
+        {
+            let last = self.visible().len().saturating_sub(1);
+            self.choose(at.min(last));
+        }
         self.settle();
     }
 
@@ -516,26 +542,22 @@ impl FontManager {
         EventResult::Consumed
     }
 
-    /// A key for the search box: `textline`'s keys, the list following what
-    /// is typed.
+    /// A key for the search box: `textline`'s keys on the program's
+    /// clipboard, the list following what is typed -- back to its top when
+    /// the search changes, and left where it is by a key that moves the caret
+    /// or copies.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
-        let edit = textline::apply_key(
-            &mut self.search,
-            key,
-            SEARCH_CAPACITY,
-            &self.clipboard,
-            TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
+        let before = self.search.text().to_owned();
+        let edit =
+            textline::apply_key_on_clipboard(&mut self.search, key, SEARCH_CAPACITY, TEXT_SIZE);
+        if !edit.handled {
+            return EventResult::Ignored;
         }
-        if edit.handled {
+        if self.search.text() != before {
             self.list_scroll = 0.0;
-            self.settle();
-            EventResult::Consumed
-        } else {
-            EventResult::Ignored
         }
+        self.settle();
+        EventResult::Consumed
     }
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
@@ -589,7 +611,11 @@ impl FontManager {
             self.settle();
             return EventResult::Consumed;
         }
-        if let Some((_, index)) = layout.rows.iter().find(|(r, _)| r.contains(x, y)) {
+        // A row is pressed only where it shows: one half scrolled out of the
+        // list runs on under the toolbar or the status line.
+        if layout.list.contains(x, y)
+            && let Some((_, index)) = layout.rows.iter().find(|(r, _)| r.contains(x, y))
+        {
             self.choose(*index);
             return EventResult::Consumed;
         }
@@ -725,35 +751,39 @@ impl FontManager {
     // ========================================================================
 
     /// Make the family chosen's pictures again if what they show has
-    /// changed -- another family, other colours, another width -- giving
-    /// the old ones back first.
+    /// changed -- another family, another reading of the folders (an install
+    /// or a removal may have changed its faces), other colours, another
+    /// width -- giving the old ones back first.
     fn refresh_previews(&mut self) {
         let width = preview_width(self.panel_rect().w);
         let background = argb(self.palette.mantle);
         let ink = argb(self.palette.text);
+        let generation = self.library.generation();
         let key = self
             .chosen()
-            .map(|family| (family.name.clone(), background, ink, width));
+            .map(|family| (family.name.clone(), generation, background, ink, width));
         if key == self.previews.key {
             return;
         }
         for (id, _, _) in self.previews.shown.drain(..).flatten() {
             self.previews.changes.push(ImageChange::Drop(id));
         }
-        self.previews.unreadable = false;
+        self.previews.why_not = None;
         self.previews.key.clone_from(&key);
         let Some((name, ..)) = key else {
             return;
         };
         // Parsed once and shared by every line: the parse is the costly part,
         // and the same for every size (`ScaledFont::shared`).
-        let face = self.library.load(&name).map(std::sync::Arc::new);
+        let face = match self.library.load(&name) {
+            Ok(face) => std::sync::Arc::new(face),
+            Err(e) => {
+                self.previews.why_not = Some(why_not_drawn(&e));
+                return;
+            }
+        };
         for (size, text) in PREVIEW_LINES {
-            let picture = face
-                .as_ref()
-                .and_then(|face| preview::line(face, text, size, width, background, ink));
-            let Some(picture) = picture else {
-                self.previews.unreadable = true;
+            let Some(picture) = preview::line(&face, text, size, width, background, ink) else {
                 self.previews.shown.push(None);
                 continue;
             };
@@ -978,12 +1008,12 @@ impl FontManager {
         let mut y = panel.y + PADDING;
         bold(tree, x, y, &family.name, pal.text, 20.0);
         y += 34.0;
-        if self.previews.unreadable && self.previews.shown.iter().all(Option::is_none) {
+        if let Some(why) = &self.previews.why_not {
             clipped(
                 tree,
                 x,
                 y,
-                "This font cannot be drawn: its file could not be read as a font.",
+                &format!("This font cannot be drawn: {why}."),
                 pal.ink(pal.red),
                 TEXT_SIZE,
                 wide,
@@ -1074,7 +1104,7 @@ impl FontManager {
             tree,
             x,
             panel.bottom() - PADDING - 14.0,
-            "Programs started after a change see it.",
+            &format!("A change here reaches programs {WHEN_SEEN}."),
             pal.subtext0,
             12.0,
             wide,
@@ -1141,10 +1171,11 @@ impl FontManager {
             if count == 1 { "is" } else { "are" }
         );
         if !removal.sharing.is_empty() {
+            // Faces of the others, not the others: a family may have faces in
+            // other files too, and keeps those.
             said.push_str(&format!(
-                " The same files hold {}, which go{} with them.",
-                removal.sharing.join(", "),
-                if removal.sharing.len() == 1 { "es" } else { "" }
+                " Those files hold faces of {} too, which go with them.",
+                removal.sharing.join(", ")
             ));
         }
         let mut y = b.y + PADDING + 30.0;
@@ -1248,6 +1279,24 @@ fn family_summary(family: &library::Family) -> String {
         said.push_str(" - fixed-pitch");
     }
     said
+}
+
+/// Why a family's face could not be read, as a clause to follow "This font
+/// cannot be drawn:" -- its file gone or changed since the folders were read
+/// told apart from no such family.
+fn why_not_drawn(error: &guitk::fontdb::LoadError) -> String {
+    match error {
+        guitk::fontdb::LoadError::NotInstalled => "no font of that name is installed".to_owned(),
+        guitk::fontdb::LoadError::Unreadable { path, source } => {
+            format!("{} could not be read ({source})", path.as_path().shown())
+        }
+        guitk::fontdb::LoadError::Unparsable { path, .. } => {
+            format!(
+                "{} is not a font this system can draw",
+                path.as_path().shown()
+            )
+        }
+    }
 }
 
 /// A file's name, for a sentence about it.

@@ -7,27 +7,27 @@
 //!
 //! # Whose fonts
 //!
-//! A face is the user's own when its file is in their fonts folder
-//! ([`FontPlaces::own`], `~/.local/share/fonts`): what an install writes, and
-//! the only fonts this program removes. The system's are SlateOS's, shared by
-//! every account, and are not this program's to delete.
+//! A face is the user's own when its file is in one of their fonts folders
+//! ([`FontPlaces::own`]: `~/.local/share/fonts`, where an install writes, and
+//! the others a program looks in for one user's fonts). Those are the only
+//! fonts this program removes. The system's are SlateOS's, shared by every
+//! account, and are not this program's to delete.
 //!
 //! # When programs see a change
 //!
-//! Each program builds its font index once, when it starts (`guitk::text`'s
-//! `font_db`), so a font installed or removed here is seen by programs started
-//! afterwards -- the page that says so is the window's.
-//!
-//! Until 2026-10-10 this program listed nineteen fonts written into its
-//! source, whatever the machine had, and its Install added a line to that list
-//! and copied no file (known issue
-//! `E-the-font-manager-lists-invented-fonts-and-installs-nothing`).
+//! Every process builds its font index once, when it starts (`guitk::text`'s
+//! `font_db`) -- the compositor too, and it draws every program's text. So a
+//! font installed or removed here is drawn as installed or removed once
+//! SlateOS restarts (known issue
+//! `E-a-font-installed-is-drawn-only-after-slateos-restarts`); the window
+//! says so after each change.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use guitk::fontdb::FontDb;
+use guitk::fontdb::{FontDb, LoadError};
 use osfont::select::Query;
 use osfont::sfnt::{Face, Style, name_id};
 
@@ -38,8 +38,9 @@ use osfont::sfnt::{Face, Style, name_id};
 pub const MAX_FONT_BYTES: usize = 128 * 1024 * 1024;
 
 /// The extensions of the files the font index reads, as it checks them: in
-/// any case.
-const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
+/// any case. What the install refuses a file by, and what its file picker
+/// shows.
+pub const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
 
 /// How many names an install tries -- `Inter.ttf`, `Inter (2).ttf`, ... --
 /// before it gives up: a folder holding ninety-nine files of one name is not
@@ -49,28 +50,35 @@ const NAME_TRIES: u32 = 99;
 /// Where fonts are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontPlaces {
-    /// Every folder walked for fonts, in the index's order.
-    pub dirs: Vec<PathBuf>,
-    /// The user's own fonts folder: where an install writes, and the only
-    /// folder a font is removed from. `None` when there is no home folder.
-    pub own: Option<PathBuf>,
+    /// The system's fonts folders, in the index's order: shared by every
+    /// account, read once, and never changed here.
+    pub system: Vec<PathBuf>,
+    /// The user's own fonts folders. Every font in them is theirs to remove,
+    /// and the first is where an install writes -- walked whether or not it
+    /// exists yet, since an install makes it. Empty with no home folder.
+    pub own: Vec<PathBuf>,
 }
 
 impl FontPlaces {
     /// The folders every program's index walks
-    /// (`guitk::fontdb::system_font_dirs`), and the user's own,
-    /// `~/.local/share/fonts` -- walked whether or not it exists yet, since
-    /// an install makes it.
+    /// (`guitk::fontdb::system_font_dirs`), split into the system's and the
+    /// user's own: `~/.local/share/fonts` first, then `~/.fonts` and a
+    /// Windows host's per-user fonts folder, which the index walks too.
     #[must_use]
     pub fn standard() -> Self {
-        let own = std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share/fonts"));
-        let mut dirs = guitk::fontdb::system_font_dirs();
-        if let Some(own) = &own
-            && !dirs.contains(own)
-        {
-            dirs.push(own.clone());
+        let mut own: Vec<PathBuf> = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            own.push(Path::new(&home).join(".local/share/fonts"));
+            own.push(Path::new(&home).join(".fonts"));
         }
-        Self { dirs, own }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            own.push(Path::new(&local).join("Microsoft/Windows/Fonts"));
+        }
+        let system = guitk::fontdb::system_font_dirs()
+            .into_iter()
+            .filter(|dir| !own.contains(dir))
+            .collect();
+        Self { system, own }
     }
 }
 
@@ -83,7 +91,8 @@ pub struct FaceEntry {
     pub style: Style,
     /// Whether every glyph advances the same width.
     pub monospaced: bool,
-    /// Whether it is the user's own: its file is in their fonts folder.
+    /// Whether it is the user's own: its file is in one of their fonts
+    /// folders.
     pub own: bool,
 }
 
@@ -198,8 +207,8 @@ pub struct Installed {
 pub enum InstallError {
     /// There is no home folder, and so no fonts folder of the user's.
     NoFontsFolder,
-    /// The file's name is not a font file's: not `.ttf`, `.otf`, `.ttc` or
-    /// `.otc`.
+    /// The file's name is not a font file's: it ends in none of
+    /// [`FONT_EXTENSIONS`].
     NotAFontName,
     /// The file could not be read.
     Read(io::Error),
@@ -227,7 +236,8 @@ impl fmt::Display for InstallError {
             Self::NotAFontName => {
                 write!(
                     f,
-                    "it is not a font file: a font's name ends .ttf, .otf, .ttc or .otc"
+                    "it is not a font file: a font's name ends {}",
+                    extensions_in_words()
                 )
             }
             Self::Read(e) => write!(f, "it could not be read: {e}"),
@@ -295,51 +305,57 @@ impl std::error::Error for RemoveError {}
 /// The fonts on this machine: the index, and its families.
 pub struct Library {
     places: FontPlaces,
+    /// The faces in the system's folders, read once: this program changes
+    /// only the user's own.
+    system: FontDb,
+    /// Every face, the system's and the user's own.
     index: FontDb,
     families: Vec<Family>,
+    /// How many times the folders have been read: what was drawn from one
+    /// reading is stale in the next.
+    generation: u64,
 }
 
 impl Library {
     /// The fonts in `places`, read now.
     #[must_use]
     pub fn scan(places: FontPlaces) -> Self {
+        let mut system = FontDb::new();
+        for dir in not_walked(&places.system, &mut Vec::new()) {
+            system.scan_dir(dir);
+        }
         let mut library = Self {
             places,
+            system,
             index: FontDb::new(),
             families: Vec::new(),
+            generation: 0,
         };
         library.rescan();
         library
     }
 
-    /// Read the folders again: after an install or a removal, or when the
-    /// user asks.
+    /// Read the user's own folders again, after an install or a removal.
     pub fn rescan(&mut self) {
-        let mut index = FontDb::new();
-        for dir in &self.places.dirs {
+        let mut index = self.system.clone();
+        // The system's folders counted as walked first, so a folder of the
+        // user's that is also one of them is read once, as the system's.
+        let mut walked = Vec::new();
+        not_walked(&self.places.system, &mut walked);
+        for dir in not_walked(&self.places.own, &mut walked) {
             index.scan_dir(dir);
         }
         index.finish();
-        let own = self.places.own.as_deref();
-        self.families = index
-            .families()
-            .into_iter()
-            .map(|name| Family {
-                faces: index
-                    .faces()
-                    .iter()
-                    .filter(|face| face.matches(&name))
-                    .map(|face| FaceEntry {
-                        path: face.path.clone(),
-                        style: face.style,
-                        monospaced: face.monospaced,
-                        own: own.is_some_and(|own| face.path.starts_with(own)),
-                    })
-                    .collect(),
-                name,
-            })
-            .collect();
+        self.families = group(&index, &self.places.own);
         self.index = index;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Which reading of the folders this is: it changes whenever the fonts
+    /// listed may have.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Every family, sorted by name in any case.
@@ -357,10 +373,14 @@ impl Library {
     }
 
     /// The upright, regular-weight face of `family` -- or its nearest -- read
-    /// and parsed, for a preview; `None` if it cannot be.
-    #[must_use]
-    pub fn load(&self, family: &str) -> Option<Face> {
-        self.index.load(family, Query::regular()).ok()
+    /// and parsed, for a preview.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError`]: no such family, or its file could not be read or is
+    /// not a font -- gone or changed since the folders were read.
+    pub fn load(&self, family: &str) -> Result<Face, LoadError> {
+        self.index.load(family, Query::regular())
     }
 
     /// Every other family with a face in one of `files`: what deleting them
@@ -388,7 +408,12 @@ impl Library {
     /// [`InstallError`]: no fonts folder, not a font file, unreadable, too
     /// large, not a font, no family name, the user's already, or not written.
     pub fn install(&mut self, from: &Path) -> Result<Installed, InstallError> {
-        let own = self.places.own.clone().ok_or(InstallError::NoFontsFolder)?;
+        let own = self
+            .places
+            .own
+            .first()
+            .cloned()
+            .ok_or(InstallError::NoFontsFolder)?;
         let name = from
             .file_name()
             .filter(|_| is_font_name(from))
@@ -398,11 +423,10 @@ impl Library {
             return Err(InstallError::TooLarge);
         }
         let face = Face::parse(read.bytes.clone()).map_err(|_| InstallError::NotAFont)?;
+        // The names as the index keys them, trimmed and none empty: the
+        // family is listed by the first, so it is the one chosen and said.
         let names = family_names(&face);
-        let family = face
-            .family()
-            .or_else(|| names.first().cloned())
-            .ok_or(InstallError::NoFamilyName)?;
+        let family = names.first().cloned().ok_or(InstallError::NoFamilyName)?;
         let style = face.style();
         let already = self.families.iter().any(|installed| {
             names
@@ -453,6 +477,11 @@ impl Library {
         for file in files {
             match std::fs::remove_file(&file) {
                 Ok(()) => deleted = deleted.saturating_add(1),
+                // Gone already -- deleted since the folders were read, by
+                // another program or another window -- is what was asked.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    deleted = deleted.saturating_add(1);
+                }
                 Err(error) => {
                     if failed.is_none() {
                         failed = Some((file, error));
@@ -481,6 +510,72 @@ pub fn is_font_name(path: &Path) -> bool {
             .iter()
             .any(|known| ext.eq_ignore_ascii_case(known))
     })
+}
+
+/// [`FONT_EXTENSIONS`] as a sentence says them: ".ttf, .otf, .ttc or .otc".
+fn extensions_in_words() -> String {
+    let dotted: Vec<String> = FONT_EXTENSIONS
+        .iter()
+        .map(|ext| format!(".{ext}"))
+        .collect();
+    match dotted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => dotted.concat(),
+    }
+}
+
+/// The folders of `dirs` not walked already, each added to `walked` --
+/// which holds every folder walked by its real path. A folder reached by two
+/// paths (`~/.fonts` a link to `~/.local/share/fonts`, as it often is) would
+/// list every font in it twice.
+fn not_walked<'a>(dirs: &'a [PathBuf], walked: &mut Vec<PathBuf>) -> Vec<&'a PathBuf> {
+    dirs.iter()
+        .filter(|dir| {
+            // A folder that does not exist yet has no real path; its own
+            // stands for it, and walking it finds nothing.
+            let real = std::fs::canonicalize(dir).unwrap_or_else(|_| (*dir).clone());
+            if walked.contains(&real) {
+                false
+            } else {
+                walked.push(real);
+                true
+            }
+        })
+        .collect()
+}
+
+/// Every family `index` answers to, with its faces in the index's order:
+/// one pass over the faces, each put under every name it has. Spelled and
+/// ordered as `FontDb::families` lists them -- the first spelling met, sorted
+/// by name in any case -- since a face's names, lowercased, are the index's
+/// keys. A face is the user's own when its file is in one of `own`.
+fn group(index: &FontDb, own: &[PathBuf]) -> Vec<Family> {
+    let mut families: BTreeMap<String, Family> = BTreeMap::new();
+    for face in index.faces() {
+        let entry = FaceEntry {
+            path: face.path.clone(),
+            style: face.style,
+            monospaced: face.monospaced,
+            own: own.iter().any(|dir| face.path.starts_with(dir)),
+        };
+        let mut keys: Vec<String> = Vec::new();
+        for name in &face.display {
+            let key = name.to_lowercase();
+            if keys.contains(&key) {
+                continue;
+            }
+            families
+                .entry(key.clone())
+                .or_insert_with(|| Family {
+                    name: name.clone(),
+                    faces: Vec::new(),
+                })
+                .faces
+                .push(entry.clone());
+            keys.push(key);
+        }
+    }
+    families.into_values().collect()
 }
 
 /// The family names a face answers to: its typographic family and its

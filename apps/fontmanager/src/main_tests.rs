@@ -325,7 +325,7 @@ fn a_font_file_is_installed_from_the_picker() {
     assert!(!message.failed);
     assert_eq!(
         message.text,
-        "Installed Delta Regular. Programs started from now on can use it."
+        "Installed Delta Regular. Programs can use it once SlateOS restarts."
     );
 
     let junk = machine.download("junk.ttf", b"not a font");
@@ -388,7 +388,7 @@ fn your_font_is_removed_after_asking() {
     let message = state.message.clone().expect("said");
     assert_eq!(
         message.text,
-        "Removed Gamma: 1 file deleted. Programs started from now on will not have it."
+        "Removed Gamma: 1 file deleted. Programs stop using it once SlateOS restarts."
     );
 
     // Enter answers yes.
@@ -398,6 +398,212 @@ fn your_font_is_removed_after_asking() {
     assert!(state.confirm.is_some());
     state.handle_event(&key(Key::Enter));
     assert!(!machine.own.join("Gamma.ttf").exists());
+}
+
+/// A machine with forty more system families than [`ScratchFonts`] has --
+/// "Many 00" to "Many 39", listed after Gamma -- so the list is longer than
+/// the window.
+fn long_list(tag: &str) -> ScratchFonts {
+    let machine = ScratchFonts::new(tag);
+    for n in 0..40 {
+        std::fs::write(
+            machine.system.join(format!("Many{n:02}.ttf")),
+            test_font(&format!("Many {n:02}"), false, false, false),
+        )
+        .unwrap();
+    }
+    machine
+}
+
+fn press_at(state: &mut FontManager, x: f32, y: f32) -> EventResult {
+    state.handle_event(&Event::Mouse(MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Press(MouseButton::Left),
+    }))
+}
+
+/// **A row is pressed only where it shows**: a press on the toolbar over a
+/// row scrolled half out of the top, or on the status line over one cut at
+/// the bottom, chooses nothing.
+#[test]
+fn a_row_is_pressed_only_where_it_shows() {
+    let machine = long_list("fontmanager-window-row-edges");
+    let mut state = manager(&machine);
+    state.handle_event(&key(Key::End));
+    let chosen = state.chosen().map(|f| f.name.clone());
+    state.list_scroll = 20.0;
+    let list = state.layout().list;
+    let top = state.layout().rows[0].0;
+    assert!(top.y < list.y, "the first row is not half scrolled out");
+    // Right of the search box, left of the install button: the toolbar's
+    // empty middle, over the first row's hidden half.
+    let x = list.right() - 20.0;
+    assert!(!state.layout().search.contains(x, list.y - 6.0));
+    press_at(&mut state, x, list.y - 6.0);
+    assert_eq!(
+        state.chosen().map(|f| f.name.clone()),
+        chosen,
+        "a press on the toolbar chose the row under it"
+    );
+    let bottom = state.layout().rows.last().unwrap().0;
+    assert!(
+        bottom.bottom() > list.bottom(),
+        "no row is cut at the bottom"
+    );
+    press_at(&mut state, x, list.bottom() + 6.0);
+    assert_eq!(
+        state.chosen().map(|f| f.name.clone()),
+        chosen,
+        "a press on the status line chose the row under it"
+    );
+}
+
+/// **An install that changes the chosen family's faces redraws its
+/// pictures**, though its name is the same: they were drawn from a face that
+/// may no longer be the one chosen.
+#[test]
+fn an_install_redraws_the_chosen_familys_pictures() {
+    let machine = ScratchFonts::new("fontmanager-window-redraw");
+    let mut state = manager(&machine);
+    let bold = machine.download("Delta-Bold.ttf", &test_font("Delta", true, false, false));
+    state.apply_dialog_answer(DialogAction::Selected(bold));
+    App::render(&mut state, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
+    App::take_images(&mut state);
+    let regular = machine.download("Delta.ttf", &test_font("Delta", false, false, false));
+    state.apply_dialog_answer(DialogAction::Selected(regular));
+    assert_eq!(state.chosen().map(|f| f.name.as_str()), Some("Delta"));
+    App::render(&mut state, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
+    let changes = App::take_images(&mut state);
+    assert!(
+        changes.iter().any(|c| matches!(c, ImageChange::Drop(_)))
+            && changes
+                .iter()
+                .any(|c| matches!(c, ImageChange::Upload { .. })),
+        "the pictures of the face before the install were kept"
+    );
+}
+
+/// **A removal leaves the choice on the family that took its place, in
+/// view** -- not on the list's first, scrolled out of sight.
+#[test]
+fn a_removal_leaves_the_choice_in_view() {
+    let machine = long_list("fontmanager-window-remove-last");
+    std::fs::write(
+        machine.own.join("Zulu.ttf"),
+        test_font("Zulu", false, false, false),
+    )
+    .unwrap();
+    let mut state = manager(&machine);
+    state.handle_event(&key(Key::End));
+    assert_eq!(state.chosen().map(|f| f.name.as_str()), Some("Zulu"));
+    state.handle_event(&key(Key::Delete));
+    state.handle_event(&key(Key::Enter));
+    assert_eq!(
+        state.chosen().map(|f| f.name.as_str()),
+        Some("Many 39"),
+        "the choice did not go to the family in the removed one's place"
+    );
+    let at = state.chosen_index().unwrap();
+    let layout = state.layout();
+    let row = layout
+        .rows
+        .iter()
+        .find(|(_, index)| *index == at)
+        .expect("the family chosen is not in view")
+        .0;
+    assert!(row.y >= layout.list.y && row.bottom() <= layout.list.bottom());
+}
+
+/// **Removing the user's faces of a system family says the system's
+/// stays**, rather than that programs will not have it.
+#[test]
+fn removing_your_faces_of_a_system_family_says_the_systems_stays() {
+    let machine = ScratchFonts::new("fontmanager-window-remove-partly");
+    let mut state = manager(&machine);
+    let mine = machine.download("Alpha-mine.ttf", &test_font("Alpha", true, true, false));
+    state.apply_dialog_answer(DialogAction::Selected(mine));
+    assert_eq!(state.chosen().map(|f| f.name.as_str()), Some("Alpha"));
+    state.handle_event(&key(Key::Delete));
+    state.handle_event(&key(Key::Enter));
+    assert_eq!(
+        state.message.clone().expect("said").text,
+        "Removed your fonts of Alpha: 1 file deleted. The system's Alpha stays."
+    );
+    assert_eq!(state.chosen().map(|f| f.name.as_str()), Some("Alpha"));
+}
+
+/// **A key that moves the caret leaves the list where it is**: only a
+/// change to the search takes it back to its top.
+#[test]
+fn a_caret_key_in_the_search_leaves_the_list_where_it_is() {
+    let machine = long_list("fontmanager-window-search-caret");
+    let mut state = manager(&machine);
+    state.handle_event(&ctrl(Key::F));
+    type_text(&mut state, "many");
+    state.list_scroll = 200.0;
+    state.handle_event(&key(Key::Left));
+    assert_eq!(
+        state.list_scroll, 200.0,
+        "Left in the search scrolled the list"
+    );
+    type_text(&mut state, "3");
+    assert_eq!(state.list_scroll, 0.0, "a changed search kept the scroll");
+}
+
+/// **The search box copies to and pastes from the program's clipboard**,
+/// the one every text field and right-click menu uses.
+#[test]
+fn the_search_box_uses_the_programs_clipboard() {
+    let machine = ScratchFonts::new("fontmanager-window-clipboard");
+    let mut state = manager(&machine);
+    state.handle_event(&ctrl(Key::F));
+    type_text(&mut state, "Beta");
+    state.handle_event(&ctrl(Key::A));
+    state.handle_event(&ctrl(Key::C));
+    assert_eq!(guitk::clipboard::text(), "Beta", "Ctrl+C copied nowhere");
+    guitk::clipboard::set_text("Gam");
+    state.handle_event(&ctrl(Key::A));
+    state.handle_event(&ctrl(Key::V));
+    assert_eq!(state.search.text(), "Gam", "Ctrl+V did not paste");
+    assert_eq!(names(&state), ["Gamma"]);
+}
+
+/// **A font whose file cannot be read says why** -- here, deleted since the
+/// folders were read -- rather than only that it cannot be drawn.
+#[test]
+fn a_font_that_cannot_be_read_says_why() {
+    let machine = ScratchFonts::new("fontmanager-window-unreadable");
+    let mut state = manager(&machine);
+    std::fs::remove_file(machine.own.join("Gamma.ttf")).unwrap();
+    state.handle_event(&key(Key::End));
+    App::render(&mut state, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
+    let gone = machine.own.join("Gamma.ttf").as_path().shown().to_string();
+    assert!(
+        texts(&state).iter().any(|t| t.starts_with(&format!(
+            "This font cannot be drawn: {gone} could not be read ("
+        ))),
+        "the panel does not say why: {:?}",
+        texts(&state)
+    );
+}
+
+/// **A family chosen for one taken away is scrolled to**: when what is
+/// shown no longer has the family chosen, the first is chosen and the list
+/// goes back to its top, where that family is.
+#[test]
+fn a_family_chosen_for_one_taken_away_is_scrolled_to() {
+    let machine = long_list("fontmanager-window-settle");
+    let mut state = manager(&machine);
+    state.handle_event(&key(Key::End));
+    assert!(
+        state.list_scroll > 0.0,
+        "the end of the list is not scrolled to"
+    );
+    state.selected = Some("Gone".to_owned());
+    state.settle();
+    assert_eq!(state.chosen().map(|f| f.name.as_str()), Some("Alpha"));
+    assert_eq!(state.list_scroll, 0.0, "the family chosen is off screen");
 }
 
 /// **A long list scrolls under the wheel**, and no further than its rows.

@@ -22,6 +22,7 @@ use appearance::{
 use guitk::color::Color;
 use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
 use guitk::dialog::{DialogAction, FileDialog};
+use guitk::disabled::{Disabled, WhyDisabled};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -565,6 +566,25 @@ pub struct SettingsState {
     /// The page control under the pointer, which is drawn lit -- a text
     /// field's edge, as the toolkit's fields are.
     page_hovered: Option<RowHit>,
+    /// Where the pointer is over the window; `None` once it has left. Kept
+    /// for the reason a disabled control gives, which is asked again after
+    /// every event: a page can change under a pointer that has not moved.
+    pointer: Option<(f32, f32)>,
+    /// Says why the disabled control under the pointer is disabled, after
+    /// the toolkit's tooltip delay (`requests/c-e-say-why-a-control-is-
+    /// disabled.md`).
+    why_disabled: WhyDisabled,
+    /// The window's clock, in milliseconds: the sum of every tick's
+    /// `elapsed_ms`. Settings asks for ticks only while a reason is waiting
+    /// to appear -- the one thing it times -- so this measures those waits
+    /// and stands still between them.
+    ///
+    /// Read when the pointer comes to rest on a disabled control, it has not
+    /// yet counted the time since the last tick. Only one wait is ever
+    /// running, so that matters in one case: moved from one disabled control
+    /// to another before the first's reason appeared, the pointer sees the
+    /// second's as soon as the first's was due -- early, never late.
+    clock_ms: u64,
 
     // Window dimensions
     pub window_width: f32,
@@ -1204,7 +1224,7 @@ impl SettingsState {
                 "",
                 "Remove",
                 pal.accent,
-                Some(RowHit::Press(ButtonId::RemoveClock(index))),
+                Press::Does(RowHit::Press(ButtonId::RemoveClock(index))),
             );
         }
         if settings.additional_clocks.len() < datetimesettings::MAX_CLOCKS {
@@ -2062,6 +2082,9 @@ impl SettingsState {
             sidebar_hovered: None,
             search_hovered: false,
             page_hovered: None,
+            pointer: None,
+            why_disabled: WhyDisabled::new(),
+            clock_ms: 0,
 
             window_width: 1200.0,
             window_height: 800.0,
@@ -3405,6 +3428,22 @@ enum RowHit {
     Slider(SliderId),
 }
 
+/// What pressing a button does: something, or nothing and why.
+///
+/// The one value [`PageSink::button_at`] decides a button by -- its click
+/// band, its paint, and what it says when the pointer rests on it -- so a
+/// button cannot be drawn dimmed and say nothing about it, any more than it
+/// can be drawn live with nothing behind it.
+#[derive(Debug, Clone, Copy)]
+enum Press<'a> {
+    /// Pressing it does this.
+    Does(RowHit),
+    /// It cannot be pressed, for this reason: a sentence for the user,
+    /// shown while the pointer rests on the dimmed button (`design.txt`: "a
+    /// hover tooltip ... explaining why it's disabled/how to enable it").
+    Cannot(&'a str),
+}
+
 /// The one description of a settings page, interpreted either as drawing or as
 /// hit-testing.
 ///
@@ -3443,6 +3482,11 @@ trait PageSink {
     /// Register `what` as clickable over the given rectangle, in absolute
     /// window coordinates. [`DrawSink`] discards it.
     fn hit_rect(&mut self, x: f32, y: f32, w: f32, h: f32, what: RowHit);
+
+    /// Note that the control drawn over the given rectangle, in absolute
+    /// window coordinates, is disabled, and `why`. Only [`WhySink`] keeps
+    /// it; the others draw or click, and a disabled control does neither.
+    fn disabled_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _why: &str) {}
 
     // ---- provided: the vocabulary a page is written in ----
 
@@ -3511,9 +3555,14 @@ trait PageSink {
     /// role and is documented as not carrying text, excluded by name from the
     /// palette's own WCAG floor (`every_role_a_user_reads_is_legible_on_the_
     /// base_of_its_own_palette`). A greyed row is still a row somebody reads.
-    fn unavailable_row(&mut self, label: &str, value: &str) {
+    ///
+    /// `why` is said while the pointer rests on the row: what it would take
+    /// for the row to be usable, in a sentence.
+    fn unavailable_row(&mut self, label: &str, value: &str, why: &str) {
         let pal = &self.palette();
         let text = value.to_string();
+        let (x, y) = (self.x(), self.y());
+        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);
         self.row(label, None, ITEM_HEIGHT, move |tree, cx, y| {
             tree.text(cx, y + 8.0, &text, pal.subtext0, 13.0);
         });
@@ -3599,26 +3648,29 @@ trait PageSink {
     /// blocks of bespoke content, so this does not move the cursor — the
     /// caller advances past the whole block.
     ///
-    /// **A button looks live exactly when it is live.** `what` is the one
-    /// value that decides both: it registers the click band, and its
-    /// `Some`-ness picks which of [`render_button`] / [`render_disabled_button`]
-    /// paints it. There is deliberately no way to ask for the live colour
-    /// while passing `None`, because that combination is the bug this is
-    /// fixing — seven buttons that promised an action the app cannot perform.
+    /// **A button looks live exactly when it is live.** `press` is the one
+    /// value that decides both: it registers the click band, and whether it
+    /// is [`Press::Does`] picks which of [`render_button`] /
+    /// [`render_disabled_button`] paints it. There is deliberately no way to
+    /// ask for the live colour with nothing behind the button, because that
+    /// combination is the bug this is fixing — seven buttons that promised an
+    /// action the app cannot perform.
     ///
-    /// A `None` button still registers no band, which stays correct: a band
-    /// that swallowed the click would take the "nothing happened here"
-    /// feedback away and block anything drawn beneath it. Dimming is what
-    /// tells the user *why* nothing happened.
-    fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, what: Option<RowHit>) {
+    /// A button that [`Press::Cannot`] still registers no band, which stays
+    /// correct: a band that swallowed the click would take the "nothing
+    /// happened here" feedback away and block anything drawn beneath it.
+    /// Dimming says that nothing will happen; the reason it carries, said
+    /// while the pointer rests on the button, says why.
+    fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, press: Press<'_>) {
         let pal = &self.palette();
-        match what {
-            Some(what) => {
-                let (x, y) = (self.x(), self.y());
+        let (x, y) = (self.x(), self.y());
+        match press {
+            Press::Does(what) => {
                 self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);
                 self.draw(|tree, x, y| render_button(tree, pal, x + dx, y + dy, label, color));
             }
-            None => {
+            Press::Cannot(why) => {
+                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, why);
                 self.draw(|tree, x, y| render_disabled_button(tree, pal, x + dx, y + dy, label));
             }
         }
@@ -3631,12 +3683,12 @@ trait PageSink {
     /// one-value rule as a free-standing one. The row itself takes no click
     /// band — the button is the target, not the whole row, because the rest of
     /// the row is a label and pressing a label should do nothing.
-    fn button_row(&mut self, label: &str, button: &str, color: Color, what: Option<RowHit>) {
+    fn button_row(&mut self, label: &str, button: &str, color: Color, press: Press<'_>) {
         let pal = &self.palette();
         self.draw(|tree, x, y| {
             render_setting_row(tree, pal, x, y, label, 0.0);
         });
-        self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, what);
+        self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, press);
         self.advance(ITEM_HEIGHT);
     }
 
@@ -3851,6 +3903,33 @@ impl PageSink for AnchorSink {
     }
 }
 
+/// The sink that answers "which controls are disabled, and why?" -- what
+/// [`WhyDisabled`] is handed with each pointer move. Walking the page for
+/// it, as [`HitSink`] does for a click, means the box a reason is given for
+/// is the box the dimmed control was drawn in.
+struct WhySink {
+    x: f32,
+    y: f32,
+    disabled: Vec<((f32, f32, f32, f32), String)>,
+}
+
+impl PageSink for WhySink {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+    fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
+    fn disabled_rect(&mut self, x: f32, y: f32, w: f32, h: f32, why: &str) {
+        self.disabled.push(((x, y, w, h), why.to_owned()));
+    }
+}
+
 // ============================================================================
 // Page renderers
 // ============================================================================
@@ -3922,6 +4001,11 @@ impl SettingsState {
                 "F1 closes this",
             );
         }
+
+        // Why the disabled control under the pointer is disabled, over
+        // everything. Nothing above is ever drawn with it: a list, a picker or
+        // the card coming up takes the reason away (`explain_disabled`).
+        tree.commands.extend(self.why_disabled.render(pal));
 
         tree
     }
@@ -4371,6 +4455,47 @@ impl SettingsState {
         sink.hit
     }
 
+    /// The page's disabled controls, each as drawn -- its box in window
+    /// coordinates -- with why it is disabled.
+    fn disabled_controls(&self) -> Vec<((f32, f32, f32, f32), String)> {
+        let mut sink = WhySink {
+            x: Self::content_x(),
+            y: Self::content_top(),
+            disabled: Vec::new(),
+        };
+        self.build_page(&mut sink);
+        sink.disabled
+    }
+
+    /// Say why the disabled control under the pointer is disabled, or stop
+    /// saying it: the pointer is on none, has left the window, or something
+    /// is drawn over the page -- a list, a picker, the shortcut card -- or a
+    /// slider is being dragged. Returns whether what is drawn changed.
+    ///
+    /// Asked after every event rather than on pointer moves alone, because a
+    /// page can change under a pointer that stays put: a key that goes to
+    /// another page must not leave the last page's reason on the new one.
+    fn explain_disabled(&mut self) -> bool {
+        let covered = self.dialog.is_some()
+            || self.color_dialog.is_some()
+            || self.show_help
+            || self.open_dropdown.is_some()
+            || self.dragging.is_some();
+        match self.pointer {
+            Some(at) if !covered => {
+                let disabled = self.disabled_controls();
+                let boxes: Vec<Disabled<'_>> = disabled
+                    .iter()
+                    .map(|(bounds, why)| (*bounds, why.as_str()))
+                    .collect();
+                let screen = (self.window_width, self.window_height);
+                self.why_disabled
+                    .pointer_at(at, self.clock_ms, screen, &boxes)
+            }
+            _ => self.why_disabled.pointer_left(),
+        }
+    }
+
     // --- Display page ---
 
     fn build_display_page<S: PageSink>(&self, s: &mut S) {
@@ -4516,18 +4641,42 @@ impl SettingsState {
             "Audio is not wired up yet: this system has no sound service and no way to enumerate devices, so these settings would not reach anything.",
             44.0,
         );
-        s.unavailable_row("Output Device", "No devices detected");
-        s.unavailable_row("Volume", "Unavailable");
-        s.unavailable_row("Mute", "Unavailable");
+        s.unavailable_row(
+            "Output Device",
+            "No devices detected",
+            "This system cannot play sound yet, so there is no device to choose.",
+        );
+        s.unavailable_row(
+            "Volume",
+            "Unavailable",
+            "This system cannot play sound yet, so there is no volume to set.",
+        );
+        s.unavailable_row(
+            "Mute",
+            "Unavailable",
+            "This system cannot play sound yet, so there is nothing to mute.",
+        );
         s.gap();
 
         s.section("Input");
-        s.unavailable_row("Input Device", "No devices detected");
-        s.unavailable_row("Input Volume", "Unavailable");
+        s.unavailable_row(
+            "Input Device",
+            "No devices detected",
+            "This system cannot record sound yet, so there is no microphone to choose.",
+        );
+        s.unavailable_row(
+            "Input Volume",
+            "Unavailable",
+            "This system cannot record sound yet, so there is no input level to set.",
+        );
         s.gap();
 
         s.section("System Sounds");
-        s.unavailable_row("Enable System Sounds", "Unavailable");
+        s.unavailable_row(
+            "Enable System Sounds",
+            "Unavailable",
+            "This system cannot play sound yet, so it has no sounds to turn on.",
+        );
         s.gap();
 
         s.section("Per-Application Volume");
@@ -4586,7 +4735,7 @@ impl SettingsState {
             "Desktop picture",
             "Choose...",
             pal.accent,
-            Some(RowHit::Press(ButtonId::ChooseWallpaper)),
+            Press::Does(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
         // Offered only when there is one to remove. A "Remove" that is always
         // there is a button whose press does nothing most of the time, and a
@@ -4596,7 +4745,7 @@ impl SettingsState {
                 "Remove the picture",
                 "Remove",
                 pal.surface1,
-                Some(RowHit::Press(ButtonId::ClearWallpaper)),
+                Press::Does(RowHit::Press(ButtonId::ClearWallpaper)),
             );
         }
         // A theme's pictures, offered as pictures like any other (lane C,
@@ -4659,7 +4808,7 @@ impl SettingsState {
             "Rotate through a folder",
             "Choose...",
             pal.accent,
-            Some(RowHit::Press(ButtonId::ChooseRotationFolder)),
+            Press::Does(RowHit::Press(ButtonId::ChooseRotationFolder)),
         );
         // The interval and the order are about a folder, so they appear with
         // one and not before: three controls of which two govern nothing read
@@ -4691,7 +4840,7 @@ impl SettingsState {
                     pattern,
                     "Remove",
                     pal.surface1,
-                    Some(RowHit::Select(SelectId::ExclusionPattern, idx)),
+                    Press::Does(RowHit::Select(SelectId::ExclusionPattern, idx)),
                 );
             }
             s.text_field_row(
@@ -4710,14 +4859,14 @@ impl SettingsState {
                     "",
                     "Add",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::AddExclusion)),
+                    Press::Does(RowHit::Press(ButtonId::AddExclusion)),
                 );
             }
             s.button_row(
                 "Stop rotating",
                 "Clear",
                 pal.subtext0,
-                Some(RowHit::Press(ButtonId::ClearRotation)),
+                Press::Does(RowHit::Press(ButtonId::ClearRotation)),
             );
         }
     }
@@ -4734,7 +4883,7 @@ impl SettingsState {
             "Desktop picture",
             "Choose...",
             pal.accent,
-            Some(RowHit::Press(ButtonId::ChooseWallpaper)),
+            Press::Does(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
     }
 
@@ -4810,7 +4959,7 @@ impl SettingsState {
                     "Login picture",
                     "Choose...",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::ChooseLoginImage)),
+                    Press::Does(RowHit::Press(ButtonId::ChooseLoginImage)),
                 );
             }
             // The theme needs no explaining, and the two hand-written styles
@@ -5156,7 +5305,7 @@ impl SettingsState {
                     &name,
                     "Change colour",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::EventColour(event.id))),
+                    Press::Does(RowHit::Press(ButtonId::EventColour(event.id))),
                 );
             }
             if hidden.len() > CLASHES_LISTED {
@@ -5165,14 +5314,14 @@ impl SettingsState {
                     &more,
                     "Open calendar",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::OpenCalendar)),
+                    Press::Does(RowHit::Press(ButtonId::OpenCalendar)),
                 );
             }
             s.button_row(
                 "Changed any?",
                 "Look again",
                 pal.accent,
-                Some(RowHit::Press(ButtonId::LookAgain)),
+                Press::Does(RowHit::Press(ButtonId::LookAgain)),
             );
         }
         if let Some(note) = &self.calendar_note {
@@ -5222,7 +5371,11 @@ impl SettingsState {
             "This system cannot list its network interfaces yet. Nothing here can ask which are present, whether any is connected, or what address it holds.",
             44.0,
         );
-        s.unavailable_row("Interfaces", "Cannot be listed");
+        s.unavailable_row(
+            "Interfaces",
+            "Cannot be listed",
+            "Nothing on this system can list its network interfaces yet.",
+        );
         s.gap();
 
         s.section("IP Configuration");
@@ -5230,8 +5383,16 @@ impl SettingsState {
             "There is no interface to configure, and nothing on this system reads an address typed here.",
             28.0,
         );
-        s.unavailable_row("IPv4 address", "Unknown");
-        s.unavailable_row("Gateway", "Unknown");
+        s.unavailable_row(
+            "IPv4 address",
+            "Unknown",
+            "No network interface can be listed yet, so there is no address to show or set.",
+        );
+        s.unavailable_row(
+            "Gateway",
+            "Unknown",
+            "No network interface can be listed yet, so there is no gateway to show or set.",
+        );
         s.gap();
 
         s.section("DNS");
@@ -5239,8 +5400,8 @@ impl SettingsState {
             "No program on this system loads a resolver configuration, so a nameserver set here would reach nothing. The format is defined -- `net/dns` parses `resolv.conf` -- but nothing reads the file.",
             44.0,
         );
-        s.unavailable_row("Preferred DNS", "Not configured");
-        s.unavailable_row("Alternate DNS", "Not configured");
+        s.unavailable_row("Preferred DNS", "Not configured", "Nothing on this system reads a nameserver setting yet, so one set here would do nothing.");
+        s.unavailable_row("Alternate DNS", "Not configured", "Nothing on this system reads a nameserver setting yet, so one set here would do nothing.");
     }
 
     /// The Proxy page.
@@ -5254,7 +5415,11 @@ impl SettingsState {
             "Nothing on this system routes through a proxy. `net/httpclient` connects directly and takes no proxy setting, so an address entered here would be read by nothing.",
             44.0,
         );
-        s.unavailable_row("HTTP proxy", "Not supported");
+        s.unavailable_row(
+            "HTTP proxy",
+            "Not supported",
+            "Nothing on this system can connect through a proxy yet.",
+        );
     }
 
     // --- Accounts page ---
@@ -5325,8 +5490,24 @@ impl SettingsState {
         }
         s.gap();
 
-        s.button_at(0.0, 0.0, "+ Add Account", pal.accent, None);
-        s.button_at(140.0, 0.0, "- Remove Account", pal.red, None);
+        s.button_at(
+            0.0,
+            0.0,
+            "+ Add Account",
+            pal.accent,
+            Press::Cannot(
+                "Settings cannot add accounts yet: there is no account service for it to ask.",
+            ),
+        );
+        s.button_at(
+            140.0,
+            0.0,
+            "- Remove Account",
+            pal.red,
+            Press::Cannot(
+                "Settings cannot remove accounts yet: there is no account service for it to ask.",
+            ),
+        );
         s.advance(44.0);
         s.gap();
 
@@ -5352,7 +5533,14 @@ impl SettingsState {
             self.auto_login_enabled,
         );
 
-        s.button_row("Password", "Change Password", pal.accent, None);
+        s.button_row(
+            "Password",
+            "Change Password",
+            pal.accent,
+            Press::Cannot(
+                "Settings cannot change passwords yet: there is no account service for it to ask.",
+            ),
+        );
         s.gap();
 
         s.section("Account Picture");
@@ -5423,9 +5611,9 @@ impl SettingsState {
             "That is by design rather than unfinished. A program here reaches a device by holding a handle to it, which it can only have been given -- there is no central table of names to tick, and nothing has authority simply because of what it is called.",
             44.0,
         );
-        s.unavailable_row("Location", "Not recorded per application");
-        s.unavailable_row("Camera", "Not recorded per application");
-        s.unavailable_row("Microphone", "Not recorded per application");
+        s.unavailable_row("Location", "Not recorded per application", "A program reaches your location only through a handle it was given, so there is no list of programs to change here.");
+        s.unavailable_row("Camera", "Not recorded per application", "A program reaches the camera only through a handle it was given, so there is no list of programs to change here.");
+        s.unavailable_row("Microphone", "Not recorded per application", "A program reaches the microphone only through a handle it was given, so there is no list of programs to change here.");
         s.gap();
 
         s.section("Diagnostics & Data");
@@ -5689,8 +5877,16 @@ impl SettingsState {
             "This system cannot update itself yet. There is no update service to ask, so nothing here could check, download or install anything, and this page will not say that it has.",
             44.0,
         );
-        s.unavailable_row("Last checked", "Never");
-        s.unavailable_row("Available updates", "Unknown");
+        s.unavailable_row(
+            "Last checked",
+            "Never",
+            "This system cannot update itself yet, so it has never checked for updates.",
+        );
+        s.unavailable_row(
+            "Available updates",
+            "Unknown",
+            "This system cannot update itself yet, so it cannot look for updates.",
+        );
         s.gap();
 
         s.section("System Information");
@@ -5740,7 +5936,15 @@ impl SettingsState {
             );
             tree.text(x + 16.0, y + 50.0, "after an update.", pal.subtext0, 12.0);
         });
-        s.button_at(440.0, 28.0, "Go Back", pal.peach, None);
+        s.button_at(
+            440.0,
+            28.0,
+            "Go Back",
+            pal.peach,
+            Press::Cannot(
+                "There is no earlier version to go back to: this system cannot update itself yet.",
+            ),
+        );
         s.advance(96.0);
 
         s.draw(|tree, x, y| {
@@ -5761,7 +5965,7 @@ impl SettingsState {
                 12.0,
             );
         });
-        s.button_at(440.0, 28.0, "Reset", pal.red, None);
+        s.button_at(440.0, 28.0, "Reset", pal.red, Press::Cannot("This system cannot reinstall itself yet, so there is nothing to start afresh from."));
         s.advance(96.0);
     }
 
@@ -6190,7 +6394,7 @@ impl SettingsState {
                 "",
                 "Clear",
                 pal.subtext0,
-                Some(RowHit::Press(ButtonId::ClearSchedule)),
+                Press::Does(RowHit::Press(ButtonId::ClearSchedule)),
             );
             return;
         };
@@ -6212,7 +6416,12 @@ impl SettingsState {
                 Some(entry) => format!("{name}: {}", entry.image.shown()),
                 None => name.to_string(),
             };
-            s.button_row(&label, "Choose...", pal.accent, Some(RowHit::Press(choose)));
+            s.button_row(
+                &label,
+                "Choose...",
+                pal.accent,
+                Press::Does(RowHit::Press(choose)),
+            );
             if let Some(entry) = entry {
                 s.dropdown_row("Up from", from, &notifsettings::format_hm(entry.from));
             }
@@ -6231,7 +6440,7 @@ impl SettingsState {
             "Clear both pictures",
             "Clear",
             pal.subtext0,
-            Some(RowHit::Press(ButtonId::ClearSchedule)),
+            Press::Does(RowHit::Press(ButtonId::ClearSchedule)),
         );
     }
 
@@ -6339,7 +6548,7 @@ impl SettingsState {
                         &notice.title(),
                         if open { "Hide licence" } else { "Show licence" },
                         pal.text,
-                        Some(RowHit::Press(ButtonId::Notice(index))),
+                        Press::Does(RowHit::Press(ButtonId::Notice(index))),
                     );
                     s.value_row("Licence", &notice.licence, pal.subtext0);
                     if let Some(attribution) = &notice.attribution {
@@ -7213,7 +7422,33 @@ impl SettingsState {
     /// Route an event to its handler. Split from [`handle_event`](Self::handle_event)
     /// so the routing can be exercised without writing to the user's home
     /// directory.
+    ///
+    /// Whoever the event goes to, a tick also moves the window's clock, and
+    /// every event is followed by asking again what the pointer rests on
+    /// ([`explain_disabled`](Self::explain_disabled)) -- both outside the
+    /// routing, so that none of its early answers can skip them.
     fn dispatch_event(&mut self, event: &Event) -> EventResult {
+        if let Event::Mouse(mouse) = event {
+            self.pointer = match mouse.kind {
+                MouseEventKind::Leave => None,
+                _ => Some((mouse.x, mouse.y)),
+            };
+        }
+        let mut result = self.route_event(event);
+        if let Event::Tick { elapsed_ms } = event {
+            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+            if self.why_disabled.tick(self.clock_ms) {
+                result = EventResult::Consumed;
+            }
+        }
+        if self.explain_disabled() {
+            result = EventResult::Consumed;
+        }
+        result
+    }
+
+    /// Hand an event to whichever part of the window answers it.
+    fn route_event(&mut self, event: &Event) -> EventResult {
         // The picker answers first, and everything but a resize. It is modal,
         // and a keystroke meant for a filename would otherwise reach the page
         // behind it -- where, on this window, every key is a setting.
@@ -8324,12 +8559,18 @@ impl oswindow::app::App for SettingsState {
         (self.window_width as u32, self.window_height as u32)
     }
 
-    // `tick_interval` is deliberately left at its `None` default, and the
-    // absence is the assertion: Settings ages nothing. Every visible change it
-    // makes is downstream of an event — there is no animation, no toast that
-    // expires, no periodic re-read of the files it owns. The day one of those is
-    // added, this is the method that has to come with it, or the feature ships
-    // frozen with passing tests over it (`known-issues.md` lesson 47).
+    /// Settings times one thing: the wait before a disabled control's reason
+    /// appears, while the pointer rests on it. A tick is asked for when that
+    /// wait ends and not otherwise -- every other visible change is downstream
+    /// of an event, with no animation and no toast that expires -- so a
+    /// window nobody is pointing at sleeps. Without this the reason would
+    /// wait for some unrelated event to draw it (`known-issues.md` lesson 47).
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.why_disabled
+            .due_in(self.clock_ms)
+            .map(|ms| std::time::Duration::from_millis(ms.max(1)))
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         // The one translation this seam performs, and the one place in Settings
         // where the two enums meet. `EventResult` answers a different question —
@@ -13409,6 +13650,300 @@ mod tests {
             }
         }
         assert!(checked >= 7, "only {checked} dimmed buttons were pressed");
+    }
+
+    // --- Saying why a control is disabled --------------------------------
+    //
+    // `design.txt` asks every program for "a hover tooltip for any menu
+    // option or button that's currently disabled, explaining why it's
+    // disabled/how to enable it" (requests/c-e-say-why-a-control-is-
+    // disabled.md). The tests rest the pointer where the window drew each
+    // dimmed control -- found in the render tree, as the census above finds
+    // them -- and let time pass with ticks, as the window's loop does.
+
+    /// The reason the window draws over its page, if it draws one -- and an
+    /// assertion that it is drawn last, over everything else.
+    fn reason_on_screen(state: &SettingsState) -> Option<String> {
+        let drawn = state.why_disabled.render(&state.palette());
+        if drawn.is_empty() {
+            return None;
+        }
+        let tree = state.render_tree();
+        assert!(
+            tree.commands.ends_with(&drawn),
+            "the reason is drawn under something rather than over the page"
+        );
+        state.why_disabled.showing().map(str::to_owned)
+    }
+
+    /// Move the pointer to (`x`, `y`), as the window's loop reports it.
+    fn rest_at(state: &mut SettingsState, x: f32, y: f32) -> EventResult {
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }))
+    }
+
+    /// Let `ms` milliseconds pass, as one tick of the window's loop.
+    fn wait(state: &mut SettingsState, ms: u64) -> EventResult {
+        state.dispatch_event(&Event::Tick { elapsed_ms: ms })
+    }
+
+    /// How long the window asks to sleep before its next tick, in ms.
+    fn asks_to_wake_in(state: &SettingsState) -> Option<u128> {
+        oswindow::app::App::tick_interval(state).map(|d| d.as_millis())
+    }
+
+    /// **Every dimmed button says why, when the pointer rests on it** -- after
+    /// the toolkit's tooltip delay and not before, drawn over the page, in a
+    /// sentence; and the window asks for the tick that shows it, so the reason
+    /// is not left waiting for some other event to draw.
+    #[test]
+    fn every_dimmed_button_says_why_when_the_pointer_rests_on_it() {
+        let mut explained = 0_usize;
+        for (page, swept) in states_to_sweep() {
+            let pal = swept.palette();
+            for (label, bx, by, fill, _) in painted_buttons(&swept) {
+                if fill != pal.surface0 {
+                    continue;
+                }
+                let mut state = fully_expanded(page);
+                state.selected_account = swept.selected_account;
+                let (cx, cy) = (bx + button_width(&label) / 2.0, by + BUTTON_HEIGHT / 2.0);
+                rest_at(&mut state, cx, cy);
+                assert_eq!(
+                    reason_on_screen(&state),
+                    None,
+                    "on {}, \"{label}\" explained itself before the delay",
+                    page.label()
+                );
+                assert_eq!(
+                    asks_to_wake_in(&state),
+                    Some(500),
+                    "on {}, \"{label}\": the window does not ask to be woken for its reason",
+                    page.label()
+                );
+                assert_eq!(wait(&mut state, 499), EventResult::Ignored);
+                assert_eq!(reason_on_screen(&state), None, "the reason came early");
+                assert_eq!(
+                    wait(&mut state, 1),
+                    EventResult::Consumed,
+                    "on {}, the tick that shows \"{label}\"'s reason does not ask for a frame",
+                    page.label()
+                );
+                let why = reason_on_screen(&state)
+                    .unwrap_or_else(|| panic!("on {}, \"{label}\" says nothing", page.label()));
+                assert!(
+                    why.len() > 20 && why.ends_with('.'),
+                    "on {}, \"{label}\" says only \"{why}\"",
+                    page.label()
+                );
+                assert_eq!(
+                    asks_to_wake_in(&state),
+                    None,
+                    "the window ticks on for nothing"
+                );
+                explained += 1;
+            }
+        }
+        assert!(explained >= 5, "only {explained} dimmed buttons explained");
+    }
+
+    /// **A row that cannot be used yet says why**: each of the Sound page's,
+    /// rested on where its value is drawn.
+    #[test]
+    fn a_row_that_cannot_be_used_says_why() {
+        let mut state = fully_expanded(SettingsPage::Sound);
+        let tree = state.render_tree();
+        let values: Vec<(f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. }
+                    if text == "Unavailable" || text == "No devices detected" =>
+                {
+                    Some((*x + 4.0, *y + 6.0))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values.len(), 6, "the Sound page's six rows are not drawn");
+        let mut reasons = Vec::new();
+        for (x, y) in values {
+            rest_at(&mut state, x, y);
+            wait(&mut state, 500);
+            let why = reason_on_screen(&state).expect("a row that cannot be used says nothing");
+            assert!(
+                why.contains("sound"),
+                "\"{why}\" does not say what is missing"
+            );
+            reasons.push(why);
+        }
+        reasons.sort();
+        reasons.dedup();
+        assert_eq!(reasons.len(), 6, "two rows give one reason: {reasons:?}");
+    }
+
+    /// **The reason goes with the pointer**: moved onto a control that can
+    /// be used, or out of the window, it is gone at once -- and moving within
+    /// the dimmed button neither restarts the wait nor hides it.
+    #[test]
+    fn the_reason_goes_when_the_pointer_leaves_the_control() {
+        let mut state = fully_expanded(SettingsPage::Recovery);
+        let (_, bx, by, _, _) = painted_buttons(&state)
+            .into_iter()
+            .find(|(label, ..)| label == "Reset")
+            .expect("the Recovery page draws Reset");
+        let (cx, cy) = (bx + 10.0, by + BUTTON_HEIGHT / 2.0);
+        rest_at(&mut state, cx, cy);
+        wait(&mut state, 300);
+        rest_at(&mut state, cx + 4.0, cy);
+        wait(&mut state, 200);
+        assert!(
+            reason_on_screen(&state).is_some(),
+            "moving within the button started the wait again"
+        );
+        assert_eq!(rest_at(&mut state, cx + 8.0, cy), EventResult::Ignored);
+        assert!(
+            reason_on_screen(&state).is_some(),
+            "moving within the button hid it"
+        );
+
+        assert_eq!(
+            rest_at(&mut state, 10.0, 10.0),
+            EventResult::Consumed,
+            "the reason went without a frame to show it gone"
+        );
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "the reason stayed with the pointer gone"
+        );
+        assert_eq!(asks_to_wake_in(&state), None);
+
+        rest_at(&mut state, cx, cy);
+        wait(&mut state, 500);
+        assert!(reason_on_screen(&state).is_some());
+        assert_eq!(
+            state.dispatch_event(&Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            })),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "the reason outlived the pointer leaving"
+        );
+    }
+
+    /// **A control that can be used explains nothing**, and the window sleeps
+    /// while the pointer rests on it.
+    #[test]
+    fn a_control_that_can_be_used_explains_nothing() {
+        let mut state = fully_expanded(SettingsPage::Wallpaper);
+        let (what, (x, y, w, h)) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| matches!(what, RowHit::Press(_)))
+            .expect("the Background page has a button to press");
+        rest_at(&mut state, x + w / 2.0, y + h / 2.0);
+        assert_eq!(state.row_at(x + w / 2.0, y + h / 2.0), Some(what));
+        assert_eq!(
+            asks_to_wake_in(&state),
+            None,
+            "a live button waits to explain itself"
+        );
+        wait(&mut state, 5_000);
+        assert_eq!(reason_on_screen(&state), None);
+    }
+
+    /// **Nothing is explained under something drawn over the page**: the
+    /// shortcut card put up over a reason takes it away, and a reason is not
+    /// started under the card.
+    #[test]
+    fn nothing_is_explained_under_the_shortcut_card() {
+        let mut state = fully_expanded(SettingsPage::Recovery);
+        let (_, bx, by, _, _) = painted_buttons(&state)
+            .into_iter()
+            .find(|(label, ..)| label == "Go Back")
+            .expect("the Recovery page draws Go Back");
+        let (cx, cy) = (bx + 10.0, by + BUTTON_HEIGHT / 2.0);
+        rest_at(&mut state, cx, cy);
+        wait(&mut state, 500);
+        assert!(reason_on_screen(&state).is_some());
+
+        state.dispatch_event(&Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(state.show_help, "F1 did not raise the card");
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "the reason is drawn over the card"
+        );
+
+        rest_at(&mut state, cx + 2.0, cy);
+        assert_eq!(
+            asks_to_wake_in(&state),
+            None,
+            "a reason waits under the card"
+        );
+        wait(&mut state, 5_000);
+        assert_eq!(reason_on_screen(&state), None);
+    }
+
+    /// **Nor under a list, a picker or a drag**: each of the other things
+    /// that can be over the page, or holding the pointer, takes a reason away
+    /// when it comes, and starts none while it is there.
+    #[test]
+    fn nothing_is_explained_under_a_list_a_picker_or_a_drag() {
+        /// Put something over the page, or hold the pointer.
+        type Cover = fn(&mut SettingsState);
+        let covers: [(&str, Cover); 4] = [
+            ("an open list", |s| {
+                s.open_dropdown = Some(DropdownId::Resolution);
+            }),
+            ("the file picker", |s| {
+                s.dialog = Some(FileDialog::open());
+            }),
+            ("the colour picker", |s| {
+                s.color_dialog = Some(ColorPickerDialog::new(s.palette().accent));
+            }),
+            ("a slider held", |s| {
+                s.dragging = Some(SliderId::NightLightTemperature);
+            }),
+        ];
+        for (what, cover) in covers {
+            let mut state = fully_expanded(SettingsPage::Recovery);
+            let (_, bx, by, _, _) = painted_buttons(&state)
+                .into_iter()
+                .find(|(label, ..)| label == "Go Back")
+                .expect("the Recovery page draws Go Back");
+            let (cx, cy) = (bx + 10.0, by + BUTTON_HEIGHT / 2.0);
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert!(reason_on_screen(&state).is_some());
+
+            cover(&mut state);
+            assert_eq!(
+                wait(&mut state, 0),
+                EventResult::Consumed,
+                "the reason went under {what} without a frame to show it gone"
+            );
+            assert_eq!(
+                state.why_disabled.showing(),
+                None,
+                "the reason stayed over {what}"
+            );
+            rest_at(&mut state, cx + 2.0, cy);
+            assert_eq!(asks_to_wake_in(&state), None, "a reason waits under {what}");
+        }
     }
 
     // --- The account picture grid ------------------------------------------

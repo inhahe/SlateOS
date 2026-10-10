@@ -12,6 +12,9 @@ suite predates this table.  The last rows, added 2026-10-04, cover the list of
 keys' hold on the pointer: a press with it up puts it away and flips nothing
 under it, and the wheel scrolls no dropdown it covers.
 
+And, from 2026-10-10, why a disabled control is disabled, said while the
+pointer rests on it (lane C, requests/c-e-say-why-a-control-is-disabled.md).
+
 And, from 2026-10-09, the Recycle Bin page (design-decisions §1238, §1240):
 every drive's bin, the default limits, and each drive's own, in `main.rs`;
 what each limit offers and how it reads, in `recyclebins.rs`.
@@ -203,8 +206,8 @@ MUTATIONS = [
     ),
     (
         "a hidden event has no button",
-        "                    Some(RowHit::Press(ButtonId::EventColour(event.id))),",
-        "                    None,",
+        "                    Press::Does(RowHit::Press(ButtonId::EventColour(event.id))),",
+        '                    Press::Cannot("Hidden."),',
         ["an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour"],
     ),
     (
@@ -1224,6 +1227,132 @@ MUTATIONS += [
         '            format!("{} -- icons only", info.name)\n'
         "        } else if info.provides_icons() {",
         [UNREADABLE],
+    ),
+]
+
+
+# -- why a disabled control is disabled, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md): every
+# dimmed button and every row that cannot be used yet gives a reason, which
+# appears after the toolkit's delay, goes with the pointer, and is drawn over
+# everything -- and is never started under a list, a picker, the card or a
+# drag.
+WHY_BUTTONS = "every_dimmed_button_says_why_when_the_pointer_rests_on_it"
+WHY_ROWS = "a_row_that_cannot_be_used_says_why"
+WHY_GOES = "the_reason_goes_when_the_pointer_leaves_the_control"
+WHY_LIVE = "a_control_that_can_be_used_explains_nothing"
+WHY_CARD = "nothing_is_explained_under_the_shortcut_card"
+WHY_COVERS = "nothing_is_explained_under_a_list_a_picker_or_a_drag"
+
+MUTATIONS += [
+    (
+        "a dimmed button gives no reason",
+        "                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, why);",
+        "                let _ = why;",
+        [WHY_BUTTONS, WHY_GOES, WHY_CARD, WHY_COVERS],
+    ),
+    (
+        "a dimmed button's reason is kept for another place",
+        "                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, why);",
+        "                self.disabled_rect(x, y, button_width(label), BUTTON_HEIGHT, why);",
+        [WHY_BUTTONS],
+    ),
+    (
+        "a button that can be pressed gives a reason",
+        "                self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);",
+        "                self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);\n"
+        '                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, "Live.");',
+        [WHY_LIVE],
+    ),
+    (
+        "a row that cannot be used gives no reason",
+        "        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);",
+        "        let _ = (x, y, why);",
+        [WHY_ROWS],
+    ),
+    (
+        "the page's reasons are not kept",
+        "        self.disabled.push(((x, y, w, h), why.to_owned()));",
+        "        let _ = (x, y, w, h, why);",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "the reasons are asked of the page from another place",
+        "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: Self::content_top(),",
+        "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: 0.0,",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "the pointer is not followed",
+        "            self.pointer = match mouse.kind {\n                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),\n            };",
+        "            let _ = mouse;",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "a pointer that left is still followed",
+        "                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),",
+        "                MouseEventKind::Leave => self.pointer,\n                _ => Some((mouse.x, mouse.y)),",
+        [WHY_GOES],
+    ),
+    (
+        "a tick does not move the clock",
+        "            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);",
+        "            let _ = elapsed_ms;",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "the tick that shows a reason asks for no frame",
+        "            if self.why_disabled.tick(self.clock_ms) {\n                result = EventResult::Consumed;\n            }",
+        "            self.why_disabled.tick(self.clock_ms);",
+        [WHY_BUTTONS],
+    ),
+    (
+        "a reason that goes asks for no frame",
+        "        if self.explain_disabled() {\n            result = EventResult::Consumed;\n        }",
+        "        self.explain_disabled();",
+        [WHY_GOES],
+    ),
+    (
+        "the window asks for no tick",
+        "            .due_in(self.clock_ms)\n            .map(|ms| std::time::Duration::from_millis(ms.max(1)))",
+        "            .due_in(self.clock_ms)\n            .filter(|_| false)\n            .map(|ms| std::time::Duration::from_millis(ms.max(1)))",
+        [WHY_BUTTONS],
+    ),
+    (
+        "the reason is not drawn",
+        "        tree.commands.extend(self.why_disabled.render(pal));",
+        "        let _ = self.why_disabled.render(pal);",
+        [WHY_BUTTONS],
+    ),
+    (
+        "a reason is given under the file picker",
+        "        let covered = self.dialog.is_some()\n            || self.color_dialog.is_some()",
+        "        let covered = self.color_dialog.is_some()",
+        [WHY_COVERS],
+    ),
+    (
+        "a reason is given under the colour picker",
+        "            || self.color_dialog.is_some()\n            || self.show_help",
+        "            || self.show_help",
+        [WHY_COVERS],
+    ),
+    (
+        "a reason is given under the shortcut card",
+        "            || self.show_help\n            || self.open_dropdown.is_some()",
+        "            || self.open_dropdown.is_some()",
+        [WHY_CARD],
+    ),
+    (
+        "a reason is given under a list",
+        "            || self.open_dropdown.is_some()\n            || self.dragging.is_some();",
+        "            || self.dragging.is_some();",
+        [WHY_COVERS],
+    ),
+    (
+        "a reason is given during a drag",
+        "            || self.open_dropdown.is_some()\n            || self.dragging.is_some();",
+        "            || self.open_dropdown.is_some();",
+        [WHY_COVERS],
     ),
 ]
 

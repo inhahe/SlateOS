@@ -18328,19 +18328,32 @@ mod tests {
         );
 
         // A press elsewhere: the menu goes, and the category under it is not
-        // chosen.
-        right_press(&mut state, sx, sy);
-        let category = state.current_category;
+        // chosen. On a page's field, with the search empty -- a search lists
+        // its results where the categories were, and a press there would
+        // choose nothing whether or not it went through.
+        let mut paged = rotation_page();
+        let (px, py) = center_of(&paged, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        right_press(&mut paged, px, py);
+        assert!(paged.field_menu.is_up());
+        let category = paged.current_category;
         let (cx, cy) = (40.0, SettingsState::category_row_top(3) + 10.0);
-        state.handle_event(&Event::Mouse(MouseEvent {
+        let press = Event::Mouse(MouseEvent {
             x: cx,
             y: cy,
             kind: MouseEventKind::Press(MouseButton::Left),
-        }));
-        assert!(!state.field_menu.is_up());
+        });
+        paged.handle_event(&press);
+        assert!(!paged.field_menu.is_up());
         assert_eq!(
-            state.current_category, category,
+            paged.current_category, category,
             "the press went through the menu"
+        );
+        // And the same press with no menu up does choose that category, so the
+        // check above looked at a press that would have done something.
+        paged.handle_event(&press);
+        assert_ne!(
+            paged.current_category, category,
+            "the press hit no category"
         );
 
         // The keys: down to Select all and Enter.

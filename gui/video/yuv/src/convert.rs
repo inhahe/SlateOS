@@ -122,7 +122,7 @@ fn yuv_pixel(k: &Constants, y32: u32, u: u32, v: u32) -> u32 {
 }
 
 /// A sample size, and how libyuv brings its samples to the 16-bit luma and
-/// 8-bit chroma and alpha that [`yuv_pixel`] takes.
+/// 8-bit chroma and alpha that its `YuvPixel` takes.
 pub trait Depth {
     /// The sample: `u8` or `u16`.
     type Sample: Copy + Default + Into<u32>;

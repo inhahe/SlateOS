@@ -10,6 +10,21 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-10: a consent prompt takes no keystrokes
+
+- **Given:** 2026-10-10, in chat to lane E's session -- a rule, not the answer
+  to a queued question, so no file in the integration tree.
+- **Processed:** 2026-10-10 by lane E, the same hour: recorded as §1242 with
+  the defect it finds (`known-issues/E-the-capability-prompt-is-answered-by-the-keys-the-user-is-typing.md`);
+  lanes C and F told by notice and asked in
+  `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`.
+- **Copy:** `operator-answers/2026-10-10-chat-consent-prompts-take-no-keystrokes.txt`
+- **Content:** sha256 `192ca7baf831fdf8127577d499703b36ed49eec336b21b5ec2c274458dc53186`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| a consent prompt is answered only on purpose: no key the user was typing answers it | C, F | §1242 (written by lane E) | relayed 2026-10-10 (C: the prompt's keys and clicks; F: a window that opens without the keyboard) |
+
 ## open-questions/answers.txt
 
 - **Written:** 2026-10-09, as `open-questions/answers.txt` in the integration

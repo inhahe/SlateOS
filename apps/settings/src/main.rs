@@ -5219,7 +5219,7 @@ impl SettingsState {
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
         s.section("Network Adapters");
         s.note(
-            "This system cannot list its network interfaces yet. Nothing here              can ask which are present, whether any is connected, or what              address it holds.",
+            "This system cannot list its network interfaces yet. Nothing here can ask which are present, whether any is connected, or what address it holds.",
             44.0,
         );
         s.unavailable_row("Interfaces", "Cannot be listed");
@@ -5227,7 +5227,7 @@ impl SettingsState {
 
         s.section("IP Configuration");
         s.note(
-            "There is no interface to configure, and nothing on this system              reads an address typed here.",
+            "There is no interface to configure, and nothing on this system reads an address typed here.",
             28.0,
         );
         s.unavailable_row("IPv4 address", "Unknown");
@@ -5236,7 +5236,7 @@ impl SettingsState {
 
         s.section("DNS");
         s.note(
-            "No program on this system loads a resolver configuration, so a              nameserver set here would reach nothing. The format is defined --              `net/dns` parses `resolv.conf` -- but nothing reads the file.",
+            "No program on this system loads a resolver configuration, so a nameserver set here would reach nothing. The format is defined -- `net/dns` parses `resolv.conf` -- but nothing reads the file.",
             44.0,
         );
         s.unavailable_row("Preferred DNS", "Not configured");
@@ -5251,7 +5251,7 @@ impl SettingsState {
     fn build_proxy_page<S: PageSink>(&self, s: &mut S) {
         s.section("Proxy");
         s.note(
-            "Nothing on this system routes through a proxy. `net/httpclient`              connects directly and takes no proxy setting, so an address              entered here would be read by nothing.",
+            "Nothing on this system routes through a proxy. `net/httpclient` connects directly and takes no proxy setting, so an address entered here would be read by nothing.",
             44.0,
         );
         s.unavailable_row("HTTP proxy", "Not supported");
@@ -5276,7 +5276,7 @@ impl SettingsState {
         // never touches the machine's real accounts.
         if self.user_accounts.is_empty() {
             s.note(
-                "No accounts to show. Either the system account database could                  not be read, or it holds no ordinary user account.",
+                "No accounts to show. Either the system account database could not be read, or it holds no ordinary user account.",
                 28.0,
             );
         }
@@ -5416,11 +5416,11 @@ impl SettingsState {
     fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
         s.section("App Permissions");
         s.note(
-            "This system does not keep a list of which applications may use              the camera, the microphone or your location, and nothing here              could grant or withdraw such a permission.",
+            "This system does not keep a list of which applications may use the camera, the microphone or your location, and nothing here could grant or withdraw such a permission.",
             44.0,
         );
         s.note(
-            "That is by design rather than unfinished. A program here reaches              a device by holding a handle to it, which it can only have been              given -- there is no central table of names to tick, and nothing              has authority simply because of what it is called.",
+            "That is by design rather than unfinished. A program here reaches a device by holding a handle to it, which it can only have been given -- there is no central table of names to tick, and nothing has authority simply because of what it is called.",
             44.0,
         );
         s.unavailable_row("Location", "Not recorded per application");
@@ -5430,7 +5430,7 @@ impl SettingsState {
 
         s.section("Diagnostics & Data");
         s.note(
-            "Nothing on this system collects diagnostic data, so there is no              collection level to choose.",
+            "Nothing on this system collects diagnostic data, so there is no collection level to choose.",
             28.0,
         );
         s.gap();

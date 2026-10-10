@@ -6414,7 +6414,7 @@ mod tests {
         // 41: running, 300 pages resident, 8 threads, 250 ticks of CPU.
         std::fs::write(
             dir.join("41/stat"),
-            b"41 (shell) R 1 41 41 0 -1 0 0 0 0 0 200 50 0 0 20 0 8 0 900               4096000 300 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+            b"41 (shell) R 1 41 41 0 -1 0 0 0 0 0 200 50 0 0 20 0 8 0 900 4096000 300 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
         )
         .unwrap();
         std::fs::write(dir.join("41/statm"), b"1000 300 64 0 0 0 0").unwrap();

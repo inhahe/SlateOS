@@ -4966,7 +4966,7 @@ mod tests {
     /// the second out of the first.
     #[test]
     fn wrapping_gives_a_long_message_more_than_one_line() {
-        let long = "the quick brown fox jumps over the lazy dog and keeps going                     well past the width of any sensible log window so that there                     is certainly something to wrap here";
+        let long = "the quick brown fox jumps over the lazy dog and keeps going well past the width of any sensible log window so that there is certainly something to wrap here";
         let mut app = app_with_source("svc");
         if let Some(file) = app.files.first_mut()
             && let Some(entry) = file.entries.first_mut()

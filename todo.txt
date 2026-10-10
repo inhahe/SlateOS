@@ -59327,17 +59327,6 @@ is still run by hand, not by `boot-test.sh`.
   H.264 film grain sample and x264 writes none. **Do it** after the loop
   filter: write film grain SEIs into conformance streams with the tests'
   `Syntax` writer and compare each picture with FFmpeg's.
-- **h264: no error concealment** (`error_resilience.c`, with
-  `ff_er_frame_start`/`er_add_slice` in `h264_slice.c`, the frame-end call
-  and `h264_er_decode_mb` in `h264dec.c`, `ff_h264_set_erpic` in
-  `h264_picture.c`). FFmpeg guesses the macroblocks of a lost or refused
-  slice from their neighbours and the previous picture; here they are left
-  unwritten (zeros). `Context::last_pic_for_ec` and `enable_er` are
-  carried for it and read by nothing yet. Streams that show it:
-  `h264-conformance/FM1_FT_E.264` (FMO, which FFmpeg does not decode but
-  conceals: from picture 119) and damaged or cut streams. **Translate it**
-  after CABAC, with `tools/ffdbg`'s `FFDBG_ER` to see where FFmpeg
-  conceals.
 - **h264: no new extradata with a packet** (`gui/video/h264/src/lib.rs`,
   `Decoder::decode`). A MOV with several sample descriptions hands the
   decoder new parameter sets with the packet where the description changes

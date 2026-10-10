@@ -8,9 +8,14 @@
 //! the intra prediction of the row below.
 //!
 //! The picture being decoded is taken out of its slot for the slice and
-//! written through unique access: nothing else holds it while it is
-//! decoded (the extra reference FFmpeg keeps for error concealment is an
-//! alias here until the picture is done -- `Context::last_pic_for_ec`).
+//! written through unique access. Only the picture kept for concealment
+//! (`LAST_PIC_FOR_EC`) can share its frame: when the second field of an
+//! IDR frame comes in a packet of its own, that packet's IDR keeps the
+//! first field's frame there. The field is then decoded into a copy, which
+//! changes nothing seen, as nothing conceals a field picture.
+//!
+//! Each slice tells concealment what it decoded as it ends or fails
+//! (`er_add_slice`), and whether the slice before it ended where it began.
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -33,6 +38,7 @@ use std::sync::Arc;
 use crate::bits::Bits;
 use crate::cabacmb::Data;
 use crate::decoder::{Context, DecodeError, SliceContext};
+use crate::er::{ER_MB_END, ER_MB_ERROR};
 use crate::loopfilter::Planes;
 use crate::mbtype::is_interlaced;
 use crate::mvpred::tab;
@@ -76,6 +82,17 @@ impl Context {
         }
         let pps = self.ps.pps.clone().ok_or(DecodeError)?;
         let field_or_mbaff = self.picture_structure != PICT_FRAME || self.mb_aff_frame;
+        #[cfg(test)]
+        if std::env::var_os("H264_REF").is_some() {
+            self.debug_refs(sl);
+        }
+        if self.picture_structure == PICT_FRAME {
+            self.er.check_slice_start(sl.resync_mb_x, sl.resync_mb_y);
+        }
+        // What the slice decoded, for concealment: from its start to `x,y`.
+        let report = |er: &mut crate::er::Er, sl: &SliceContext, x: i32, y: i32, status: u8| {
+            er.add_slice(sl.resync_mb_x, sl.resync_mb_y, x, y, status);
+        };
         if pps.cabac != 0 {
             gb.align();
             let d = Data {
@@ -92,6 +109,7 @@ impl Context {
             loop {
                 if sl.mb_x + sl.mb_y * self.mb_width >= sl.next_slice_idx {
                     // "Slice overlaps with next".
+                    report(&mut self.er, sl, sl.mb_x, sl.mb_y, ER_MB_ERROR);
                     return Err(DecodeError);
                 }
                 let mut ret = self.decode_mb_cabac(sl, d);
@@ -111,6 +129,7 @@ impl Context {
                 // for truncated slices is off, as it is by default), but no
                 // more than four bytes.
                 if ret.is_err() || sl.cabac.pos > sl.cabac.end + 4 {
+                    report(&mut self.er, sl, sl.mb_x, sl.mb_y, ER_MB_ERROR);
                     return Err(DecodeError);
                 }
                 sl.mb_x += 1;
@@ -127,6 +146,7 @@ impl Context {
                     }
                 }
                 if eos != 0 || sl.mb_y >= self.mb_height {
+                    report(&mut self.er, sl, sl.mb_x - 1, sl.mb_y, ER_MB_END);
                     if sl.mb_x > lf_x_start {
                         self.loop_filter(sl, frame, lf_x_start, sl.mb_x);
                     }
@@ -142,6 +162,7 @@ impl Context {
         loop {
             if sl.mb_x + sl.mb_y * self.mb_width >= sl.next_slice_idx {
                 // "Slice overlaps with next".
+                report(&mut self.er, sl, sl.mb_x, sl.mb_y, ER_MB_ERROR);
                 return Err(DecodeError);
             }
             let mut ret = self.decode_mb_cavlc(sl, gb);
@@ -156,7 +177,10 @@ impl Context {
                 }
                 sl.mb_y -= 1;
             }
-            ret?;
+            if ret.is_err() {
+                report(&mut self.er, sl, sl.mb_x, sl.mb_y, ER_MB_ERROR);
+                return ret;
+            }
 
             sl.mb_x += 1;
             if sl.mb_x >= self.mb_width {
@@ -173,24 +197,66 @@ impl Context {
                 if sl.mb_y >= self.mb_height {
                     // Bits left over end the slice well unless errors are
                     // looked for aggressively, which they are not.
-                    sl.hdr.deblocking_filter = orig_deblock;
-                    return if gb.left() >= 0 {
-                        Ok(())
-                    } else {
-                        Err(DecodeError)
-                    };
+                    if gb.left() >= 0 {
+                        report(&mut self.er, sl, sl.mb_x - 1, sl.mb_y, ER_MB_END);
+                        sl.hdr.deblocking_filter = orig_deblock;
+                        return Ok(());
+                    }
+                    report(&mut self.er, sl, sl.mb_x, sl.mb_y, ER_MB_END);
+                    return Err(DecodeError);
                 }
             }
 
             if gb.left() <= 0 && sl.mb_skip_run <= 0 {
                 if gb.left() == 0 {
+                    report(&mut self.er, sl, sl.mb_x - 1, sl.mb_y, ER_MB_END);
                     if sl.mb_x > lf_x_start {
                         self.loop_filter(sl, frame, lf_x_start, sl.mb_x);
                     }
                     sl.hdr.deblocking_filter = orig_deblock;
                     return Ok(());
                 }
+                report(&mut self.er, sl, sl.mb_x, sl.mb_y, ER_MB_ERROR);
                 return Err(DecodeError);
+            }
+        }
+    }
+
+    /// Under H264_REF, the lines `tools/ffdbg`'s FFDBG_REF prints in FFmpeg,
+    /// for `tools/h264cmp.py`: each entry of the slice's reference lists,
+    /// with its picture's luma summed as bytes -- which picture it is.
+    #[cfg(test)]
+    fn debug_refs(&self, sl: &SliceContext) {
+        fn sum<P: Pixel>(p: &crate::picture::Plane<P>) -> u32 {
+            let wide = std::mem::size_of::<P>() > 1;
+            let (mut a, mut b) = (1u32, 0u32);
+            for y in 0..p.height {
+                for x in 0..p.width {
+                    let v = p.data[y * p.stride + x].int() as u32;
+                    let bytes: &[u32] = if wide { &[v & 0xFF, v >> 8] } else { &[v] };
+                    for &byte in bytes {
+                        a = (a + byte) % 65521;
+                        b = (b + a) % 65521;
+                    }
+                }
+            }
+            (b << 16) | a
+        }
+        let poc = self.cur_pic_ptr.map_or(-1, |c| self.pics[c].poc);
+        for list in 0..sl.hdr.list_count as usize {
+            for i in 0..sl.hdr.ref_count[list] as usize {
+                let r = &sl.ref_list[list][i];
+                let s = r
+                    .parent
+                    .and_then(|p| self.pics[p].f.as_deref())
+                    .map_or(1, |f| match f {
+                        AnyFrame::Eight(f) => sum(&f.planes[0]),
+                        AnyFrame::High(f) => sum(&f.planes[0]),
+                    });
+                eprintln!(
+                    "REF poc={poc} slice={} list={list} i={i} refpoc={} ref={} sum={s:08x}",
+                    sl.slice_num, r.poc, r.reference
+                );
             }
         }
     }

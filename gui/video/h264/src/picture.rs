@@ -300,6 +300,9 @@ pub(crate) struct Picture {
     pub(crate) motion_val: [Vec<[i16; 2]>; 2],
     /// Each list's reference index of each 8x8 block (`ref_index`).
     pub(crate) ref_index: [Vec<i8>; 2],
+    /// The pool generation the four tables above came from
+    /// ([`crate::pool::Tables::generation`]); 0 for none.
+    pub(crate) tables_generation: u32,
 
     /// The top and bottom field's order counts, and the lower of them.
     pub(crate) field_poc: [i32; 2],
@@ -357,17 +360,51 @@ impl Picture {
 
     /// Release everything the picture holds and forget all it was
     /// (`ff_h264_unref_picture`): every field after the frame's own goes
-    /// back to its starting value, as FFmpeg zeroes them.
-    pub(crate) fn unref(&mut self) {
-        if self.f.is_none() {
-            return;
-        }
+    /// back to its starting value, as FFmpeg zeroes them. Its tables are
+    /// handed back, for the caller to return to their pool
+    /// ([`crate::decoder::Context::unref_pic`]); `None` when the slot held
+    /// nothing, tables included.
+    #[must_use]
+    pub(crate) fn unref(&mut self) -> Option<crate::pool::Tables> {
+        self.f.as_ref()?;
+        let tables = self.take_tables();
         *self = Self::default();
+        Some(tables)
     }
 
-    /// A second holder of `src`'s samples, tables and properties
+    /// The picture's tables, moved out.
+    pub(crate) fn take_tables(&mut self) -> crate::pool::Tables {
+        crate::pool::Tables {
+            qscale_table: std::mem::take(&mut self.qscale_table),
+            mb_type: std::mem::take(&mut self.mb_type),
+            motion_val: std::mem::take(&mut self.motion_val),
+            ref_index: std::mem::take(&mut self.ref_index),
+            generation: std::mem::take(&mut self.tables_generation),
+        }
+    }
+
+    /// Tables moved in.
+    pub(crate) fn put_tables(&mut self, t: crate::pool::Tables) {
+        self.qscale_table = t.qscale_table;
+        self.mb_type = t.mb_type;
+        self.motion_val = t.motion_val;
+        self.ref_index = t.ref_index;
+        self.tables_generation = t.generation;
+    }
+
+    /// The picture without its tables: what a second holder copies, the
+    /// tables being held, not copied ([`crate::pool`]).
+    pub(crate) fn without_tables(&mut self) -> Self {
+        let tables = self.take_tables();
+        let copy = self.clone();
+        self.put_tables(tables);
+        copy
+    }
+
+    /// A second holder of `src`'s samples and properties
     /// (`ff_h264_ref_picture`, into a slot that holds nothing): all but the
-    /// picture number, which FFmpeg does not copy.
+    /// picture number, which FFmpeg does not copy. `src` is a picture
+    /// [`without_tables`](Self::without_tables).
     pub(crate) fn ref_from(&mut self, src: &Self) {
         let pic_id = self.pic_id;
         *self = src.clone();

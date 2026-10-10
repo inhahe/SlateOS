@@ -509,9 +509,10 @@ impl Context {
         }
         if self.short_ref_count != 0 && !self.pics[LAST_PIC_FOR_EC].in_use() {
             if let Some(first) = self.short_ref[0] {
-                self.pics[LAST_PIC_FOR_EC].unref();
-                let src = self.pics[first].clone();
+                self.unref_pic(LAST_PIC_FOR_EC);
+                let src = self.pics[first].without_tables();
                 self.pics[LAST_PIC_FOR_EC].ref_from(&src);
+                self.hold(crate::pool::HOLD_EC, first);
             }
         }
         for i in 0..self.short_ref_count {

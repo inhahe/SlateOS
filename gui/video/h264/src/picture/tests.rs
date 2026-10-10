@@ -48,11 +48,12 @@ fn a_second_holder_shares_the_frame_but_not_the_picture_number() {
         ..Picture::default()
     };
     src.props.format = PixelFormat::Yuv420(8);
+    src.mb_type = vec![5; 4];
     let mut dst = Picture {
         pic_id: 4,
         ..Picture::default()
     };
-    dst.ref_from(&src);
+    dst.ref_from(&src.without_tables());
     assert!(Arc::ptr_eq(
         dst.f.as_ref().unwrap(),
         src.f.as_ref().unwrap()
@@ -62,16 +63,23 @@ fn a_second_holder_shares_the_frame_but_not_the_picture_number() {
         (7, 3, 3, 4)
     );
     assert!(dst.same_shape(&src));
+    // The tables stay with the picture taken from, untouched.
+    assert!(dst.mb_type.is_empty());
+    assert_eq!(src.mb_type, [5; 4]);
 
-    // Let go, it is as new; a free slot is left as it is.
-    dst.unref();
+    // Let go, it is as new and hands back its tables; a free slot is left
+    // as it is, with none to hand back.
+    let tables = src.unref().unwrap();
+    assert_eq!(tables.mb_type, [5; 4]);
+    assert!(!src.in_use());
+    assert!(dst.unref().is_some());
     assert!(!dst.in_use());
     assert_eq!((dst.poc, dst.pic_id), (0, 0));
     let mut free = Picture {
         reference: 2,
         ..Picture::default()
     };
-    free.unref();
+    assert!(free.unref().is_none());
     assert_eq!(free.reference, 2);
 }
 

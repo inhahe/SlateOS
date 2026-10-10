@@ -7,16 +7,19 @@
 macroblock they reconstruct -- its type, cbp, qp and an Adler-32 of its
 samples in each plane, before the loop filter (`MB`) -- for each macroblock
 once its edges are filtered (`LF`), for each inter macroblock its references
-and vectors (`MV`), and for each picture handed out its POCs and each
-field's luma (`OUT`). This runs both on the stream and reports, for each
-kind, the first line where they disagree: the picture, the macroblock and
-what differs. The first `MB` difference is usually the one to read.
+and vectors (`MV`), for each picture once a packet's slices are decoded and
+concealed, shown or not, its planes (`PIC`), and for each picture handed out
+its POCs and each field's luma (`OUT`). This runs both on the stream and
+reports, for each kind, the first line where they disagree: the picture, the
+macroblock and what differs. The first `MB` difference is usually the one to
+read; where every `MB` agrees and a `PIC` does not, concealment parts.
 
 FFmpeg's side is its 8.1.3 build in WSL with those lines added
-(`tools/ffdbg/build.sh`, in ~/ffdbg/src). This decoder's side is the pixel
-test under `H264_MB`, `H264_LF`, `H264_MV` and `H264_OUT`, with `H264_ONLY`
-naming the one stream. H264_FATE and H264_PICT must be set as for the pixel
-test.
+(`tools/ffdbg/build.sh`, in ~/ffdbg/src); FFDBG_ENV adds variables to its run
+(`FFDBG_ENV=FFDBG_ZERO_TABLES=1`). This decoder's side is the pixel test
+under `H264_MB`, `H264_LF`, `H264_MV`, `H264_PIC` and `H264_OUT`, with
+`H264_ONLY` naming the one stream. H264_FATE and H264_PICT must be set as for
+the pixel test.
 """
 import os
 import subprocess
@@ -26,7 +29,7 @@ from pathlib import Path
 CONTAINERS = {".avi", ".flv", ".mkv", ".mov", ".mp4", ".mxf", ".ts"}
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
-TAGS = ("MB", "LF", "MV", "OUT")
+TAGS = ("REF", "MB", "LF", "MV", "PIC", "OUT")
 
 
 def wsl_path(p: Path) -> str:
@@ -87,7 +90,8 @@ def main() -> None:
         args.remove("--release")
     name = args[0]
     fate, pict = Path(os.environ["H264_FATE"]), Path(os.environ["H264_PICT"])
-    stream = (pict if name.startswith("cut/") else fate) / name
+    # A stream made by pict_expect.py (cut, damaged, x264) is under H264_PICT.
+    stream = pict / name if (pict / name).is_file() else fate / name
     raw = [] if stream.suffix.lower() in CONTAINERS else ["-f", "h264"]
     tmp = Path(os.environ.get("TEMP", "/tmp")) / "h264cmp"
     tmp.mkdir(exist_ok=True)
@@ -97,9 +101,10 @@ def main() -> None:
     # pictures to /dev/null. FFmpeg logs nothing (quiet): its messages come
     # from other threads too -- the demuxer's parser -- and one whose prefix
     # lands in front of a probe line hides that line.
+    probes = [f"FFDBG_{t}=1" for t in TAGS] + os.environ.get("FFDBG_ENV", "").split()
     with ff_log.open("wb") as err:
-        subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "env", "FFDBG_MB=1", "FFDBG_LF=1",
-                        "FFDBG_MV=1", "FFDBG_OUT=1", os.environ.get("FFDBG", "/home/inhahe/ffdbg/src")
+        subprocess.run(["wsl", "-d", "Ubuntu", "--exec", "env", *probes,
+                        os.environ.get("FFDBG", "/home/inhahe/ffdbg/src")
                         + "/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "quiet",
                         "-threads", "1", "-flags", "unaligned", *raw, "-i", wsl_path(stream),
                         "-map", "0:v:0", "-fps_mode", "passthrough", "-noautoscale",
@@ -113,8 +118,12 @@ def main() -> None:
     if release:
         cmd.insert(2, "--release")
     cmd += ["--", "--include-ignored", "--nocapture", "sample_for_sample"]
-    with our_log.open("wb") as out:
-        subprocess.run(cmd, cwd=ROOT, env=env, stdout=out, stderr=subprocess.STDOUT, check=False)
+    # The probes' lines alone: the test harness's own notices ("has been
+    # running for over 60 seconds") go to stdout from another thread, and
+    # landed inside probe lines when both went to one file.
+    with our_log.open("wb") as err:
+        subprocess.run(cmd, cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=err,
+                       check=False)
 
     ok = True
     for tag in TAGS:

@@ -25,6 +25,9 @@
 //! - `picture`: `h264_picture.c` and the `H264Picture` of `h264dec.h` --
 //!   the picture slots, their samples and per-macroblock tables, and what
 //!   a decoded frame carries out.
+//! - `pool`: `init_table_pools` and the RefStruct pools under it -- the
+//!   per-macroblock tables reused as FFmpeg reuses them, contents and all,
+//!   which a picture with lost macroblocks reads.
 //! - `decoder`: the `H264Context` and `H264SliceContext` of `h264dec.h`,
 //!   with the parts of `h264_slice.c` and `h264dec.c` that set a stream
 //!   up -- its format, its tables, a picture slot for each picture.
@@ -65,17 +68,15 @@
 //!   `h264dsp`.
 //! - `loopfilter`: `h264_loopfilter.c` and the deblocking of
 //!   `h264dsp_template.c`.
+//! - `er`: `error_resilience.c` and `h264_er_decode_mb` -- the macroblocks
+//!   of a frame that no slice decoded, or that a slice failed in, guessed
+//!   from around them.
 //! - `output`: `h264dec.c`'s packet loop -- extradata, NAL units handed to
 //!   their parts, pictures finished and handed out, the last ones drained.
 //! - `side_data`: what FFmpeg attaches to a frame from SEI -- stereo
 //!   packing, rotation, captions, HDR metadata and the rest.
 //! - `vlc`: `vlc.c`'s table building and `get_vlc2` -- variable-length
 //!   codes read as FFmpeg reads them, the invalid ones included.
-//!
-//! One part is still to be translated: error concealment
-//! (`error_resilience.c`), without which the macroblocks of a slice that is
-//! lost or refused are left unwritten rather than guessed from their
-//! neighbours.
 
 #![forbid(unsafe_code)]
 
@@ -85,6 +86,7 @@ mod cabacmb;
 mod cavlc;
 mod decoder;
 mod direct;
+mod er;
 mod field;
 mod idct;
 mod loopfilter;
@@ -96,6 +98,7 @@ mod nal;
 mod output;
 mod picture;
 mod poc;
+mod pool;
 mod pred;
 mod ps;
 mod queue;

@@ -23,6 +23,10 @@
 #   FFDBG_LF    after each macroblock's edges are filtered: "LF ... sum=".
 #   FFDBG_MV    for each inter macroblock: its references and vectors, block
 #               by block, as motion compensation reads them.
+#   FFDBG_REF   at each slice's first macroblock, each entry of its
+#               reference lists: POC, fields, and its picture's luma summed.
+#   FFDBG_PIC   for the picture being decoded, once a packet's slices are
+#               decoded and concealed -- shown or not -- each plane summed.
 #   FFDBG_OUT   for each picture handed out: its POCs and each field's luma.
 #   FFDBG_FRAMECRC
 #               "DECODER d=N" as each decoder opens, and for each frame
@@ -35,6 +39,11 @@
 #   FFDBG_FILL  every picture started filled with this byte (0-255), so
 #               samples FFmpeg never writes show as it rather than as
 #               whatever memory its buffer pool hands back.
+#   FFDBG_ZERO_TABLES
+#               a picture's tables (vectors, references, types, quantizers)
+#               zeroed every time their pools hand them out, not only when
+#               first made: to see what of a damaged stream's output
+#               depends on what earlier pictures left in them.
 #
 # `h=N` and `d=N` number the decoder as it opens: avformat_find_stream_info's
 # comes first, and the one that shows the stream is the last.
@@ -56,6 +65,6 @@ fi
     --enable-protocol=file,pipe \
     --enable-bsf=extract_extradata,h264_mp4toannexb,null \
     --enable-filter=buffer,buffersink,null,format,scale,copy \
-    --disable-ffplay --disable-ffprobe
-make -j"$(nproc)" ffmpeg
-echo "built $dir/ffmpeg"
+    --disable-ffplay
+make -j"$(nproc)" ffmpeg ffprobe
+echo "built $dir/ffmpeg and $dir/ffprobe"

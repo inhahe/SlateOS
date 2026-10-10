@@ -293,7 +293,6 @@ impl Context {
             .map_err(|_| DecodeError)?;
 
         let mut ret = Ok(());
-        let mut slice_failed = false;
         for nal in pkt.nals().to_vec() {
             self.nal_ref_idc = nal.ref_idc;
             self.nal_unit_type = nal.kind;
@@ -325,7 +324,6 @@ impl Context {
                         continue;
                     }
                     let r = self.execute_decode_slices(sl, &mut gb);
-                    slice_failed = r.is_err();
                     if r.is_err() && self.explode {
                         ret = r;
                         break;
@@ -366,14 +364,58 @@ impl Context {
         }
 
         // FFmpeg decodes what is still queued here; with one slice context
-        // every slice was decoded as it was queued. A slice that failed
-        // marks the picture.
-        if ret.is_ok() && slice_failed {
+        // every slice was decoded as it was queued. A slice that failed, or
+        // one missing before a slice, marks the picture -- unless decoding
+        // stopped short of here.
+        if ret.is_ok() && self.er.error_occurred {
             if let Some(cur) = self.cur_pic_ptr {
                 self.pics[cur].props.decode_error_flags |= DECODE_ERROR_DECODE_SLICES;
             }
         }
+        self.conceal(sl);
+        #[cfg(test)]
+        if std::env::var_os("H264_PIC").is_some() {
+            self.debug_pic();
+        }
         ret
+    }
+
+    /// Under H264_PIC, the line `tools/ffdbg`'s FFDBG_PIC prints in FFmpeg,
+    /// for `tools/h264cmp.py`: the picture being decoded once a packet's
+    /// slices are decoded and concealed -- shown or not -- each plane's
+    /// samples summed as bytes, coded size.
+    #[cfg(test)]
+    fn debug_pic(&self) {
+        fn sum<P: crate::picture::Pixel>(p: &crate::picture::Plane<P>) -> u32 {
+            let wide = std::mem::size_of::<P>() > 1;
+            let (mut a, mut b) = (1u32, 0u32);
+            for y in 0..p.height {
+                for x in 0..p.width {
+                    let v = p.data[y * p.stride + x].int() as u32;
+                    let bytes: &[u32] = if wide { &[v & 0xFF, v >> 8] } else { &[v] };
+                    for &byte in bytes {
+                        a = (a + byte) % 65521;
+                        b = (b + a) % 65521;
+                    }
+                }
+            }
+            (b << 16) | a
+        }
+        let Some(cur) = self.cur_pic_ptr else {
+            return;
+        };
+        let pic = &self.pics[cur];
+        let Some(f) = pic.f.as_deref() else {
+            return;
+        };
+        let s: [u32; 3] = match f {
+            crate::picture::AnyFrame::Eight(f) => std::array::from_fn(|p| sum(&f.planes[p])),
+            crate::picture::AnyFrame::High(f) => std::array::from_fn(|p| sum(&f.planes[p])),
+        };
+        eprintln!(
+            "PIC poc={} fpoc={},{} struct={} sum={:08x},{:08x},{:08x}",
+            pic.poc, pic.field_poc[0], pic.field_poc[1], self.picture_structure, s[0], s[1], s[2]
+        );
     }
 
     /// Picture `out` handed out, if it can be shown (`finalize_frame`): a
@@ -510,7 +552,7 @@ impl Context {
         let buf = packet.data;
         self.setup_finished = false;
         self.nb_slice_ctx_queued = 0;
-        self.pics[crate::picture::LAST_PIC_FOR_EC].unref();
+        self.unref_pic(crate::picture::LAST_PIC_FOR_EC);
         if buf.is_empty() {
             return Ok(self.send_next_delayed_frame());
         }
@@ -546,7 +588,7 @@ impl Context {
             Some(out) => self.finalize_frame(out),
             None => None,
         };
-        self.pics[crate::picture::LAST_PIC_FOR_EC].unref();
+        self.unref_pic(crate::picture::LAST_PIC_FOR_EC);
         Ok(out)
     }
 }

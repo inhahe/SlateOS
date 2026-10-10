@@ -4543,7 +4543,7 @@ lane C's `guitk`.
           sample (`framecrc`) on every CAVLC stream of the 716: 317 of the
           318 match in every picture (16,335 of 16,521 pictures); the 318th,
           `FM1_FT_E`, uses FMO, which FFmpeg does not decode but conceals,
-          and parts at picture 119, where its error concealment takes over.
+          and parted at picture 119 until concealment was translated (below).
           The checksums are FFmpeg 8.1.3's own C build's (in WSL,
           `tools/ffdbg/build.sh`), not the March 2026 snapshot's, which
           shows four cut streams differently; a picture with samples FFmpeg
@@ -4563,8 +4563,24 @@ lane C's `guitk`.
           from what its command line passes on, which converts every
           picture to the first one's format: nine streams that change size
           or format midway had been compared converted.
-        - `[ ]` Error concealment (`error_resilience.c`): a lost or refused
-          slice's macroblocks are left unwritten rather than guessed.
+        - `[x]` Error concealment (2026-10-10): `error_resilience.c` and
+          H.264's side of it -- what each slice decoded and where it
+          stopped, the lost macroblocks' vectors guessed from their
+          neighbours' and the picture before's, their samples predicted
+          with them or drawn flat from guessed DCs, damaged edges smoothed;
+          read and written as bytes, as FFmpeg's routines read them, at any
+          depth. `FM1_FT_E` now matches FFmpeg in all 305 pictures, and
+          715 of the 716 streams in every picture (38,887 of 38,889); the
+          one left is `extradata-reload-multi-stsd.mov` (todo.txt). Two
+          things it took that are not concealment: a picture's tables are
+          now reused as FFmpeg reuses them (`init_table_pools`: last given
+          back, first taken, never cleared), since concealment reads the
+          vectors a lost macroblock's table still holds from an earlier
+          picture; and the 16 zero bytes FFmpeg keeps before its scan
+          tables, which a damaged CAVLC block reads when its zeros run out
+          before the scan's start. `tools/h264cmp.py` now also compares
+          each picture after concealment (`PIC`) and which picture each
+          reference entry is (`REF`).
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point

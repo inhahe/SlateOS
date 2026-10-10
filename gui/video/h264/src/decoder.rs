@@ -398,13 +398,14 @@ pub(crate) struct Context {
     pub(crate) slice_row: [i32; MAX_SLICES],
     pub(crate) width_from_caller: i32,
     pub(crate) height_from_caller: i32,
-    /// Lost slices concealed (`enable_er`, on by default without slice
-    /// threads).
-    #[allow(
-        dead_code,
-        reason = "read by error concealment, not yet translated (todo.txt)"
-    )]
-    pub(crate) enable_er: bool,
+    /// Error concealment's tables and its account of the picture being
+    /// decoded (`er`): always on, as FFmpeg's is without slice threads
+    /// (`enable_er`).
+    pub(crate) er: crate::er::Er,
+    /// The pools pictures' tables come from, and who besides a slot holds
+    /// a picture's tables (`qscale_table_pool` and the rest, `cur_pic`).
+    pub(crate) pool: crate::pool::TablePool,
+    pub(crate) holders: crate::pool::Holders,
     /// Each slice's reference numbers for the loop filter: `[slice][list][2 + ref]`.
     pub(crate) ref2frm: Box<[[[i32; 64]; 2]; MAX_SLICES]>,
     /// An intra picture has come since a gray stand-in (`non_gray`).
@@ -451,14 +452,6 @@ pub(crate) struct Context {
     /// Each 4x4 block's place in its macroblock -- luma, Cb, Cr -- for a
     /// frame macroblock, then for a field one (`block_offset`), in samples.
     pub(crate) block_offset: [usize; 2 * 48],
-    /// The picture FFmpeg keeps for concealing lost slices of pictures
-    /// without references (`last_pic_for_ec`) while it is still a live
-    /// slot; copied into its own slot when that slot is let go.
-    #[allow(
-        dead_code,
-        reason = "read by error concealment, not yet translated (todo.txt)"
-    )]
-    pub(crate) last_pic_for_ec: Option<usize>,
 
     /// FFmpeg's `-debug pict` lines, one a slice, for the tests to hold to
     /// FFmpeg's.
@@ -544,7 +537,9 @@ impl Default for Context {
             slice_row: [0; MAX_SLICES],
             width_from_caller: 0,
             height_from_caller: 0,
-            enable_er: true,
+            er: crate::er::Er::default(),
+            pool: crate::pool::TablePool::default(),
+            holders: crate::pool::Holders::default(),
             ref2frm: Box::new([[[0; 64]; 2]; MAX_SLICES]),
             non_gray: 0,
             noref_gray: 1,
@@ -565,7 +560,6 @@ impl Default for Context {
             scans: crate::scan::ScanTables::default(),
             pixel_shift: 0,
             block_offset: [0; 2 * 48],
-            last_pic_for_ec: None,
             #[cfg(test)]
             debug: Vec::new(),
             #[cfg(test)]
@@ -712,7 +706,7 @@ impl Context {
                 *slot = Some(d);
             }
         }
-        self.pics[LAST_PIC_FOR_EC].unref();
+        self.unref_pic(LAST_PIC_FOR_EC);
         self.first_field = 0;
         self.recovery_frame = -1;
         self.frame_recovered = 0;
@@ -725,13 +719,16 @@ impl Context {
         self.delayed_pic = [None; MAX_DPB_FRAMES + 2];
         self.flush_change();
         self.sei.uninit();
-        for pic in &mut self.pics[..MAX_PICTURE_COUNT] {
-            pic.unref();
+        for slot in 0..MAX_PICTURE_COUNT {
+            self.unref_pic(slot);
         }
         self.cur_pic_ptr = None;
+        self.release_hold(crate::pool::HOLD_CUR);
         self.mb_y = 0;
         self.non_gray = 0;
+        // ff_h264_free_tables.
         self.slice_table = Vec::new();
+        self.pool.reset();
         self.context_initialized = false;
     }
 
@@ -866,6 +863,8 @@ impl Context {
             self.avctx.framerate = (den, num);
         }
 
+        // ff_h264_free_tables: the tables' pools go with the rest.
+        self.pool.reset();
         self.first_field = 0;
         self.prev_interlaced_frame = true;
         self.alloc_tables()?;
@@ -927,6 +926,12 @@ impl Context {
                 self.mb2b_xy[mb_xy] = (4 * x + 4 * y * self.b_stride) as u32;
                 self.mb2br_xy[mb_xy] = (8 * (mb_xy % row_mb_num)) as u32;
             }
+        }
+        #[allow(clippy::cast_sign_loss, reason = "macroblock counts from the SPS")]
+        {
+            self.er =
+                crate::er::Er::new(self.mb_width as usize, self.mb_height as usize, mb_stride)
+                    .ok_or(DecodeError)?;
         }
         Ok(())
     }
@@ -1063,7 +1068,7 @@ impl Context {
                 && self.pics[i].reference == 0
                 && (remove_current || Some(i) != self.cur_pic_ptr)
             {
-                self.pics[i].unref();
+                self.unref_pic(i);
             }
         }
     }
@@ -1101,6 +1106,16 @@ impl Context {
             )
         };
         let mb_stride = self.mb_stride as usize;
+        // The tables from their pools, after the frame as FFmpeg takes them.
+        let tables = self
+            .pool
+            .get(crate::pool::TableSizes {
+                qscale_table: big_mb_num + mb_stride,
+                mb_type: big_mb_num + mb_stride,
+                motion_val: b4_array_size + 4,
+                ref_index: 4 * mb_array_size,
+            })
+            .ok_or(DecodeError)?;
         let a = &self.avctx;
         // ff_decode_frame_props: the codec context's properties, and the
         // packet's, onto the new frame; an aspect ratio the coded size
@@ -1130,12 +1145,7 @@ impl Context {
         pic.props.chroma_location = a.chroma_sample_location;
         pic.props.time = self.pkt_time;
         pic.props.duration = self.pkt_duration;
-        pic.qscale_table = vec![0; big_mb_num + mb_stride];
-        pic.mb_type = vec![0; big_mb_num + mb_stride];
-        for list in 0..2 {
-            pic.motion_val[list] = vec![[0; 2]; b4_array_size + 4];
-            pic.ref_index[list] = vec![0; 4 * mb_array_size];
-        }
+        pic.put_tables(tables);
         pic.pps = self.ps.pps.clone();
         pic.mb_width = self.mb_width;
         pic.mb_height = self.mb_height;
@@ -1176,10 +1186,14 @@ impl Context {
             pic.needs_fg = i32::from(self.sei.film_grain.as_ref().is_some_and(|f| f.present));
         }
         if self.alloc_picture(slot, &sps).is_err() {
-            self.pics[slot].unref();
+            self.unref_pic(slot);
             return Err(DecodeError);
         }
         self.cur_pic_ptr = Some(slot);
+        // The decoder's view of the picture being decoded (`cur_pic`) moves
+        // to it, letting go of the last one's tables.
+        self.hold(crate::pool::HOLD_CUR, slot);
+        self.er.frame_start();
 
         // Each block's place in its macroblock, at the picture's strides.
         let strides = self.pics[slot]

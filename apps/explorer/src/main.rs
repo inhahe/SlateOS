@@ -6862,6 +6862,10 @@ impl ExplorerState {
             // An open menu owns the next press, whatever button it is and
             // wherever it lands.
             MouseEventKind::Press(_) if self.menu.is_some() => self.click_menu(m.x, m.y),
+            // The double click that follows a second press on a row that keeps
+            // the menu up -- a submenu's, a greyed one -- is the menu's too, as
+            // both presses were: it opens nothing under the menu.
+            MouseEventKind::DoubleClick(_) if self.menu.is_some() => false,
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
             }
@@ -11744,6 +11748,32 @@ mod tests {
         assert_eq!(
             state.menu.as_ref().and_then(ContextMenu::showing_reason),
             Some("A folder opens here, in the explorer: Open With is for files.")
+        );
+    }
+
+    /// **A double click on a menu row that keeps the menu up opens nothing
+    /// under it**: a folder's greyed Open with leaves the menu up, and the
+    /// double click that follows the second press is the menu's -- not a
+    /// double click on whichever folder lies behind the row.
+    #[test]
+    fn a_double_click_on_a_menu_row_opens_nothing_under_it() {
+        let scratch = temp_dir("menu_double_click");
+        let root = scratch.dir().to_path_buf();
+        for n in 0..30 {
+            fs::create_dir(root.join(format!("folder{n:02}"))).expect("make a folder");
+        }
+        let mut state = state_at(&root);
+        let _ = state.render();
+        let (x, y) = row_centre(&state, "folder03");
+        right_click(&mut state, x, y);
+        let open_with = menu_row(&state, "Open with");
+        press_at(&mut state, open_with);
+        press_at(&mut state, open_with);
+        send(&mut state, &double_click(open_with.0, open_with.1));
+        assert!(state.menu.is_some(), "the menu was put away");
+        assert_eq!(
+            state.current_path, root,
+            "the double click opened the folder under the menu"
         );
     }
 

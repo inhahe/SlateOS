@@ -3086,10 +3086,10 @@ impl NotesApp {
         // it either way: a click that dismisses a menu must not also land on
         // whatever was behind it. It is put away only when the press put it
         // away -- a row chosen, or a press outside it: a press on Move to
-        // opens the submenu and one on a greyed row does nothing, and the
-        // menu used to go after every press, so Move to could not be reached
-        // with the pointer. And it has the pointer's moves while it is up, so
-        // its rows light, its submenu opens, and a greyed row says why.
+        // opens the submenu, and one on a greyed row does nothing, so the
+        // double click that follows a second press there is the menu's too.
+        // And it has the pointer's moves while it is up, so its rows light,
+        // its submenu opens, and a greyed row says why.
         if let Some(menu) = self.note_menu.as_mut() {
             match event.kind {
                 MouseEventKind::Press(_) => {
@@ -3106,6 +3106,7 @@ impl NotesApp {
                     menu.handle_mouse_move(event.x, event.y);
                     return EventResult::Consumed;
                 }
+                MouseEventKind::DoubleClick(_) => return EventResult::Consumed,
                 _ => {}
             }
         }
@@ -8964,6 +8965,36 @@ mod tests {
         type_str(&mut app, "X");
         app.handle_event(&press(Key::Escape));
         assert_eq!(content_of(&app, id), "first line\nXsecond line");
+    }
+
+    /// **A double click on a menu row that keeps the menu up writes nothing
+    /// behind it**: the double click that follows a second press on Move to
+    /// is the menu's, as both presses were -- not a double click on the
+    /// note's text, which would start writing and select a word there.
+    #[test]
+    fn a_double_click_on_the_note_menu_writes_nothing_behind_it() {
+        let (mut app, id) = app_with_note(&"many words here ".repeat(40));
+        app.create_notebook("Personal");
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, m) = app.body_box(&note);
+        app.open_note_menu(id, left + 20.0, top + m.line_height() / 2.0);
+        let move_to = menu_row(&app, "Move to");
+        assert!(
+            app.body_at(move_to.0, move_to.1).is_some(),
+            "the row is not over the note's text"
+        );
+        pointer(&mut app, move_to, MouseEventKind::Press(MouseButton::Left));
+        pointer(&mut app, move_to, MouseEventKind::Press(MouseButton::Left));
+        pointer(
+            &mut app,
+            move_to,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        );
+        assert_eq!(
+            app.writing(),
+            None,
+            "the double click started writing behind the menu"
+        );
     }
 
     /// A double click on the text selects the word under it, and typing

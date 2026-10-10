@@ -1648,6 +1648,15 @@ TABLES = {
     "fileops.rs": FILEOPS,
 }
 
+MAIN += [
+    (
+        "a double click reaches a file under a menu that stays up",
+        "            MouseEventKind::DoubleClick(_) if self.menu.is_some() => false,\n",
+        "",
+        ["a_double_click_on_a_menu_row_opens_nothing_under_it"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     names = [name for rows in TABLES.values() for name, *_ in rows]

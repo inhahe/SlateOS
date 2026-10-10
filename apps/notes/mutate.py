@@ -657,6 +657,15 @@ MUTATIONS += [
     ),
 ]
 
+MUTATIONS += [
+    (
+        "a double click on the note menu reaches the note behind it",
+        "                MouseEventKind::DoubleClick(_) => return EventResult::Consumed,\n",
+        "",
+        ["a_double_click_on_the_note_menu_writes_nothing_behind_it"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "notes", timeout=900, only=only))

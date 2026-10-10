@@ -614,6 +614,23 @@ MUTATIONS += [
     ),
 ]
 
+# 2026-10-09: JSON lines are read with the applications' one reader
+# (`apps/jsonvalue`), each value as the line wrote it.
+MUTATIONS += [
+    (
+        "a string is shown with its quotes and escapes",
+        "                jsonvalue::JsonValue::Str(text) => text,\n",
+        "                jsonvalue::JsonValue::Str(_) => member.text.to_owned(),\n",
+        ["a_string_value_is_read_with_its_escapes"],
+    ),
+    (
+        "a number is shown as an f64 reads it",
+        "                _ => member.text.to_owned(),\n",
+        "                other => other.to_string(),\n",
+        ["a_value_is_shown_as_the_line_wrote_it"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "logviewer", timeout=900, only=only))

@@ -47,10 +47,34 @@ MUTATIONS = [
     ),
     (
         "an object does not count as a level",
-        "fn parse_object(input: &str, depth: usize) -> Result<(JsonValue, &str), String> {\n"
+        "fn parse_members(input: &str, depth: usize) -> Result<Members<'_>, String> {\n"
         "    let depth = deeper(depth)?;\n",
-        "fn parse_object(input: &str, depth: usize) -> Result<(JsonValue, &str), String> {\n",
+        "fn parse_members(input: &str, depth: usize) -> Result<Members<'_>, String> {\n",
         [NESTING],
+    ),
+    (
+        "a member's text is the rest of the document",
+        "            .get(..start.len().saturating_sub(rest.len()))\n",
+        "            .get(..start.len())\n",
+        ["an_objects_members_come_with_their_text_as_written"],
+    ),
+    (
+        "a member's text loses its first character",
+        "        let start = after_colon.trim_start();\n",
+        "        let start = after_colon.trim_start();\n        let start = start.get(1..).unwrap_or_default();\n",
+        ["an_objects_members_come_with_their_text_as_written"],
+    ),
+    (
+        "more after the object is read as nothing",
+        "    let (members, rest) = parse_members(trimmed, 0)?;\n    if !rest.trim().is_empty() {",
+        "    let (members, rest) = parse_members(trimmed, 0)?;\n    if false && !rest.trim().is_empty() {",
+        ["object_members_refuses_what_is_not_one_object"],
+    ),
+    (
+        "an array is read as an object",
+        "    if !trimmed.starts_with('{') {\n        return Err(\"not an object\".to_string());\n    }\n",
+        "",
+        ["object_members_refuses_what_is_not_one_object"],
     ),
     (
         "a key is written bare in a document on one line",

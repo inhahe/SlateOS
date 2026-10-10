@@ -418,14 +418,63 @@ fn deeper(depth: usize) -> Result<usize, String> {
     }
 }
 
-fn parse_object(input: &str, depth: usize) -> Result<(JsonValue, &str), String> {
+/// A member of an object as the document wrote it ([`object_members`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member<'a> {
+    /// Its name.
+    pub key: String,
+    /// Its value, as read.
+    pub value: JsonValue,
+    /// Its value exactly as the document wrote it: `1.50`,
+    /// `1700000000123456789`, `{"a": [1, 2]}`, `"aA"` with its quotes
+    /// and escapes.
+    pub text: &'a str,
+}
+
+/// The members of the one object `input` is, in the order written, each with
+/// its value's own text.
+///
+/// For a reader that shows what was written rather than what it reads as.
+/// A number is read as an `f64`, so `1.50` reads back as `1.5`, and a 64-bit
+/// id or a nanosecond time past 2^53 reads back rounded -- a log viewer
+/// showing `1700000000123456800` for `1700000000123456789` would show a
+/// different id. [`Member::text`] is the value as written; the grammar is
+/// [`json_parse`]'s, so what one accepts the other does.
+///
+/// # Errors
+///
+/// As [`json_parse`]; and a document that is JSON but not an object.
+pub fn object_members(input: &str) -> Result<Vec<Member<'_>>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("empty input".to_string());
+    }
+    if !trimmed.starts_with('{') {
+        return Err("not an object".to_string());
+    }
+    let (members, rest) = parse_members(trimmed, 0)?;
+    if !rest.trim().is_empty() {
+        let shown: String = rest.chars().take(20).collect();
+        return Err(format!("trailing characters: {shown:?}"));
+    }
+    Ok(members
+        .into_iter()
+        .map(|(key, value, text)| Member { key, value, text })
+        .collect())
+}
+
+/// An object's members, each with its value's text, and what follows the
+/// object. `input` starts with its `{`.
+type Members<'a> = (Vec<(String, JsonValue, &'a str)>, &'a str);
+
+fn parse_members(input: &str, depth: usize) -> Result<Members<'_>, String> {
     let depth = deeper(depth)?;
-    let mut s = &input[1..]; // skip '{'
-    let mut entries = Vec::new();
+    let mut s = input.get(1..).unwrap_or_default(); // skip '{'
+    let mut members = Vec::new();
 
     s = s.trim_start();
     if let Some(rest) = s.strip_prefix('}') {
-        return Ok((JsonValue::Object(entries), rest));
+        return Ok((members, rest));
     }
 
     loop {
@@ -439,18 +488,33 @@ fn parse_object(input: &str, depth: usize) -> Result<(JsonValue, &str), String> 
         let Some(after_colon) = s.strip_prefix(':') else {
             return Err("expected ':'".to_string());
         };
-        s = after_colon;
-        let (val, rest) = parse_value(s, depth)?;
-        entries.push((key, val));
+        let start = after_colon.trim_start();
+        let (val, rest) = parse_value(start, depth)?;
+        // `rest` is what `start` had left after the value, so the value is
+        // the part before it -- ending on a character boundary, since `rest`
+        // begins on one.
+        let text = start
+            .get(..start.len().saturating_sub(rest.len()))
+            .unwrap_or_default();
+        members.push((key, val, text));
         s = rest.trim_start();
         if let Some(rest) = s.strip_prefix('}') {
-            return Ok((JsonValue::Object(entries), rest));
+            return Ok((members, rest));
         }
         let Some(after_comma) = s.strip_prefix(',') else {
             return Err("expected ',' or '}'".to_string());
         };
         s = after_comma;
     }
+}
+
+fn parse_object(input: &str, depth: usize) -> Result<(JsonValue, &str), String> {
+    let (members, rest) = parse_members(input, depth)?;
+    let entries = members
+        .into_iter()
+        .map(|(key, value, _)| (key, value))
+        .collect();
+    Ok((JsonValue::Object(entries), rest))
 }
 
 fn parse_array(input: &str, depth: usize) -> Result<(JsonValue, &str), String> {
@@ -761,5 +825,54 @@ mod tests {
         assert_eq!(n(f64::INFINITY), None);
         assert_eq!(n(1e20), None);
         assert_eq!(JsonValue::Str("5".to_string()).as_u64(), None);
+    }
+
+    /// **Each member's value comes with its own text, as written**: a number
+    /// past an `f64`'s exact range, or with a trailing zero, is there as the
+    /// document has it, and a nested value is its whole text.
+    #[test]
+    fn an_objects_members_come_with_their_text_as_written() {
+        let members = object_members(
+            r#" {"id": 1700000000123456789, "ratio":1.50, "tags":[1, 2], "s":"aA", "n":null} "#,
+        )
+        .unwrap();
+        let texts: Vec<(&str, &str)> = members.iter().map(|m| (m.key.as_str(), m.text)).collect();
+        assert_eq!(
+            texts,
+            [
+                ("id", "1700000000123456789"),
+                ("ratio", "1.50"),
+                ("tags", "[1, 2]"),
+                ("s", r#""aA""#),
+                ("n", "null"),
+            ]
+        );
+        assert_eq!(members[3].value, JsonValue::Str("aA".to_string()));
+        assert_eq!(members[1].value.as_f64(), Some(1.5));
+        // The same document through `json_parse` reads the same.
+        let JsonValue::Object(entries) = json_parse(r#"{"a":[1,{"b":2}]}"#).unwrap() else {
+            panic!("not an object");
+        };
+        let members = object_members(r#"{"a":[1,{"b":2}]}"#).unwrap();
+        assert_eq!(entries[0].1, members[0].value);
+    }
+
+    /// What `json_parse` refuses this does, and a document that is not an
+    /// object.
+    #[test]
+    fn object_members_refuses_what_is_not_one_object() {
+        assert!(object_members("").is_err());
+        assert!(object_members("[1]").is_err());
+        assert!(
+            object_members(r#"["a":1}"#).is_err(),
+            "read as an object for its members, the first character unread"
+        );
+        assert!(
+            object_members(r#"{"a":1 "b":2}"#).is_err(),
+            "a comma left out"
+        );
+        assert!(object_members(r#"{"a":1} and more"#).is_err());
+        assert!(object_members(r#"{"a":"#).is_err(), "cut short");
+        assert_eq!(object_members(" {} ").unwrap(), Vec::new());
     }
 }

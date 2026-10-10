@@ -99,6 +99,76 @@ MUTATIONS = [
     ),
 ]
 
+# What every program's save now rests on and no row covered (2026-10-10):
+# the merge when this window moved records about, what a stamp compares, and
+# the count past sixty-four clashes.
+REORDERED = "a_reordered_merge_keeps_both_windows_changes"
+STAMP = "a_stamp_changes_when_the_file_is_written"
+STAMP_PARTS = "a_stamp_tells_a_write_by_its_length_or_its_time"
+
+MUTATIONS += [
+    (
+        "a reordered merge takes the file's copy of a record changed here",
+        "            if changed_here(&k) {\n"
+        "                result.push(record.clone());\n"
+        "            } else if let Some(theirs) = theirs_by.get(&k) {",
+        "            if false {\n"
+        "                result.push(record.clone());\n"
+        "            } else if let Some(theirs) = theirs_by.get(&k) {",
+        [REORDERED],
+    ),
+    (
+        "a reordered merge brings back what another window deleted",
+        "            } else if let Some(theirs) = theirs_by.get(&k) {\n"
+        "                result.push(theirs.clone());\n"
+        "            }",
+        "            } else {\n"
+        "                result.push(theirs_by.get(&k).unwrap_or(record).clone());\n"
+        "            }",
+        [REORDERED],
+    ),
+    (
+        "a reordered merge loses what only the file has",
+        "        for record in theirs {\n"
+        "            let k = key(record);\n"
+        "            if !mine_by.contains_key(&k) && !deleted_here(&k) {",
+        "        for record in theirs.iter().take(0) {\n"
+        "            let k = key(record);\n"
+        "            if !mine_by.contains_key(&k) && !deleted_here(&k) {",
+        [REORDERED, ORDER],
+    ),
+    (
+        "a reordered merge brings back what was deleted here",
+        "            if !mine_by.contains_key(&k) && !deleted_here(&k) {",
+        "            if !mine_by.contains_key(&k) {",
+        [REORDERED],
+    ),
+    (
+        "a stamp ignores the length",
+        "                len: meta.len(),",
+        "                len: 0,",
+        [STAMP_PARTS],
+    ),
+    (
+        "a stamp ignores the time",
+        "                modified: meta.modified().ok(),",
+        "                modified: None,",
+        [STAMP_PARTS],
+    ),
+    (
+        "a missing file is an error",
+        "            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),\n",
+        "",
+        [STAMP],
+    ),
+    (
+        "past sixty-four clashes an id in use is given",
+        "        .find(|id| !taken(*id))",
+        "        .find(|_| true)",
+        [IDS],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "recordfile", timeout=300, only=only))

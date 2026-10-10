@@ -556,6 +556,27 @@ mod tests {
         assert_eq!(texts(&merge(&base, &mine, &theirs))[0], "first here");
     }
 
+    /// **A window that moved records about keeps every other rule too:** its
+    /// edit stands and its deletion stays; another window's edit, deletion
+    /// and addition stand, the addition at the end.
+    #[test]
+    fn a_reordered_merge_keeps_both_windows_changes() {
+        let base = vec![n(1, "a"), n(2, "b"), n(3, "c"), n(4, "d")];
+        // Here: c moved to the front and edited, d deleted.
+        let mine = vec![n(3, "c edited here"), n(1, "a"), n(2, "b")];
+        // There: a deleted, b edited, e added.
+        let theirs = vec![
+            n(2, "b edited there"),
+            n(3, "c"),
+            n(4, "d"),
+            n(5, "e from there"),
+        ];
+        assert_eq!(
+            texts(&merge(&base, &mine, &theirs)),
+            ["c edited here", "b edited there", "e from there"]
+        );
+    }
+
     /// Nothing changed here: the file is taken as it is.
     #[test]
     fn a_window_that_changed_nothing_takes_the_file_as_it_is() {
@@ -601,6 +622,45 @@ mod tests {
         assert_eq!(Stamp::of(&path).unwrap(), Some(first));
         fs::write(&path, "three").unwrap();
         assert_ne!(Stamp::of(&path).unwrap(), Some(first));
+    }
+
+    /// The length and the time each tell a write apart on their own: a
+    /// write of the same length is told by its time, and one inside the
+    /// same clock tick by its length. Written in place, as by a program that
+    /// does not rename, so the file stays the same file.
+    #[test]
+    fn a_stamp_tells_a_write_by_its_length_or_its_time() {
+        use std::time::Duration;
+        let scratch = scratchdir::ScratchDir::new("recordfile_stamp_parts");
+        let path = scratch.dir().join("data.txt");
+        let at = |when: SystemTime| {
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        };
+        let then = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::write(&path, "one").unwrap();
+        at(then);
+        let first = Stamp::of(&path).unwrap().unwrap();
+
+        fs::write(&path, "two").unwrap();
+        at(then + Duration::from_mins(1));
+        let same_length = Stamp::of(&path).unwrap().unwrap();
+        assert_ne!(
+            same_length, first,
+            "a write of the same length was not told"
+        );
+
+        fs::write(&path, "three").unwrap();
+        at(then + Duration::from_mins(1));
+        let same_time = Stamp::of(&path).unwrap().unwrap();
+        assert_ne!(
+            same_time, same_length,
+            "a write in the same tick was not told"
+        );
     }
 
     #[test]

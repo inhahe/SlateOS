@@ -722,35 +722,31 @@ impl PongApp {
         self.height = height.max(1.0);
     }
 
-    /// Whether an action would do anything in the state the game is in.
+    /// Why `action` cannot be done now, in a sentence for the player; `None`
+    /// when it can. The one answer to whether a button is live, so no button
+    /// is greyed without a reason to give.
     ///
     /// A button for something that cannot happen is drawn dim rather than
     /// hidden: a control that vanishes is a control the player has to find
     /// again, and the footer would change width as the game changed state.
-    fn enabled(&self, action: Action) -> bool {
+    fn refusal(&self, action: Action) -> Option<&'static str> {
         match action {
-            Action::NewGame => true,
-            Action::PauseToggle => {
-                matches!(self.state, GameState::Playing | GameState::Paused)
-            }
+            Action::NewGame => None,
+            Action::PauseToggle => match self.state {
+                GameState::Playing | GameState::Paused => None,
+                GameState::Menu => Some("No game is under way yet: start one to pause it."),
+                GameState::GameOver => Some("The game is over: start a new one to play again."),
+            },
         }
     }
 
     /// Why the button `target` is greyed now, in a sentence for the player;
-    /// `None` when it is not. A button is greyed exactly when
-    /// [`enabled`](Self::enabled) refuses what it does.
+    /// `None` when it is not ([`refusal`](Self::refusal)).
     fn why_greyed(&self, target: Target) -> Option<&'static str> {
         let Target::Button(action) = target else {
             return None;
         };
-        if self.enabled(action) {
-            return None;
-        }
-        match self.state {
-            GameState::Menu => Some("No game is under way yet: start one to pause it."),
-            GameState::GameOver => Some("The game is over: start a new one to play again."),
-            GameState::Playing | GameState::Paused => None,
-        }
+        self.refusal(action)
     }
 
     // ── Drawing ─────────────────────────────────────────────────────
@@ -1963,7 +1959,7 @@ mod tests {
         // letting it fall through would hand the click to whatever lies behind,
         // and a button you can see is a button that has been clicked.
         let mut app = PongApp::new();
-        assert!(!app.enabled(Action::PauseToggle));
+        assert!(app.refusal(Action::PauseToggle).is_some());
         assert_eq!(
             probe::click(&mut app, Target::Button(Action::PauseToggle)),
             EventResult::Consumed

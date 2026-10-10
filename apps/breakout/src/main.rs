@@ -996,27 +996,32 @@ impl BreakoutApp {
     /// box, so that a click on it stops there instead of falling through to
     /// whatever happens to be behind it.
     fn enabled(&self, action: Action) -> bool {
+        self.refusal(action).is_none()
+    }
+
+    /// Why `action` cannot be done now, in a sentence for the player; `None`
+    /// when it can. The one answer to whether a button is live: [`enabled`]
+    /// is its absence, so no button is greyed without a reason to give.
+    ///
+    /// [`enabled`]: Self::enabled
+    fn refusal(&self, action: Action) -> Option<&'static str> {
         match action {
-            Action::NewGame => true,
-            Action::PauseToggle => matches!(self.state, GameState::Playing | GameState::Paused),
+            Action::NewGame => None,
+            Action::PauseToggle => match self.state {
+                GameState::Playing | GameState::Paused => None,
+                GameState::Menu => Some("No game is under way yet: start one to pause it."),
+                GameState::GameOver => Some("The game is over: start a new one to play again."),
+            },
         }
     }
 
     /// Why the button `target` is greyed now, in a sentence for the player;
-    /// `None` when it is not. A button is greyed exactly when
-    /// [`enabled`](Self::enabled) refuses what it does.
+    /// `None` when it is not ([`refusal`](Self::refusal)).
     fn why_greyed(&self, target: Target) -> Option<&'static str> {
         let Target::Button(action) = target else {
             return None;
         };
-        if self.enabled(action) {
-            return None;
-        }
-        match self.state {
-            GameState::Menu => Some("No game is under way yet: start one to pause it."),
-            GameState::GameOver => Some("The game is over: start a new one to play again."),
-            GameState::Playing | GameState::Paused => None,
-        }
+        self.refusal(action)
     }
 
     /// Carry out `action`. Returns whether anything changed.

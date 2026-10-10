@@ -1,5 +1,5 @@
 //! Tests of the Font Manager's window, over a machine's fonts built in a
-//! scratch folder (`library::tests::Machine`).
+//! scratch folder (`library::tests::ScratchFonts`).
 
 #![allow(
     clippy::unwrap_used,
@@ -11,10 +11,10 @@
 )]
 
 use super::*;
-use crate::library::tests::{Machine, font};
+use crate::library::tests::{ScratchFonts, test_font};
 use guitk::event::Modifiers;
 
-fn manager(machine: &Machine) -> FontManager {
+fn manager(machine: &ScratchFonts) -> FontManager {
     FontManager::new(machine.places())
 }
 
@@ -82,7 +82,7 @@ fn press(state: &mut FontManager, rect: Rect) -> EventResult {
 /// status line.
 #[test]
 fn the_list_is_the_machines_fonts() {
-    let machine = Machine::new("fontmanager-window-list");
+    let machine = ScratchFonts::new("fontmanager-window-list");
     let state = manager(&machine);
     assert_eq!(names(&state), ["Alpha", "Beta", "Gamma"]);
     assert_eq!(state.chosen().map(|f| f.name.as_str()), Some("Alpha"));
@@ -103,7 +103,7 @@ fn the_list_is_the_machines_fonts() {
 /// each with how many, and the choice follows what is shown.
 #[test]
 fn the_sidebar_filters_the_list() {
-    let machine = Machine::new("fontmanager-window-filters");
+    let machine = ScratchFonts::new("fontmanager-window-filters");
     let mut state = manager(&machine);
     let filters = state.layout().filters;
     press(&mut state, filters[1].0);
@@ -130,7 +130,7 @@ fn the_sidebar_filters_the_list() {
 /// it.
 #[test]
 fn the_search_box_finds_fonts_by_name() {
-    let machine = Machine::new("fontmanager-window-search");
+    let machine = ScratchFonts::new("fontmanager-window-search");
     let mut state = manager(&machine);
     state.handle_event(&ctrl(Key::F));
     assert!(state.search_focused);
@@ -168,7 +168,7 @@ fn the_search_box_finds_fonts_by_name() {
 /// row chooses it.
 #[test]
 fn the_keys_and_the_pointer_choose_a_font() {
-    let machine = Machine::new("fontmanager-window-keys");
+    let machine = ScratchFonts::new("fontmanager-window-keys");
     let mut state = manager(&machine);
     let chosen = |state: &FontManager| state.chosen().map(|f| f.name.clone());
     state.handle_event(&key(Key::Down));
@@ -199,7 +199,7 @@ fn the_keys_and_the_pointer_choose_a_font() {
 /// user's own, saying why not for the system's.
 #[test]
 fn the_panel_says_what_the_font_is() {
-    let machine = Machine::new("fontmanager-window-panel");
+    let machine = ScratchFonts::new("fontmanager-window-panel");
     let mut state = manager(&machine);
     let drawn = texts(&state);
     for said in ["Regular, Bold", "No", "The system's"] {
@@ -241,7 +241,7 @@ fn the_panel_says_what_the_font_is() {
 /// font is chosen or the colours change, and not made again for nothing.
 #[test]
 fn the_font_chosen_is_shown_in_its_own_letters() {
-    let machine = Machine::new("fontmanager-window-preview");
+    let machine = ScratchFonts::new("fontmanager-window-preview");
     let mut state = manager(&machine);
     let tree = App::render(&mut state, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
     let uploads: Vec<u64> = App::take_images(&mut state)
@@ -309,11 +309,11 @@ fn the_font_chosen_is_shown_in_its_own_letters() {
 /// is refused with why, and nothing is written.
 #[test]
 fn a_font_file_is_installed_from_the_picker() {
-    let machine = Machine::new("fontmanager-window-install");
+    let machine = ScratchFonts::new("fontmanager-window-install");
     let mut state = manager(&machine);
     state.handle_event(&ctrl(Key::O));
     assert!(state.dialog.is_some(), "Ctrl+O put no picker up");
-    let from = machine.download("Delta.ttf", &font("Delta", false, false, false));
+    let from = machine.download("Delta.ttf", &test_font("Delta", false, false, false));
     state.apply_dialog_answer(DialogAction::Selected(from));
     assert!(state.dialog.is_none());
     assert!(
@@ -350,7 +350,7 @@ fn a_font_file_is_installed_from_the_picker() {
 /// the system's is not offered.
 #[test]
 fn your_font_is_removed_after_asking() {
-    let machine = Machine::new("fontmanager-window-remove");
+    let machine = ScratchFonts::new("fontmanager-window-remove");
     let gamma = machine.own.join("Gamma.ttf");
     let mut state = manager(&machine);
 
@@ -392,7 +392,7 @@ fn your_font_is_removed_after_asking() {
     );
 
     // Enter answers yes.
-    let again = machine.download("Gamma.ttf", &font("Gamma", false, true, false));
+    let again = machine.download("Gamma.ttf", &test_font("Gamma", false, true, false));
     state.apply_dialog_answer(DialogAction::Selected(again));
     state.handle_event(&key(Key::Delete));
     assert!(state.confirm.is_some());
@@ -403,11 +403,11 @@ fn your_font_is_removed_after_asking() {
 /// **A long list scrolls under the wheel**, and no further than its rows.
 #[test]
 fn a_long_list_scrolls() {
-    let machine = Machine::new("fontmanager-window-scroll");
+    let machine = ScratchFonts::new("fontmanager-window-scroll");
     for n in 0..40 {
         std::fs::write(
             machine.system.join(format!("Many{n:02}.ttf")),
-            font(&format!("Many {n:02}"), false, false, false),
+            test_font(&format!("Many {n:02}"), false, false, false),
         )
         .unwrap();
     }
@@ -452,7 +452,7 @@ fn every_advertised_key_does_something() {
     for (label, what) in SHORTCUTS {
         for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
             let answered = (0..3).any(|setup| {
-                let machine = Machine::new("fontmanager-window-card");
+                let machine = ScratchFonts::new("fontmanager-window-card");
                 let mut state = manager(&machine);
                 match setup {
                     // The user's own font chosen, for Delete.
@@ -480,7 +480,7 @@ fn every_advertised_key_does_something() {
 /// without reaching what is under it.
 #[test]
 fn the_card_is_modal() {
-    let machine = Machine::new("fontmanager-window-card-modal");
+    let machine = ScratchFonts::new("fontmanager-window-card-modal");
     let mut state = manager(&machine);
     state.handle_event(&key(Key::F1));
     assert!(state.show_help);

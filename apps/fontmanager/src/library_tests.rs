@@ -17,12 +17,12 @@ use super::*;
 /// smallest font the index takes -- it reads the family from `name`, the
 /// style from `head` where there is no `OS/2`, and the pitch from `post` --
 /// laid out as `osfont::testing::colour_face` lays out its tables.
-pub(crate) fn font(family: &str, bold: bool, italic: bool, fixed: bool) -> Vec<u8> {
+pub(crate) fn test_font(family: &str, bold: bool, italic: bool, fixed: bool) -> Vec<u8> {
     named_font(&[(name_id::FAMILY, family)], bold, italic, fixed)
 }
 
 /// [`font`] with the names given: `(name id, name)` each.
-pub(crate) fn named_font(names: &[(u16, &str)], bold: bool, italic: bool, fixed: bool) -> Vec<u8> {
+fn named_font(names: &[(u16, &str)], bold: bool, italic: bool, fixed: bool) -> Vec<u8> {
     let square = {
         let mut g = Vec::new();
         for v in [1i16, 100, 0, 200, 100] {
@@ -132,7 +132,7 @@ fn assemble(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
 
 /// A machine's fonts in a scratch folder: the system's -- Alpha in two
 /// styles, fixed-pitch Beta -- and the user's own folder, holding Gamma.
-pub(crate) struct Machine {
+pub(crate) struct ScratchFonts {
     _dir: scratchdir::ScratchDir,
     /// The system's fonts folder.
     pub system: PathBuf,
@@ -142,7 +142,7 @@ pub(crate) struct Machine {
     pub downloads: PathBuf,
 }
 
-impl Machine {
+impl ScratchFonts {
     pub(crate) fn new(tag: &str) -> Self {
         let dir = scratchdir::ScratchDir::new(tag);
         let system = dir.dir().join("system");
@@ -153,20 +153,24 @@ impl Machine {
         }
         std::fs::write(
             system.join("Alpha-Regular.ttf"),
-            font("Alpha", false, false, false),
+            test_font("Alpha", false, false, false),
         )
         .unwrap();
         std::fs::write(
             system.join("Alpha-Bold.ttf"),
-            font("Alpha", true, false, false),
+            test_font("Alpha", true, false, false),
         )
         .unwrap();
         std::fs::write(
             system.join("Beta-Mono.ttf"),
-            font("Beta", false, false, true),
+            test_font("Beta", false, false, true),
         )
         .unwrap();
-        std::fs::write(own.join("Gamma.ttf"), font("Gamma", false, true, false)).unwrap();
+        std::fs::write(
+            own.join("Gamma.ttf"),
+            test_font("Gamma", false, true, false),
+        )
+        .unwrap();
         Self {
             _dir: dir,
             system,
@@ -198,7 +202,7 @@ fn names(library: &Library) -> Vec<String> {
 /// styles, whether it is fixed-pitch, and whose it is -- and nothing else.
 #[test]
 fn the_fonts_listed_are_the_ones_in_the_folders() {
-    let machine = Machine::new("fontmanager-listed");
+    let machine = ScratchFonts::new("fontmanager-listed");
     let library = Library::scan(machine.places());
     assert_eq!(names(&library), ["Alpha", "Beta", "Gamma"]);
     let alpha = library.family("alpha").expect("found in any case");
@@ -219,13 +223,13 @@ fn the_fonts_listed_are_the_ones_in_the_folders() {
 /// is not there yet -- and is listed as theirs at once.
 #[test]
 fn a_font_file_is_installed_into_your_fonts_folder() {
-    let machine = Machine::new("fontmanager-install");
+    let machine = ScratchFonts::new("fontmanager-install");
     let fresh = machine.own.parent().unwrap().join("new-fonts");
     let mut places = machine.places();
     places.own = Some(fresh.clone());
     places.dirs.push(fresh.clone());
     let mut library = Library::scan(places);
-    let from = machine.download("Delta-Bold.otf", &font("Delta", true, false, false));
+    let from = machine.download("Delta-Bold.otf", &test_font("Delta", true, false, false));
     let installed = library.install(&from).expect("installed");
     assert_eq!(installed.family, "Delta");
     assert_eq!(installed.style, "Bold");
@@ -244,12 +248,12 @@ fn a_font_file_is_installed_into_your_fonts_folder() {
 /// written beside the first, as `Name (2)`.
 #[test]
 fn a_second_file_of_the_same_name_is_written_beside_the_first() {
-    let machine = Machine::new("fontmanager-same-name");
+    let machine = ScratchFonts::new("fontmanager-same-name");
     let mut library = Library::scan(machine.places());
-    let first = machine.download("Delta.ttf", &font("Delta", false, false, false));
+    let first = machine.download("Delta.ttf", &test_font("Delta", false, false, false));
     library.install(&first).unwrap();
     std::fs::remove_file(&first).unwrap();
-    let second = machine.download("Delta.ttf", &font("Delta", true, false, false));
+    let second = machine.download("Delta.ttf", &test_font("Delta", true, false, false));
     let installed = library
         .install(&second)
         .expect("the bold one is another style");
@@ -268,9 +272,9 @@ fn a_second_file_of_the_same_name_is_written_beside_the_first() {
 /// the system has is the user's to install over it.
 #[test]
 fn the_same_family_and_style_is_not_installed_twice() {
-    let machine = Machine::new("fontmanager-twice");
+    let machine = ScratchFonts::new("fontmanager-twice");
     let mut library = Library::scan(machine.places());
-    let gamma = machine.download("Gamma-copy.ttf", &font("Gamma", false, true, false));
+    let gamma = machine.download("Gamma-copy.ttf", &test_font("Gamma", false, true, false));
     let refused = library.install(&gamma).unwrap_err();
     assert!(
         matches!(&refused, InstallError::AlreadyInstalled { family, style } if family == "Gamma" && style == "Italic"),
@@ -280,7 +284,7 @@ fn the_same_family_and_style_is_not_installed_twice() {
         refused.to_string(),
         "you have Gamma Italic installed already"
     );
-    let alpha = machine.download("Alpha-mine.ttf", &font("Alpha", false, false, false));
+    let alpha = machine.download("Alpha-mine.ttf", &test_font("Alpha", false, false, false));
     library
         .install(&alpha)
         .expect("the system's Alpha is not the user's");
@@ -292,11 +296,11 @@ fn the_same_family_and_style_is_not_installed_twice() {
 /// and a machine with no home folder.
 #[test]
 fn what_is_not_a_font_is_refused_and_nothing_is_written() {
-    let machine = Machine::new("fontmanager-refused");
+    let machine = ScratchFonts::new("fontmanager-refused");
     let mut library = Library::scan(machine.places());
     let before: Vec<_> = std::fs::read_dir(&machine.own).unwrap().collect();
 
-    let text = machine.download("notes.txt", &font("Delta", false, false, false));
+    let text = machine.download("notes.txt", &test_font("Delta", false, false, false));
     assert!(matches!(
         library.install(&text),
         Err(InstallError::NotAFontName)
@@ -326,7 +330,7 @@ fn what_is_not_a_font_is_refused_and_nothing_is_written() {
     let mut homeless = machine.places();
     homeless.own = None;
     let mut library = Library::scan(homeless);
-    let delta = machine.download("Delta.ttf", &font("Delta", false, false, false));
+    let delta = machine.download("Delta.ttf", &test_font("Delta", false, false, false));
     assert!(matches!(
         library.install(&delta),
         Err(InstallError::NoFontsFolder)
@@ -336,7 +340,7 @@ fn what_is_not_a_font_is_refused_and_nothing_is_written() {
 /// **The user's own fonts are removed, and the system's are not.**
 #[test]
 fn your_fonts_are_removed_and_the_systems_are_not() {
-    let machine = Machine::new("fontmanager-remove");
+    let machine = ScratchFonts::new("fontmanager-remove");
     let mut library = Library::scan(machine.places());
     assert_eq!(library.remove("Gamma").expect("removed"), 1);
     assert!(!machine.own.join("Gamma.ttf").exists());
@@ -352,7 +356,7 @@ fn your_fonts_are_removed_and_the_systems_are_not() {
     ));
 
     // A family that is partly the user's loses only their faces.
-    let mine = machine.download("Alpha-mine.ttf", &font("Alpha", true, true, false));
+    let mine = machine.download("Alpha-mine.ttf", &test_font("Alpha", true, true, false));
     library.install(&mine).unwrap();
     assert_eq!(library.remove("Alpha").expect("the user's face"), 1);
     assert_eq!(
@@ -364,7 +368,7 @@ fn your_fonts_are_removed_and_the_systems_are_not() {
 /// **A file holding two families is said to take the other with it.**
 #[test]
 fn a_file_another_family_shares_is_named() {
-    let machine = Machine::new("fontmanager-sharing");
+    let machine = ScratchFonts::new("fontmanager-sharing");
     std::fs::write(
         machine.own.join("Pair.ttf"),
         named_font(

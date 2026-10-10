@@ -97,7 +97,10 @@ mod tests {
     #[test]
     fn a_line_is_drawn_in_the_familys_own_glyphs() {
         let face = Arc::new(
-            Face::parse(crate::library::tests::font("Alpha", false, false, false)).unwrap(),
+            Face::parse(crate::library::tests::test_font(
+                "Alpha", false, false, false,
+            ))
+            .unwrap(),
         );
         let picture = line(&face, "AAA", 100.0, 200, PAPER, INK).expect("drawn");
         assert_eq!(picture.width, 200);
@@ -113,7 +116,10 @@ mod tests {
         );
 
         let face = Arc::new(
-            Face::parse(crate::library::tests::font("Alpha", false, false, false)).unwrap(),
+            Face::parse(crate::library::tests::test_font(
+                "Alpha", false, false, false,
+            ))
+            .unwrap(),
         );
         let blank = line(&face, "zzz", 100.0, 200, PAPER, INK).expect("drawn");
         assert!(
@@ -127,14 +133,20 @@ mod tests {
     #[test]
     fn the_picture_is_one_line_tall() {
         let face = Arc::new(
-            Face::parse(crate::library::tests::font("Alpha", false, false, false)).unwrap(),
+            Face::parse(crate::library::tests::test_font(
+                "Alpha", false, false, false,
+            ))
+            .unwrap(),
         );
         // The test font: 800 up and 200 down in 1000 units, at 50 pixels to
         // the em -- 40 and 10 -- and four pixels of room either side.
         let picture = line(&face, "A", 50.0, 100, PAPER, INK).expect("drawn");
         assert_eq!(picture.height, 58);
         let face = Arc::new(
-            Face::parse(crate::library::tests::font("Alpha", false, false, false)).unwrap(),
+            Face::parse(crate::library::tests::test_font(
+                "Alpha", false, false, false,
+            ))
+            .unwrap(),
         );
         assert!(line(&face, "A", 50.0, 0, PAPER, INK).is_none());
     }

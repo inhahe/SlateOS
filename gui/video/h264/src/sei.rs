@@ -56,7 +56,18 @@ const ALTERNATIVE_TRANSFER: u32 = 147;
 /// `SEI_TYPE_AMBIENT_VIEWING_ENVIRONMENT`.
 const AMBIENT_VIEWING_ENVIRONMENT: u32 = 148;
 
-/// `H264_SEI_PIC_STRUCT_FRAME_TRIPLING`, the last picture structure.
+/// `H264_SEI_PIC_STRUCT_*`: how a picture is to be shown -- a frame, one
+/// field, two fields in either order, three (telecine), or a frame shown
+/// two or three times.
+pub(crate) const PIC_STRUCT_FRAME: u32 = 0;
+pub(crate) const PIC_STRUCT_TOP_FIELD: u32 = 1;
+pub(crate) const PIC_STRUCT_BOTTOM_FIELD: u32 = 2;
+pub(crate) const PIC_STRUCT_TOP_BOTTOM: u32 = 3;
+pub(crate) const PIC_STRUCT_BOTTOM_TOP: u32 = 4;
+pub(crate) const PIC_STRUCT_TOP_BOTTOM_TOP: u32 = 5;
+pub(crate) const PIC_STRUCT_BOTTOM_TOP_BOTTOM: u32 = 6;
+pub(crate) const PIC_STRUCT_FRAME_DOUBLING: u32 = 7;
+/// The last picture structure.
 pub(crate) const PIC_STRUCT_FRAME_TRIPLING: u32 = 8;
 /// How many clock timestamps each picture structure has
 /// (`sei_num_clock_ts_table`).
@@ -152,16 +163,33 @@ impl Default for FilmGrain {
 
 /// A frame packing arrangement message: how a stereo pair is packed into
 /// one picture (`H2645SEIFramePacking`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FramePacking {
     pub(crate) present: bool,
     pub(crate) arrangement_id: u32,
-    pub(crate) arrangement_cancel_flag: u32,
+    /// -1 until a message says, as the decoder starts it
+    /// (`h264_init_context`).
+    pub(crate) arrangement_cancel_flag: i32,
     pub(crate) arrangement_type: u32,
     pub(crate) arrangement_repetition_period: u32,
     pub(crate) content_interpretation_type: u32,
     pub(crate) quincunx_sampling_flag: u32,
     pub(crate) current_frame_is_frame0_flag: u32,
+}
+
+impl Default for FramePacking {
+    fn default() -> Self {
+        Self {
+            present: false,
+            arrangement_id: 0,
+            arrangement_cancel_flag: -1,
+            arrangement_type: 0,
+            arrangement_repetition_period: 0,
+            content_interpretation_type: 0,
+            quincunx_sampling_flag: 0,
+            current_frame_is_frame0_flag: 0,
+        }
+    }
 }
 
 /// A display orientation message: which way up the picture is shown
@@ -598,7 +626,7 @@ impl Sei {
     fn decode_frame_packing(&mut self, gb: &mut Bits<'_>) {
         let f = &mut self.frame_packing;
         f.arrangement_id = gb.ue_long();
-        f.arrangement_cancel_flag = gb.bit();
+        f.arrangement_cancel_flag = i32::from(gb.flag());
         f.present = f.arrangement_cancel_flag == 0;
         if f.present {
             f.arrangement_type = gb.bits(7);

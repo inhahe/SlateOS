@@ -4515,8 +4515,21 @@ lane C's `guitk`.
         captions, film grain, frame packing, orientation, HDR metadata;
         stopping where FFmpeg stops on damage. Five FATE samples' SEI held
         to `trace_headers`.
-      - `[ ]` Slice headers, references, CAVLC and CABAC, prediction,
-        reconstruction, the loop filter, error concealment, the decoder.
+      - `[x]` Slice headers (2026-10-10): `h264_slice_header_parse` with
+        `h264_parse.c`'s reference counts and weights; 56 headers from 17
+        conformance streams held to `trace_headers` element by element,
+        synthetic ones for every refusal.
+      - `[x]` Pictures and references (2026-10-10): `h264_picture.c`,
+        `h264_refs.c` and the picture parts of `h264_slice.c` and
+        `h264dec.c` -- order counts, gaps in frame numbers, field pairs,
+        reference lists and their modification, marking, recovery, the
+        order pictures are shown in, what each frame carries. Held to
+        FFmpeg on all 195 FATE conformance streams: 25,960 slices' set-up
+        (`-debug pict`), every marking (`-debug mmco`), 19,539 shown
+        pictures' order and flags (ffprobe).
+      - `[ ]` CAVLC and CABAC, prediction, reconstruction, the loop filter,
+        error concealment -- the macroblock layer, which turns the set-up
+        pictures into samples.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.
     - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point

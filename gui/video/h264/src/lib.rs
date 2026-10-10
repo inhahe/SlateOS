@@ -20,15 +20,43 @@
 //! - `slice`: `h264_slice_header_parse` in `h264_slice.c`, with the
 //!   reference counts and weights of `h264_parse.c` and the list
 //!   modifications and marking of `h264_refs.c` -- a slice's header.
+//! - `poc`: `ff_h264_init_poc` in `h264_parse.c` -- where each picture
+//!   falls in display order.
+//! - `picture`: `h264_picture.c` and the `H264Picture` of `h264dec.h` --
+//!   the picture slots, their samples and per-macroblock tables, and what
+//!   a decoded frame carries out.
+//! - `decoder`: the `H264Context` and `H264SliceContext` of `h264dec.h`,
+//!   with the parts of `h264_slice.c` and `h264dec.c` that set a stream
+//!   up -- its format, its tables, a picture slot for each picture.
+//! - `refs`: `h264_refs.c` -- the reference lists each slice predicts
+//!   from, their modification, and the marking of references after each
+//!   picture.
+//! - `field`: `h264_field_start`, `h264_select_output_frame` and
+//!   `ff_h264_field_end` in `h264_slice.c` and `h264_picture.c` -- a
+//!   picture begun (gaps in frame numbers, field pairs, recovery) and the
+//!   order pictures are shown in.
+//! - `queue`: `h264_slice_init`, `ff_h264_queue_decode_slice` and
+//!   `ff_h264_execute_decode_slices` in `h264_slice.c` -- each slice made
+//!   ready and decoded.
+//! - `direct`: `h264_direct.c` -- direct prediction's scale factors and
+//!   the map from the co-located picture's references.
+//! - `output`: `h264dec.c`'s packet loop -- extradata, NAL units handed to
+//!   their parts, pictures finished and handed out, the last ones drained.
+//! - `side_data`: what FFmpeg attaches to a frame from SEI -- stereo
+//!   packing, rotation, captions, HDR metadata and the rest.
+//! - `vlc`: `vlc.c`'s table building and `get_vlc2` -- variable-length
+//!   codes read as FFmpeg reads them, the invalid ones included.
 //!
 //! The rest is being translated in this order, each part against FFmpeg's
-//! output before the next: pictures (`h264_slice.c`, `h264_picture.c`),
-//! references (`h264_refs.c`), CAVLC and CABAC (`h264_cavlc.c`, `cabac.c`,
-//! `h264_cabac.c`), motion vector prediction (`h264_mvpred.h`,
-//! `h264_direct.c`), reconstruction (`h264_mb.c` and its templates, with
-//! `h264pred`, `h264qpel`, `h264chroma`, `h264idct` and `h264dsp`), the
-//! loop filter (`h264_loopfilter.c`), error concealment
-//! (`error_resilience.c`), and the decoder that drives them (`h264dec.c`).
+//! output before the next: CAVLC and CABAC (`h264_cavlc.c`, `cabac.c`,
+//! `h264_cabac.c`), motion vector prediction (`h264_mvpred.h`, the
+//! macroblock part of `h264_direct.c`), reconstruction (`h264_mb.c` and
+//! its templates, with `h264pred`, `h264qpel`, `h264chroma`, `h264idct`
+//! and `h264dsp`), the loop filter (`h264_loopfilter.c`), and error
+//! concealment (`error_resilience.c`). Until then each slice's macroblocks
+//! are skipped (`queue`'s `decode_slice`), so the pictures handed out are
+//! the right pictures in the right order with the right properties, but
+//! without their samples.
 
 #![forbid(unsafe_code)]
 // The decoder is translated a module at a time, and each module's parts are
@@ -40,13 +68,293 @@
 )]
 
 mod bits;
+mod decoder;
+mod direct;
+mod field;
 mod nal;
+mod output;
+mod picture;
+mod poc;
 mod ps;
+mod queue;
+mod refs;
 mod sei;
+mod side_data;
 mod slice;
 mod tables;
+mod vlc;
 #[cfg(test)]
 mod writer;
+
+pub use picture::{Pixel, PixelFormat};
+pub use side_data::{MasteringDisplay, Rational, SideData, Stereo3d, Stereo3dType, Stereo3dView};
+
+use decoder::{Context, SliceContext};
+use nal::Splitter;
+use output::{Output, Packet};
+use picture::FrameBuf;
+
+/// An H.264 decoder: a stream's packets in, in the order the file holds
+/// them, its pictures out in the order they are shown.
+///
+/// The pictures are FFmpeg's: decoded as its decoder decodes them, held
+/// back as it holds them to put them in display order, and handed out with
+/// what its frames carry.
+pub struct Decoder {
+    h: Box<Context>,
+    sl: Box<SliceContext>,
+    pkt: Splitter,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Decoder {
+    /// A decoder for a stream not yet seen.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            h: Box::default(),
+            sl: Box::default(),
+            pkt: Splitter::default(),
+        }
+    }
+
+    /// The stream's configuration from its container: an MP4 or Matroska
+    /// `avcC` record, or parameter sets as Annex B units (FFmpeg's
+    /// `extradata`). A configuration that cannot be read is passed over,
+    /// as FFmpeg passes it: the stream may carry its parameter sets
+    /// itself.
+    pub fn configure(&mut self, config: &[u8]) {
+        // h264_decode_init: an error reading the extradata is only a
+        // warning unless errors explode.
+        let _ = self.h.decode_extradata(config);
+        if let Some(sps) = self.h.ps.sps.clone() {
+            if sps.bitstream_restriction_flag != 0
+                && self.h.avctx.has_b_frames < sps.num_reorder_frames
+            {
+                self.h.avctx.has_b_frames = sps.num_reorder_frames;
+            }
+        }
+        self.h.flush_change();
+    }
+
+    /// One packet decoded: an access unit -- an MP4 sample, a Matroska
+    /// block -- or, for a raw stream, whatever it was split into, with the
+    /// time and duration its pictures are to carry. Returns the picture it
+    /// lets out, if any: the next in display order, once as many are held
+    /// as the stream reorders by.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidData`] for a packet FFmpeg refuses, or one with no
+    /// picture in it (FFmpeg's "no frame!"). The decoder goes on with the
+    /// next packet either way, as FFmpeg's does.
+    pub fn decode(
+        &mut self,
+        data: &[u8],
+        time: i64,
+        duration: u64,
+    ) -> Result<Option<Picture>, Error> {
+        if data.is_empty() {
+            return Ok(None);
+        }
+        let packet = Packet {
+            data,
+            time,
+            duration,
+        };
+        self.h
+            .decode_frame(&mut self.sl, &mut self.pkt, &packet)
+            .map(|o| o.map(Picture::new))
+            .map_err(|_| Error::InvalidData)
+    }
+
+    /// How many pictures to hold back to put them in display order, from
+    /// the start (FFmpeg's `has_b_frames` as its caller sets it, from the
+    /// container's `video_delay` or from probing the stream). A stream
+    /// whose parameter sets do not say how far it reorders otherwise shows
+    /// its first pictures in decoding order until the decoder sees it needs
+    /// the delay, and drops what it can then no longer show in order. The
+    /// decoder raises it as the stream asks; it is never lowered.
+    pub fn set_reorder_delay(&mut self, frames: u32) {
+        self.h.avctx.has_b_frames = i32::try_from(frames).unwrap_or(i32::MAX);
+    }
+
+    /// At the end of the stream, the next picture still held back: call
+    /// until it gives none.
+    pub fn drain(&mut self) -> Option<Picture> {
+        self.h.send_next_delayed_frame().map(Picture::new)
+    }
+
+    /// Every picture forgotten, as after a seek (`h264_decode_flush`):
+    /// decoding starts again at the next IDR or recovery point.
+    pub fn flush(&mut self) {
+        self.h.flush();
+    }
+}
+
+/// A picture the decoder showed: its samples, cropped as the stream says,
+/// and what came with them.
+#[derive(Clone, Debug)]
+pub struct Picture {
+    out: Output,
+}
+
+/// One plane of a [`Picture`]: `height` rows of `width` samples, `stride`
+/// apart, starting at `data[0]`. Rows are longer than `width`.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaneView<'a, P> {
+    pub data: &'a [P],
+    pub stride: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Picture {
+    fn new(out: Output) -> Self {
+        Self { out }
+    }
+
+    /// The picture's size after cropping, in luma samples.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        let (w, h) = self.out.frame.size();
+        let [l, r, t, b] = self.out.props.crop;
+        #[allow(clippy::cast_possible_truncation, reason = "coded sizes, under 2^16")]
+        let (w, h) = (w as u32, h as u32);
+        (
+            w.saturating_sub(l.saturating_add(r)),
+            h.saturating_sub(t.saturating_add(b)),
+        )
+    }
+
+    /// How its samples are laid out.
+    #[must_use]
+    pub fn format(&self) -> PixelFormat {
+        self.out.props.format
+    }
+
+    /// Plane `i` (0 Y, 1 Cb, 2 Cr; for GBR, 0 G, 1 B, 2 R) of an 8-bit
+    /// picture, cropped.
+    #[must_use]
+    pub fn plane8(&self, i: usize) -> Option<PlaneView<'_, u8>> {
+        u8::from_any(&self.out.frame).and_then(|f| self.view(f, i))
+    }
+
+    /// Plane `i` of a 9- to 14-bit picture, cropped.
+    #[must_use]
+    pub fn plane16(&self, i: usize) -> Option<PlaneView<'_, u16>> {
+        u16::from_any(&self.out.frame).and_then(|f| self.view(f, i))
+    }
+
+    fn view<'a, P: Pixel>(&self, f: &'a FrameBuf<P>, i: usize) -> Option<PlaneView<'a, P>> {
+        let plane = f.planes.get(i)?;
+        let [l, r, t, b] = self.out.props.crop.map(|c| c as usize);
+        // A chroma plane's crop is the luma's, scaled as the plane is.
+        let (luma_w, luma_h) = (f.planes[0].width, f.planes[0].height);
+        let (sx, sy) = (
+            usize::from(plane.width < luma_w),
+            usize::from(plane.height < luma_h),
+        );
+        let (l, r, t, b) = if i == 0 {
+            (l, r, t, b)
+        } else {
+            (l >> sx, r >> sx, t >> sy, b >> sy)
+        };
+        let width = plane.width.checked_sub(l.checked_add(r)?)?;
+        let height = plane.height.checked_sub(t.checked_add(b)?)?;
+        let start = t.checked_mul(plane.stride)?.checked_add(l)?;
+        Some(PlaneView {
+            data: plane.data.get(start..)?,
+            stride: plane.stride,
+            width,
+            height,
+        })
+    }
+
+    /// The time and duration of the packet that began it.
+    #[must_use]
+    pub fn time(&self) -> (i64, u64) {
+        (self.out.props.time, self.out.props.duration)
+    }
+
+    /// Whether it is a key frame: an IDR picture, or one at a recovery
+    /// point the stream marks as whole.
+    #[must_use]
+    pub fn is_key_frame(&self) -> bool {
+        self.out.props.key
+    }
+
+    /// Whether it was coded as fields, or is to be shown as them, and
+    /// which comes first (`AV_FRAME_FLAG_INTERLACED`,
+    /// `AV_FRAME_FLAG_TOP_FIELD_FIRST`).
+    #[must_use]
+    pub fn interlacing(&self) -> (bool, bool) {
+        (self.out.props.interlaced, self.out.props.top_field_first)
+    }
+
+    /// Extra field periods to show it for (`repeat_pict`): 1 for a
+    /// telecined frame's third field, 2 for a frame shown twice, 4 three
+    /// times.
+    #[must_use]
+    pub fn repeat(&self) -> i32 {
+        self.out.props.repeat_pict
+    }
+
+    /// The width a sample is shown at against its height
+    /// (`sample_aspect_ratio`): `(0, 1)` when the stream does not say.
+    #[must_use]
+    pub fn sample_aspect_ratio(&self) -> Rational {
+        self.out.props.sample_aspect_ratio
+    }
+
+    /// H.273's colour codes -- primaries, transfer characteristics, matrix
+    /// coefficients -- and whether samples use the full range, as the
+    /// stream says them (2, "unspecified", where it does not; `None` for
+    /// the range).
+    #[must_use]
+    pub fn colour(&self) -> (i32, i32, i32, Option<bool>) {
+        let p = &self.out.props;
+        let range = match p.color_range {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        };
+        (p.color_primaries, p.color_trc, p.colorspace, range)
+    }
+
+    /// Where chroma samples sit against luma's (`AVChromaLocation`): 0
+    /// unspecified, 1 left, 2 center, then H.264's other sitings.
+    #[must_use]
+    pub fn chroma_location(&self) -> i32 {
+        self.out.props.chroma_location
+    }
+
+    /// What came with it: captions, stereo packing, orientation, HDR
+    /// metadata, time codes.
+    #[must_use]
+    pub fn side_data(&self) -> &[SideData] {
+        &self.out.props.side_data
+    }
+
+    /// FFmpeg's `stereo_mode` and `timecode` metadata, where there is any.
+    #[must_use]
+    pub fn metadata(&self) -> (Option<&'static str>, Option<&str>) {
+        (self.out.stereo_mode, self.out.props.timecode.as_deref())
+    }
+
+    /// Whether it is shown though decoding has not yet recovered
+    /// (`AV_FRAME_FLAG_CORRUPT`), and how decoding it went wrong
+    /// (`decode_error_flags`).
+    #[must_use]
+    pub fn damage(&self) -> (bool, i32) {
+        (self.out.props.corrupt, self.out.props.decode_error_flags)
+    }
+}
 
 /// Why a packet or a stream could not be decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

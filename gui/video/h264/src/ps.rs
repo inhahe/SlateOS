@@ -161,7 +161,7 @@ pub(crate) struct Sps {
 impl Sps {
     /// A set with FFmpeg's starting values (`av_refstruct_allocz`, then
     /// the defaults `ff_h264_decode_seq_parameter_set` sets before reading).
-    fn zeroed() -> Self {
+    pub(crate) fn zeroed() -> Self {
         Self {
             sps_id: 0,
             profile_idc: 0,

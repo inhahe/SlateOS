@@ -59324,3 +59324,21 @@ is still run by hand, not by `boot-test.sh`.
   read only by their tests, so the crate allows dead code. **Remove the
   allowance** when `Decoder` is public and the conformance tests run: from
   then on, a part nothing reads is a finding, not a stage of the work.
+- **h264: film grain synthesis** (`gui/video/h264/src/field.rs`,
+  `sei_to_frame`). FFmpeg adds H.274 film grain to a finished picture
+  that carries a film grain characteristics SEI (`h274.c`,
+  `ff_h274_apply_film_grain`, from `finalize_frame` in `h264dec.c`)
+  unless the caller asks for the parameters instead
+  (`AV_CODEC_EXPORT_DATA_FILM_GRAIN`). The SEI is read and its
+  persistence kept as FFmpeg keeps it, but no grain is added. FATE has no
+  H.264 film grain sample and x264 writes none. **Do it** after the loop
+  filter: write film grain SEIs into conformance streams with the tests'
+  `Syntax` writer and compare each picture with FFmpeg's.
+- **h264: slices set up but not decoded** (`gui/video/h264/src/queue.rs`,
+  `decode_slice`). The picture stage (2026-10-10) is held to FFmpeg on
+  all 195 FATE conformance streams -- every slice's set-up (`-debug
+  pict`), every reference marking (`-debug mmco`), every shown picture's
+  order and flags -- but `decode_slice` returns at once: the macroblock
+  layer (CAVLC, CABAC, prediction, reconstruction, the loop filter) is the
+  next part of the translation. **Replace it** with `h264_slice.c`'s
+  `decode_slice` once that is in.

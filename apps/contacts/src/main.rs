@@ -10738,6 +10738,34 @@ mod tests {
         });
     }
 
+    /// A save whose write fails -- the book reads, and cannot be replaced --
+    /// says so, and the next change tries again. A folder where the file goes
+    /// (the test above) now fails at the read, which a save does first
+    /// (design-decisions §1239), so the write's failure needs a file that
+    /// reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("contacts-unwritable", |_| {
+            let mut app = ContactsApp::from_settings();
+            app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+            app.keep();
+            let path = book_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.store.add_contact(Contact::new(0, "Alan", "Turing"));
+            app.keep();
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(app.unkept(), "the failed change is taken for kept");
+            drop(refusal);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unkept());
+        });
+    }
+
     #[test]
     fn closing_over_a_contact_being_edited_asks_and_save_keeps_it() {
         settingsfile::testing::with_scratch_config("contacts-close", |_| {

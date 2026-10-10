@@ -9752,6 +9752,34 @@ mod tests {
         });
     }
 
+    /// A save whose write fails -- the library reads, and cannot be
+    /// replaced -- says so, and the next change tries again. A folder where
+    /// the file goes (the test above) now fails at the read, which a save does
+    /// first (design-decisions §1239), so the write's failure needs a file
+    /// that reads and cannot be replaced.
+    #[test]
+    fn a_save_that_cannot_be_written_says_so() {
+        settingsfile::testing::with_scratch_config("notes-unwritable", |_| {
+            let mut app = NotesApp::from_settings();
+            let book = app.create_notebook("Home");
+            app.keep();
+            let path = library_path().unwrap();
+            let Some(refusal) = safeio::testing::refuse_replacing(&path).unwrap() else {
+                // Nothing can refuse this process (a Unix superuser).
+                return;
+            };
+            app.create_note("Unwritten", book);
+            app.keep();
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(app.unsaved, "the failed change is taken for kept");
+            drop(refusal);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unsaved);
+        });
+    }
+
     #[test]
     fn closing_while_writing_keeps_what_was_written() {
         settingsfile::testing::with_scratch_config("notes-close", |_| {

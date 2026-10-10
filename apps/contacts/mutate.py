@@ -467,7 +467,9 @@ MUTATIONS = [
         "a failed save is not said",
         '                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));',
         "                drop(err);",
-        [FAILING],
+        # Not FAILING since 2026-10-09: its folder in the file's place fails
+        # the read a save now does first (§1239), before any write.
+        ["a_save_that_cannot_be_written_says_so"],
     ),
     (
         "the failure is drawn nowhere",

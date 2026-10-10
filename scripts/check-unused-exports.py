@@ -96,8 +96,11 @@ import rustlex  # noqa: E402
 # absent external caller says nothing about them. The first version of this
 # pattern treated the parenthesised form as optional and counted them all --
 # caught by this file's own self-test before the number was quoted anywhere.
+#
+# It reads `production` text, whose literals are blanked, so `extern "C"`
+# arrives as `extern` and spaces.
 ITEM_RE = re.compile(
-    r"^pub\s+(?:async\s+)?(?:const\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*"
+    r"^pub\s+(?:async\s+)?(?:const\s+|unsafe\s+|extern\s+(?:\"[^\"]*\"\s+)?)*"
     r"(fn|struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
@@ -168,11 +171,16 @@ def crate_of(path: Path, root: Path) -> Path | None:
 
 
 def production(text: str) -> str:
-    """`text` with its `#[cfg(test)]` items blanked, so test-only exports are
-    not reported -- `rustlex.live_code`, which ends each item where that item
-    ends: a module or a function at its closing brace, a `mod tests;` or a
-    field at its own `;` or `,`."""
-    return rustlex.live_code(text)[0]
+    """The code in `text` that a build compiles outside its tests, with its
+    comments and literals blanked: `rustlex.live_code`'s masked view. So a
+    test-only export is not reported, a commented-out `pub fn` is not an
+    export, and a `pub mod` line inside a string is not followed.
+
+    One gap stays open until `rustlex` closes it
+    (`requests/e-a-live-code-leaves-a-test-item-without-a-body-live.md`): an
+    item under `#[cfg(test)]` that has no body of its own -- `pub mod x;`,
+    `pub struct X;` -- is read as production."""
+    return rustlex.live_code(text)[1]
 
 
 # Bare `pub mod` only, for ITEM_RE's reason: a `pub(crate) mod` is not a way
@@ -180,8 +188,9 @@ def production(text: str) -> str:
 PUB_MOD_RE = re.compile(r"^pub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE)
 
 
-def reachable_sources(crate: Path) -> list[Path]:
-    """`lib.rs` and every file reachable from it through `pub mod`.
+def reachable_sources(crate: Path) -> dict[Path, str]:
+    """`lib.rs` and every file reachable from it through `pub mod`, each with
+    its `production` code, which is lexed once per file and read twice.
 
     Without this the report is half noise, and the noise is the same shape
     every time: an item marked `pub` inside a *private* module. It is `pub`
@@ -192,20 +201,22 @@ def reachable_sources(crate: Path) -> list[Path]:
     """
     lib = crate / "src" / "lib.rs"
     if not lib.is_file():
-        return []
-    seen: list[Path] = [lib]
+        return {}
+    seen: dict[Path, str] = {}
     queue = [lib]
     while queue:
         cur = queue.pop()
+        if cur in seen:
+            continue
         try:
             text = production(cur.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
+        seen[cur] = text
         base = cur.parent if cur.name in ("lib.rs", "mod.rs") else cur.with_suffix("")
         for name in PUB_MOD_RE.findall(text):
             for cand in (base / f"{name}.rs", base / name / "mod.rs"):
                 if cand.is_file() and cand not in seen:
-                    seen.append(cand)
                     queue.append(cand)
     return seen
 
@@ -221,11 +232,7 @@ def exports(root: Path) -> tuple[dict[str, list[tuple[str, str]]], int]:
         libs += 1
         rel = crate.relative_to(root).as_posix()
         items: list[tuple[str, str]] = []
-        for src in reachable_sources(crate):
-            try:
-                text = production(src.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
+        for text in reachable_sources(crate).values():
             for kind, name in ITEM_RE.findall(text):
                 if name in TOO_COMMON or name.startswith("_"):
                     continue
@@ -259,6 +266,13 @@ pub struct Holder {
     scratch: u8,
 }
 pub fn after_field() {}
+pub extern "C" fn c_entry() {}
+/*
+pub fn commented_out() {}
+*/
+const SAMPLE: &str = r#"
+pub mod in_a_literal;
+"#;
 """
 
 
@@ -278,9 +292,8 @@ def selftest() -> int:
     )
 
     items = dict((name, kind) for kind, name in ITEM_RE.findall(stripped))
-    # The cut used to run from the attribute to the end of the next braced
-    # block, which after a `mod tests;` or a test-only field is the next
-    # production item.
+    # A test item ends where it ends: what follows a test module's declaration
+    # or a test-only field is production code.
     case(
         "an export after `#[cfg(test)] mod x;` is still one",
         items.get("after_out_of_line") == "fn",
@@ -299,10 +312,13 @@ def selftest() -> int:
         "a test-only export is not reported",
         "test_only_export" not in items,
     )
+    case("an extern \"C\" fn is an export", items.get("c_entry") == "fn")
+    case("a pub fn in a comment is not", "commented_out" not in items)
 
-    mods = PUB_MOD_RE.findall(SELFTEST_SOURCE)
+    mods = PUB_MOD_RE.findall(stripped)
     case("pub mod is followed", mods == ["visible"])
     case("a private mod is not", "hidden" not in mods)
+    case("a pub mod line in a string literal is not", "in_a_literal" not in mods)
 
     case("the noise list is applied", "new" in TOO_COMMON and "parse" in TOO_COMMON)
 

@@ -24,6 +24,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rustlex  # noqa: E402
@@ -457,56 +458,142 @@ def is_label(literal: str) -> bool:
 
 
 # A module declared under `#[cfg(test)]` is test code from its first line to
-# its last, with nothing in its own file to say so. The attribute sits in the
-# parent, where `live_code` blanks the declaration, and the module's file is
-# read on its own: `apps/fieldmenu/src/tests.rs` was read as the field menu's
-# live code, and the `Key::A` its tests type was reported as a key the library
-# answers and names nowhere.
+# its last, and only its parent says so: `live_code` reads one file at a time
+# and cannot know it. So test modules are found from the declarations,
+# resolved as cargo resolves them, and not by name -- test code is not always
+# called `tests`. A declaration this misreads leaves its module read as live
+# code.
 #
-# Found from the declarations, resolved as cargo resolves them, not by name:
-# test code is not always called `tests`. A declaration this misreads leaves
-# its module read as live code, which is where the survey stood before.
-_TEST_MOD_DECL = re.compile(
-    r"^[ \t]*#\[cfg\(test\)\]\s*"
-    r"(?:#\[[^\n]*\]\s*)*"
-    r"(?:pub(?:\([^)\n]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[;{]",
-    re.MULTILINE,
+# One `mod` declaration: its attributes (any number, in any order, each one
+# spanning lines where rustfmt broke it), a visibility, its name, and `;` for a
+# module in a file of its own or `{` for one written inline.
+_MOD_DECL = re.compile(
+    r"(?<![\w#])(?P<attrs>(?:#\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_]\w*)\s*(?P<end>[;{])"
 )
-_PATH_ATTR = re.compile(r'#\[path\s*=\s*"(?P<path>[^"\n]+)"\s*\]')
+_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# A file or an inline module can say it itself instead: an inner
+# `#![cfg(test)]` among the attributes before its first item.
+_INNER_CFG_TEST = re.compile(r"(?:\s*#!\[[^\]]*\])*?\s*#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_SAYS_INNER_CFG_TEST = re.compile(r"#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_PATH_ATTR = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
+# Every file that declares a module file has this in it, comments and all;
+# the rest are not lexed.
+_DECLARES_A_FILE = re.compile(r"\bmod\s+(?:r#)?\w+\s*;")
 
 
-def _module_dir(path: Path) -> Path:
-    """Where `mod x;` in the file `path` looks for `x`: beside a crate root --
-    `lib.rs`, `main.rs`, a file directly in `src/bin` -- or a `mod.rs`, and in
-    the directory named for the file otherwise."""
+class _ModDecl(NamedTuple):
+    """A `mod name;` -- a module in a file of its own."""
+
+    name: str
+    #: Under `#[cfg(test)]`, itself or through an inline module around it.
+    gated: bool
+    #: Its `#[path = "..."]`, if it has one.
+    path: str | None
+    #: The inline modules around it, outermost first.
+    inline: tuple[str, ...]
+
+
+def _matching_brace(code: str, at: int) -> int:
+    """Where the block that opens at `code[at]` closes (the text's end if it
+    never does). `code` has its comments and literals blanked."""
+    depth = 0
+    for i in range(at, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(code)
+
+
+def _module_file_decls(text: str) -> list[_ModDecl]:
+    """Every declaration of a module file in one source file's `text`."""
+    # Matched with comments and literals blanked, so a declaration in either
+    # is not one; `#[path]`'s value is read from the same offsets of a copy
+    # that keeps the literals.
+    code = rustlex.strip_noise(text)
+    kept = rustlex.strip_noise(text, keep_literals=True)
+    files: list[tuple[int, str, bool, str | None]] = []
+    blocks: list[tuple[int, int, str, bool]] = []
+    for m in _MOD_DECL.finditer(code):
+        gated = bool(_CFG_TEST.search(m["attrs"]))
+        if m["end"] == "{":
+            gated = gated or bool(_INNER_CFG_TEST.match(code, m.end()))
+            blocks.append((m.end() - 1, _matching_brace(code, m.end() - 1), m["name"], gated))
+            continue
+        attr = _PATH_ATTR.search(kept, m.start("attrs"), m.end("attrs"))
+        files.append((m.start(), m["name"], gated, attr["path"] if attr else None))
+    decls = []
+    for at, name, gated, path in files:
+        around = [b for b in blocks if b[0] < at < b[1]]
+        decls.append(_ModDecl(
+            name,
+            gated or any(b[3] for b in around),
+            path,
+            tuple(b[2] for b in around),
+        ))
+    return decls
+
+
+def _module_dir(path: Path, owners: set[Path]) -> Path:
+    """Where `mod x;` in the file `path` looks for `x`. That is beside a crate
+    root -- `lib.rs`, `main.rs`, a file directly in `src/bin` -- or beside a
+    `mod.rs` or a file loaded through `#[path]` (`owners`). For any other file,
+    it is the directory named for that file."""
     in_bin = path.parent.name == "bin" and path.parent.parent.name == "src"
-    if path.name in ("lib.rs", "main.rs", "mod.rs") or in_bin:
+    if path.name in ("lib.rs", "main.rs", "mod.rs") or in_bin or path in owners:
         return path.parent
     return path.parent / path.stem
 
 
+def _declared_files(path: Path, decl: _ModDecl, owners: set[Path]) -> list[Path]:
+    """The files `decl`, made in the file `path`, may load."""
+    if decl.path is not None:
+        # Beside the declaring file -- or, from inside an inline module, under
+        # that module's directory.
+        base = (
+            _module_dir(path, owners).joinpath(*decl.inline)
+            if decl.inline
+            else path.parent
+        )
+        return [Path(os.path.normpath(base / decl.path))]
+    base = _module_dir(path, owners).joinpath(*decl.inline, decl.name)
+    return [base.with_name(f"{decl.name}.rs"), base / "mod.rs"]
+
+
 def test_module_files(texts: dict[Path, str]) -> set[Path]:
     """Which of a crate's source files -- `texts` maps each one's path to its
-    contents -- a build compiles only for its tests: the modules declared under
-    `#[cfg(test)]`, and every file beneath one."""
-    files: set[Path] = set()
-    dirs: list[Path] = []
-    for path, text in texts.items():
-        if "#[cfg(test)]" not in text:
-            continue
-        # Comments blanked, so a commented-out declaration is not one; literals
-        # kept, for `#[path = "..."]`.
-        code = rustlex.strip_noise(text, keep_literals=True)
-        for decl in _TEST_MOD_DECL.finditer(code):
-            attr = _PATH_ATTR.search(decl.group(0))
-            if attr:
-                # Relative to the declaring file's own directory.
-                files.add(Path(os.path.normpath(path.parent / attr["path"])))
-                continue
-            base = _module_dir(path) / decl["name"]
-            files.update((base.parent / f"{base.name}.rs", base / "mod.rs"))
-            dirs.append(base)
-    return {p for p in texts if p in files or any(d in p.parents for d in dirs)}
+    contents -- a build compiles only for its tests: those a `#[cfg(test)]`
+    declaration loads, those whose own `#![cfg(test)]` says so, and those any
+    declaration in such a file loads, all the way down."""
+    if len(texts) < 2:
+        return set()
+    decls = {
+        path: _module_file_decls(text)
+        for path, text in texts.items()
+        if _DECLARES_A_FILE.search(text)
+    }
+    owners: set[Path] = set()
+    for path, found in decls.items():
+        for decl in found:
+            if decl.path is not None:
+                owners.update(_declared_files(path, decl, owners))
+    tests: set[Path] = {
+        path
+        for path, text in texts.items()
+        if _SAYS_INNER_CFG_TEST.search(text)
+        and _INNER_CFG_TEST.match(rustlex.strip_noise(text))
+    }
+    while True:
+        before = len(tests)
+        for path, found in decls.items():
+            for decl in found:
+                if decl.gated or path in tests:
+                    tests.update(p for p in _declared_files(path, decl, owners) if p in texts)
+        if len(tests) == before:
+            return tests
 
 
 def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
@@ -737,12 +824,45 @@ def _self_test() -> int:
             "#[cfg(test)]",
             "mod commented_out;",
             "*/",
+            "#[cfg(test)]",
+            "#[allow(",
+            "    clippy::unwrap_used,",
+            "    clippy::panic,",
+            ")]",
+            "mod multi;",
+            '#[path = "renamed_cases.rs"]',
+            "#[cfg(test)]",
+            "mod renamed;",
+            "mod outer {",
+            "    #[cfg(test)]",
+            "    mod util;",
+            "}",
+            "mod util;",
+            'const SAMPLE: &str = r#"',
+            "#[cfg(test)]",
+            "mod widgets;",
+            '"#;',
+            "mod self_gated;",
+            "mod inner_gated {",
+            "    #![cfg(test)]",
+            "    mod deep2;",
+            "}",
         ]),
+        src / "self_gated.rs": nl.join(["//! The root's tests.", "#![cfg(test)]", "mod helper2;"]),
+        src / "self_gated" / "helper2.rs": "",
+        src / "inner_gated" / "deep2.rs": "",
         src / "tests.rs": "mod helper;",
         src / "tests" / "helper.rs": "",
-        src / "oracle_cases.rs": "",
+        src / "oracle_cases.rs": "mod fixtures;",
+        src / "fixtures.rs": "",
         src / "inline" / "deeper.rs": "",
         src / "commented_out.rs": "",
+        src / "multi.rs": "",
+        src / "renamed_cases.rs": "",
+        src / "renamed.rs": "",
+        src / "outer" / "util.rs": "",
+        src / "util.rs": "",
+        src / "widgets.rs": "",
         src / "real.rs": nl.join(["#[cfg(test)]", "pub(crate) mod tests;"]),
         src / "real" / "tests.rs": "",
         src / "other.rs": "mod tests;",
@@ -757,9 +877,19 @@ def _self_test() -> int:
         (src / "inline" / "deeper.rs", True, "a file beneath an inline test module"),
         (src / "real" / "tests.rs", True, "a pub(crate) one, beside a non-root file"),
         (src / "bin" / "checks.rs", True, "a binary's root resolves beside itself"),
+        (src / "multi.rs", True, "a declaration under an attribute spanning lines"),
+        (src / "renamed_cases.rs", True, "a path attribute written before cfg(test)"),
+        (src / "outer" / "util.rs", True, "a declaration inside a live inline module"),
+        (src / "fixtures.rs", True, "a module of a path-loaded test file sits beside it"),
+        (src / "self_gated.rs", True, "a file whose own #![cfg(test)] says so"),
+        (src / "self_gated" / "helper2.rs", True, "and the modules it declares"),
+        (src / "inner_gated" / "deep2.rs", True, "a file in an inline module that says so"),
         (src / "lib.rs", False, "control: the crate root"),
         (src / "other" / "tests.rs", False, "control: called `tests`, never gated"),
         (src / "commented_out.rs", False, "control: a declaration commented out"),
+        (src / "renamed.rs", False, "control: the name a path attribute replaced"),
+        (src / "util.rs", False, "control: the live module of the nested one's name"),
+        (src / "widgets.rs", False, "control: a declaration inside a string literal"),
     ]
     test_files = test_module_files(tree)
     bad = 0

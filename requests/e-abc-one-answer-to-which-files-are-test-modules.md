@@ -17,13 +17,13 @@ they disagree about which files count:
 
 | Script | Lane | How it finds them | Where it is wrong |
 |---|---|---|---|
-| `quote-names.py` `test_modules` | B | the declarations, resolved as cargo does; `#[path]`; the files beneath | a declaration inside a block comment counts |
-| `check-help-vs-parser.py` `test_module_files` | B | the declarations, with comments stripped | no `#[path]`, and not the files beneath; it looks for `src/bin/foo.rs`'s modules in `src/bin/foo/`, but cargo looks beside the file |
+| `quote-names.py` `test_modules` | B | the declarations, resolved as cargo does; `#[path]`; the files beneath | a declaration inside a comment or a string counts; an attribute rustfmt broke over lines, or a `#[path]` written before `#[cfg(test)]`, hides the declaration; one inside an inline module is resolved as if it sat at the top of the file |
+| `check-help-vs-parser.py` `test_module_files` | B | the declarations, with comments stripped | no `#[path]`, and not the files beneath; it looks for `src/bin/foo.rs`'s modules in `src/bin/foo/`, but cargo looks beside the file; one inside an inline module is resolved as if it sat at the top |
 | `check-tested-but-uncalled.py` `external_test_files` | C | the attribute, then `mod x;` on the very next line | looks for every file's modules beside it, so `real.rs`'s `tests` is sought at `src/tests.rs` instead of `src/real/tests.rs`; misses `pub(crate) mod` and anything with a second attribute in between; no `#[path]`; not the files beneath |
 | `lanec_scan.py` `external_test_files` | C | the same | the same |
 | `check-config-turn-guards.py` | A | by name: `tests.rs`, or anything under a `tests` directory | a test module with any other name is read as production; a `tests.rs` that is not gated is read as test code |
 | `lossy-decode.py` `is_test_file` | E | the same, on purpose (its docstring: two checkers disagreeing is worse) | the same |
-| `key-survey.py` `test_module_files` | E | the declarations, resolved as cargo does; comments blanked; `#[path]`; the files beneath, including those of inline test modules | added 2026-10-10 (`49eb55dcc`), when the survey read `apps/fieldmenu/src/tests.rs` as the library's live code and stopped lane E's boot test |
+| `key-survey.py` `test_module_files` | E | the declarations, resolved as cargo does, matched with comments and literals blanked; attributes in any order and over any number of lines; `#[path]`, whose file keeps its modules beside it; the inline modules around a declaration; a file or an inline module whose own `#![cfg(test)]` says so (nine files in `gui/desktop` do); whatever a test file declares, all the way down | none known. Added 2026-10-10, when the survey read `apps/fieldmenu/src/tests.rs` as the library's live code and stopped lane E's boot test; rewritten the same day after its review |
 
 ## The ask
 
@@ -31,7 +31,7 @@ they disagree about which files count:
   contract it completes. Something like `test_module_files(texts: dict[Path,
   str]) -> set[Path]`: given a crate's sources, return the ones a build
   compiles only for its tests. Lane E's in `key-survey.py` is a starting point
-  if it is useful, and it has eleven self-test cases.
+  if it is useful, and it has 21 self-test cases, seven of them controls.
 - **Lanes A, B, C and E:** each lane then replaces its own copies with the
   shared one. Lane E will replace `lossy-decode.py`'s and `key-survey.py`'s
   as soon as it lands.

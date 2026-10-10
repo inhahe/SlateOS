@@ -766,12 +766,38 @@ fn split_command_line(line: &str) -> Result<Vec<String>, String> {
 ///
 /// The complaint is the box's own: it goes when the box does, so no way of
 /// closing the box can leave one behind for the next time it opens.
-#[derive(Default)]
 struct RunBox {
     /// The command line being typed.
     input: guitk::textinput::TextInput,
     /// Why the last command line did not start, until the line is edited.
     error: Option<String>,
+}
+
+impl RunBox {
+    /// The box as it opens: an empty line, and no complaint.
+    fn new() -> Self {
+        Self {
+            input: box_holding(RUN_BOX_CAPACITY),
+            error: None,
+        }
+    }
+}
+
+/// An empty box that typing and pasting -- by key or from its right-click
+/// menu -- fill to at most `capacity` characters.
+fn box_holding(capacity: usize) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_capacity(Some(capacity));
+    input
+}
+
+/// The box a right-click menu is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The toolbar's filter box.
+    Filter,
+    /// The New Task box's command line.
+    RunBox,
 }
 
 /// Where the New Task box and its parts are: left, top, width, height each.
@@ -847,8 +873,13 @@ pub struct ProcessExplorerState {
     /// implemented" -- the one control a task manager has for starting
     /// something rather than stopping it.
     run_box: Option<RunBox>,
-    /// What Ctrl+C or Ctrl+X last took from the New Task box, for Ctrl+V.
-    clipboard: String,
+    /// The filter box's or the New Task box's right-click menu -- Cut, Copy,
+    /// Paste, Delete, Select all -- while it is up, and the box it is for
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<MenuField>,
+    /// The window's clock, moved by its ticks: a dimmed row of the menu the
+    /// pointer rests on says why when its wait is over.
+    clock_ms: u64,
     /// How programs are started; see [`Spawner`].
     spawner: Spawner,
     /// Whether the search box is focused.
@@ -949,10 +980,11 @@ impl ProcessExplorerState {
             filter_text: String::new(),
             show_help: false,
             run_box: None,
-            clipboard: String::new(),
+            field_menu: fieldmenu::FieldMenu::new(),
+            clock_ms: 0,
             spawner: spawn_program,
             filter_focused: false,
-            filter_editor: TextInput::new(),
+            filter_editor: box_holding(FILTER_CAPACITY),
             filter_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_picker: features::WindowPicker::new(),
@@ -1435,6 +1467,33 @@ impl ProcessExplorerState {
 
     /// Handle an input event and return whether it was consumed.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A box's right-click menu takes every press and key while it is up,
+        // as any menu does: a row chosen, a press outside putting it away and
+        // reaching nothing under it -- a right press there being taken as the
+        // window would take it, so a right-click on a process opens that
+        // process's menu instead.
+        match event {
+            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
+                fieldmenu::Outcome::NotUp => {}
+                fieldmenu::Outcome::Taken => return EventResult::Consumed,
+                fieldmenu::Outcome::Chosen(field, id) => {
+                    self.do_field_menu_row(field, id);
+                    return EventResult::Consumed;
+                }
+                fieldmenu::Outcome::RightPressElsewhere(..) => return self.handle_mouse(mouse),
+            },
+            Event::Key(key) => match self.field_menu.key(key) {
+                fieldmenu::Outcome::NotUp => {}
+                fieldmenu::Outcome::Chosen(field, id) => {
+                    self.do_field_menu_row(field, id);
+                    return EventResult::Consumed;
+                }
+                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
+                    return EventResult::Consumed;
+                }
+            },
+            _ => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -1444,6 +1503,8 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
             Event::Tick { elapsed_ms } => {
+                self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+                let _menu_changed = self.field_menu.tick(self.clock_ms);
                 self.ms_since_refresh = self.ms_since_refresh.saturating_add(*elapsed_ms);
                 if self.ms_since_refresh >= self.refresh_interval.ms() {
                     self.ms_since_refresh = 0;
@@ -1626,16 +1687,12 @@ impl ProcessExplorerState {
             _ => {
                 self.sync_filter_editor();
                 let before = self.filter_editor.text().to_owned();
-                let edit = textline::apply_key(
+                let _edit = textline::apply_key_on_clipboard(
                     &mut self.filter_editor,
                     key,
                     FILTER_CAPACITY,
-                    &self.clipboard,
                     FILTER_TEXT_SIZE,
                 );
-                if let Some(copied) = edit.copied {
-                    self.clipboard = copied;
-                }
                 if self.filter_editor.text() != before {
                     self.filter_text = self.filter_editor.text().to_owned();
                     self.rebuild_visible_list();
@@ -1735,6 +1792,10 @@ impl ProcessExplorerState {
         if self.run_box.is_some() {
             return match mouse.kind {
                 MouseEventKind::Press(MouseButton::Left) => self.run_box_press(mx, my),
+                MouseEventKind::Press(MouseButton::Right) => {
+                    let _menu = self.open_field_menu(mx, my);
+                    EventResult::Consumed
+                }
                 _ => EventResult::Consumed,
             };
         }
@@ -1814,8 +1875,12 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
 
-            // Right click — context menu on process rows
+            // Right click — the filter box's own menu, or the context menu on
+            // process rows
             MouseEventKind::Press(MouseButton::Right) => {
+                if self.open_field_menu(mx, my) == EventResult::Consumed {
+                    return EventResult::Consumed;
+                }
                 // The one that matters: this menu's actions include Kill, and
                 // it was being opened over a process the pointer was nowhere
                 // near whenever the click landed in the status bar.
@@ -1998,7 +2063,7 @@ impl ProcessExplorerState {
 
     /// Put the New Task box up, empty.
     fn open_run_box(&mut self) {
-        self.run_box = Some(RunBox::default());
+        self.run_box = Some(RunBox::new());
     }
 
     /// A key while the New Task box is up: Enter runs, Escape closes, the
@@ -2009,16 +2074,12 @@ impl ProcessExplorerState {
             Key::Enter => self.run_task(),
             _ => {
                 if let Some(run_box) = self.run_box.as_mut() {
-                    let edit = textline::apply_key(
+                    let edit = textline::apply_key_on_clipboard(
                         &mut run_box.input,
                         key,
                         RUN_BOX_CAPACITY,
-                        &self.clipboard,
                         RUN_BOX_TEXT_SIZE,
                     );
-                    if let Some(copied) = edit.copied {
-                        self.clipboard = copied;
-                    }
                     // An edit is a new attempt; the old complaint no longer
                     // describes what is typed.
                     if edit.handled {
@@ -2172,6 +2233,62 @@ impl ProcessExplorerState {
             self.run_box = None;
         }
         EventResult::Consumed
+    }
+
+    /// A right press at (`x`, `y`): over the New Task box's line while that
+    /// box is up, or over the filter box while it is not, the box's menu
+    /// where the press landed; anywhere else, nothing. The filter box is
+    /// given the keyboard, its caret and selection left as they are when it
+    /// had it already (design-decisions 1454), so Cut and Copy act on what
+    /// the user selected.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        #[allow(clippy::cast_precision_loss)]
+        let viewport = (self.window_width as f32, self.window_height as f32);
+        let (field, menu) = if let Some(run_box) = self.run_box.as_ref() {
+            let (fx, fy, fw, fh) = self.run_box_layout().field;
+            if !(x >= fx && x < fx + fw && y >= fy && y < fy + fh) {
+                return EventResult::Ignored;
+            }
+            (MenuField::RunBox, run_box.input.edit_menu())
+        } else if filter_rect(viewport.0).contains(x, y) {
+            if self.filter_focused {
+                self.sync_filter_editor();
+            } else {
+                self.focus_filter();
+            }
+            (MenuField::Filter, self.filter_editor.edit_menu())
+        } else {
+            return EventResult::Ignored;
+        };
+        self.context_menu = None;
+        self.field_menu.open(field, menu, x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen for the box `field`: done to it as its key
+    /// would be -- the list filtered again when the filter's text changed,
+    /// the New Task box's complaint put away when the line did.
+    fn do_field_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) {
+        match field {
+            MenuField::Filter => {
+                self.sync_filter_editor();
+                let before = self.filter_editor.text().to_owned();
+                let _edit = self.filter_editor.edit_command(id);
+                if self.filter_editor.text() != before {
+                    self.filter_text = self.filter_editor.text().to_owned();
+                    self.rebuild_visible_list();
+                }
+            }
+            MenuField::RunBox => {
+                if let Some(run_box) = self.run_box.as_mut() {
+                    let before = run_box.input.text().to_owned();
+                    let _edit = run_box.input.edit_command(id);
+                    if run_box.input.text() != before {
+                        run_box.error = None;
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a context menu action on a target process.
@@ -2460,6 +2577,7 @@ impl ProcessExplorerState {
         // Context menu overlay (drawn on top of everything)
         self.render_context_menu(&mut tree);
         self.render_run_box(&mut tree);
+        tree.commands.extend(self.field_menu.render(&self.palette));
 
         if self.show_help {
             #[allow(clippy::cast_precision_loss)]
@@ -4116,9 +4234,15 @@ impl App for ProcessExplorerState {
     /// desktop park between refreshes.
     ///
     /// It reads the *current* setting rather than a constant, so changing the
-    /// refresh rate in the app changes the clock it is given.
+    /// refresh rate in the app changes the clock it is given -- sooner only
+    /// while a box's right-click menu waits to say why a row is dimmed.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(self.refresh_interval.ms()))
+        let refresh = Duration::from_millis(self.refresh_interval.ms());
+        let menu = self
+            .field_menu
+            .due_in(self.clock_ms)
+            .map(Duration::from_millis);
+        Some(menu.map_or(refresh, |menu| menu.min(refresh)))
     }
 
     /// A window pick to start or give up, asked for by the Identify button
@@ -4405,8 +4529,7 @@ mod tests {
     }
 
     /// What is copied in the box pastes back in it, across a close and a
-    /// reopen: the box keeps a clipboard as every field of the explorer's
-    /// does.
+    /// reopen: the copy is on the program's clipboard, which outlives the box.
     #[test]
     fn a_line_copied_in_the_run_box_pastes_back() {
         let mut app = app_with_processes(1);
@@ -4418,6 +4541,195 @@ mod tests {
         app.handle_key(&pressed(Key::N, Modifiers::ctrl()));
         app.handle_key(&pressed(Key::V, Modifiers::ctrl()));
         assert_eq!(run_line(&app).as_deref(), Some("calc --fast"));
+    }
+
+    // --- The boxes' right-click menu ---------------------------------------
+    // (`requests/c-e-text-fields-have-a-right-click-menu.md`). Through
+    // `handle_event`, where the menu is routed.
+
+    /// A press with `button` at (`x`, `y`), as the window delivers it.
+    fn event_press(app: &mut ProcessExplorerState, button: MouseButton, x: f32, y: f32) {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }));
+    }
+
+    /// The middle of the filter box.
+    fn filter_middle(app: &ProcessExplorerState) -> (f32, f32) {
+        #[allow(clippy::cast_precision_loss)]
+        let r = filter_rect(app.window_width as f32);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// Choose the menu's row for `command`, with a press on it.
+    fn choose(app: &mut ProcessExplorerState, command: guitk::editmenu::EditCommand) {
+        let (x, y) = app.field_menu.row_middle(command).expect("the row");
+        event_press(app, MouseButton::Left, x, y);
+    }
+
+    /// **The filter box's right-click menu edits it, and the list follows**:
+    /// what is pasted from the menu filters the list as typing it would, and
+    /// what the menu copies Ctrl+V pastes into the New Task box -- the keys
+    /// and the menu share the program's clipboard.
+    #[test]
+    fn the_filter_boxs_right_click_menu_pastes_and_filters() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with_processes(3);
+        guitk::clipboard::set_text("proc1");
+        let (fx, fy) = filter_middle(&app);
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        assert_eq!(
+            app.field_menu.field(),
+            Some(MenuField::Filter),
+            "a right-click on the filter box offered nothing"
+        );
+        assert!(app.filter_focused, "the box was not given the keyboard");
+        assert_eq!(
+            app.field_menu.row_lit(EditCommand::Copy),
+            Some(false),
+            "Copy lit with nothing selected"
+        );
+        choose(&mut app, EditCommand::Paste);
+        assert!(!app.field_menu.is_up(), "the menu stayed up");
+        assert_eq!(app.filter_text, "proc1");
+        assert_eq!(app.visible_indices.len(), 1, "the list was not filtered");
+
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        choose(&mut app, EditCommand::SelectAll);
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        choose(&mut app, EditCommand::Copy);
+        guitk::clipboard::set_text("");
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        choose(&mut app, EditCommand::Cut);
+        assert_eq!(
+            guitk::clipboard::text(),
+            "proc1",
+            "Cut put nothing on the clipboard"
+        );
+        assert_eq!(
+            app.visible_indices.len(),
+            3,
+            "the cut did not unfilter the list"
+        );
+        // What the menu cut, the keys paste -- in the box, and in the New Task
+        // box.
+        app.handle_event(&Event::Key(pressed(Key::V, Modifiers::ctrl())));
+        assert_eq!(app.filter_text, "proc1", "Ctrl+V read another clipboard");
+        app.handle_event(&Event::Key(pressed(Key::N, Modifiers::ctrl())));
+        app.handle_event(&Event::Key(pressed(Key::V, Modifiers::ctrl())));
+        assert_eq!(run_line(&app).as_deref(), Some("proc1"));
+        app.handle_event(&Event::Key(pressed(Key::Escape, Modifiers::NONE)));
+
+        // A paste from the menu stops at the box's capacity, as one by key does.
+        guitk::clipboard::set_text(&"y".repeat(FILTER_CAPACITY + 5));
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        choose(&mut app, EditCommand::Paste);
+        assert_eq!(app.filter_text.chars().count(), FILTER_CAPACITY);
+    }
+
+    /// **The New Task box's menu pastes no more than the box holds**, as a
+    /// paste by key does, and an edit from it puts the last complaint away.
+    #[test]
+    fn the_run_boxs_menu_pastes_to_its_capacity_and_puts_the_complaint_away() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with_processes(1);
+        app.open_run_box();
+        app.handle_event(&Event::Key(pressed(Key::Enter, Modifiers::NONE)));
+        assert!(run_error(&app).is_some(), "an empty line ran");
+        guitk::clipboard::set_text(&"x".repeat(RUN_BOX_CAPACITY + 10));
+        let (x, y, w, h) = app.run_box_layout().field;
+        event_press(&mut app, MouseButton::Right, x + w / 2.0, y + h / 2.0);
+        assert_eq!(app.field_menu.field(), Some(MenuField::RunBox));
+        choose(&mut app, EditCommand::Paste);
+        assert_eq!(
+            run_line(&app).map(|line| line.chars().count()),
+            Some(RUN_BOX_CAPACITY)
+        );
+        assert_eq!(run_error(&app), None, "the old complaint stayed up");
+        // A right press in the box but off its line offers nothing.
+        let (bx, by, _, _) = app.run_box_layout().frame;
+        event_press(&mut app, MouseButton::Right, bx + 4.0, by + 4.0);
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **A box's menu is drawn, and its clock runs on the window's ticks**:
+    /// while the pointer rests on a dimmed row, the window asks to be woken
+    /// sooner than its refresh, and the ticks it is given bring the row's
+    /// reason up.
+    #[test]
+    fn a_boxs_menu_is_drawn_and_a_dimmed_row_says_why_on_the_windows_ticks() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with_processes(1);
+        let refresh = App::tick_interval(&app).expect("the refresh tick");
+        let drawn =
+            |app: &ProcessExplorerState| texts_of(app).iter().any(|t| t.starts_with("Paste"));
+        assert!(!drawn(&app), "a menu drawn before any right-click");
+        let (fx, fy) = filter_middle(&app);
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        assert!(drawn(&app), "the menu is not drawn");
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let mut said = false;
+        for _ in 0..40 {
+            let wait = App::tick_interval(&app).expect("a tick");
+            if wait >= refresh {
+                break;
+            }
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+    }
+
+    /// **A box's menu is modal, and a process keeps its own**: a right-click
+    /// on a process opens the process's menu, on the filter box the box's
+    /// (the process's put away), Escape puts the box's away and reaches
+    /// nothing else, and a right press on a process while the box's is up
+    /// opens the process's.
+    #[test]
+    fn a_boxs_menu_is_modal_and_a_process_keeps_its_own() {
+        let mut app = app_with_processes(3);
+        let row_zero = ProcessExplorerState::rows_top() + ROW_HEIGHT / 2.0;
+        let (fx, fy) = filter_middle(&app);
+        event_press(&mut app, MouseButton::Right, 100.0, row_zero);
+        assert!(
+            app.context_menu.is_some(),
+            "a process's right-click opened nothing"
+        );
+        assert!(!app.field_menu.is_up());
+
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        assert!(app.field_menu.is_up());
+        assert!(app.context_menu.is_none(), "two menus up at once");
+        app.handle_event(&Event::Key(pressed(Key::Escape, Modifiers::NONE)));
+        assert!(!app.field_menu.is_up(), "Escape left the menu up");
+        assert!(
+            app.filter_focused,
+            "Escape reached the box and took its keyboard"
+        );
+
+        event_press(&mut app, MouseButton::Right, fx, fy);
+        event_press(&mut app, MouseButton::Right, 100.0, row_zero);
+        assert!(!app.field_menu.is_up());
+        assert!(
+            app.context_menu.is_some(),
+            "the right press on a process did nothing"
+        );
     }
 
     /// A key the line does not answer -- Tab -- is not an edit, so the

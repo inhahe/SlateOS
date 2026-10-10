@@ -495,6 +495,157 @@ MUTATIONS += [
     ),
 ]
 
+# The boxes' right-click menu (2026-10-10, requests/c-e-text-fields-have-a-
+# right-click-menu.md): Cut, Copy, Paste, Delete and Select all over the filter
+# box and the New Task box's line, through apps/fieldmenu; the keys and the menu
+# share the program's clipboard; each box holds its capacity.
+FM_FILTER = "the_filter_boxs_right_click_menu_pastes_and_filters"
+FM_RUN = "the_run_boxs_menu_pastes_to_its_capacity_and_puts_the_complaint_away"
+FM_MODAL = "a_boxs_menu_is_modal_and_a_process_keeps_its_own"
+FM_CLOCK = "a_boxs_menu_is_drawn_and_a_dimmed_row_says_why_on_the_windows_ticks"
+
+MUTATIONS += [
+    (
+        "a right press on the filter box opens no menu",
+        "                if self.open_field_menu(mx, my) == EventResult::Consumed {\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [FM_FILTER, FM_MODAL],
+    ),
+    (
+        "a right press in the New Task box opens no menu",
+        "                MouseEventKind::Press(MouseButton::Right) => {\n"
+        "                    let _menu = self.open_field_menu(mx, my);\n"
+        "                    EventResult::Consumed\n"
+        "                }\n",
+        "",
+        [FM_RUN],
+    ),
+    (
+        "the right-click leaves the filter without the keyboard",
+        "            if self.filter_focused {\n"
+        "                self.sync_filter_editor();\n"
+        "            } else {\n"
+        "                self.focus_filter();\n"
+        "            }\n"
+        "            (MenuField::Filter, self.filter_editor.edit_menu())\n",
+        "            (MenuField::Filter, self.filter_editor.edit_menu())\n",
+        [FM_FILTER],
+    ),
+    (
+        "opening a box's menu leaves the process's menu up",
+        "        self.context_menu = None;\n        self.field_menu.open(field, menu, x, y, viewport);\n",
+        "        self.field_menu.open(field, menu, x, y, viewport);\n",
+        [FM_MODAL],
+    ),
+    (
+        "a row chosen for the filter does nothing",
+        "                let _edit = self.filter_editor.edit_command(id);\n",
+        "",
+        [FM_FILTER],
+    ),
+    (
+        "an edit from the menu leaves the list unfiltered",
+        "                    self.filter_text = self.filter_editor.text().to_owned();\n"
+        "                    self.rebuild_visible_list();\n"
+        "                }\n"
+        "            }\n"
+        "            MenuField::RunBox => {\n",
+        "                    self.filter_text = self.filter_editor.text().to_owned();\n"
+        "                }\n"
+        "            }\n"
+        "            MenuField::RunBox => {\n",
+        [FM_FILTER],
+    ),
+    (
+        "an edit from the menu leaves the New Task box's complaint up",
+        "                    if run_box.input.text() != before {\n"
+        "                        run_box.error = None;\n"
+        "                    }\n",
+        "",
+        [FM_RUN],
+    ),
+    (
+        "the New Task box holds no capacity",
+        "            input: box_holding(RUN_BOX_CAPACITY),\n",
+        "            input: TextInput::new(),\n",
+        [FM_RUN],
+    ),
+    (
+        "the filter box holds no capacity",
+        "            filter_editor: box_holding(FILTER_CAPACITY),\n",
+        "            filter_editor: TextInput::new(),\n",
+        [FM_FILTER],
+    ),
+    (
+        "the filter's keys keep a clipboard the menu does not share",
+        "                let _edit = textline::apply_key_on_clipboard(\n"
+        "                    &mut self.filter_editor,\n"
+        "                    key,\n"
+        "                    FILTER_CAPACITY,\n"
+        "                    FILTER_TEXT_SIZE,\n"
+        "                );\n",
+        "                let _edit = textline::apply_key(\n"
+        "                    &mut self.filter_editor,\n"
+        "                    key,\n"
+        "                    FILTER_CAPACITY,\n"
+        "                    \"\",\n"
+        "                    FILTER_TEXT_SIZE,\n"
+        "                );\n",
+        [FM_FILTER],
+    ),
+    (
+        "the New Task box's keys keep a clipboard the menu does not share",
+        "                    let edit = textline::apply_key_on_clipboard(\n"
+        "                        &mut run_box.input,\n"
+        "                        key,\n"
+        "                        RUN_BOX_CAPACITY,\n"
+        "                        RUN_BOX_TEXT_SIZE,\n"
+        "                    );\n",
+        "                    let edit = textline::apply_key(\n"
+        "                        &mut run_box.input,\n"
+        "                        key,\n"
+        "                        RUN_BOX_CAPACITY,\n"
+        "                        \"\",\n"
+        "                        RUN_BOX_TEXT_SIZE,\n"
+        "                    );\n",
+        [FM_FILTER],
+    ),
+    (
+        "a key the menu took reaches the box under it",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        [FM_MODAL],
+    ),
+    (
+        "a right press on a process under a box's menu opens nothing",
+        "                fieldmenu::Outcome::RightPressElsewhere(..) => return self.handle_mouse(mouse),\n",
+        "                fieldmenu::Outcome::RightPressElsewhere(..) => return EventResult::Consumed,\n",
+        [FM_MODAL],
+    ),
+    (
+        "a box's menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [FM_CLOCK],
+    ),
+    (
+        "the window's ticks do not move the menu's clock",
+        "                let _menu_changed = self.field_menu.tick(self.clock_ms);\n",
+        "",
+        [FM_CLOCK],
+    ),
+    (
+        "the window asks no tick for the menu's wait",
+        "        Some(menu.map_or(refresh, |menu| menu.min(refresh)))\n",
+        "        Some(menu.map_or(refresh, |_menu| refresh))\n",
+        [FM_CLOCK],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "procexplorer", timeout=600, only=only))

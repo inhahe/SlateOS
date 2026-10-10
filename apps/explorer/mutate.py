@@ -1471,6 +1471,50 @@ BINVIEW = [
     ),
 ]
 
+
+# The context menu follows the pointer and says why a greyed row is greyed
+# (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md): it never saw
+# the pointer move and was put away after every press, so its submenus
+# could not be reached with the pointer at all.
+MAIN += [
+    (
+        'a press that opens a submenu puts the menu away',
+        '        if !menu.is_visible() {\n            self.menu = None;\n        }',
+        '        self.menu = None;',
+        ['a_submenu_is_reached_with_the_pointer'],
+    ),
+    (
+        'the menu never sees the pointer move',
+        '            MouseEventKind::Move if self.menu.is_some() => self.hover_menu(m.x, m.y),',
+        '            MouseEventKind::Move if self.menu.is_some() => false,',
+        ['a_submenu_is_reached_with_the_pointer', 'a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the menu's greyed rows are not explained",
+        '        self.explain_menu(&mut menu);',
+        '        let _ = &menu;',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a folder's Open With is explained as a file's",
+        '                "A folder opens here, in the explorer: Open With is for files."',
+        '                "No program on this system says it opens this kind of file."',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'time does not pass for the menu',
+        '            Event::Tick { elapsed_ms } => self.tick_menu(*elapsed_ms) | self.tick_work(),',
+        '            Event::Tick { .. } => self.tick_work(),',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window does not wake for a menu's reason",
+        '            .map(|ms| std::time::Duration::from_millis(ms.max(1)));',
+        '            .filter(|_| false)\n            .map(|ms| std::time::Duration::from_millis(ms.max(1)));',
+        ['a_greyed_menu_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
     "binview.rs": BINVIEW,

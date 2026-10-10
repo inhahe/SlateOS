@@ -1324,6 +1324,10 @@ pub struct ExplorerState {
     /// uses that widget for the desktop menu and the tray overflow, and a
     /// second menu implementation in the file manager would be the third.
     menu: Option<ContextMenu>,
+    /// The context menu's clock, in milliseconds: every tick's `elapsed_ms`.
+    /// A greyed row's reason appears once the pointer has rested on it for
+    /// the toolkit's delay, which the menu counts by this.
+    menu_clock_ms: u64,
     /// The bulk file operations in flight.
     ///
     /// More than one, but never two that touch the same drive: that is the
@@ -1518,6 +1522,7 @@ impl ExplorerState {
             status_message: String::new(),
             hover_hint: String::new(),
             menu: None,
+            menu_clock_ms: 0,
             operations: Vec::new(),
             pending: VecDeque::new(),
             dir_summary: String::new(),
@@ -3142,9 +3147,76 @@ impl ExplorerState {
         } else {
             self.folder_menu_items()
         };
-        let mut menu = ContextMenu::new(items);
+        self.put_up_menu(ContextMenu::new(items), x, y);
+    }
+
+    /// Show `menu` at (`x`, `y`) as the window's context menu, each greyed
+    /// row in it saying why when the pointer rests on it ([`Self::explain_menu`]).
+    fn put_up_menu(&mut self, mut menu: ContextMenu, x: f32, y: f32) {
+        self.explain_menu(&mut menu);
         menu.show(x, y, (self.window_width as f32, self.window_height as f32));
         self.menu = Some(menu);
+    }
+
+    /// Say why each row a menu of this window can grey is greyed, in a
+    /// sentence: the toolkit shows a reason only while its row *is* greyed,
+    /// so every one is given whatever the rows' states. Open With with no
+    /// program for the file; your own order with none made yet; and the
+    /// bin's rows, in the words its buttons already use.
+    fn explain_menu(&self, menu: &mut ContextMenu) {
+        // A folder's Open With is greyed because a folder opens here; a
+        // file's, because nothing on the system claims its kind.
+        let folder = self
+            .selected_indices
+            .first()
+            .and_then(|&index| self.entries.get(index))
+            .is_some_and(|entry| entry.is_dir);
+        menu.explain(
+            MENU_OPEN_WITH_BASE,
+            if folder {
+                "A folder opens here, in the explorer: Open With is for files."
+            } else {
+                "No program on this system says it opens this kind of file."
+            },
+        );
+        if let Some(i) = SORTS.iter().position(|&(by, _)| by == SortBy::Custom) {
+            menu.explain(
+                sort_row_id(i),
+                "Drag a file to where you want it to make an order of your own.",
+            );
+        }
+        if let Some(bin) = &self.bin {
+            for (id, button) in [
+                (MENU_BIN_RESTORE, BinButton::Restore),
+                (MENU_BIN_DELETE, BinButton::DeleteForever),
+                (MENU_BIN_EMPTY, BinButton::Empty),
+            ] {
+                if let Some(why) = bin.button_state(button).reason() {
+                    menu.explain(id, why);
+                }
+            }
+        }
+    }
+
+    /// The pointer moved with a context menu up: the row under it is lit, a
+    /// submenu under it opens, and a greyed row it comes to rest on starts the
+    /// wait for its reason. Every move is a frame while the menu is up.
+    fn hover_menu(&mut self, x: f32, y: f32) -> bool {
+        match self.menu.as_mut() {
+            Some(menu) => {
+                menu.handle_mouse_move(x, y);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Let `elapsed_ms` pass for the open context menu: a greyed row's reason
+    /// appears once its wait is up. Returns whether one appeared.
+    fn tick_menu(&mut self, elapsed_ms: u64) -> bool {
+        self.menu_clock_ms = self.menu_clock_ms.saturating_add(elapsed_ms);
+        let now = self.menu_clock_ms;
+        self.menu.as_mut().is_some_and(|menu| menu.tick(now))
     }
 
     /// Sort by the column whose heading is under `x`, or the other way when
@@ -3364,7 +3436,7 @@ impl ExplorerState {
                 .iter()
                 .enumerate()
                 .map(|(i, &(by, label))| MenuItem::Action {
-                    id: MENU_SORT_BASE.saturating_add(1).saturating_add(i as u64),
+                    id: sort_row_id(i),
                     label: label.to_string(),
                     shortcut: None,
                     icon: None,
@@ -3532,9 +3604,7 @@ impl ExplorerState {
 
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
-        let mut menu = ContextMenu::new(self.heading_menu_items());
-        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
-        self.menu = Some(menu);
+        self.put_up_menu(ContextMenu::new(self.heading_menu_items()), x, y);
     }
 
     /// The headings' menu: how the listing is sorted, which columns it
@@ -3750,7 +3820,15 @@ impl ExplorerState {
             return false;
         };
         let chosen = menu.handle_click(x, y);
-        self.menu = None;
+        // Put away only when the press put it away -- a row chosen, or a
+        // press outside it. A press on a submenu's row opens the submenu and
+        // one on a greyed row does nothing, and both leave the menu up: the
+        // menu was dropped after every press, so a submenu a click opened
+        // went with it, and Open With and Sort by could not be reached with
+        // the pointer at all.
+        if !menu.is_visible() {
+            self.menu = None;
+        }
         if let Some(id) = chosen {
             self.activate_menu_item(id);
         }
@@ -6228,6 +6306,14 @@ const SORTS: [(SortBy, &str); 5] = [
     (SortBy::Type, "Type"),
     (SortBy::Custom, "Your own order"),
 ];
+/// The id of the sort menu's row for `SORTS[i]`: one id space above
+/// [`MENU_SORT_BASE`], for the menu and for the reason a greyed row gives.
+fn sort_row_id(i: usize) -> u64 {
+    MENU_SORT_BASE
+        .saturating_add(1)
+        .saturating_add(u64::try_from(i).unwrap_or(u64::MAX))
+}
+
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -6366,11 +6452,26 @@ impl oswindow::app::App for ExplorerState {
         // should move as smoothly as anything else on screen. Named first
         // because it is the shorter of the two and this returns the one it
         // finds.
-        if self.work_moving() {
-            return Some(OPERATION_TICK);
+        //
+        // And whenever a greyed row of an open menu has a reason waiting to
+        // appear, the sooner of the two -- the menu says `Some(0)` until a
+        // tick has started the wait, which a tick of a millisecond does.
+        let own = if self.work_moving() {
+            Some(OPERATION_TICK)
+        } else {
+            let working =
+                self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
+            working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
+        };
+        let reason = self
+            .menu
+            .as_ref()
+            .and_then(|menu| menu.due_in(self.menu_clock_ms))
+            .map(|ms| std::time::Duration::from_millis(ms.max(1)));
+        match (own, reason) {
+            (Some(own), Some(reason)) => Some(own.min(reason)),
+            (own, reason) => own.or(reason),
         }
-        let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
-        working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
     }
 
     fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
@@ -6538,7 +6639,7 @@ impl ExplorerState {
             // Each tick retires a batch. A tick that retires nothing has
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
-            Event::Tick { .. } => self.tick_work(),
+            Event::Tick { elapsed_ms } => self.tick_menu(*elapsed_ms) | self.tick_work(),
             // `ModifierChord` is here for another reason: this program never
             // asks for one, so the compositor never sends it. Named rather
             // than swept up in a `_ =>` because a wildcard here would also
@@ -6604,6 +6705,10 @@ impl ExplorerState {
                 let divider = self.drop_divider();
                 was.is_some() || dropped || divider
             }
+            // With a menu up, the pointer lights its rows and opens its
+            // submenus -- it did neither, so a submenu opened only on a press,
+            // and that press then put the whole menu away.
+            MouseEventKind::Move if self.menu.is_some() => self.hover_menu(m.x, m.y),
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
             MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x, m.y),
             MouseEventKind::Move if self.row_drag.is_some() => self.drag_row(m.x, m.y),
@@ -7131,9 +7236,7 @@ impl ExplorerState {
                 Self::menu_action(MENU_REFRESH, "Refresh", true),
             ],
         };
-        let mut menu = ContextMenu::new(items);
-        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
-        self.menu = Some(menu);
+        self.put_up_menu(ContextMenu::new(items), x, y);
         true
     }
 
@@ -10880,6 +10983,157 @@ mod tests {
         let mut state = state_at(root);
         let _ = state.render();
         state
+    }
+
+    // ---- the context menu and the pointer -------------------------------
+
+    /// The middle of the open menu's row `label`, where the menu laid it out.
+    fn menu_row(state: &ExplorerState, label: &str) -> (f32, f32) {
+        let menu = state.menu.as_ref().expect("a menu is up");
+        let index = menu
+            .items()
+            .iter()
+            .position(|item| match item {
+                MenuItem::Action { label: l, .. } | MenuItem::Submenu { label: l, .. } => {
+                    l == label
+                }
+                MenuItem::Separator => false,
+            })
+            .unwrap_or_else(|| panic!("the menu has no {label} row"));
+        menu.item_rect(index).expect("a row is laid out").centre()
+    }
+
+    /// A point on the row `label` as the open menu last drew it -- a
+    /// submenu's row included, which is drawn over the menu it opened from.
+    fn drawn_menu_row(state: &ExplorerState, label: &str) -> (f32, f32) {
+        state
+            .render_menu()
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                guitk::render::RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    font_size,
+                    ..
+                } if text == label => Some((*x + 4.0, *y + font_size / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"))
+    }
+
+    fn move_to(state: &mut ExplorerState, (x, y): (f32, f32)) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    fn press_at(state: &mut ExplorerState, (x, y): (f32, f32)) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// **A submenu is reached with the pointer**: moving onto Sort by opens
+    /// it, a press on Sort by opens it too and leaves the menu up, and a
+    /// press on a row in it chooses that row. The menu used to be put away
+    /// after every press and never saw the pointer move, so a submenu opened
+    /// only on a press -- which then put the whole menu away -- and Sort by
+    /// and Open With could not be reached with the pointer at all.
+    #[test]
+    fn a_submenu_is_reached_with_the_pointer() {
+        let scratch = temp_dir("menu_submenu");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "a.txt");
+
+        state.open_column_menu(400.0, 120.0);
+        let sort_by = menu_row(&state, "Sort by");
+        press_at(&mut state, sort_by);
+        assert!(
+            state.menu.as_ref().is_some_and(ContextMenu::is_visible),
+            "a press on Sort by put the menu away"
+        );
+        let size = drawn_menu_row(&state, "Size");
+        press_at(&mut state, size);
+        assert_eq!(
+            state.sort_by,
+            SortBy::Size,
+            "the submenu's row was not chosen"
+        );
+        assert!(state.menu.is_none(), "choosing a row left the menu up");
+
+        state.open_column_menu(400.0, 120.0);
+        let sort_by = menu_row(&state, "Sort by");
+        move_to(&mut state, sort_by);
+        let name = drawn_menu_row(&state, "Name");
+        press_at(&mut state, name);
+        assert_eq!(
+            state.sort_by,
+            SortBy::Name,
+            "moving onto Sort by did not open it"
+        );
+    }
+
+    /// **A greyed menu row says why**, while the pointer rests on it, after
+    /// the toolkit's delay, and the window asks for the ticks that show it:
+    /// your own order before there is one, and a folder's Open With.
+    #[test]
+    fn a_greyed_menu_row_says_why_while_the_pointer_rests_on_it() {
+        use oswindow::app::App;
+        let scratch = temp_dir("menu_why");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("folder")).expect("make a folder");
+        let mut state = one_file(&root, "a.txt");
+
+        state.open_column_menu(400.0, 120.0);
+        let sort_by = menu_row(&state, "Sort by");
+        move_to(&mut state, sort_by);
+        let own = drawn_menu_row(&state, "Your own order");
+        move_to(&mut state, own);
+        assert!(
+            App::tick_interval(&state).is_some_and(|d| d <= std::time::Duration::from_millis(1)),
+            "the window does not ask for the tick that starts the wait"
+        );
+        send(&mut state, &Event::Tick { elapsed_ms: 1 });
+        assert!(
+            App::tick_interval(&state).is_some_and(|d| d <= std::time::Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        send(&mut state, &Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            state.menu.as_ref().and_then(ContextMenu::showing_reason),
+            Some("Drag a file to where you want it to make an order of your own.")
+        );
+        assert!(
+            state.render_menu().iter().any(|c| matches!(
+                c,
+                guitk::render::RenderCommand::Text { text, .. } if text.starts_with("Drag a file")
+            )),
+            "the reason is not drawn"
+        );
+
+        state.menu = None;
+        let (x, y) = row_centre(&state, "folder");
+        right_click(&mut state, x, y);
+        let open_with = menu_row(&state, "Open with");
+        move_to(&mut state, open_with);
+        send(&mut state, &Event::Tick { elapsed_ms: 1 });
+        send(&mut state, &Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            state.menu.as_ref().and_then(ContextMenu::showing_reason),
+            Some("A folder opens here, in the explorer: Open With is for files.")
+        );
     }
 
     /// A point on the row showing `name`.

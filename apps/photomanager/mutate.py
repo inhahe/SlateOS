@@ -487,6 +487,44 @@ MUTATIONS += [
     ),
 ]
 
+
+# The context menu follows the pointer and says why a greyed row is greyed
+# (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md): it never saw
+# the pointer move and was put away after every press, so its submenus
+# could not be reached with the pointer at all.
+MUTATIONS += [
+    (
+        'a press that opens Colour label puts the menu away',
+        '                    if !menu.is_visible() {\n                        self.photo_menu = None;\n                    }',
+        '                    self.photo_menu = None;',
+        ['the_colour_labels_are_reached_with_the_pointer'],
+    ),
+    (
+        'the photo menu never sees the pointer move',
+        '                MouseEventKind::Move => {\n                    menu.handle_mouse_move(event.x, event.y);',
+        '                MouseEventKind::Move => {\n                    let _ = &menu;',
+        ['the_colour_labels_are_reached_with_the_pointer', 'a_greyed_album_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'an album the photograph is in is not explained',
+        '            menu.explain(album.id, "The photograph is in this album already.");',
+        '            let _ = album;',
+        ['a_greyed_album_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'time does not pass for the photo menu',
+        '                self.menu_clock_ms = self.menu_clock_ms.saturating_add(*elapsed_ms);',
+        '                let _ = elapsed_ms;',
+        ['a_greyed_album_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a reason appearing asks for no frame',
+        '                self.advance_slideshow(*elapsed_ms) | reason',
+        '                self.advance_slideshow(*elapsed_ms)',
+        ['a_greyed_album_row_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "photomanager", timeout=600, only=only))

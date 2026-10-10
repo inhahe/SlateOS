@@ -619,6 +619,44 @@ MUTATIONS += [
     ),
 ]
 
+
+# The context menu follows the pointer and says why a greyed row is greyed
+# (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md): it never saw
+# the pointer move and was put away after every press, so its submenus
+# could not be reached with the pointer at all.
+MUTATIONS += [
+    (
+        'a press that opens Move to puts the menu away',
+        '                    if !menu.is_visible() {\n                        self.note_menu = None;\n                    }',
+        '                    self.note_menu = None;',
+        ['move_to_is_reached_with_the_pointer'],
+    ),
+    (
+        'the note menu never sees the pointer move',
+        '                MouseEventKind::Move => {\n                    menu.handle_mouse_move(event.x, event.y);',
+        '                MouseEventKind::Move => {\n                    let _ = &menu;',
+        ['move_to_is_reached_with_the_pointer', 'the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+    (
+        'the notebook the note is in is not explained',
+        '            menu.explain(current, "The note is in this notebook already.");',
+        '            let _ = current;',
+        ['the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+    (
+        'time does not pass for the note menu',
+        '                self.menu_clock_ms = self.menu_clock_ms.saturating_add(*elapsed_ms);',
+        '                let _ = elapsed_ms;',
+        ['the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+    (
+        "the window does not wake for the note menu's reason",
+        '            .map(|ms| Duration::from_millis(ms.max(1)))\n    }',
+        '            .filter(|_| false)\n            .map(|ms| Duration::from_millis(ms.max(1)))\n    }',
+        ['the_notebook_the_note_is_in_says_why_it_is_greyed'],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "notes", timeout=900, only=only))

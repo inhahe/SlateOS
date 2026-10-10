@@ -1450,6 +1450,10 @@ pub struct PhotoApp {
     /// name the library no longer has is worse than one that costs a few
     /// allocations to raise.
     photo_menu: Option<ContextMenu>,
+    /// The open menu's clock, in milliseconds: every tick's `elapsed_ms`. A
+    /// greyed row's reason appears once the pointer has rested on it for the
+    /// toolkit's delay, which the menu counts by this.
+    menu_clock_ms: u64,
     /// The photograph the open menu is about.
     ///
     /// Remembered rather than read from the selection when the menu is
@@ -1490,6 +1494,7 @@ impl PhotoApp {
             asking_tag: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             photo_menu: None,
+            menu_clock_ms: 0,
             menu_photo: None,
             photos: Vec::new(),
             albums: Vec::new(),
@@ -2792,7 +2797,14 @@ impl PhotoApp {
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Tick { elapsed_ms } => self.advance_slideshow(*elapsed_ms),
+            // Time passes for the slideshow and for the open menu, whose
+            // greyed rows say why once the pointer has rested on them.
+            Event::Tick { elapsed_ms } => {
+                self.menu_clock_ms = self.menu_clock_ms.saturating_add(*elapsed_ms);
+                let now = self.menu_clock_ms;
+                let reason = self.photo_menu.as_mut().is_some_and(|menu| menu.tick(now));
+                self.advance_slideshow(*elapsed_ms) | reason
+            }
             _ => false,
         }
     }
@@ -2875,19 +2887,32 @@ impl PhotoApp {
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
         // An open menu takes the click before anything under it does --
         // that is what being over everything means.
-        if self.photo_menu.is_some() {
-            if let MouseEventKind::Press(_) = event.kind {
-                let chosen = self
-                    .photo_menu
-                    .as_mut()
-                    .and_then(|m| m.handle_click(event.x, event.y));
-                self.photo_menu = None;
-                if let Some(id) = chosen {
-                    self.choose_from_photo_menu(id);
+        //
+        // Put away only when the press put it away -- a row chosen, or a press
+        // outside it: a press on Colour label opens the submenu and one on a
+        // greyed row does nothing, and the menu used to go after every press,
+        // so the colour labels could not be reached with the pointer. And it
+        // has the pointer's moves while it is up, so its rows light, its
+        // submenu opens, and a greyed row says why.
+        if let Some(menu) = self.photo_menu.as_mut() {
+            match event.kind {
+                MouseEventKind::Press(_) => {
+                    let chosen = menu.handle_click(event.x, event.y);
+                    if !menu.is_visible() {
+                        self.photo_menu = None;
+                    }
+                    if let Some(id) = chosen {
+                        self.choose_from_photo_menu(id);
+                    }
+                    // Consumed either way: a click that dismisses a menu
+                    // should not also land on whatever was behind it.
+                    return true;
                 }
-                // Consumed either way: a click that dismisses a menu should
-                // not also land on whatever was behind it.
-                return true;
+                MouseEventKind::Move => {
+                    menu.handle_mouse_move(event.x, event.y);
+                    return true;
+                }
+                _ => {}
             }
         }
         if let MouseEventKind::Scroll { dy, .. } = event.kind {
@@ -3402,6 +3427,14 @@ impl PhotoApp {
             checked: None,
         });
         let mut menu = ContextMenu::new(items);
+        // Why each row that can be greyed is: shown only while it is.
+        menu.explain(
+            0,
+            "There is no album to add the photograph to: make one in the sidebar.",
+        );
+        for album in &self.albums {
+            menu.explain(album.id, "The photograph is in this album already.");
+        }
         menu.show(x, y, (self.window_width, self.window_height));
         self.photo_menu = Some(menu);
         self.menu_photo = Some(pid);
@@ -5015,7 +5048,19 @@ impl App for PhotoApp {
     /// ten times a second to discover that is `known-issues.md` lesson 47 --
     /// which is also the defect being fixed here, from the other side.
     fn tick_interval(&self) -> Option<Duration> {
-        self.has_work().then_some(SLIDESHOW_TICK)
+        // The sooner of the slideshow's tick and the one an open menu's
+        // greyed row waits for -- `Some(0)` until a tick has started the
+        // wait, which a tick of a millisecond does.
+        let own = self.has_work().then_some(SLIDESHOW_TICK);
+        let reason = self
+            .photo_menu
+            .as_ref()
+            .and_then(|menu| menu.due_in(self.menu_clock_ms))
+            .map(|ms| Duration::from_millis(ms.max(1)));
+        match (own, reason) {
+            (Some(own), Some(reason)) => Some(own.min(reason)),
+            (own, reason) => own.or(reason),
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -6506,17 +6551,30 @@ mod tests {
     /// whatever card was underneath it.
     #[test]
     fn a_click_dismisses_the_menu_without_falling_through() {
-        let mut app = app_with_n_pictures("dismiss", 2);
+        let mut app = app_with_n_pictures("dismiss", 6);
         app.set_window_size(900.0, 700.0);
         app.create_album("Holiday");
         let (x, y) = first_card_point(&app);
         app.handle_event(&right_click(x, y));
         let before = app.selected_photo;
 
-        // Far from the menu, over the grid.
-        let elsewhere = app.thumb_rect(1).expect("a second card");
+        // Away from the menu, over the grid: a card the menu's panel does not
+        // cover, since a press on the panel itself -- a separator, a greyed
+        // row -- leaves the menu up.
+        let panel = app
+            .photo_menu
+            .as_ref()
+            .and_then(ContextMenu::panel_rect)
+            .expect("the menu is up");
+        // Not the card right-clicked: a press there would choose what is
+        // chosen already, and could not show a press falling through.
+        let elsewhere = (1..app.photos.len())
+            .filter_map(|i| app.thumb_rect(i))
+            .map(|r| (r.x + 4.0, r.y + 4.0))
+            .find(|&(x, y)| !panel.contains(x, y))
+            .expect("a card the menu does not cover");
         assert!(
-            app.handle_event(&click(elsewhere.x + 4.0, elsewhere.y + 4.0)),
+            app.handle_event(&click(elsewhere.0, elsewhere.1)),
             "the click was not consumed"
         );
 
@@ -8355,6 +8413,140 @@ mod tests {
                 transition.label()
             );
         }
+    }
+
+    // --- The photograph menu and the pointer ---
+
+    /// The middle of the open menu's row `label`, where the menu laid it out.
+    fn menu_row(app: &PhotoApp, label: &str) -> (f32, f32) {
+        let menu = app.photo_menu.as_ref().expect("a menu is up");
+        let index = menu
+            .items()
+            .iter()
+            .position(|item| match item {
+                MenuItem::Action { label: l, .. } | MenuItem::Submenu { label: l, .. } => {
+                    l == label
+                }
+                MenuItem::Separator => false,
+            })
+            .unwrap_or_else(|| panic!("the menu has no {label} row"));
+        menu.item_rect(index).expect("a row is laid out").centre()
+    }
+
+    /// A point on the row `label` as the open menu last drew it -- a
+    /// submenu's row included, drawn over the menu it opened from.
+    fn drawn_menu_row(app: &PhotoApp, label: &str) -> (f32, f32) {
+        app.photo_menu
+            .as_ref()
+            .expect("a menu is up")
+            .render(&Palette::for_mode(false))
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    font_size,
+                    ..
+                } if text == label => Some((*x + 4.0, *y + font_size / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"))
+    }
+
+    fn pointer(app: &mut PhotoApp, (x, y): (f32, f32), kind: MouseEventKind) -> bool {
+        app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// **The colour labels are reached with the pointer**: a press on Colour
+    /// label opens it and leaves the menu up, moving onto it opens it too,
+    /// and a press on a colour in it gives the photograph that label. The
+    /// menu used to go after every press and never saw the pointer move.
+    #[test]
+    fn the_colour_labels_are_reached_with_the_pointer() {
+        let mut app = app_with_photos("menu-colour");
+        let pid = app.photos.first().expect("a photograph").id;
+        // As a right-click does: the photograph is chosen, and a choice in
+        // the menu acts on what is chosen.
+        app.selected_photo = Some(pid);
+        app.open_photo_menu(pid, 300.0, 200.0);
+        let colour = menu_row(&app, "Colour label");
+        pointer(&mut app, colour, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            app.photo_menu.as_ref().is_some_and(ContextMenu::is_visible),
+            "a press on Colour label put the menu away"
+        );
+        let label = COLOR_LABELS
+            .iter()
+            .find(|l| **l != ColorLabel::None)
+            .expect("a colour to give");
+        let row = drawn_menu_row(&app, label.label());
+        pointer(&mut app, row, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(
+            app.find_photo(pid).map(|p| p.color_label),
+            Some(*label),
+            "the colour was not given"
+        );
+        assert!(
+            app.photo_menu.is_none(),
+            "choosing a colour left the menu up"
+        );
+
+        app.open_photo_menu(pid, 300.0, 200.0);
+        let colour = menu_row(&app, "Colour label");
+        assert!(pointer(&mut app, colour, MouseEventKind::Move));
+        drawn_menu_row(&app, label.label());
+    }
+
+    /// **A greyed row says why**, while the pointer rests on it, after the
+    /// toolkit's delay: with no album to add to, and an album the photograph
+    /// is in already -- and the window asks for the ticks that show it.
+    #[test]
+    fn a_greyed_album_row_says_why_while_the_pointer_rests_on_it() {
+        let mut app = app_with_photos("menu-why");
+        let pid = app.photos.first().expect("a photograph").id;
+        app.open_photo_menu(pid, 300.0, 200.0);
+        let none = menu_row(&app, "No albums yet - make one in the sidebar");
+        pointer(&mut app, none, MouseEventKind::Move);
+        assert_eq!(
+            oswindow::app::App::tick_interval(&app),
+            Some(Duration::from_millis(1)),
+            "the window does not ask for the tick that starts the wait"
+        );
+        app.handle_event(&Event::Tick { elapsed_ms: 1 });
+        assert_eq!(
+            oswindow::app::App::tick_interval(&app),
+            Some(Duration::from_millis(500))
+        );
+        assert!(
+            app.handle_event(&Event::Tick { elapsed_ms: 500 }),
+            "no frame for the reason"
+        );
+        assert_eq!(
+            app.photo_menu
+                .as_ref()
+                .and_then(ContextMenu::showing_reason),
+            Some("There is no album to add the photograph to: make one in the sidebar.")
+        );
+
+        app.photo_menu = None;
+        let album = app.create_album("Holiday");
+        assert!(
+            app.add_to_album(album, pid),
+            "the fixture could not add to the album"
+        );
+        app.open_photo_menu(pid, 300.0, 200.0);
+        let holiday = menu_row(&app, "Add to Holiday");
+        pointer(&mut app, holiday, MouseEventKind::Move);
+        app.handle_event(&Event::Tick { elapsed_ms: 1 });
+        app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            app.photo_menu
+                .as_ref()
+                .and_then(ContextMenu::showing_reason),
+            Some("The photograph is in this album already.")
+        );
     }
 
     fn app_with_photos(tag: &str) -> PhotoApp {

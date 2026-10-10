@@ -1671,6 +1671,10 @@ pub struct NotesApp {
     /// The note menu, while it is open. Rebuilt on each opening, because its
     /// rows are the notebooks and those change underneath it.
     note_menu: Option<ContextMenu>,
+    /// The open menu's clock, in milliseconds: every tick's `elapsed_ms`. A
+    /// greyed row's reason appears once the pointer has rested on it for the
+    /// toolkit's delay, which the menu counts by this.
+    menu_clock_ms: u64,
     /// The note the open menu is about, so nothing can move the answer while
     /// it is up.
     menu_target: Option<MenuTarget>,
@@ -1758,6 +1762,7 @@ impl NotesApp {
             picker: FilePicker::new(),
             last_save: None,
             note_menu: None,
+            menu_clock_ms: 0,
             menu_target: None,
             window_width: 1280.0,
             window_height: 800.0,
@@ -2292,6 +2297,10 @@ impl NotesApp {
             });
         }
         let mut menu = ContextMenu::new(items);
+        // The notebook the note is in is greyed: say so where it is.
+        if let Some(current) = current {
+            menu.explain(current, "The note is in this notebook already.");
+        }
         menu.show(x, y, (self.window_width, self.window_height));
         self.note_menu = Some(menu);
         self.menu_target = Some(MenuTarget::Note(id));
@@ -2951,6 +2960,17 @@ impl NotesApp {
                 // Not `Consumed`: a resize is not by itself a reason to redraw.
                 EventResult::Ignored
             }
+            // Time passes for the open menu, whose greyed rows say why once
+            // the pointer has rested on them for the toolkit's delay.
+            Event::Tick { elapsed_ms } => {
+                self.menu_clock_ms = self.menu_clock_ms.saturating_add(*elapsed_ms);
+                let now = self.menu_clock_ms;
+                if self.note_menu.as_mut().is_some_and(|menu| menu.tick(now)) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -3064,18 +3084,29 @@ impl NotesApp {
         }
         // An open menu takes the press before anything under it, and consumes
         // it either way: a click that dismisses a menu must not also land on
-        // whatever was behind it.
-        if self.note_menu.is_some() {
-            if let MouseEventKind::Press(_) = event.kind {
-                let chosen = self
-                    .note_menu
-                    .as_mut()
-                    .and_then(|m| m.handle_click(event.x, event.y));
-                self.note_menu = None;
-                if let Some(row) = chosen {
-                    self.choose_from_note_menu(row);
+        // whatever was behind it. It is put away only when the press put it
+        // away -- a row chosen, or a press outside it: a press on Move to
+        // opens the submenu and one on a greyed row does nothing, and the
+        // menu used to go after every press, so Move to could not be reached
+        // with the pointer. And it has the pointer's moves while it is up, so
+        // its rows light, its submenu opens, and a greyed row says why.
+        if let Some(menu) = self.note_menu.as_mut() {
+            match event.kind {
+                MouseEventKind::Press(_) => {
+                    let chosen = menu.handle_click(event.x, event.y);
+                    if !menu.is_visible() {
+                        self.note_menu = None;
+                    }
+                    if let Some(row) = chosen {
+                        self.choose_from_note_menu(row);
+                    }
+                    return EventResult::Consumed;
                 }
-                return EventResult::Consumed;
+                MouseEventKind::Move => {
+                    menu.handle_mouse_move(event.x, event.y);
+                    return EventResult::Consumed;
+                }
+                _ => {}
             }
         }
         if let Some(result) = self.body_mouse(event) {
@@ -5508,15 +5539,19 @@ impl App for NotesApp {
         }
     }
 
-    /// No clock.
+    /// A clock only while an open menu's greyed row has a reason waiting to
+    /// appear.
     ///
-    /// Nothing here ages: a note changes when it is edited and the list
+    /// Nothing else here ages: a note changes when it is edited and the list
     /// reorders when the sort order does. A change is stamped from the clock
     /// when it is made and shown as a date and time, not as "a minute ago", so
-    /// there is nothing a tick could re-read. `known-issues.md` lesson 47's
-    /// question asked and answered the other way.
+    /// there is nothing a tick could re-read. The menu says `Some(0)` until a
+    /// tick has started a reason's wait, which a tick of a millisecond does.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.note_menu
+            .as_ref()
+            .and_then(|menu| menu.due_in(self.menu_clock_ms))
+            .map(|ms| Duration::from_millis(ms.max(1)))
     }
 
     /// Watch the library file, so another window's save reaches this one
@@ -6060,6 +6095,129 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::Modifiers;
+
+    // ------------------------------------------------------------------
+    // The note menu and the pointer
+    // ------------------------------------------------------------------
+
+    /// A note in Work, with Personal beside it, and its menu up.
+    fn note_menu_up() -> (NotesApp, NoteId, NotebookId, NotebookId) {
+        let mut app = NotesApp::new();
+        let work = app.create_notebook("Work");
+        let personal = app.create_notebook("Personal");
+        let id = app.create_note("Release checklist", work);
+        app.open_note_menu(id, 300.0, 200.0);
+        (app, id, work, personal)
+    }
+
+    /// The middle of the open menu's row `label`, where the menu laid it out.
+    fn menu_row(app: &NotesApp, label: &str) -> (f32, f32) {
+        let menu = app.note_menu.as_ref().expect("a menu is up");
+        let index = menu
+            .items()
+            .iter()
+            .position(|item| match item {
+                MenuItem::Action { label: l, .. } | MenuItem::Submenu { label: l, .. } => {
+                    l == label
+                }
+                MenuItem::Separator => false,
+            })
+            .unwrap_or_else(|| panic!("the menu has no {label} row"));
+        menu.item_rect(index).expect("a row is laid out").centre()
+    }
+
+    /// A point on the row `label` as the open menu last drew it -- a
+    /// submenu's row included, drawn over the menu it opened from.
+    fn drawn_menu_row(app: &NotesApp, label: &str) -> (f32, f32) {
+        app.note_menu
+            .as_ref()
+            .expect("a menu is up")
+            .render(&Palette::for_mode(false))
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    font_size,
+                    ..
+                } if text == label => Some((*x + 4.0, *y + font_size / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"))
+    }
+
+    fn pointer(app: &mut NotesApp, (x, y): (f32, f32), kind: MouseEventKind) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// **Move to is reached with the pointer**: moving onto it opens it, a
+    /// press on it opens it and leaves the menu up, and a press on a
+    /// notebook in it moves the note there. The menu used to be put away
+    /// after every press and never saw the pointer move, so Move to could
+    /// not be reached with the pointer at all.
+    #[test]
+    fn move_to_is_reached_with_the_pointer() {
+        let (mut app, id, _work, personal) = note_menu_up();
+        let move_to = menu_row(&app, "Move to");
+        pointer(&mut app, move_to, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            app.note_menu.as_ref().is_some_and(ContextMenu::is_visible),
+            "a press on Move to put the menu away"
+        );
+        let there = drawn_menu_row(&app, "Personal");
+        pointer(&mut app, there, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(
+            app.find_note(id).map(|n| n.notebook_id),
+            Some(personal),
+            "the note did not move"
+        );
+        assert!(
+            app.note_menu.is_none(),
+            "choosing a notebook left the menu up"
+        );
+
+        app.open_note_menu(id, 300.0, 200.0);
+        let move_to = menu_row(&app, "Move to");
+        assert_eq!(
+            pointer(&mut app, move_to, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        drawn_menu_row(&app, "Work");
+    }
+
+    /// **The notebook the note is in says why it is greyed**, while the
+    /// pointer rests on it, after the toolkit's delay -- and the window asks
+    /// for the ticks that show it, where it kept no clock at all.
+    #[test]
+    fn the_notebook_the_note_is_in_says_why_it_is_greyed() {
+        let (mut app, _id, _work, _personal) = note_menu_up();
+        assert_eq!(oswindow::app::App::tick_interval(&app), None);
+        let move_to = menu_row(&app, "Move to");
+        pointer(&mut app, move_to, MouseEventKind::Move);
+        let here = drawn_menu_row(&app, "Work");
+        pointer(&mut app, here, MouseEventKind::Move);
+        assert_eq!(
+            oswindow::app::App::tick_interval(&app),
+            Some(Duration::from_millis(1)),
+            "the window does not ask for the tick that starts the wait"
+        );
+        app.handle_event(&Event::Tick { elapsed_ms: 1 });
+        assert_eq!(
+            oswindow::app::App::tick_interval(&app),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 500 }),
+            EventResult::Consumed,
+            "the tick that shows the reason asks for no frame"
+        );
+        assert_eq!(
+            app.note_menu.as_ref().and_then(ContextMenu::showing_reason),
+            Some("The note is in this notebook already.")
+        );
+    }
 
     fn seeded() -> NotesApp {
         let mut app = NotesApp::new();

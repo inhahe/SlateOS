@@ -3431,7 +3431,14 @@ word; text inside them that says "lane C" is history.
     (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
     2026-09-29** (3a7073848): a morning and an evening picture, each with
     its time, and the picture and the rotation saying when a schedule hides
-    them;
+    them (since 2026-10-10 the page shows one source at a time, below);
+  - ~~a theme's wallpapers on the Background page
+    (`c-e-a-themes-wallpapers-on-the-background-page.md`)~~ **done
+    2026-10-10**: the page asks one question first -- Show: a picture, a
+    theme's pictures, pictures by time of day, a folder in turn, or none --
+    and choosing a source clears those the desktop would show over it
+    (design-decisions §1243); themes chosen by their pictures, decoded off
+    the window's thread; the pictures themes bring offered as pictures;
   - ~~window frames, the taskbar panel and the cursor theme chosen in
     Settings (`c-e-choose-the-window-frames-in-settings.md`,
     `c-e-choose-the-taskbar-panel-in-settings.md`,
@@ -3446,6 +3453,15 @@ word; text inside them that says "lane C" is history.
     **done 2026-10-10**: `apps/credvault`, the vault's model and its file
     format moved out of the password manager into a library both build on,
     so the service reads the vault with the very code that writes it;
+  - `[-]` a disabled control says why while the pointer rests on it
+    (`c-e-say-why-a-control-is-disabled.md`) -- **in progress**: Settings
+    (every dimmed button and unusable row), thirteen games through
+    `gamechrome::why`, the lock screen and System Restore's forms, and the
+    explorer's, notes' and the photo manager's context menus -- which never
+    saw the pointer, so their submenus could not be reached with it -- done
+    2026-10-10; hangman, gomoku, pinball and the network manager wait on
+    lane C's `Frame::greyed`, the editor's menu rows on the menu bar's
+    `explain`;
   - the editor and the markdown editor onto the toolkit's code editor
     (`c-e-the-toolkit-has-a-code-editor.md`);
   - adoption, program by program: the slider, the switch, checkbox, radio

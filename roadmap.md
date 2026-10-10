@@ -2227,7 +2227,9 @@ live.
   turned on (`context-menus.yaml`); a menu that cannot be used is reported
   with why. **Lane E:** the file manager's menus and the Settings page that
   lists and switches them
-  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`) -- the file
+  manager's done 2026-10-10 (60fc1cd4a), but for the items' pictures, which
+  wait on it drawing from the icon theme at all; the Settings page next. Menu rows
   draw their pictures since the same day -- an item's, a submenu's, a jump
   list action's (`ContextMenu::render_with_icons`).
 

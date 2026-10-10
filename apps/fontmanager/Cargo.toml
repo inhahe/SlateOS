@@ -2,15 +2,33 @@
 name = "fontmanager"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS Font Manager — graphical font management and preview"
+description = "SlateOS Font Manager: the fonts on this machine, each shown in its own letters; a font file installed; your own fonts removed"
+
 [dependencies]
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
+# The window's controls, and the font index every program draws from
+# (`guitk::fontdb`): the fonts listed are the ones the machine's programs find.
 guitk = { path = "../../gui/toolkit" }
+# Reading a font file as a font before it is installed, and drawing a family
+# in its own letters for the preview -- the same parsing and drawing every
+# program's text goes through.
+osfont = { path = "../../gui/font" }
+# A font file read with a cap, and written into the fonts folder without
+# ever replacing a file already there.
+safeio = { path = "../safeio" }
+# A file's name and a folder's path shown as text, by their bytes.
+pathtext = { path = "../pathtext" }
+# The search box's keys: the one table of a one-line field's keys.
+textline = { path = "../textline" }
 
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# A machine's fonts folders, made for a test and removed after it.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

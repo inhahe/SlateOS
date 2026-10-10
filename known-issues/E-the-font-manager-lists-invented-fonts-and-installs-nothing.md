@@ -1,6 +1,11 @@
 # The Font Manager lists invented fonts, and installs nothing
 
-**Status:** OPEN (lane E, found 2026-10-10)
+**Status:** OPEN (lane E, found 2026-10-10) -- fixed on lane-e-wip the same
+day, awaiting a boot on main: the program rewritten over the machine's real
+fonts (the toolkit's font index, the same folders), Install copying the file
+into `~/.local/share/fonts` after reading it as a font, Remove deleting the
+user's own files after asking, the preview drawn in the family's own letters,
+and the rendering settings, which nothing obeyed, gone.
 
 **In short:** the Font Manager (`apps/fontmanager`) shows nineteen fonts it
 made up, whatever is installed, and its Install and Remove change only that

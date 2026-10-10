@@ -471,6 +471,71 @@ MAIN += [
         "                let _ = cursor;\n",
         [EDITS, CLICK],
     ),
+    # 2026-10-09: online lookups are off until the user turns them on
+    # (design-decisions §1236, the operator's answer to E-Q2).
+    (
+        "a word is sent with lookups off",
+        "        if !self.online {\n            self.status = format!(\n",
+        "        if false {\n            self.status = format!(\n",
+        ["online_lookups_are_off_until_turned_on"],
+    ),
+    (
+        "choosing the offer leaves lookups off",
+        "                if !self.online && self.find_word(&word).is_none() {\n"
+        "                    self.set_online(true);\n"
+        "                }\n",
+        "",
+        ["choosing_the_offer_turns_lookups_on_and_asks"],
+    ),
+    (
+        "the choice is not kept",
+        "        doc.set_bool(ONLINE_KEY, on);\n",
+        "",
+        ["ctrl_i_turns_lookups_on_and_off_and_the_choice_is_kept"],
+    ),
+    (
+        "settings that say nothing read as on",
+        "        self.online = doc.get_bool(ONLINE_KEY) == Some(true);\n",
+        "        self.online = doc.get_bool(ONLINE_KEY) != Some(false);\n",
+        ["online_lookups_are_off_until_turned_on"],
+    ),
+    (
+        "Ctrl+I does nothing",
+        "                Key::I => Some(Action::ToggleOnline),\n",
+        "",
+        [
+            "ctrl_i_turns_lookups_on_and_off_and_the_choice_is_kept",
+            "every_advertised_key_does_something",
+        ],
+    ),
+    (
+        "the switch is drawn and does nothing",
+        "            Target::Online => self.apply(Action::ToggleOnline),\n",
+        "            Target::Online => {}\n",
+        [
+            "the_status_bar_switch_turns_lookups_on_and_names_the_server",
+            "every_control_the_program_draws_answers_a_click",
+        ],
+    ),
+    (
+        "another window's choice is not followed",
+        "            app.load_settings(&settingsfile::load(CONFIG_NAME));\n"
+        "            if app.online == was {\n",
+        "            if app.online == was {\n",
+        ["lookups_turned_on_in_another_window_are_on_here"],
+    ),
+    (
+        "the offer does not say it turns lookups on",
+        '                    format!("Turn on online lookups and look up \\u{201c}{word}\\u{201d}"),\n',
+        '                    format!("Look up \\u{201c}{word}\\u{201d} online"),\n',
+        ["online_lookups_are_off_until_turned_on"],
+    ),
+    (
+        "the switch does not say where a word goes",
+        '            format!("Online lookups: {}", self.server_name())\n',
+        '            String::from("Online lookups: on")\n',
+        ["the_status_bar_switch_turns_lookups_on_and_names_the_server"],
+    ),
 ]
 
 ONLINE = [

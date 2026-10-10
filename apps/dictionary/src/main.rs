@@ -9,12 +9,16 @@
 //! built-in word list, in a real window: every tab, result row, list row and
 //! button is clickable, and the keyboard reaches all of it.
 //!
-//! A word the thirty built-in entries lack is looked up in WordNet at
+//! A word the thirty built-in entries lack can be looked up in WordNet at
 //! dict.org -- when the reader asks, never as they type, since the word is
 //! sent to a server this project does not run ([`online`], design-decisions
-//! §1214). The answer becomes an entry like the others, saying where it came
-//! from, and a remembered word the list lacks stays in the history and the
-//! favourites as a row that looks it up again.
+//! §1214). Online lookups are off until the reader turns them on (§1236, the
+//! operator's answer to E-Q2): Ctrl+I, the status bar's switch, or the search
+//! screen's offer, which says in its own words that choosing it turns them on
+//! and sends the word. The choice is kept in `dictionary.yaml`. The answer
+//! becomes an entry like the others, saying where it came from, and a
+//! remembered word the list lacks stays in the history and the favourites as a
+//! row that looks it up again.
 //!
 //! # What wiring this up found
 //!
@@ -899,6 +903,9 @@ pub enum Target {
     NextFeatured,
     /// Open the featured word as a full entry.
     OpenFeatured,
+    /// The status bar's online-lookup switch: on, it names the server a word
+    /// is sent to; off, it says nothing is sent (§1236).
+    Online,
     /// The scrollbar's column beside a list or an entry, above or below the
     /// thumb: a page towards the press.
     ScrollTrack,
@@ -941,6 +948,8 @@ pub enum Action {
     /// Look up the open entry's `n`th cross-reference online; see
     /// [`Dictionary::cross_ref`].
     LookUp(usize),
+    /// Turn online lookups on, or off (§1236).
+    ToggleOnline,
 }
 
 /// One row of a list screen.
@@ -1379,6 +1388,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Backspace", "Rub out a letter, or go back"),
     ("Esc", "Clear the query, or go back"),
     ("Ctrl+D", "Favourite this word"),
+    ("Ctrl+I", "Online lookups on / off"),
     ("Ctrl+L / Ctrl+K / Ctrl+F", "Jump to the search box"),
     ("Ctrl+S", "Save the favourites"),
     ("Ctrl+O", "Open a word list"),
@@ -1454,6 +1464,12 @@ pub struct Dictionary {
     pub lookup: online::Lookup,
     /// The DICT server asked, as `host:port`.
     pub server: String,
+    /// Whether a word the built-in list lacks may be sent to [`Self::server`].
+    /// Off until the user turns it on, and remembered in their settings
+    /// (`dictionary.yaml`): no program contacts a website by default unless
+    /// that is what it is for, and a dictionary works without one
+    /// (design-decisions §1236).
+    pub online: bool,
     /// The lookup under way, if one is.
     pending: Option<Pending>,
     /// The last word WordNet did not have, and what it offered instead.
@@ -1474,6 +1490,13 @@ pub struct Dictionary {
 const DEFAULT_SERVER: &str = online::DICT_ORG;
 #[cfg(test)]
 const DEFAULT_SERVER: &str = "127.0.0.1:9";
+
+/// The name the dictionary's settings are kept under (`settingsfile`):
+/// `dictionary.yaml`.
+const CONFIG_NAME: &str = "dictionary";
+
+/// Where in `dictionary.yaml` the online-lookup switch is kept.
+const ONLINE_KEY: &[&str] = &["online_lookups"];
 
 /// A lookup under way.
 struct Pending {
@@ -1531,6 +1554,7 @@ impl Dictionary {
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             lookup: online::look_up,
             server: String::from(DEFAULT_SERVER),
+            online: false,
             pending: None,
             miss: None,
             waker: None,
@@ -1701,11 +1725,18 @@ impl Dictionary {
     }
 
     /// Open a row: its entry, or look its word up.
+    ///
+    /// With online lookups off, a row for a word not in the dictionary says
+    /// that choosing it turns them on and sends the word (`draw_lookup_row`),
+    /// so choosing it is the user's say-so: lookups go on, and it asks.
     fn activate(&mut self, row: &Row) {
         match row {
             Row::Entry(i) => self.open(*i),
             Row::LookUp(w) | Row::Suggestion(w) => {
                 let word = w.clone();
+                if !self.online && self.find_word(&word).is_none() {
+                    self.set_online(true);
+                }
                 self.look_up(&word);
             }
         }
@@ -1727,8 +1758,40 @@ impl Dictionary {
             .is_some_and(|p| p.word.eq_ignore_ascii_case(word.trim()))
     }
 
+    /// Read the online-lookup switch from the user's settings. Anything but
+    /// `true` there -- no file, no key, a word this does not know -- is off.
+    pub fn load_settings(&mut self, doc: &yamldoc::Document) {
+        self.online = doc.get_bool(ONLINE_KEY) == Some(true);
+    }
+
+    /// Turn online lookups on or off, keep the choice in the user's settings,
+    /// and say on the status line what it means.
+    ///
+    /// A lookup already under way is left to answer: its word has gone, and
+    /// its answer is no more sent than it was.
+    pub fn set_online(&mut self, on: bool) {
+        self.online = on;
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_bool(ONLINE_KEY, on);
+        let kept = settingsfile::store(CONFIG_NAME, &doc);
+        let host = self.server_name().to_owned();
+        self.status = match (on, kept) {
+            (true, Ok(())) => format!(
+                "Online lookups on: a word not in this dictionary is sent to {host} \u{2014} Ctrl+I turns them off"
+            ),
+            (false, Ok(())) => String::from(
+                "Online lookups off: nothing is sent anywhere \u{2014} Ctrl+I turns them on",
+            ),
+            (true, Err(e)) => format!("Online lookups on, but not kept for next time: {e}"),
+            (false, Err(e)) => format!("Online lookups off, but not kept for next time: {e}"),
+        };
+    }
+
     /// Look `word` up online -- or open it, if the dictionary already has
     /// it. The answer arrives on another thread, and wakes the window.
+    ///
+    /// With online lookups off, nothing is sent: the status line says the
+    /// word is not here and how to turn lookups on.
     pub fn look_up(&mut self, word: &str) {
         let word = word.trim();
         if let Some(index) = self.find_word(word) {
@@ -1736,6 +1799,12 @@ impl Dictionary {
             return;
         }
         if word.is_empty() || self.looking_up(word) {
+            return;
+        }
+        if !self.online {
+            self.status = format!(
+                "\u{201c}{word}\u{201d} is not in this dictionary \u{2014} online lookups are off; Ctrl+I turns them on"
+            );
             return;
         }
         let (tx, answer) = std::sync::mpsc::channel();
@@ -1955,6 +2024,7 @@ impl Dictionary {
             Action::Scroll(dy) => self.scroll_entry(dy),
             Action::ScrollRows(n) => self.scroll_rows(n),
             Action::StepFeatured(n) => self.step_featured(n),
+            Action::ToggleOnline => self.set_online(!self.online),
         }
     }
 
@@ -3127,13 +3197,28 @@ impl Dictionary {
         } else if matches!(row, Row::Suggestion(_)) {
             (
                 format!("Did you mean \u{201c}{word}\u{201d}?"),
-                format!("Look it up in WordNet, at {host}"),
+                if self.online {
+                    format!("Look it up in WordNet, at {host}")
+                } else {
+                    format!("Turns online lookups back on, and asks {host}")
+                },
             )
         } else if self.screen == Screen::Search {
-            (
-                format!("Look up \u{201c}{word}\u{201d} online"),
-                format!("In WordNet, at {host} \u{2014} the word is sent there"),
-            )
+            // With lookups off, the row says what choosing it does, because
+            // choosing it is what turns them on (`activate`).
+            if self.online {
+                (
+                    format!("Look up \u{201c}{word}\u{201d} online"),
+                    format!("In WordNet, at {host} \u{2014} the word is sent there"),
+                )
+            } else {
+                (
+                    format!("Turn on online lookups and look up \u{201c}{word}\u{201d}"),
+                    format!(
+                        "In WordNet, at {host} \u{2014} this word is sent there, and so is each word looked up after it"
+                    ),
+                )
+            }
         } else {
             let star = if self.favorites.iter().any(|w| w == word) {
                 "\u{2605} "
@@ -3142,7 +3227,13 @@ impl Dictionary {
             };
             (
                 format!("{star}{word}"),
-                format!("Not in the built-in list \u{2014} Enter looks it up at {host}"),
+                if self.online {
+                    format!("Not in the built-in list \u{2014} Enter looks it up at {host}")
+                } else {
+                    format!(
+                        "Not in the built-in list \u{2014} Enter turns online lookups on and asks {host}"
+                    )
+                },
             )
         };
         let inner = l.pad;
@@ -3353,15 +3444,68 @@ impl Dictionary {
         }
     }
 
+    /// The online-lookup switch's words: where a word goes, or that nothing
+    /// is sent.
+    #[must_use]
+    pub fn online_caption(&self) -> String {
+        if self.online {
+            format!("Online lookups: {}", self.server_name())
+        } else {
+            String::from("Online lookups: off")
+        }
+    }
+
     fn draw_status(&self, f: &mut Frame, l: &Layout) {
         fill(f, l.status, self.palette.crust, 0.0);
         let baseline = l.status.y + l.status.h / 2.0
             - text::line_height(l.small, FontWeightHint::Regular) / 2.0;
+        let mut room = (l.status.w - l.pad * 2.0).max(0.0);
+
+        // The online-lookup switch, at the right end, ahead of the hint: it
+        // is a control, and the hint is advice. Left out only when the bar
+        // has no room for it, and Ctrl+I still turns lookups on and off.
+        let caption = self.online_caption();
+        let caption_w = text::measure(&caption, l.small, FontWeightHint::Bold);
+        let switch_w = caption_w + l.pad * 2.0;
+        if switch_w > 0.0 && switch_w + l.pad * 4.0 <= room {
+            let switch = Rect::new(
+                l.status.right() - l.pad - switch_w,
+                l.status.y + l.status.h * 0.15,
+                switch_w,
+                l.status.h * 0.7,
+            );
+            fill(
+                f,
+                switch,
+                if self.online {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                (switch.h * 0.5).min(8.0),
+            );
+            label(
+                f,
+                switch.x + l.pad,
+                baseline,
+                &caption,
+                l.small,
+                if self.online {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                FontWeightHint::Bold,
+                Some(caption_w),
+            );
+            f.hit(Target::Online, switch);
+            room = (room - switch_w - l.pad).max(0.0);
+        }
+
         let hint = self.hint();
         // Measured, not guessed at: the old bar drew its right-hand half at
         // `width - 250`, which is a negative x on any window under 250 across.
         let hint_w = text::measure(hint, l.small, FontWeightHint::Regular);
-        let room = (l.status.w - l.pad * 2.0).max(0.0);
         let show_hint = hint_w > 0.0 && hint_w + l.pad * 4.0 <= room;
         label(
             f,
@@ -3380,7 +3524,7 @@ impl Dictionary {
         if show_hint {
             label(
                 f,
-                l.status.right() - l.pad - hint_w,
+                l.status.x + l.pad + room - hint_w,
                 baseline,
                 hint,
                 l.small,
@@ -3516,6 +3660,7 @@ impl Dictionary {
                 Key::Num4 => Some(Action::Go(Screen::Favorites)),
                 Key::Num5 => Some(Action::Go(Screen::Featured)),
                 Key::D => Some(Action::ToggleFavorite),
+                Key::I => Some(Action::ToggleOnline),
                 Key::L | Key::K | Key::F => Some(Action::Go(Screen::Search)),
                 Key::Backspace => Some(Action::ClearQuery),
                 // The list's ends, on any list screen: on the search screen
@@ -3693,6 +3838,7 @@ impl Dictionary {
             Target::PrevFeatured => self.apply(Action::StepFeatured(-1)),
             Target::NextFeatured => self.apply(Action::StepFeatured(1)),
             Target::OpenFeatured => self.apply(Action::Open(self.featured)),
+            Target::Online => self.apply(Action::ToggleOnline),
             Target::ScrollThumb => {
                 if let Some(bar) = self.current_bar() {
                     self.thumb_grab = Some(ev.y - bar.thumb.y);
@@ -3954,6 +4100,17 @@ pub fn handle_event(app: &mut Dictionary, event: &Event) -> EventResult {
             app.window_focused = false;
             EventResult::Consumed
         }
+        // Online lookups turned on or off in another window of the
+        // dictionary, or by hand in `dictionary.yaml`: this window follows.
+        Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+            let was = app.online;
+            app.load_settings(&settingsfile::load(CONFIG_NAME));
+            if app.online == was {
+                EventResult::Ignored
+            } else {
+                EventResult::Consumed
+            }
+        }
         _ => EventResult::Ignored,
     }
 }
@@ -4061,6 +4218,10 @@ impl Probe for Dictionary {
 
 fn main() -> ExitCode {
     let mut app = Dictionary::new();
+    // Whether online lookups were turned on in an earlier session. `new`
+    // reads no file, so a test's window starts with them off whatever the
+    // user running the tests has chosen.
+    app.load_settings(&settingsfile::load(CONFIG_NAME));
     app::launch("dictionary", &mut app)
 }
 
@@ -4127,22 +4288,25 @@ mod tests {
     /// elsewhere is correct.
     #[test]
     fn every_advertised_key_does_something() {
-        for (label, what) in SHORTCUTS {
-            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let answered = [Screen::Search, Screen::Entry, Screen::Featured]
-                    .into_iter()
-                    .any(|screen| {
-                        let mut app = Dictionary::new();
-                        app.screen = screen;
-                        probe::key(&mut app, &stroke) == EventResult::Consumed
-                    });
-                assert!(
-                    answered,
-                    "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
-                    stroke.key
-                );
+        // Ctrl+I keeps its choice in the settings: a scratch copy of them.
+        settingsfile::testing::with_scratch_config("dict_keys", |_| {
+            for (label, what) in SHORTCUTS {
+                for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                    let answered = [Screen::Search, Screen::Entry, Screen::Featured]
+                        .into_iter()
+                        .any(|screen| {
+                            let mut app = Dictionary::new();
+                            app.screen = screen;
+                            probe::key(&mut app, &stroke) == EventResult::Consumed
+                        });
+                    assert!(
+                        answered,
+                        "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
+                        stroke.key
+                    );
+                }
             }
-        }
+        });
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**
@@ -4407,6 +4571,145 @@ mod tests {
         assert_ne!(app().server, online::DICT_ORG);
     }
 
+    /// **Online lookups are off until the user turns them on** (§1236): a
+    /// word the built-in list lacks is not sent anywhere, the offer says
+    /// that choosing it turns lookups on, and the status bar says they are
+    /// off.
+    #[test]
+    fn online_lookups_are_off_until_turned_on() {
+        let mut d = app();
+        d.lookup = answers;
+        assert!(!d.online, "a new window starts with lookups on");
+        search_for(&mut d, "serenity");
+        d.look_up("serenity");
+        assert!(
+            !d.looking_up("serenity"),
+            "a word was sent with lookups off"
+        );
+        assert!(
+            d.status().contains("online lookups are off"),
+            "{}",
+            d.status()
+        );
+        let text = drawn_text(&d);
+        assert!(
+            text.iter()
+                .any(|t| t == "Turn on online lookups and look up \u{201c}serenity\u{201d}"),
+            "the offer does not say it turns lookups on: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t == "Online lookups: off"),
+            "the status bar does not say lookups are off"
+        );
+        // Settings that say nothing, or something else, are off as well.
+        for yaml in ["", "online_lookups: maybe\n", "online_lookups: false\n"] {
+            let mut d = app();
+            d.online = true;
+            d.load_settings(&yamldoc::Document::parse(yaml));
+            assert!(!d.online, "{yaml:?} read as on");
+        }
+    }
+
+    /// **Choosing the offer is the user's say-so**: lookups go on, are kept
+    /// for next time, and the word is asked for.
+    #[test]
+    fn choosing_the_offer_turns_lookups_on_and_asks() {
+        settingsfile::testing::with_scratch_config("dict_offer", |_| {
+            let mut d = app();
+            d.lookup = answers;
+            search_for(&mut d, "serenity");
+            probe::key(&mut d, &probe::press(Key::End));
+            probe::key(&mut d, &probe::press(Key::Enter));
+            assert!(d.online, "choosing the offer left lookups off");
+            assert!(d.looking_up("serenity"), "and did not ask");
+            assert_eq!(
+                settingsfile::load(CONFIG_NAME).get_bool(ONLINE_KEY),
+                Some(true),
+                "the choice was not kept"
+            );
+            settle(&mut d);
+            assert_eq!(d.screen(), Screen::Entry);
+        });
+    }
+
+    /// **Ctrl+I turns lookups on and off**, the choice is kept, and the next
+    /// window starts where the last one left it.
+    #[test]
+    fn ctrl_i_turns_lookups_on_and_off_and_the_choice_is_kept() {
+        settingsfile::testing::with_scratch_config("dict_ctrl_i", |_| {
+            let mut d = app();
+            let ctrl_i = probe::ctrl(Key::I);
+            assert_eq!(probe::key(&mut d, &ctrl_i), EventResult::Consumed);
+            assert!(d.online);
+            assert!(
+                d.status().starts_with("Online lookups on"),
+                "{}",
+                d.status()
+            );
+            let mut next = app();
+            next.load_settings(&settingsfile::load(CONFIG_NAME));
+            assert!(next.online, "the next window starts with lookups off");
+
+            probe::key(&mut d, &ctrl_i);
+            assert!(!d.online);
+            assert!(
+                d.status().starts_with("Online lookups off"),
+                "{}",
+                d.status()
+            );
+            let mut next = app();
+            next.online = true;
+            next.load_settings(&settingsfile::load(CONFIG_NAME));
+            assert!(!next.online, "turning them off was not kept");
+        });
+    }
+
+    /// **The status bar's switch turns lookups on**, and then names where a
+    /// word goes.
+    #[test]
+    fn the_status_bar_switch_turns_lookups_on_and_names_the_server() {
+        settingsfile::testing::with_scratch_config("dict_switch", |_| {
+            let mut d = app();
+            probe::click(&mut d, Target::Online);
+            assert!(d.online, "the switch did nothing");
+            assert!(
+                drawn_text(&d)
+                    .iter()
+                    .any(|t| t == "Online lookups: 127.0.0.1"),
+                "the switch does not name where a word goes"
+            );
+            probe::click(&mut d, Target::Online);
+            assert!(!d.online, "the switch does not turn them off again");
+        });
+    }
+
+    /// **Another window's choice is followed**: the desktop says
+    /// `dictionary.yaml` changed, and this window reads it.
+    #[test]
+    fn lookups_turned_on_in_another_window_are_on_here() {
+        settingsfile::testing::with_scratch_config("dict_reread", |_| {
+            let mut d = app();
+            let mut doc = settingsfile::load(CONFIG_NAME);
+            doc.set_bool(ONLINE_KEY, true);
+            settingsfile::store(CONFIG_NAME, &doc).expect("stored");
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            assert_eq!(
+                handle_event(&mut d, &announce(b"dictionary")),
+                EventResult::Consumed
+            );
+            assert!(d.online);
+            // Another program's settings are not the dictionary's.
+            assert_eq!(
+                handle_event(&mut d, &announce(b"weather")),
+                EventResult::Ignored
+            );
+        });
+    }
+
     /// **A word the built-in list lacks is offered for lookup, looked up,
     /// and opened** -- with where it came from said under it, and a place
     /// in the history like any other.
@@ -4414,6 +4717,7 @@ mod tests {
     fn a_word_the_list_lacks_is_looked_up_and_opened() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "serenity");
         assert!(
             d.find_word("serenity").is_none(),
@@ -4467,6 +4771,7 @@ mod tests {
     fn a_word_nobody_has_is_answered_with_what_is_near_it() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "nowhere");
         probe::key(&mut d, &probe::press(Key::End));
         probe::key(&mut d, &probe::press(Key::Enter));
@@ -4499,6 +4804,7 @@ mod tests {
         // it starts on a result, above them.
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "ker");
         assert_eq!(d.selected(Screen::Search), 0);
         assert!(
@@ -4523,6 +4829,7 @@ mod tests {
     fn a_lookup_that_fails_says_why_and_changes_nothing() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         let before = d.entries().len();
         d.look_up("offline");
         settle(&mut d);
@@ -4544,6 +4851,7 @@ mod tests {
     fn a_remembered_word_the_list_lacks_is_kept_and_looked_up() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         d.replace_lists(
             vec![String::from("serenity")],
             vec![String::from("serenity")],
@@ -4571,6 +4879,7 @@ mod tests {
     fn an_answer_for_a_reader_who_moved_on_does_not_take_the_screen() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         search_for(&mut d, "serenity");
         probe::key(&mut d, &probe::press(Key::End));
         probe::key(&mut d, &probe::press(Key::Enter));
@@ -4597,6 +4906,7 @@ mod tests {
         }
         let mut d = app();
         d.lookup = slow;
+        d.online = true;
         d.look_up("serenity");
         d.look_up("Serenity");
         settle(&mut d);
@@ -4622,6 +4932,7 @@ mod tests {
         let flag = Arc::new(Flag(AtomicBool::new(false)));
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         assert!(d.wants_waker());
         d.attach_waker(std::task::Waker::from(Arc::clone(&flag)));
         d.look_up("serenity");
@@ -4649,7 +4960,8 @@ mod tests {
     /// click instead of letting it fall through.
     fn describe(d: &Dictionary) -> String {
         format!(
-            "{:?}|{}|{:?}|{:?}|{}|{:.2}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
+            "{}|{:?}|{}|{:?}|{:?}|{}|{:.2}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
+            d.online,
             d.screen(),
             d.query(),
             // Where the query's caret and selection are drawn.
@@ -4973,42 +5285,48 @@ mod tests {
 
     #[test]
     fn every_control_the_program_draws_answers_a_click() {
-        for screen in Screen::ALL {
-            let reference = furnished(screen);
-            let targets: Vec<Target> = reference
-                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
-                .hits()
-                .iter()
-                .map(|(t, _)| *t)
-                .collect();
-            assert!(
-                !targets.is_empty(),
-                "{screen:?} records no hit boxes at all"
-            );
-            for target in targets {
-                // A tab whose whole job is "go to this screen", clicked while
-                // you are already on that screen, is entitled to do nothing.
-                // Every other control must answer — including the search
-                // field, which is drawn only on the screen it would take you
-                // to and so has to justify its hit box some other way.
-                if target == Target::Tab(screen.index()) {
-                    continue;
-                }
-                let mut d = furnished(screen);
-                // The field answers a press by putting the caret under it:
-                // from the query's start, so a press past its end moves it.
-                if target == Target::SearchBox {
-                    d.key_at(&probe::press(Key::Home), (WINDOW_WIDTH, WINDOW_HEIGHT));
-                }
-                let before = describe(&d);
-                probe::click(&mut d, target);
-                assert_ne!(
-                    describe(&d),
-                    before,
-                    "{screen:?}: clicking {target:?} changed nothing"
+        // The online-lookup switch keeps its choice in the settings: a
+        // scratch copy of them.
+        settingsfile::testing::with_scratch_config("dict_clicks", |_| {
+            for screen in Screen::ALL {
+                let reference = furnished(screen);
+                let targets: Vec<Target> = reference
+                    .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                    .hits()
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .collect();
+                assert!(
+                    !targets.is_empty(),
+                    "{screen:?} records no hit boxes at all"
                 );
+                for target in targets {
+                    // A tab whose whole job is "go to this screen", clicked
+                    // while you are already on that screen, is entitled to do
+                    // nothing. Every other control must answer — including
+                    // the search field, which is drawn only on the screen it
+                    // would take you to and so has to justify its hit box
+                    // some other way.
+                    if target == Target::Tab(screen.index()) {
+                        continue;
+                    }
+                    let mut d = furnished(screen);
+                    // The field answers a press by putting the caret under
+                    // it: from the query's start, so a press past its end
+                    // moves it.
+                    if target == Target::SearchBox {
+                        d.key_at(&probe::press(Key::Home), (WINDOW_WIDTH, WINDOW_HEIGHT));
+                    }
+                    let before = describe(&d);
+                    probe::click(&mut d, target);
+                    assert_ne!(
+                        describe(&d),
+                        before,
+                        "{screen:?}: clicking {target:?} changed nothing"
+                    );
+                }
             }
-        }
+        });
     }
 
     #[test]
@@ -5124,6 +5442,7 @@ mod tests {
     fn a_chip_naming_a_word_the_dictionary_lacks_looks_it_up() {
         let mut d = app();
         d.lookup = answers;
+        d.online = true;
         open(&mut d, "algorithm");
         let n = d
             .frame(WINDOW_WIDTH, WINDOW_HEIGHT)

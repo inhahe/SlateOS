@@ -992,7 +992,9 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "settingsfile",
  "textline",
+ "yamldoc",
 ]
 
 [[package]]

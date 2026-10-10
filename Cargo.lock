@@ -1414,10 +1414,12 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recordfile",
  "safeio",
  "settingsfile",
  "textline",
  "tzrules",
+ "unsaved",
 ]
 
 [[package]]

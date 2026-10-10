@@ -87,14 +87,14 @@ MUTATIONS = [
     ),
     (
         "the clock moves no wait on",
-        "            .is_some_and(|(menu, _)| menu.tick(now_ms))\n",
-        "            .is_some_and(|(_menu, _)| false)\n",
+        "        self.up.as_mut().is_some_and(|(menu, _)| menu.tick(now_ms))\n",
+        "        self.up.as_mut().is_some_and(|(_menu, _)| false)\n",
         [CLOCK],
     ),
     (
         "no tick is asked for",
         "            .and_then(|(menu, _)| menu.due_in(now_ms))\n",
-        "            .and_then(|(_menu, _)| None)\n",
+        "            .and_then(|(_menu, _)| None::<u64>)\n",
         [CLOCK],
     ),
     (

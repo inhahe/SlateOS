@@ -628,6 +628,7 @@ dependencies = [
  "inputsettings",
  "keylayout",
  "osfont",
+ "randrange",
  "settingsfile",
  "videocodec",
  "vp9",

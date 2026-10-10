@@ -4784,11 +4784,35 @@ lane C's `guitk`.
     told the focused window it had lost it; closing a window behind a
     minimised one kept on top left no window focused; and an accent half
     typed in a closed window completed itself in the next.
+  - `[x]` A shell action giving the keyboard back without closing the
+    window: `ShellControlAction::ReturnKeyboard` (Escape in the prompt) --
+    never back into the window giving it up.
+  - `[x]` Nothing but the user moves the keyboard into the prompt, and no
+    program takes it on its own say-so without the user's action
+    (§1386, the next item).
   - `[~]` A window that opens without taking the keyboard (a field of
-    `WindowSpec`), and a shell action giving the keyboard back without
-    closing the window -- **blocked by** lane C's `chrome()` naming every
+    `WindowSpec`) -- **blocked by** lane C's `chrome()` naming every
     field of a window's terms
     (`requests/f-c-build-the-shells-window-terms-from-spec-new.md`).
+
+- `[x]` `[F]` **A program takes the keyboard on its own say-so only when the
+  user's action asked for it** -- done 2026-10-10 (§1386), the general case
+  lane E's §1242 request left to lane F, and the keyboard half of lane C's
+  `c-abf-...` F2. Activation tokens as Wayland's xdg-activation has them: a
+  launcher draws one (`GetActivationToken`, sixteen bytes from the kernel's
+  random source) standing for the user's latest action in its windows and
+  hands it to the program it starts (`SLATE_ACTIVATION_TOKEN`,
+  `EventLoop::vouch_for`); `oswindow` presents it with the program's first
+  window; `Window::activate` brings an existing window forward on one. Good
+  once, and only while the window holding the keyboard has seen no later
+  action. A program's own `Restore` no longer takes the keyboard (it could
+  take the keys, and the clipboard, whenever it liked); a refused window
+  opens beneath the one with the keyboard and asks for attention. A tray
+  click passed on by the shell counts as the user's action for the icon's
+  program. New windows with no token still take the keyboard (GNOME's and
+  KDE's default) -- refusing them too is F-Q12. Launchers asked to hand
+  tokens on: `requests/f-c-hand-a-started-program-an-activation-token.md`,
+  `requests/f-e-hand-a-started-program-an-activation-token.md`.
 
 - `[F]` Port FreeRDP (line ~5058)
 

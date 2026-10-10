@@ -83,6 +83,10 @@ mod video;
 // area-average downscale, and the set of pictures one draw names.
 mod picture;
 use picture::{PictureKey, PictureSet};
+// When a program may take the keyboard on its own say-so: the action count,
+// activation tokens, and the rule (design-decisions 1386).
+mod activation;
+pub use activation::{NewWindows, NoToken};
 // Sticky, filter and mouse keys. The state machines live here rather than
 // beside the settings because the compositor is the only place every
 // keystroke passes through; `inputsettings` owns what the user chose.
@@ -141,6 +145,7 @@ pub use guiremote::control::CursorShape;
 pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
+use guiremote::ActivationToken;
 pub use guiremote::control::ShellControlAction;
 use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
@@ -1035,6 +1040,15 @@ pub struct Window {
     /// request is moot, and focusing a window clears it. See
     /// [`Compositor::set_attention`].
     pub demands_attention: bool,
+    /// The number of the latest of the user's actions this window took part
+    /// in: set when it takes the keyboard, and at each key press, typed text
+    /// or click while it holds it. Zero for a window that has done neither.
+    ///
+    /// Mutter's user time, kept by the compositor rather than claimed by the
+    /// client. An activation standing for an earlier action than the user time
+    /// of the window holding the keyboard is one the user has moved on from
+    /// (design-decisions 1386).
+    pub user_time: u64,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
     /// Which band of the stacking order this window may move within.
@@ -1266,6 +1280,7 @@ impl Window {
             maximized: false,
             focused: false,
             demands_attention: false,
+            user_time: 0,
             z_order: 0,
             layer: spec.layer,
             blur_behind: spec.blur_behind,
@@ -3490,7 +3505,10 @@ pub enum CompositorRequest {
     Maximize { window_id: WindowId },
     /// Enter or leave fullscreen (enables direct-scanout bypass for games).
     SetFullscreen { window_id: WindowId, enable: bool },
-    /// Restore a window from minimized/maximized state.
+    /// A program restoring its own window from minimized/maximized state,
+    /// taking the keyboard only as [`Compositor::restore_on_request`] allows.
+    /// The user's restore -- the taskbar's, the title bar's -- is
+    /// [`ShellControlAction::Restore`] and [`Compositor::restore_window`].
     Restore { window_id: WindowId },
     /// Show or hide a window without destroying it.
     SetVisible { window_id: WindowId, visible: bool },
@@ -5787,6 +5805,10 @@ pub struct Compositor {
     /// moved there. Bounded by the window count: a window is in it at most
     /// once and leaves it when it closes.
     focus_history: Vec<WindowId>,
+    /// When a program may take the keyboard on its own say-so: the count of
+    /// the user's actions, the activation tokens outstanding, what each
+    /// connection presented. See the [`activation`] module.
+    activation: activation::Activations,
     /// The pictures windows' commands name ([`RenderCommand::WindowPicture`]),
     /// made at the size they are drawn at: keyed by the viewer, the pictured
     /// window and that size, and remade when the pictured window's content
@@ -6254,6 +6276,7 @@ impl Compositor {
             z_stack: Vec::new(),
             focused_window: None,
             focus_history: Vec::new(),
+            activation: activation::Activations::new(),
             thumbnails: HashMap::new(),
             backend,
             display_manager,
@@ -6588,6 +6611,8 @@ impl Compositor {
     /// and died, and a pick nobody will hear about must not keep the pointer
     /// a crosshair.
     pub fn forget_client_requests(&mut self, client: u64) {
+        // And what it presented for a window it will now never open.
+        self.activation.forget(client);
         self.sleep_waiters.retain(|&(owner, _)| owner != client);
         self.deferred_replies
             .retain(|(owner, _, _)| *owner != client);
@@ -7023,10 +7048,24 @@ impl Compositor {
         let id = window.id;
 
         self.windows.push(window);
-        self.raise_within_layer(id);
 
-        // Focus the new window.
-        self.focus_window(id);
+        // Whether it takes the keyboard is the activation rule's
+        // (design-decisions 1386): yes when nothing has it, when the program
+        // the user is in opened it, or on a good activation; with none at all,
+        // yes unless the policy is strict.
+        let presented = self.activation.take(client_pid);
+        if self.may_take_keyboard(client_pid, presented, true) {
+            self.raise_within_layer(id);
+            self.focus_window(id);
+        } else {
+            // Behind the window the user is in, as Mutter places a window it
+            // refuses: in front, a window that cannot be typed into would look
+            // as though it could, and the user's next keys would go somewhere
+            // they cannot see.
+            self.place_beneath_keyboard(id);
+            // It was there a moment ago; there is no error to have.
+            let _ = self.set_attention(id, true);
+        }
 
         // Mark damage for the new window's area.
         self.damage_window(id);
@@ -7092,7 +7131,7 @@ impl Compositor {
             // the next one; `focus_window` disarms it only when it takes the
             // keyboard *from* a window, and none holds it now.
             self.dead_keys.cancel();
-            self.hand_keyboard_back(closed_layer);
+            self.hand_keyboard_back(closed_layer, window_id);
         }
 
         self.full_recomposite = true;
@@ -7650,6 +7689,50 @@ impl Compositor {
     /// rectangle is consumed by the restore, so nothing afterwards knows the
     /// window was ever anywhere else.
     pub fn restore_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        self.restore_geometry(window_id, true)?;
+        self.focus_window(window_id);
+        Ok(())
+    }
+
+    /// A program's own `Restore` of its window (design-decisions 1386).
+    ///
+    /// What [`restore_window`](Self::restore_window) does -- the user's
+    /// restore, from the taskbar or the title bar -- when the program may take
+    /// the keyboard: its window has it already, or it presented a good
+    /// activation first. Otherwise nothing that would put the window in front
+    /// of the user's: a minimised window stays minimised and asks for the
+    /// user's attention, and an un-maximise or un-snap, which changes only the
+    /// program's own window, still happens.
+    ///
+    /// That is the difference from what this request did until 2026-10-10,
+    /// which was to give the window the keyboard whatever the program's
+    /// reason: any program could take the keys -- and with them the clipboard,
+    /// which only the window with the keyboard may read -- at a moment of its
+    /// choosing, by restoring a window it already had.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn restore_on_request(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        let client = self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .client_pid;
+        let presented = self.activation.take(client);
+        if self.may_take_keyboard(client, presented, false) {
+            return self.restore_window(window_id);
+        }
+        if self.window_ref(window_id).is_some_and(|w| w.minimized) {
+            return self.set_attention(window_id, true);
+        }
+        self.restore_geometry(window_id, false)
+    }
+
+    /// The part of a restore that is the window's own business: out of a
+    /// maximise or a snap, back to the rectangle it had, and -- when
+    /// `unminimize` -- shown again if minimised. The keyboard is the caller's
+    /// decision.
+    fn restore_geometry(&mut self, window_id: WindowId, unminimize: bool) -> CompositorResult<()> {
         self.damage_window(window_id);
 
         // Read before the window is borrowed mutably. `home` is deliberately the
@@ -7666,7 +7749,7 @@ impl Compositor {
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
 
-        if window.minimized {
+        if unminimize && window.minimized {
             window.minimized = false;
             window.visible = true;
         }
@@ -7694,7 +7777,6 @@ impl Compositor {
         window.dirty = true;
         // Shown again, perhaps at another size: its pictures change too.
         self.content_changed(window_id);
-        self.focus_window(window_id);
         self.full_recomposite = true;
 
         Ok(())
@@ -7913,11 +7995,17 @@ impl Compositor {
                 .push_back(EventNotification::FocusLost { window_id: old_id });
         }
 
+        // It took the keyboard because of the user's latest action -- a click,
+        // a launch, a shortcut -- so that action is now its own: an activation
+        // drawn before it is one the user has moved on from, even if they have
+        // not yet typed a key here.
+        let latest = self.activation.serial();
         if let Some(win) = self.window_mut(window_id) {
             win.focused = true;
             // The user is looking at it now, which is all the request asked.
             win.demands_attention = false;
             win.dirty = true;
+            win.user_time = win.user_time.max(latest);
         }
         self.focused_window = Some(window_id);
         self.focus_history.retain(|&id| id != window_id);
@@ -7959,7 +8047,7 @@ impl Compositor {
         self.dead_keys.cancel();
         self.pending_notifications
             .push_back(EventNotification::FocusLost { window_id });
-        self.hand_keyboard_back(band);
+        self.hand_keyboard_back(band, window_id);
     }
 
     /// Give the keyboard, which no window holds, back to the window that held
@@ -7978,10 +8066,15 @@ impl Compositor {
     /// application by construction and is never what the user was looking at
     /// next -- and a desktop with no application left focuses nothing rather
     /// than the panel.
-    fn hand_keyboard_back(&mut self, band: Layer) {
+    ///
+    /// **Never to `leaving`**, the window that gave it up. Every other way of
+    /// giving it up also takes the window off the screen, which already rules
+    /// it out; [`return_keyboard`](Self::return_keyboard) leaves it there.
+    fn hand_keyboard_back(&mut self, band: Layer, leaving: WindowId) {
         let workspace = self.current_workspace;
         let can = |comp: &Self, id: WindowId| {
-            comp.layer_of(id) <= band
+            id != leaving
+                && comp.layer_of(id) <= band
                 && comp.window_ref(id).is_some_and(|w| w.is_showing(workspace))
         };
         let next = self
@@ -7994,6 +8087,146 @@ impl Compositor {
         if let Some(id) = next {
             self.focus_window(id);
         }
+    }
+
+    /// Give the keyboard back, if `window_id` holds it, to the window that held
+    /// it before ([`hand_keyboard_back`](Self::hand_keyboard_back)), leaving
+    /// the window where it is: Escape inside a prompt the user moved into
+    /// (§1242). Nothing if it does not hold the keyboard.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn return_keyboard(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        self.release_keyboard(window_id);
+        Ok(())
+    }
+
+    /// Whether `client`'s window may take the keyboard on the program's own
+    /// say-so -- opening (`opening`), or a restore or an activate -- given
+    /// what the program presented. The rule is the [`activation`] module's;
+    /// this supplies who holds the keyboard now.
+    fn may_take_keyboard(
+        &self,
+        client: u64,
+        presented: Option<activation::Presented>,
+        opening: bool,
+    ) -> bool {
+        let holder = self
+            .focused_window
+            .and_then(|id| self.window_ref(id))
+            .map(|w| (w.client_pid, w.user_time));
+        self.activation.allows(holder, client, presented, opening)
+    }
+
+    /// Stack `id` directly beneath the window holding the keyboard, where a
+    /// window refused the keyboard belongs, when the two share a band and a
+    /// tier. Otherwise at the top of its own band -- beneath the holder
+    /// already, or in a band no window of the holder's can be above.
+    ///
+    /// The one way besides [`raise_within_layer`](Self::raise_within_layer)
+    /// that a window enters `z_stack`, and it keeps the same invariant: placed
+    /// next to a window of its own band and tier, the band stays contiguous.
+    fn place_beneath_keyboard(&mut self, id: WindowId) {
+        let key = self.stack_key(id);
+        let holder = self
+            .focused_window
+            .filter(|&holder| holder != id && self.stack_key(holder) == key);
+        let Some(holder) = holder else {
+            self.raise_within_layer(id);
+            return;
+        };
+        self.z_stack.retain(|&other| other != id);
+        match self.z_stack.iter().position(|&w| w == holder) {
+            Some(at) => {
+                self.z_stack.insert(at, id);
+                self.update_z_orders();
+            }
+            None => self.raise_within_layer(id),
+        }
+    }
+
+    /// The latest of the user's actions in any of `client`'s windows; zero if
+    /// the user has touched none of them.
+    fn user_time_of(&self, client: u64) -> u64 {
+        self.windows
+            .iter()
+            .filter(|w| w.client_pid == client)
+            .map(|w| w.user_time)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Draw an activation token for `client` to hand a program it starts
+    /// (design-decisions 1386), standing for the latest of the user's actions
+    /// in `client`'s windows.
+    ///
+    /// # Errors
+    ///
+    /// [`NoToken::NoAction`] when the user has done nothing in `client`'s
+    /// windows; [`NoToken::NoRandomness`] when the compositor cannot draw an
+    /// unguessable token.
+    pub fn issue_activation_token(&mut self, client: u64) -> Result<ActivationToken, NoToken> {
+        let stands_for = self.user_time_of(client);
+        self.activation.issue(client, stands_for)
+    }
+
+    /// `client` presents `token` for its next window or restore, whichever
+    /// comes first. Used up whether or not it is good; a token the
+    /// compositor does not hold counts against the program, not for it.
+    pub fn present_activation_token(&mut self, client: u64, token: ActivationToken) {
+        self.activation.present(client, token);
+    }
+
+    /// Give `client`'s next window or restore the activation the user's
+    /// latest action in `shell`'s windows stands for: the shell passed on a
+    /// click meant for `client` -- its tray icon. Nothing when the shell's
+    /// windows have seen no action.
+    pub fn grant_activation(&mut self, client: u64, shell: u64) {
+        let stands_for = self.user_time_of(shell);
+        self.activation.grant(client, stands_for);
+    }
+
+    /// A program's `Activate`: bring its window to the user on a token --
+    /// shown, its desktop switched to, raised and given the keyboard, as
+    /// [`activate_window`](Self::activate_window) does for the user's own
+    /// click -- or, when the token is not good, ask for the user's attention
+    /// instead (design-decisions 1386).
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn activate_on_request(
+        &mut self,
+        window_id: WindowId,
+        token: ActivationToken,
+    ) -> CompositorResult<()> {
+        let client = self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .client_pid;
+        self.activation.present(client, token);
+        let presented = self.activation.take(client);
+        if self.may_take_keyboard(client, presented, false) {
+            self.activate_window(window_id)
+        } else {
+            self.set_attention(window_id, true)
+        }
+    }
+
+    /// Whether a new window presented with no activation may take the
+    /// keyboard from another program's ([`NewWindows`]).
+    pub const fn set_new_window_policy(&mut self, policy: NewWindows) {
+        self.activation.new_windows = policy;
+    }
+
+    /// The policy [`Self::set_new_window_policy`] set.
+    #[must_use]
+    pub const fn new_window_policy(&self) -> NewWindows {
+        self.activation.new_windows
     }
 
     /// Mark a window as asking for the user's attention (`wanted`), or withdraw
@@ -8695,6 +8928,34 @@ impl Compositor {
         // pointer mid-drag, which is the one moment a user would notice.
         self.refresh_window_scales();
 
+        // The user's actions, as activations count them (design-decisions
+        // 1386): a key going down, text typed, a button pressed. Not motion,
+        // not a scroll, not a release -- none of those is the user turning to
+        // something.
+        let action = matches!(
+            event,
+            InputEvent::KeyDown { .. }
+                | InputEvent::TextInput { .. }
+                | InputEvent::MouseButton { pressed: true, .. }
+        );
+
+        self.dispatch_input(event);
+
+        // After the event is handled, so that a click is counted for the
+        // window it focused rather than the one it left.
+        if action {
+            let serial = self.activation.note_action();
+            if let Some(id) = self.focused_window
+                && let Some(win) = self.window_mut(id)
+            {
+                win.user_time = serial;
+            }
+        }
+    }
+
+    /// Hand one event to its handler: [`Self::handle_input`] once the activity
+    /// bookkeeping is done.
+    fn dispatch_input(&mut self, event: InputEvent) {
         match event {
             InputEvent::MouseMove { x, y } => {
                 self.pointer_on_output = true;
@@ -11454,7 +11715,7 @@ impl Compositor {
                     },
                 }
             }
-            CompositorRequest::Restore { window_id } => match self.restore_window(window_id) {
+            CompositorRequest::Restore { window_id } => match self.restore_on_request(window_id) {
                 Ok(()) => CompositorResponse::Ok,
                 Err(e) => CompositorResponse::Error {
                     message: e.to_string(),
@@ -11589,6 +11850,7 @@ impl Compositor {
                     // the result depend on what the window was already doing,
                     // and the rule would undo itself if it ever ran twice.
                     ShellControlAction::Fullscreen => self.set_fullscreen(window_id, true),
+                    ShellControlAction::ReturnKeyboard => self.return_keyboard(window_id),
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -12393,7 +12655,9 @@ impl Compositor {
     /// is simply the number of windows in bands at or below `layer` — after all
     /// of them, before the first window of any higher band. That partitioning
     /// is the invariant this whole layering rests on, and it is maintained by
-    /// this function being the *only* way anything enters the stack.
+    /// this function being the way anything enters the stack -- the one other,
+    /// [`place_beneath_keyboard`](Self::place_beneath_keyboard), places a
+    /// window only next to one of its own band and tier.
     fn stack_insertion_index(&self, key: (Layer, StackTier)) -> usize {
         self.z_stack
             .iter()
@@ -20177,6 +20441,271 @@ mod tests {
         comp.switch_workspace(1);
         assert_eq!(comp.focused_window, Some(there));
         assert!(!comp.window_ref(panel).unwrap().focused);
+    }
+
+    // -----------------------------------------------------------------------
+    // Activation: when a program may take the keyboard on its own say-so
+    // (design-decisions 1386). Each test names its programs by connection
+    // number: 1 is the launcher or the program the user is in.
+    // -----------------------------------------------------------------------
+
+    /// A compositor whose tokens are numbered: the host the tests run on has
+    /// no kernel random source.
+    fn activating() -> Compositor {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.activation.count_tokens();
+        comp
+    }
+
+    /// The user types a key into whatever has the keyboard.
+    fn type_a_key(comp: &mut Compositor) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x1E });
+    }
+
+    fn opened(comp: &mut Compositor, title: &str, client: u64) -> WindowId {
+        comp.create_window(title.to_string(), 200, 100, client)
+    }
+
+    /// The hole this closes: a program restoring a window it already had took
+    /// the keyboard -- and with it the clipboard, which only the window with
+    /// the keyboard may read -- whenever it liked.
+    #[test]
+    fn a_program_cannot_take_the_keyboard_by_restoring_its_own_window() {
+        let mut comp = activating();
+        let lurker = opened(&mut comp, "Lurker", 2);
+        let editor = opened(&mut comp, "Editor", 1);
+        type_a_key(&mut comp);
+        assert_eq!(comp.focused_window, Some(editor));
+
+        // Restored while on screen: nothing in front of the user moves.
+        comp.handle_request(CompositorRequest::Restore { window_id: lurker });
+        assert_eq!(
+            comp.focused_window,
+            Some(editor),
+            "a program's restore took the keyboard"
+        );
+        assert_eq!(comp.z_stack.last(), Some(&editor));
+
+        // Minimised: it stays minimised, and asks for the user's attention.
+        comp.minimize_window(lurker).unwrap();
+        comp.handle_request(CompositorRequest::Restore { window_id: lurker });
+        let win = comp.window_ref(lurker).unwrap();
+        assert!(
+            win.minimized,
+            "a restore put a window in front of the user's"
+        );
+        assert!(win.demands_attention);
+        assert_eq!(comp.focused_window, Some(editor));
+    }
+
+    /// The program the user is in restores its own windows as before.
+    #[test]
+    fn the_program_the_user_is_in_restores_its_windows_as_before() {
+        let mut comp = activating();
+        let first = opened(&mut comp, "First", 1);
+        let second = opened(&mut comp, "Second", 1);
+        comp.minimize_window(first).unwrap();
+        assert_eq!(comp.focused_window, Some(second));
+        comp.handle_request(CompositorRequest::Restore { window_id: first });
+        assert_eq!(comp.focused_window, Some(first));
+        assert!(!comp.window_ref(first).unwrap().minimized);
+    }
+
+    /// A launcher's token lets the program it started take the keyboard --
+    /// once. Under the strict policy, so that the token is what decides.
+    #[test]
+    fn a_launchers_token_lets_the_program_it_started_take_the_keyboard_once() {
+        let mut comp = activating();
+        comp.set_new_window_policy(NewWindows::Strict);
+        let _menu = opened(&mut comp, "Start menu", 1);
+        type_a_key(&mut comp);
+        let token = comp.issue_activation_token(1).unwrap();
+
+        comp.present_activation_token(2, token);
+        let program = opened(&mut comp, "Program", 2);
+        assert_eq!(comp.focused_window, Some(program));
+
+        // The same token, presented by a third program: used up.
+        comp.present_activation_token(3, token);
+        let other = opened(&mut comp, "Other", 3);
+        assert_eq!(comp.focused_window, Some(program), "a token was good twice");
+        assert!(comp.window_ref(other).unwrap().demands_attention);
+    }
+
+    /// A program the user started and then left -- they went on typing
+    /// elsewhere while it loaded -- opens behind the window they are in and
+    /// asks for attention, rather than taking the keys mid-word.
+    #[test]
+    fn a_program_the_user_has_moved_on_from_opens_behind() {
+        let mut comp = activating();
+        let _launcher = opened(&mut comp, "Launcher", 1);
+        type_a_key(&mut comp);
+        let token = comp.issue_activation_token(1).unwrap();
+
+        let editor = opened(&mut comp, "Editor", 3);
+        type_a_key(&mut comp);
+
+        comp.present_activation_token(2, token);
+        let slow = opened(&mut comp, "Slow", 2);
+        assert_eq!(comp.focused_window, Some(editor));
+        assert!(comp.window_ref(slow).unwrap().demands_attention);
+        let at = |id| comp.z_stack.iter().position(|&w| w == id).unwrap();
+        assert_eq!(
+            at(slow) + 1,
+            at(editor),
+            "a window refused the keyboard was not put directly beneath the one with it"
+        );
+    }
+
+    /// Under the smart default a new window with no token takes the keyboard,
+    /// as GNOME's and KDE's do; under the strict policy it opens behind.
+    /// Either way a window of the program the user is in takes it.
+    #[test]
+    fn a_new_window_with_no_token_follows_the_policy() {
+        let mut comp = activating();
+        let editor = opened(&mut comp, "Editor", 1);
+        let smart = opened(&mut comp, "Smart", 2);
+        assert_eq!(comp.focused_window, Some(smart));
+
+        comp.set_new_window_policy(NewWindows::Strict);
+        comp.focus_window(editor);
+        let strict = opened(&mut comp, "Strict", 3);
+        assert_eq!(comp.focused_window, Some(editor));
+        assert!(comp.window_ref(strict).unwrap().demands_attention);
+
+        let dialog = opened(&mut comp, "Dialog", 1);
+        assert_eq!(comp.focused_window, Some(dialog));
+    }
+
+    /// A token the compositor never drew counts *against* the program that
+    /// presents it -- even under the smart default, where presenting nothing
+    /// would have been let through. And a program the user has not touched
+    /// draws none, so its launches carry nothing rather than a dud.
+    #[test]
+    fn an_unknown_token_counts_against_whoever_presents_it() {
+        let mut comp = activating();
+        let editor = opened(&mut comp, "Editor", 1);
+        type_a_key(&mut comp);
+        assert_eq!(comp.issue_activation_token(9), Err(NoToken::NoAction));
+        comp.present_activation_token(2, ActivationToken::from_bytes([0x55; 16]));
+        let program = opened(&mut comp, "Program", 2);
+        assert_eq!(comp.focused_window, Some(editor));
+        assert!(comp.window_ref(program).unwrap().demands_attention);
+    }
+
+    /// `Activate` on a good token brings a window back from minimised, raised
+    /// and given the keyboard; on a stale one it only asks for attention.
+    #[test]
+    fn activate_brings_a_window_forward_on_a_good_token_only() {
+        let mut comp = activating();
+        let running = opened(&mut comp, "Running", 2);
+        comp.minimize_window(running).unwrap();
+        let launcher = opened(&mut comp, "Launcher", 1);
+        type_a_key(&mut comp);
+
+        let token = comp.issue_activation_token(1).unwrap();
+        comp.activate_on_request(running, token).unwrap();
+        assert_eq!(comp.focused_window, Some(running));
+        assert!(!comp.window_ref(running).unwrap().minimized);
+        assert_eq!(comp.z_stack.last(), Some(&running));
+
+        comp.focus_window(launcher);
+        let token = comp.issue_activation_token(1).unwrap();
+        type_a_key(&mut comp);
+        comp.activate_on_request(running, token).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(launcher),
+            "a stale token activated"
+        );
+        assert!(comp.window_ref(running).unwrap().demands_attention);
+    }
+
+    /// The shell passing on a click meant for a program -- its tray icon --
+    /// lets that program restore its window: "restore from the tray".
+    #[test]
+    fn a_grant_from_the_shell_lets_a_program_restore_its_window() {
+        let mut comp = activating();
+        let player = opened(&mut comp, "Player", 2);
+        comp.minimize_window(player).unwrap();
+        let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        comp.focus_window(panel);
+        type_a_key(&mut comp);
+
+        comp.grant_activation(2, 1);
+        comp.handle_request(CompositorRequest::Restore { window_id: player });
+        assert_eq!(comp.focused_window, Some(player));
+        assert!(!comp.window_ref(player).unwrap().minimized);
+    }
+
+    /// Escape inside a prompt the user moved into (§1242): the keyboard goes
+    /// back to the window they came from, and the prompt stays up.
+    #[test]
+    fn a_prompt_gives_the_keyboard_back_and_stays_up() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let editor = opened(&mut comp, "Editor", 2);
+        let prompt = layered(&mut comp, "Allow?", Layer::Overlay);
+        comp.focus_window(prompt);
+        let give_back = |comp: &mut Compositor| {
+            comp.handle_request(CompositorRequest::ShellControl {
+                window_id: prompt,
+                action: ShellControlAction::ReturnKeyboard,
+            })
+        };
+        assert!(matches!(give_back(&mut comp), CompositorResponse::Ok));
+        assert_eq!(comp.focused_window, Some(editor));
+        let workspace = comp.current_workspace;
+        assert!(comp.window_ref(prompt).unwrap().is_showing(workspace));
+        assert!(!comp.window_ref(prompt).unwrap().focused);
+
+        // Again, now that it does not hold the keyboard: nothing moves.
+        assert!(matches!(give_back(&mut comp), CompositorResponse::Ok));
+        assert_eq!(comp.focused_window, Some(editor));
+    }
+
+    /// With nowhere for it to go back to, the keyboard goes nowhere -- not
+    /// back into the prompt that gave it up, though it is the topmost window
+    /// on screen.
+    #[test]
+    fn a_prompt_alone_gives_the_keyboard_to_nobody() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let prompt = layered(&mut comp, "Allow?", Layer::Overlay);
+        assert_eq!(comp.focused_window, Some(prompt));
+        comp.handle_request(CompositorRequest::ShellControl {
+            window_id: prompt,
+            action: ShellControlAction::ReturnKeyboard,
+        });
+        assert_eq!(comp.focused_window, None);
+    }
+
+    /// The user's action belongs to the window that took the keyboard for
+    /// it, before a key is typed there: a token drawn earlier is stale
+    /// against a window the user just clicked into.
+    #[test]
+    fn taking_the_keyboard_makes_the_latest_action_the_windows_own() {
+        let mut comp = activating();
+        let editor = opened(&mut comp, "Editor", 3);
+        let _launcher = opened(&mut comp, "Launcher", 1);
+        type_a_key(&mut comp);
+        let token = comp.issue_activation_token(1).unwrap();
+        // The user goes on in the launcher, then clicks into the editor --
+        // where they have never typed a key.
+        type_a_key(&mut comp);
+        comp.focus_window(editor);
+        assert_eq!(comp.window_ref(editor).unwrap().user_time, 2);
+
+        comp.present_activation_token(2, token);
+        let late = opened(&mut comp, "Late", 2);
+        assert_eq!(
+            comp.focused_window,
+            Some(editor),
+            "a token drawn before the user moved took the keyboard from where they moved to"
+        );
+        assert!(comp.window_ref(late).unwrap().demands_attention);
     }
 
     #[test]

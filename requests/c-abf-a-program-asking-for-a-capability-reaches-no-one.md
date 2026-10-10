@@ -213,19 +213,26 @@ With the prompt in `Overlay`, nothing a program draws can be above it, so a
 click on Allow lands on Allow; moving something under the pointer means
 moving it *under* the prompt, which the hit test never reaches.
 
-**F2. A prompt keeps its input -- the keyboard.** Not done yet, and not by
-a rule about bands. Today a program takes the keyboard whenever it opens a
-window, *and* whenever it asks to restore its own window, which needs no
-reason at all -- so the keys can be taken from a prompt, or from anything
-else, at a moment the program picks. Lane F is building focus-stealing
-prevention for every window, as Wayland's desktops and macOS do: a program
-takes the keyboard only when the user's own action started it or happened
-in it, and otherwise opens without it and asks for attention on the
-taskbar. A rule by band ("never from a window in front of yours") was
-tried and dropped: the taskbar is in that band too and holds the keyboard
-after any click on it, so every program started from the start menu would
-have opened without the keyboard. The prompt opening without taking the
-keyboard at all is §1242's, and waits on
+**F2. A prompt keeps its input -- the keyboard.** Built, and not by a rule
+about bands (design-decisions 1386). A program took the keyboard whenever it
+opened a window, *and* whenever it asked to restore its own window, which
+needed no reason at all -- so the keys could be taken from a prompt, or from
+anything else, at a moment the program picked. Now a program takes the
+keyboard by itself only when the user is already in it, or when the user's
+own action asked for it (an activation token from the launcher that started
+it); a restore with neither leaves a minimised window minimised and asks for
+attention, and a program started and then left opens behind. New windows
+with no token still take the keyboard, as GNOME's and KDE's do by default --
+whether to refuse them too is F-Q12. A rule by band ("never from a window in
+front of yours") was tried first and dropped: the taskbar is in that band
+too and holds the keyboard after any click on it, so every program started
+from the start menu would have opened without the keyboard.
+
+For the prompt itself: the shell moves the keyboard in with
+`ShellControlAction::Activate` (the chord, or a click) and out with the new
+`ShellControlAction::ReturnKeyboard` (Escape), which gives it back to the
+window it came from and leaves the prompt up. The prompt opening without
+taking the keyboard at all is §1242's, and waits on
 `requests/f-c-build-the-shells-window-terms-from-spec-new.md`.
 
 **F1. Waiting on a kernel handle** works today without a change of lane F's:

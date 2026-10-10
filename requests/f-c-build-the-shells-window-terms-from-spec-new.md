@@ -11,8 +11,9 @@ Two such fields are waiting on it now, both for requests that lane C and lane
 E filed:
 
 - `minimize_to_tray` -- your `requests/c-f-let-a-window-say-it-goes-to-the-tray.md`.
-  Done on lane F's side (control version 26, window list version 7), and held
-  off `main` for this alone.
+  Done on lane F's side (window list version 7; control version 27 when it
+  lands -- 26 went to activation tokens meanwhile), and held off `main` for
+  this alone.
 - when a window takes the keyboard -- for the consent prompt
   (`requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`,
   design-decisions §1242): the prompt's surface must open without taking the

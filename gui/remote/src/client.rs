@@ -884,6 +884,35 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Ask the compositor for an activation token, to hand a program this one
+    /// is about to start in its environment
+    /// ([`ACTIVATION_TOKEN_ENV`](crate::activation::ACTIVATION_TOKEN_ENV),
+    /// design-decisions 1386). Ask as the user starts the program: the token
+    /// stands for the user's latest action in this connection's windows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] when the
+    /// compositor cannot draw one -- it has no random source -- and
+    /// [`ClientError::Mismatched`] if it answered with something other than a
+    /// token.
+    pub fn activation_token(
+        &mut self,
+    ) -> Result<crate::activation::ActivationToken, ClientError<T::Error>> {
+        match self.round_trip(RequestBody::GetActivationToken)? {
+            ResponseBody::ActivationToken(token) => Ok(token),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
             | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
@@ -923,7 +952,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Display(_)
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -946,7 +976,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
             | ResponseBody::Clipboard(_)
-            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Picked(_)
+            | ResponseBody::ActivationToken(_) => Err(ClientError::Mismatched),
         }
     }
 

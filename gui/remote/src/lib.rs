@@ -107,6 +107,9 @@ pub use control::{
     try_decode_requests, try_decode_responses,
 };
 
+pub mod activation;
+pub use activation::{ACTIVATION_TOKEN_ENV, ActivationToken};
+
 pub mod submit;
 pub use submit::{
     SUBMIT_MAGIC, SUBMIT_VERSION, Submission, decode_submit, encode_submit, encode_submit_into,

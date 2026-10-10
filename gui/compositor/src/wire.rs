@@ -687,6 +687,13 @@ fn to_compositor_request(
                 message: "clipboard requests are link-level".to_string(),
             });
         }
+        RequestBody::GetActivationToken
+        | RequestBody::UseActivationToken { .. }
+        | RequestBody::Activate { .. } => {
+            return Err(ResponseBody::Error {
+                message: "activation requests are link-level".to_string(),
+            });
+        }
         // Link-level too: a sleep request's answer is owed to the link that
         // asked, at a moment no `CompositorRequest` can name.
         RequestBody::SleepDisplays | RequestBody::WakeDisplays => {
@@ -1069,7 +1076,13 @@ impl Compositor {
                         // clicking one the program removed a frame ago is an
                         // ordinary race, not a mistake it could have avoided.
                         Ok(()) => {
-                            self.click_tray_icon(owner, id, button);
+                            // The click was the user's, on the shell's panel,
+                            // and meant for the program: so the program may
+                            // bring a window forward for it, as a launcher's
+                            // token would let it (design-decisions 1386).
+                            if self.click_tray_icon(owner, id, button) {
+                                self.grant_activation(owner, link.client_pid);
+                            }
                             ResponseBody::Ok
                         }
                         Err(refusal) => refusal,
@@ -1110,6 +1123,41 @@ impl Compositor {
                     let body = self.clipboard_refusal(link).unwrap_or_else(|| {
                         ResponseBody::Clipboard(self.clipboard().map(str::to_owned))
                     });
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // Activation (design-decisions 1386), answered here because
+                // each is about the connection: whose windows a token's action
+                // is read from, whose next window a presented one is for.
+                RequestBody::GetActivationToken => {
+                    let body = match self.issue_activation_token(link.client_pid) {
+                        Ok(token) => ResponseBody::ActivationToken(token),
+                        Err(none) => ResponseBody::Error {
+                            message: none.to_string(),
+                        },
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                RequestBody::UseActivationToken { token } => {
+                    // `Ok` whatever the token: a program presenting guesses
+                    // learns nothing about anyone's tokens.
+                    self.present_activation_token(link.client_pid, *token);
+                    replies.push(Response::new(req.seq, ResponseBody::Ok));
+                    continue;
+                }
+                RequestBody::Activate { window, token } => {
+                    // Its own windows only, as every window request is: a
+                    // token lets a program bring itself forward, never another.
+                    let body = match link.resolve(*window) {
+                        Ok(window_id) => match self.activate_on_request(window_id, *token) {
+                            Ok(()) => ResponseBody::Ok,
+                            Err(e) => ResponseBody::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(refusal) => refusal,
+                    };
                     replies.push(Response::new(req.seq, body));
                     continue;
                 }
@@ -1982,6 +2030,158 @@ mod tests {
             responses[0].body,
             ResponseBody::WindowCreated { .. }
         ));
+    }
+
+    /// One request's answer.
+    fn reply(comp: &mut Compositor, link: &mut ClientLink, body: RequestBody) -> ResponseBody {
+        let mut responses = exchange(comp, link, vec![body]);
+        assert_eq!(responses.len(), 1, "{responses:?}");
+        responses.remove(0).body
+    }
+
+    /// The user types a key into whatever has the keyboard.
+    fn type_a_key(comp: &mut Compositor) {
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: Some('a'),
+        });
+        comp.handle_input(crate::InputEvent::KeyUp { scancode: 0x1E });
+    }
+
+    /// Activation over the wire (design-decisions 1386): a token drawn by the
+    /// program the user is in lets the program it starts open in front --
+    /// under the strict policy, where nothing else would -- and only once.
+    #[test]
+    fn a_token_drawn_over_the_wire_opens_the_started_program_in_front() {
+        let (mut comp, mut launcher) = wired();
+        comp.activation.count_tokens();
+        comp.set_new_window_policy(crate::NewWindows::Strict);
+        let menu = open(&mut comp, &mut launcher, "Start menu");
+        type_a_key(&mut comp);
+        let ResponseBody::ActivationToken(token) =
+            reply(&mut comp, &mut launcher, RequestBody::GetActivationToken)
+        else {
+            panic!("no token");
+        };
+
+        let mut started = ClientLink::new(77);
+        assert_eq!(
+            reply(
+                &mut comp,
+                &mut started,
+                RequestBody::UseActivationToken { token }
+            ),
+            ResponseBody::Ok
+        );
+        let window = open(&mut comp, &mut started, "Started");
+        assert_eq!(comp.focused_window(), Some(WindowId::from_raw(window)));
+
+        // The same token from another program: used up, and the window
+        // opens behind.
+        let mut other = ClientLink::new(78);
+        assert_eq!(
+            reply(
+                &mut comp,
+                &mut other,
+                RequestBody::UseActivationToken { token }
+            ),
+            ResponseBody::Ok,
+            "a presented token is answered Ok whatever it was"
+        );
+        open(&mut comp, &mut other, "Other");
+        assert_eq!(comp.focused_window(), Some(WindowId::from_raw(window)));
+        let _ = menu;
+    }
+
+    /// A token brings forward only the presenter's own windows: `Activate`
+    /// naming another program's window is refused as every window request
+    /// naming one is, and changes nothing.
+    #[test]
+    fn a_program_activates_only_its_own_windows() {
+        let (mut comp, mut mine) = wired();
+        comp.activation.count_tokens();
+        let theirs_link = &mut ClientLink::new(99);
+        let theirs = open(&mut comp, theirs_link, "Theirs");
+        comp.minimize_window(WindowId::from_raw(theirs)).unwrap();
+        open(&mut comp, &mut mine, "Mine");
+        type_a_key(&mut comp);
+        let ResponseBody::ActivationToken(token) =
+            reply(&mut comp, &mut mine, RequestBody::GetActivationToken)
+        else {
+            panic!("no token");
+        };
+        let focused = comp.focused_window();
+        let refused = reply(
+            &mut comp,
+            &mut mine,
+            RequestBody::Activate {
+                window: theirs,
+                token,
+            },
+        );
+        // The answer any window request naming another program's window
+        // gets: no such window, as far as this program is told.
+        assert!(matches!(refused, ResponseBody::Error { .. }), "{refused:?}");
+        assert!(
+            comp.window_ref(WindowId::from_raw(theirs))
+                .unwrap()
+                .minimized
+        );
+        assert_eq!(comp.focused_window(), focused);
+    }
+
+    /// A program's own `Restore` no longer takes the keyboard from another
+    /// program's window -- and a click on its tray icon, passed on by the
+    /// shell, is what lets it: "restore from the tray".
+    #[test]
+    fn a_tray_click_lets_the_icons_program_restore_its_window() {
+        let (mut comp, mut shell) = wired();
+        comp.activation.count_tokens();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut player = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut player,
+            vec![RequestBody::SetTrayIcon {
+                id: 7,
+                icon: TraySpec::new("M", "Music"),
+            }],
+        );
+        let window = open(&mut comp, &mut player, "Player");
+        comp.minimize_window(WindowId::from_raw(window)).unwrap();
+        open(&mut comp, &mut shell, "Taskbar");
+        type_a_key(&mut comp);
+
+        // Unprompted, a restore leaves the window where it is.
+        reply(&mut comp, &mut player, RequestBody::Restore { window });
+        assert!(
+            comp.window_ref(WindowId::from_raw(window))
+                .unwrap()
+                .minimized
+        );
+
+        let clicked = reply(
+            &mut comp,
+            &mut shell,
+            RequestBody::ClickTrayIcon {
+                owner: 99,
+                id: 7,
+                button: guitk::event::MouseButton::Left,
+            },
+        );
+        assert_eq!(clicked, ResponseBody::Ok);
+        reply(&mut comp, &mut player, RequestBody::Restore { window });
+        assert_eq!(comp.focused_window(), Some(WindowId::from_raw(window)));
+        assert!(
+            !comp
+                .window_ref(WindowId::from_raw(window))
+                .unwrap()
+                .minimized
+        );
     }
 
     #[test]

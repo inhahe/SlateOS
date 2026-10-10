@@ -3668,6 +3668,7 @@ dependencies = [
  "pathtext",
  "programs",
  "quoting",
+ "recyclebin",
  "scratchdir",
  "settingsfile",
  "textline",

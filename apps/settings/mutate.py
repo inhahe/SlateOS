@@ -12,6 +12,10 @@ suite predates this table.  The last rows, added 2026-10-04, cover the list of
 keys' hold on the pointer: a press with it up puts it away and flips nothing
 under it, and the wheel scrolls no dropdown it covers.
 
+And, from 2026-10-09, the Recycle Bin page (design-decisions §1238, §1240):
+every drive's bin, the default limits, and each drive's own, in `main.rs`;
+what each limit offers and how it reads, in `recyclebins.rs`.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -23,7 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
-SRC = Path(__file__).parent / "src" / "main.rs"
+SRC = Path(__file__).parent / "src"
+
+BINS_LISTED = "the_recycle_bin_page_lists_every_drive_and_what_it_holds"
+BINS_DEFAULT = "the_default_limits_are_chosen_and_kept"
+BINS_OWN = "a_drive_given_limits_of_its_own_keeps_them_in_its_bin"
+BINS_UNREAD = "a_drive_whose_limits_cannot_be_read_says_so"
+BINS_BY_HAND = "a_limit_written_by_hand_is_offered_as_it_is"
 
 LABELS = "test_the_taskbar_labels_toggle_is_on_the_themes_page_and_reaches_the_file"
 AUTO = "the_automatic_modes_hours_are_chosen_beside_it_and_reach_the_file"
@@ -373,8 +383,8 @@ MUTATIONS = [
     ),
     (
         'the About page is listed nowhere',
-        '                SettingsPage::Power,\n                SettingsPage::About,\n            ],',
-        '                SettingsPage::Power,\n            ],',
+        '                SettingsPage::RecycleBin,\n                SettingsPage::About,\n            ],',
+        '                SettingsPage::RecycleBin,\n            ],',
         ['the_about_page_is_named_about_and_listed_under_system'],
     ),
     (
@@ -673,6 +683,105 @@ MUTATIONS += [
     ),
 ]
 
+# -- the Recycle Bin page (design-decisions §1238, §1240) --
+MUTATIONS += [
+    (
+        "the bins are not read when the page is opened",
+        "            self.bin_error = None;\n            self.refresh_bins();\n",
+        "            self.bin_error = None;\n",
+        [BINS_LISTED],
+    ),
+    (
+        "the default chosen is not kept",
+        "                        .bin_default\n                        .store_as_user_default()\n",
+        "                        .bin_default\n                        .max_age\n"
+        "                        .map_or(Ok::<(), std::io::Error>(()), |_| Ok(()))\n",
+        [BINS_DEFAULT],
+    ),
+    (
+        "turning a drive's own limits on writes nothing",
+        "            Ok(None) => bin.set_limits(Some(&self.bin_default)),",
+        "            Ok(None) => Ok(()),",
+        [BINS_OWN],
+    ),
+    (
+        "turning a drive's own limits off leaves them",
+        "            Ok(Some(_)) => bin.set_limits(None),",
+        "            Ok(Some(_)) => Ok(()),",
+        [BINS_OWN],
+    ),
+    (
+        "a drive's own limit is not kept",
+        "            .set_limits(Some(&own))\n",
+        "            .set_limits(Some(&self.bin_default))\n",
+        [BINS_OWN],
+    ),
+    (
+        "the switch is offered over limits nobody can read",
+        "            match &row.own {\n                Ok(own) => {",
+        "            match &row.own.clone().or(Ok::<Option<recyclebin::Limits>, String>(None)) {\n                Ok(own) => {",
+        [BINS_UNREAD],
+    ),
+    (
+        "the switch is a plain toggle",
+        "            RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),\n",
+        "",
+        [BINS_OWN],
+    ),
+]
+
+RECYCLEBINS = [
+    (
+        "a limit written by hand is not offered",
+        "        values.insert(at, current);\n        (values, at)",
+        "        let _ = (at, current);\n        (values, 0)",
+        [BINS_BY_HAND],
+    ),
+    (
+        "a limit written by hand is offered in the wrong place",
+        ".position(|v| v.is_some_and(|v| current.is_some_and(|c| v > c)))",
+        ".position(|v| v.is_some_and(|v| current.is_some_and(|c| v < c)))",
+        [BINS_BY_HAND],
+    ),
+    (
+        "a week reads in days",
+        '                7 => "1 week".to_string(),',
+        "",
+        [BINS_DEFAULT],
+    ),
+    (
+        "a size in gigabytes reads in megabytes",
+        "                if megabytes >= 1024 && megabytes % 1024 == 0 {",
+        "                if false {",
+        [BINS_BY_HAND],
+    ),
+    (
+        "a number of items is not set",
+        "            Self::Count => limits.max_items = value.and_then(|n| u32::try_from(n).ok()),",
+        "            Self::Count => {}",
+        [BINS_OWN],
+    ),
+]
+
+TABLES = {
+    "main.rs": MUTATIONS,
+    "recyclebins.rs": RECYCLEBINS,
+}
+
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "settings", timeout=900, only=only))
+    only = sys.argv[1:]
+    names = [name for rows in TABLES.values() for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    worst = 0
+    for file, rows in TABLES.items():
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        print(f"\n######## {file} ########")
+        worst = max(worst, sweep(SRC / file, rows, "settings", timeout=900, only=mine))
+    raise SystemExit(worst)

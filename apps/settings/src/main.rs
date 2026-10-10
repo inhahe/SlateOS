@@ -8,6 +8,7 @@
 
 mod dyndns;
 mod lockscreen;
+mod recyclebins;
 mod remote;
 mod snapshots;
 
@@ -173,6 +174,7 @@ impl SettingsCategory {
                 SettingsPage::Notifications,
                 SettingsPage::DateTime,
                 SettingsPage::Power,
+                SettingsPage::RecycleBin,
                 SettingsPage::About,
             ],
             Self::Network => &[
@@ -221,6 +223,9 @@ pub enum SettingsPage {
     Notifications,
     DateTime,
     Power,
+    /// Every drive's recycle bin, and how long each keeps what is deleted
+    /// (design-decisions §1238, §1240).
+    RecycleBin,
     /// The system, and the notices of the code others wrote that it carries.
     About,
     // Network
@@ -278,6 +283,7 @@ impl SettingsPage {
             Self::Notifications => "notifications",
             Self::DateTime => "date-time",
             Self::Power => "power",
+            Self::RecycleBin => "recycle-bin",
             Self::About => "about",
             Self::NetworkStatus => "network-status",
             Self::WiFi => "wifi",
@@ -328,6 +334,7 @@ impl SettingsPage {
             Self::Notifications => "Notifications",
             Self::DateTime => "Date & Time",
             Self::Power => "Power",
+            Self::RecycleBin => "Recycle Bin",
             Self::About => "About",
             Self::NetworkStatus => "Status",
             Self::WiFi => "Wi-Fi",
@@ -795,6 +802,19 @@ pub struct SettingsState {
     /// Without the telling, a delay the user just chose takes effect at the
     /// next sign-in -- the shell claims its idle watch once, at startup.
     session_dirty: bool,
+    /// The recycle-bin limits for a drive with none of its own:
+    /// `recyclebin.yaml`'s `default_limits` (design-decisions §1240).
+    bin_default: recyclebin::Limits,
+    /// Every drive's bin as the Recycle Bin page shows it: read on entry to
+    /// the page, and held rather than re-read while drawing.
+    bin_rows: Vec<recyclebins::DriveRow>,
+    /// Where the bins are found: the machine's, once
+    /// [`load_recycle_bins`](Self::load_recycle_bins) has run, and none
+    /// before -- `new` does no I/O. A test gives bins of its own making.
+    bins: Option<recyclebin::Bins>,
+    /// What the last change to a bin's limits could not do, said on the page
+    /// until the next change.
+    bin_error: Option<String>,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -940,6 +960,12 @@ pub enum DropdownId {
     DayWallpaperFrom,
     /// When the evening picture goes up.
     NightWallpaperFrom,
+    /// One of the default recycle-bin limits, for a drive with none of its
+    /// own (`recyclebin.yaml`, design-decisions §1240).
+    BinDefault(recyclebins::LimitKind),
+    /// One of the `n`-th drive's own limits, as the Recycle Bin page lists
+    /// the drives.
+    BinDrive(usize, recyclebins::LimitKind),
 }
 
 impl DropdownId {
@@ -951,9 +977,9 @@ impl DropdownId {
     /// rather than trust that whoever adds one also wires it.
     ///
     /// **Named `FIXED` and not `ALL`, because it is deliberately a subset.**
-    /// `NotifImportance` is absent, and it is the only one: it is one dropdown
-    /// *per program*, in a list that may be empty, so there is no fixed value
-    /// to walk.
+    /// `NotifImportance` and `BinDrive` are absent, and they are the only
+    /// ones: each is one dropdown *per program* or *per drive*, in a list that
+    /// may be empty, so there is no fixed value to walk.
     ///
     /// **Five more used to be absent for no reason anybody had written down**
     /// -- `RotationInterval`, `LoginBackground`, `UiFont`, `LockAfter` and
@@ -971,7 +997,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 24] = [
+    pub const FIXED: [Self; 27] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::TimeZone,
@@ -996,6 +1022,9 @@ impl DropdownId {
         Self::UiFont,
         Self::LockAfter,
         Self::MonoFont,
+        Self::BinDefault(recyclebins::LimitKind::Age),
+        Self::BinDefault(recyclebins::LimitKind::Size),
+        Self::BinDefault(recyclebins::LimitKind::Count),
     ];
 }
 
@@ -1046,6 +1075,25 @@ impl SettingsState {
     pub fn load_lock_delay(&mut self) {
         self.lock_after_minutes = lockscreen::stored_minutes();
         (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
+    }
+
+    /// Find this machine's recycle bins, and read the user's default limits.
+    ///
+    /// I/O, and so out of [`new`](Self::new) with the rest of it. The bins
+    /// themselves are read when the page is opened ([`refresh_bins`](Self::refresh_bins)).
+    pub fn load_recycle_bins(&mut self) {
+        self.bins = Some(recyclebin::Bins::system());
+        self.bin_default = recyclebin::Limits::user_default();
+    }
+
+    /// Read every drive's bin again: what it holds and whether it has limits
+    /// of its own. On entry to the page, and after every change to one.
+    fn refresh_bins(&mut self) {
+        self.bin_rows = self
+            .bins
+            .as_ref()
+            .map(recyclebins::drive_rows)
+            .unwrap_or_default();
     }
 
     /// Enumerate the font families installed on this machine.
@@ -1342,6 +1390,12 @@ impl SettingsState {
         if page == SettingsPage::About {
             self.refresh_notices();
         }
+        // The bins, read on entry: a stick plugged in since the last look
+        // is there, and what each holds is what it holds now.
+        if page == SettingsPage::RecycleBin {
+            self.bin_error = None;
+            self.refresh_bins();
+        }
     }
 
     /// Open on `page`, with its category chosen in the sidebar -- what
@@ -1637,6 +1691,10 @@ impl SettingsState {
             let before = self.lock_after_minutes;
             self.lock_after_minutes = lockscreen::stored_minutes();
             before != self.lock_after_minutes
+        } else if name == recyclebin::USER_SETTINGS {
+            let before = self.bin_default;
+            self.bin_default = recyclebin::Limits::user_default();
+            before != self.bin_default
         } else if name == lockscreen::CLOCK_CONFIG {
             let before = (self.lock_clock_seconds, self.lock_clock_date);
             (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
@@ -1900,6 +1958,10 @@ impl SettingsState {
             lock_clock_seconds: false,
             lock_clock_date: true,
             session_dirty: false,
+            bin_default: recyclebin::Limits::default(),
+            bin_rows: Vec::new(),
+            bins: None,
+            bin_error: None,
         }
     }
 }
@@ -2677,6 +2739,11 @@ enum ToggleId {
     /// its picture alone. `appearance.yaml`'s `taskbar.labels`, beside
     /// auto-hide's key; the desktop watches the file and redraws the bar.
     TaskbarLabels,
+    /// Whether the `n`-th drive on the Recycle Bin page keeps limits of its
+    /// own. Not a field of `SettingsState`: the answer is whether the drive's
+    /// bin holds a `limits.yaml`, so flipping it writes or removes that file
+    /// ([`SettingsState::set_bin_own_limits`]) rather than a `bool`.
+    BinOwnLimits(usize),
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -3897,6 +3964,7 @@ impl SettingsState {
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
             SettingsPage::About => self.build_about_page(sink),
+            SettingsPage::RecycleBin => self.build_recycle_bin_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
             SettingsPage::LockScreen => self.build_lockscreen_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
@@ -5464,6 +5532,116 @@ impl SettingsState {
         );
     }
 
+    /// Every drive's recycle bin, what it holds, and how long it keeps what
+    /// is deleted (design-decisions §1238, §1240).
+    ///
+    /// When the limits are applied is said on the page -- when the file
+    /// manager's Recycle Bin is opened -- so a limit set here is not taken for
+    /// one that deletes the moment it is set, nor one that never does.
+    fn build_recycle_bin_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("Every Drive");
+        s.note(
+            "Each drive keeps what is deleted from it in a bin of its own.",
+            24.0,
+        );
+        s.note(
+            "A bin over a limit loses its oldest items when the Recycle Bin is opened.",
+            28.0,
+        );
+        for kind in recyclebins::LimitKind::ALL {
+            s.dropdown_row(
+                kind.row_label(),
+                DropdownId::BinDefault(kind),
+                &kind.label(kind.get(&self.bin_default)),
+            );
+        }
+        if let Some(error) = &self.bin_error {
+            s.value_row("Not kept", error, pal.ink(pal.red));
+        }
+
+        for (index, row) in self.bin_rows.iter().enumerate() {
+            s.gap();
+            s.section(&row.drive.label());
+            s.value_row("Holds", &row.holds(), pal.text);
+            match &row.own {
+                Ok(own) => {
+                    s.toggle_row(
+                        "Limits of its own",
+                        ToggleId::BinOwnLimits(index),
+                        own.is_some(),
+                    );
+                    match own {
+                        Some(own) => {
+                            for kind in recyclebins::LimitKind::ALL {
+                                s.dropdown_row(
+                                    kind.row_label(),
+                                    DropdownId::BinDrive(index, kind),
+                                    &kind.label(kind.get(own)),
+                                );
+                            }
+                            s.note("These go with the drive to any computer.", 28.0);
+                        }
+                        None => s.note("Keeps to the limits above.", 28.0),
+                    }
+                }
+                // Unreadable limits keep everything (`RecycleBin::limits`):
+                // said, rather than shown as a switch that is off.
+                Err(e) => {
+                    s.value_row("Limits", "Could not be read", pal.ink(pal.red));
+                    s.note(
+                        &format!("Nothing is deleted from it until they can be: {e}"),
+                        28.0,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Give the `index`-th drive's bin limits of its own, or take them away
+    /// so it keeps to the default -- the "Limits of its own" switch.
+    ///
+    /// Turned on, its limits start as the default's, so nothing it keeps
+    /// changes until one is chosen.
+    fn set_bin_own_limits(&mut self, index: usize) {
+        let Some(row) = self.bin_rows.get(index) else {
+            return;
+        };
+        let (bin, label) = (row.drive.bin.clone(), row.drive.label());
+        let result = match &row.own {
+            Ok(Some(_)) => bin.set_limits(None),
+            Ok(None) => bin.set_limits(Some(&self.bin_default)),
+            // Unreadable: no switch is drawn for it.
+            Err(_) => return,
+        };
+        self.bin_error = result
+            .err()
+            .map(|e| format!("{label}: its limits could not be changed: {e}"));
+        self.refresh_bins();
+    }
+
+    /// Set one of the `drive`-th bin's own limits to the `index`-th value its
+    /// dropdown offers.
+    fn set_bin_drive_limit(&mut self, drive: usize, kind: recyclebins::LimitKind, index: usize) {
+        let Some(row) = self.bin_rows.get(drive) else {
+            return;
+        };
+        let Ok(Some(mut own)) = row.own.clone() else {
+            return;
+        };
+        let (values, _) = kind.options(&own);
+        let Some(value) = values.get(index).copied() else {
+            return;
+        };
+        kind.set(&mut own, value);
+        let (bin, label) = (row.drive.bin.clone(), row.drive.label());
+        self.bin_error = bin
+            .set_limits(Some(&own))
+            .err()
+            .map(|e| format!("{label}: its limits could not be kept: {e}"));
+        self.refresh_bins();
+    }
+
     /// The font the interface is drawn in.
     ///
     /// Two rows that look redundant and are not: what the user has *chosen*
@@ -6103,6 +6281,21 @@ impl SettingsState {
                         .position(|s| *s == self.scale)
                         .unwrap_or(0),
                 )
+            }
+            DropdownId::BinDefault(kind) => {
+                let (values, at) = kind.options(&self.bin_default);
+                (values.into_iter().map(|v| kind.label(v)).collect(), at)
+            }
+            DropdownId::BinDrive(drive, kind) => {
+                // A drive whose own limits are gone since the page was drawn
+                // shows the default's, which is what it now keeps to.
+                let limits = self
+                    .bin_rows
+                    .get(drive)
+                    .and_then(|row| row.own.as_ref().ok().copied().flatten())
+                    .unwrap_or(self.bin_default);
+                let (values, at) = kind.options(&limits);
+                (values.into_iter().map(|v| kind.label(v)).collect(), at)
             }
             DropdownId::NotifImportance(index) => {
                 let items: Vec<String> = notifsettings::Importance::ALL
@@ -6946,6 +7139,7 @@ impl SettingsState {
                 self.dragging = Some(id);
                 self.drag_slider_to(id, mx);
             }
+            RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),
             RowHit::Toggle(id) => {
                 // Saved, where it is one of the lock screen's two, by the
                 // whole-snapshot comparison in `handle_event`, as every other
@@ -7216,6 +7410,9 @@ impl SettingsState {
             ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_labels,
             ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
             ToggleId::LockClockDate => &mut self.lock_clock_date,
+            // Not a `bool` of this state's: whether the drive's bin holds a
+            // `limits.yaml`, flipped by `set_bin_own_limits`.
+            ToggleId::BinOwnLimits(_) => return None,
         })
     }
 
@@ -7449,6 +7646,18 @@ impl SettingsState {
                     };
                 }
             }
+            DropdownId::BinDefault(kind) => {
+                let (values, _) = kind.options(&self.bin_default);
+                if let Some(value) = values.get(index).copied() {
+                    kind.set(&mut self.bin_default, value);
+                    self.bin_error = self
+                        .bin_default
+                        .store_as_user_default()
+                        .err()
+                        .map(|e| format!("The default could not be kept: {e}"));
+                }
+            }
+            DropdownId::BinDrive(drive, kind) => self.set_bin_drive_limit(drive, kind, index),
             DropdownId::NotifImportance(app) => {
                 if let Some(chosen) = notifsettings::Importance::ALL.get(index)
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
@@ -7892,6 +8101,10 @@ fn main() -> ExitCode {
 
     // The screen-lock delay, for the Lock Screen page.
     state.load_lock_delay();
+
+    // The machine's recycle bins and the default limits, for the Recycle Bin
+    // page; each bin is read when the page is opened.
+    state.load_recycle_bins();
 
     if let Some(page) = page {
         state.open_on(page);
@@ -14078,6 +14291,163 @@ mod tests {
         let cut = elided(&long, 36);
         assert_eq!(cut.chars().count(), 36);
         assert!(cut.ends_with('\u{2026}'));
+    }
+
+    // -- The Recycle Bin page (design-decisions §1238, §1240) ----------------
+
+    /// Drives of a test's own making: folders standing for mount points.
+    struct PretendDrives(Vec<PathBuf>);
+
+    impl recyclebin::Drives for PretendDrives {
+        fn mounted(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+        fn mount_point_of(&self, path: &std::path::Path) -> Option<PathBuf> {
+            recyclebin::longest_mount(&self.0, path)
+        }
+    }
+
+    /// A machine whose system drive is `root` and which has a stick at
+    /// `root/stick`, one file deleted from each, and Settings showing the
+    /// Recycle Bin page for it.
+    fn bins_page(root: &std::path::Path) -> SettingsState {
+        let stick = root.join("stick");
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::create_dir_all(&stick).unwrap();
+        let bins = recyclebin::Bins::new(
+            root.join("home").join(".recycle"),
+            Box::new(PretendDrives(vec![root.to_path_buf(), stick.clone()])),
+            None,
+        );
+        for path in [root.join("home").join("a.txt"), stick.join("b.txt")] {
+            std::fs::write(&path, "x").unwrap();
+            bins.recycle(&path).unwrap();
+        }
+        let mut state = SettingsState::new();
+        state.bins = Some(bins);
+        state.go_to_page(SettingsPage::RecycleBin);
+        state
+    }
+
+    /// **Every drive's bin is listed, with what it holds**, the default
+    /// limits above them.
+    #[test]
+    fn the_recycle_bin_page_lists_every_drive_and_what_it_holds() {
+        with_scratch_config("settings-bins-list", |root| {
+            let state = bins_page(root);
+            assert_eq!(state.bin_rows.len(), 2);
+            let text = format!("{:?}", state.render_tree());
+            assert!(text.contains("Every Drive"), "{text}");
+            assert!(text.contains("Home drive"), "{text}");
+            assert!(text.contains("stick"), "the stick's bin is not listed");
+            assert!(text.contains("1 item"), "{text}");
+            assert!(text.contains("Keeps to the limits above."), "{text}");
+            assert!(text.contains("30 days"), "the default is not shown");
+        });
+    }
+
+    /// **The default limits are chosen and kept** in the user's settings.
+    #[test]
+    fn the_default_limits_are_chosen_and_kept() {
+        with_scratch_config("settings-bins-default", |root| {
+            let mut state = bins_page(root);
+            state.show_dropdown(DropdownId::BinDefault(recyclebins::LimitKind::Age));
+            let items = state.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|t| t == "1 week")
+                .expect("a week is offered");
+            state.apply_dropdown_selection(at);
+            assert!(state.bin_error.is_none(), "{:?}", state.bin_error);
+            assert_eq!(
+                recyclebin::Limits::user_default().max_age,
+                Some(std::time::Duration::from_hours(7 * 24))
+            );
+            assert!(format!("{:?}", state.render_tree()).contains("1 week"));
+        });
+    }
+
+    /// **A drive given limits of its own keeps them in its bin**, starting
+    /// from the default's; taken away, it keeps to the default again.
+    #[test]
+    fn a_drive_given_limits_of_its_own_keeps_them_in_its_bin() {
+        with_scratch_config("settings-bins-own", |root| {
+            let mut state = bins_page(root);
+            let stick = state
+                .bin_rows
+                .iter()
+                .position(|row| !row.drive.home)
+                .expect("the stick");
+            let bin = state.bin_rows[stick].drive.bin.clone();
+            press_row(&mut state, RowHit::Toggle(ToggleId::BinOwnLimits(stick)));
+            assert_eq!(bin.own_limits().unwrap(), Some(state.bin_default));
+
+            state.show_dropdown(DropdownId::BinDrive(stick, recyclebins::LimitKind::Count));
+            let items = state.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|t| t == "100 items")
+                .expect("offered");
+            state.apply_dropdown_selection(at);
+            assert_eq!(
+                bin.own_limits().unwrap().and_then(|l| l.max_items),
+                Some(100)
+            );
+            assert!(format!("{:?}", state.render_tree()).contains("100 items"));
+
+            press_row(&mut state, RowHit::Toggle(ToggleId::BinOwnLimits(stick)));
+            assert_eq!(bin.own_limits().unwrap(), None, "the switch left the file");
+        });
+    }
+
+    /// A drive whose limits cannot be read says so, and offers no switch
+    /// that would overwrite them.
+    #[test]
+    fn a_drive_whose_limits_cannot_be_read_says_so() {
+        with_scratch_config("settings-bins-unreadable", |root| {
+            let mut state = bins_page(root);
+            let stick = state
+                .bin_rows
+                .iter()
+                .position(|row| !row.drive.home)
+                .expect("the stick");
+            let bin_root = state.bin_rows[stick].drive.bin.root().to_path_buf();
+            std::fs::write(bin_root.join("limits.yaml"), "#".repeat(70 * 1024)).unwrap();
+            state.go_to_page(SettingsPage::RecycleBin);
+            let text = format!("{:?}", state.render_tree());
+            assert!(text.contains("Could not be read"), "{text}");
+            assert!(
+                center_of(&state, RowHit::Toggle(ToggleId::BinOwnLimits(stick))).is_none(),
+                "a switch would write over limits nobody can read"
+            );
+        });
+    }
+
+    /// The values a limit offers include one written by hand, where it falls,
+    /// so opening the page never changes what a bin keeps.
+    #[test]
+    fn a_limit_written_by_hand_is_offered_as_it_is() {
+        let limits = recyclebin::Limits {
+            max_age: Some(std::time::Duration::from_hours(45 * 24)),
+            ..recyclebin::Limits::NONE
+        };
+        let (values, at) = recyclebins::LimitKind::Age.options(&limits);
+        let labels: Vec<String> = values
+            .iter()
+            .map(|v| recyclebins::LimitKind::Age.label(*v))
+            .collect();
+        assert_eq!(labels[at], "45 days");
+        assert_eq!(labels[at - 1], "30 days");
+        assert_eq!(labels[at + 1], "60 days");
+        assert_eq!(
+            recyclebins::LimitKind::Size.label(Some(2048 * 1024 * 1024)),
+            "2 GB"
+        );
+        assert_eq!(
+            recyclebins::LimitKind::Size.label(Some(500 * 1024 * 1024)),
+            "500 MB"
+        );
+        assert_eq!(recyclebins::LimitKind::Count.label(None), "Any number");
     }
 }
 

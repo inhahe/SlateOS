@@ -31,7 +31,8 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src"
 TARGETS = ("--lib", "--test", "subtitles")
-# colour.rs's rows run its unit tests and the HDR fixtures' test.
+# colour.rs's and picture.rs's rows run the unit tests and the HDR fixtures'
+# tests.
 COLOUR_TARGETS = ("--lib", "--test", "hdr")
 
 # What each video says of its light (colour.rs, tests/hdr.rs).
@@ -40,6 +41,11 @@ HDR_TRANSFER = "unsaid_transfer_is_bt709s"
 HDR_SCALED = "the_light_is_scaled_as_ffmpeg_scales_it"
 HDR_KINDS = "the_bitstream_s_light_stands_kind_by_kind"
 HDR_UNSAID = "unspecified_and_reserved_say_nothing"
+HDR_GUESS = "hdr_is_guessed_as_chrome_guesses_it"
+SIZE_GUESS = "unsaid_colour_is_guessed_from_the_size"
+MATRIX_GUESS = "unsaid_primaries_are_the_matrix_s"
+# How each is shown (picture.rs, tests/hdr.rs): Chrome's pixels.
+CHROME = "every_first_frame_is_chrome_s"
 
 # pgs.rs's own.
 SHOWS = "a_display_set_shows_its_composition"
@@ -1672,6 +1678,64 @@ COLOUR = [
         "    u32::try_from(v).unwrap_or(u32::MAX)",
         [HDR_SCALED],
     ),
+    (
+        "an HDR transfer's unsaid colour is guessed by the size",
+        "if said_transfer.is_some_and(|t| TRANSFERS_BT2020.contains(&t)) {",
+        "if said_transfer.is_some_and(|t| t == 0) {",
+        [HDR_GUESS],
+    ),
+    (
+        "BT.709 said does not outrank BT.2020",
+        "        let bt709 = said_matrix == Some(MATRIX_BT709) || said_primaries == Some(PRIMARIES_BT709);",
+        "        let bt709 = false;",
+        [HDR_GUESS],
+    ),
+    (
+        "unsaid primaries do not follow BT.2020's matrix",
+        "            MATRIX_BT2020_NCL | MATRIX_BT2020_CL => PRIMARIES_BT2020,",
+        "            MATRIX_BT2020_CL => PRIMARIES_BT2020,",
+        [MATRIX_GUESS],
+    ),
+    (
+        "NTSC's professional height is 488",
+        "                480 | 486 => PRIMARIES_SMPTE170M,",
+        "                480 | 488 => PRIMARIES_SMPTE170M,",
+        [SIZE_GUESS],
+    ),
+]
+
+# How an HDR picture is shown (picture.rs).
+SHOWN = [
+    (
+        "HDR is shown as ordinary video",
+        "        match Transfer::from_h273(colour.transfer) {",
+        "        match None::<Transfer> {",
+        [CHROME],
+    ),
+    (
+        "an HDR picture's light is not read",
+        "                Some(_) => self.light(),",
+        "                Some(_) => Light::default(),",
+        [CHROME],
+    ),
+    (
+        "MaxCLL is not the light",
+        "        max_cll: light.content.map_or(0.0, |c| c.max_cll as f32),",
+        "        max_cll: 0.0,",
+        [CHROME],
+    ),
+    (
+        "the mastering display's peak is not the light",
+        "            .map_or(0.0, |l| l.max as f32),",
+        "            .map_or(0.0, |_| 0.0),",
+        [CHROME],
+    ),
+    (
+        "HDR's primaries are taken for BT.709's",
+        "let map = ToneMap::new(signal(transfer), colour.primaries, hdr_light(look.light));",
+        "let map = ToneMap::new(signal(transfer), 1, hdr_light(look.light));",
+        [CHROME],
+    ),
 ]
 
 if __name__ == "__main__":
@@ -1691,6 +1755,7 @@ if __name__ == "__main__":
         (SRC / "container.rs", CONTAINER),
         (SRC / "lib.rs", LIB),
         (SRC / "colour.rs", COLOUR, COLOUR_TARGETS),
+        (SRC / "picture.rs", SHOWN, COLOUR_TARGETS),
     ]
     names = [name for _, rows, *_ in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

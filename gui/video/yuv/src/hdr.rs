@@ -2023,5 +2023,10 @@ mod tests {
         );
         // An unknown code is taken as BT.2020, as Chrome guesses it.
         assert_eq!(red(200), red(9));
+        // BT.709's primaries are sRGB's: its red, carried into BT.2020 for
+        // the tone map and back out, is the screen's red and nothing else.
+        let bt709_red = ToneMap::new(&signal, 1, light).pixel([0.58, 0.0, 0.0]);
+        assert!(bt709_red >> 16 > 0, "{bt709_red:06x}");
+        assert_eq!(bt709_red & 0xffff, 0, "{bt709_red:06x}: green or blue lit");
     }
 }

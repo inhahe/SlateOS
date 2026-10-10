@@ -203,4 +203,51 @@ mod tests {
         short.height = 4;
         assert_eq!(to_argb(&Decoded::Eight(short)), Err(BAD_SIZE));
     }
+
+    /// Which pictures Chrome shows as HDR, and with what primaries: PQ and
+    /// HLG by their code points; unspecified primaries are BT.709's and an
+    /// unspecified matrix BT.601's (MIAF's defaults); a code Chrome has no
+    /// name for makes it an ordinary picture, as does an ICC profile.
+    #[test]
+    fn hdr_is_what_chrome_takes_for_hdr() {
+        let image = |primaries: u16, transfer: u16, matrix: u16| Yuv {
+            primaries,
+            transfer,
+            ..grey(YuvFormat::Yuv420, matrix)
+        };
+        assert_eq!(hdr_of(&image(9, 16, 9)), Some((Transfer::Pq, 9)));
+        assert_eq!(hdr_of(&image(9, 18, 9)), Some((Transfer::Hlg, 9)));
+        // Not HDR: an ordinary transfer, or an unspecified one (the sRGB
+        // curve's).
+        assert_eq!(hdr_of(&image(9, 1, 9)), None);
+        assert_eq!(hdr_of(&image(9, 2, 9)), None);
+        // Unspecified primaries are BT.709's; an unspecified matrix passes.
+        assert_eq!(hdr_of(&image(2, 16, 2)), Some((Transfer::Pq, 1)));
+        // Primaries and matrices Chrome names, and those it does not.
+        assert_eq!(hdr_of(&image(22, 16, 9)), Some((Transfer::Pq, 22)));
+        assert_eq!(hdr_of(&image(12, 16, 11)), Some((Transfer::Pq, 12)));
+        for primaries in [0, 3, 13, 21, 23] {
+            assert_eq!(
+                hdr_of(&image(primaries, 16, 9)),
+                None,
+                "primaries {primaries}"
+            );
+        }
+        for matrix in [3, 10, 12, 14] {
+            assert_eq!(hdr_of(&image(9, 16, matrix)), None, "matrix {matrix}");
+        }
+        // Grey's matrix is BT.601's, whatever it says.
+        let grey_hdr = Yuv {
+            primaries: 9,
+            transfer: 16,
+            ..grey(YuvFormat::Yuv400, 12)
+        };
+        assert_eq!(hdr_of(&grey_hdr), Some((Transfer::Pq, 9)));
+        // An ICC profile is the picture's colour instead.
+        let profiled = Yuv {
+            icc: true,
+            ..image(9, 16, 9)
+        };
+        assert_eq!(hdr_of(&profiled), None);
+    }
 }

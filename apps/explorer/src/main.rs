@@ -6672,6 +6672,14 @@ impl oswindow::app::App for ExplorerState {
     fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
         use oswindow::app::ImageChange;
 
+        // The icons' changes split by kind: their drops -- queued when the
+        // colours or the icon theme changed -- go with the thumbnails' drops,
+        // ahead of every upload of either.
+        let (icon_drops, icon_uploads): (Vec<ImageChange>, Vec<ImageChange>) = self
+            .icons
+            .take_images()
+            .into_iter()
+            .partition(|change| matches!(change, ImageChange::Drop(_)));
         let mut changes = Vec::new();
         for id in self.thumbs.take_evicted_image_ids() {
             // Only announce a drop for something believed to be held. An id the
@@ -6682,6 +6690,7 @@ impl oswindow::app::App for ExplorerState {
                 changes.push(ImageChange::Drop(id));
             }
         }
+        changes.extend(icon_drops);
         for (id, thumb) in self.take_pending_uploads() {
             let Some(bytes) = thumb.to_wire_bytes() else {
                 continue;
@@ -6700,9 +6709,7 @@ impl oswindow::app::App for ExplorerState {
             // no frame in which this could be believed and be wrong.
             self.mark_uploaded(id);
         }
-        // The icons after the thumbnails, in their own order: their drops,
-        // queued when the colours changed, before their uploads.
-        changes.extend(self.icons.take_images());
+        changes.extend(icon_uploads);
         changes
     }
 
@@ -14790,6 +14797,40 @@ mod tests {
         if let (Some(up), Some(drop)) = (first_upload, last_drop) {
             assert!(drop < up, "every drop must precede every upload: {mixed:?}");
         }
+    }
+
+    /// **The icons' drops come before the thumbnails' uploads too**: a change
+    /// of colours or icon theme gives every icon back, and thumbnails made in
+    /// the same frame are not asked for before that room is freed.
+    #[test]
+    fn the_icons_drops_come_before_the_thumbnails_uploads() {
+        let scratch = dir_of("win_icon_order", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Details);
+        let _ = App::render(&mut state, 900.0, 600.0);
+        let held = state.take_images();
+        assert!(
+            held.iter().any(|c| matches!(c, ImageChange::Upload { .. })),
+            "no icon was drawn: {held:?}"
+        );
+        state.icons.forget();
+        state.set_view_mode(ViewMode::Icons);
+        while state.pump_thumbnails_default() > 0 {}
+        let batch = state.take_images();
+        let first_upload = batch
+            .iter()
+            .position(|c| matches!(c, ImageChange::Upload { .. }));
+        let last_drop = batch
+            .iter()
+            .rposition(|c| matches!(c, ImageChange::Drop(_)));
+        assert!(
+            first_upload.is_some() && last_drop.is_some(),
+            "the batch holds no drop and upload together: {batch:?}"
+        );
+        assert!(
+            last_drop < first_upload,
+            "an icon was given back after a thumbnail was asked for: {batch:?}"
+        );
     }
 
     /// A drop is only announced for an id believed to be held. Announcing one

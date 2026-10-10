@@ -1598,7 +1598,7 @@ MAIN += [
     ),
     (
         "the icons are not handed to the loop",
-        "        changes.extend(self.icons.take_images());\n",
+        "        changes.extend(icon_uploads);\n",
         "",
         [EX_ICONS],
     ),
@@ -1654,6 +1654,12 @@ MAIN += [
         "            MouseEventKind::DoubleClick(_) if self.menu.is_some() => false,\n",
         "",
         ["a_double_click_on_a_menu_row_opens_nothing_under_it"],
+    ),
+    (
+        "the icons' drops wait behind the thumbnails' uploads",
+        "            .partition(|change| matches!(change, ImageChange::Drop(_)));\n",
+        "            .partition(|_| false);\n",
+        ["the_icons_drops_come_before_the_thumbnails_uploads"],
     ),
 ]
 

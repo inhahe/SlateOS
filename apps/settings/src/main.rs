@@ -745,6 +745,22 @@ pub struct SettingsState {
     /// from the page on every move, so the value follows the same track the
     /// user can see.
     dragging: Option<SliderId>,
+    /// How far the page is scrolled down, in pixels: nought at its top.
+    ///
+    /// Every walk of the page starts at [`SettingsState::page_top`] -- the
+    /// drawing, the hit test, the anchors a list opens under and the boxes a
+    /// disabled control's reason is said for -- so a scrolled row is pressed
+    /// where it is drawn. Pages did not scroll at all until 2026-10-10, and
+    /// what ran past the bottom of the window could not be reached: the
+    /// Sound page's last events, among others. Kept within the page after
+    /// every event ([`SettingsState::clamp_page_scroll`]), and nought on
+    /// entering a page.
+    page_scroll: f32,
+    /// Where the page's scrollbar thumb was taken hold of, measured from the
+    /// thumb's top, while the button is down on it.
+    page_bar_grab: Option<f32>,
+    /// Whether the pointer is over the page's scrollbar, which lights it.
+    page_bar_hovered: bool,
     /// The file associations the Default Apps page reports.
     ///
     /// Held rather than read while drawing because `build_page` runs on every
@@ -1595,6 +1611,16 @@ impl SettingsState {
     /// assigning the field themselves would be four chances to forget.
     fn go_to_page(&mut self, page: SettingsPage) {
         self.current_page = page;
+        // Another page opens at its top: a scroll is where this page was
+        // read to, and means nothing on the next.
+        self.page_scroll = 0.0;
+        self.page_bar_grab = None;
+        // And no field of the last page keeps the keyboard. Left focused, the
+        // Background page's exclusion box took what was typed on whatever
+        // page the sidebar went to -- a box no longer on screen, filling
+        // with keystrokes meant for another page, which on this window are
+        // settings.
+        self.focused_field = None;
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
         }
@@ -2303,6 +2329,9 @@ impl SettingsState {
             dropdown_scroll: 0,
             dropdown_wheel: wheel::Accumulator::default(),
             dragging: None,
+            page_scroll: 0.0,
+            page_bar_grab: None,
+            page_bar_hovered: false,
             // Empty, not loaded: this constructor is deliberately free of
             // I/O, as the note on `load_appearance` explains. The list is
             // filled by `refresh_default_apps`, from `main` and on entry to
@@ -4142,6 +4171,31 @@ impl PageSink for WhySink {
     }
 }
 
+/// The sink that answers "how tall is the page?": it walks the page and
+/// keeps only where the cursor ends.
+struct MeasureSink {
+    x: f32,
+    y: f32,
+}
+
+impl PageSink for MeasureSink {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+    fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
+}
+
+/// Room left below a page's last row when it is scrolled to its end, so the
+/// end reads as an end rather than as a row cut by the window's edge.
+const PAGE_FOOT: f32 = 24.0;
+
 // ============================================================================
 // Page renderers
 // ============================================================================
@@ -4180,8 +4234,13 @@ impl SettingsState {
         // Page content
         let page_y = HEADER_HEIGHT + 8.0;
         tree.clip(content_x, page_y, content_w, self.window_height - page_y);
-        self.render_current_page(&mut tree, content_x + CONTENT_PADDING, page_y);
+        self.render_current_page(
+            &mut tree,
+            content_x + CONTENT_PADDING,
+            page_y - self.page_scroll,
+        );
         tree.unclip();
+        self.render_page_bar(&mut tree);
 
         tree.unclip();
 
@@ -4604,6 +4663,109 @@ impl SettingsState {
         HEADER_HEIGHT + 8.0
     }
 
+    /// Where the page's first row is drawn: the content's top, less how far
+    /// the page is scrolled. Every walk of the page starts here.
+    fn page_top(&self) -> f32 {
+        Self::content_top() - self.page_scroll
+    }
+
+    /// How tall the window's view of the page is.
+    fn page_view_height(&self) -> f32 {
+        (self.window_height - Self::content_top()).max(0.0)
+    }
+
+    /// How tall the page is, from its first row to below its last.
+    fn page_height(&self) -> f32 {
+        let mut sink = MeasureSink { x: 0.0, y: 0.0 };
+        self.build_page(&mut sink);
+        sink.y + PAGE_FOOT
+    }
+
+    /// The farthest the page scrolls: until its last row is on screen, with
+    /// [`PAGE_FOOT`] below it. Nought for a page that fits.
+    fn max_page_scroll(&self) -> f32 {
+        (self.page_height() - self.page_view_height()).max(0.0)
+    }
+
+    /// Keep the scroll within the page, which may have grown shorter -- a
+    /// section switched off, a window made taller. Whether it moved.
+    fn clamp_page_scroll(&mut self) -> bool {
+        self.scroll_page_to(self.page_scroll)
+    }
+
+    /// Scroll the page by `dy` pixels, down for positive. Whether it moved:
+    /// at an end it does not.
+    fn scroll_page_by(&mut self, dy: f32) -> bool {
+        self.scroll_page_to(self.page_scroll + dy)
+    }
+
+    /// Scroll the page to `to`, kept within it. Whether it moved.
+    fn scroll_page_to(&mut self, to: f32) -> bool {
+        let before = self.page_scroll;
+        let to = if to.is_finite() { to } else { before };
+        self.page_scroll = to.clamp(0.0, self.max_page_scroll());
+        (self.page_scroll - before).abs() > f32::EPSILON
+    }
+
+    /// How far Page Up and Page Down move: the view, less a row, so the row
+    /// at the edge is still on screen after the move to read on from.
+    fn page_step(&self) -> f32 {
+        (self.page_view_height() - ITEM_HEIGHT).max(ITEM_HEIGHT)
+    }
+
+    /// The page's scrollbar -- its column and its thumb -- or `None` for a
+    /// page that fits the window, which has nothing to scroll.
+    fn page_bar(&self) -> Option<(guitk::frame::Rect, guitk::frame::Rect)> {
+        let max = self.max_page_scroll();
+        if max <= 0.0 {
+            return None;
+        }
+        let view = self.page_view_height();
+        let track = guitk::frame::Rect::new(
+            self.window_width - guitk::scrollbar::WIDTH,
+            Self::content_top(),
+            guitk::scrollbar::WIDTH,
+            view,
+        );
+        let thumb = guitk::scrollbar::thumb_of(
+            track,
+            view / (view + max),
+            self.page_scroll / max,
+            guitk::scrollbar::MIN_THUMB,
+        );
+        Some((track, thumb))
+    }
+
+    /// Scroll the page to where the thumb, held `grab` below its top, is
+    /// dragged to the pointer's height `my`.
+    fn drag_page_bar_to(&mut self, my: f32, grab: f32) {
+        let Some((track, thumb)) = self.page_bar() else {
+            return;
+        };
+        let span = track.h - thumb.h;
+        if span <= 0.0 {
+            return;
+        }
+        let fraction = ((my - grab - track.y) / span).clamp(0.0, 1.0);
+        self.scroll_page_to(fraction * self.max_page_scroll());
+    }
+
+    /// Draw the page's scrollbar, if the page does not fit.
+    fn render_page_bar(&self, tree: &mut RenderTree) {
+        if let Some((track, thumb)) = self.page_bar() {
+            guitk::scrollbar::draw(
+                tree,
+                &self.palette(),
+                track,
+                thumb,
+                guitk::scrollbar::BarState {
+                    hovered: self.page_bar_hovered,
+                    dragging: self.page_bar_grab.is_some(),
+                },
+            );
+        }
+    }
+
     /// Paint the current page.
     fn render_current_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
         let mut sink = DrawSink {
@@ -4656,11 +4818,16 @@ impl SettingsState {
 
     /// What the page control at (`mx`, `my`) is, if the point is on one.
     fn row_at(&self, mx: f32, my: f32) -> Option<RowHit> {
+        // Above the content's top is the header, over whatever row has
+        // scrolled under it: a press there is the header's, never the row's.
+        if my < Self::content_top() {
+            return None;
+        }
         let mut sink = HitSink {
             mx,
             my,
             x: Self::content_x(),
-            y: Self::content_top(),
+            y: self.page_top(),
             hit: None,
         };
         self.build_page(&mut sink);
@@ -4672,7 +4839,7 @@ impl SettingsState {
     fn disabled_controls(&self) -> Vec<((f32, f32, f32, f32), String)> {
         let mut sink = WhySink {
             x: Self::content_x(),
-            y: Self::content_top(),
+            y: self.page_top(),
             disabled: Vec::new(),
         };
         self.build_page(&mut sink);
@@ -4694,7 +4861,9 @@ impl SettingsState {
             || self.open_dropdown.is_some()
             || self.dragging.is_some();
         match self.pointer {
-            Some(at) if !covered => {
+            // Not over the header, where a disabled row may have scrolled
+            // under it: the row is not what the pointer is on.
+            Some(at) if !covered && at.1 >= Self::content_top() => {
                 let disabled = self.disabled_controls();
                 let boxes: Vec<Disabled<'_>> = disabled
                     .iter()
@@ -7078,7 +7247,7 @@ impl SettingsState {
         let mut sink = AnchorSink {
             want: id,
             x: Self::content_x(),
-            y: Self::content_top(),
+            y: self.page_top(),
             found: None,
         };
         self.build_page(&mut sink);
@@ -7719,6 +7888,11 @@ impl SettingsState {
             };
         }
         let mut result = self.route_event(event);
+        // A page that grew shorter -- a section switched off, the window made
+        // taller -- is not left scrolled past its end.
+        if self.clamp_page_scroll() {
+            result = EventResult::Consumed;
+        }
         if let Event::Tick { elapsed_ms } = event {
             self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
             if self.why_disabled.tick(self.clock_ms) {
@@ -7877,6 +8051,25 @@ impl SettingsState {
                 self.step_category(1);
                 EventResult::Consumed
             }
+            // The page, a view at a time, and to its ends. Reached only with
+            // no field or search box holding the keyboard: each takes its
+            // keys above, Home and End among them.
+            Key::PageDown => {
+                self.scroll_page_by(self.page_step());
+                EventResult::Consumed
+            }
+            Key::PageUp => {
+                self.scroll_page_by(-self.page_step());
+                EventResult::Consumed
+            }
+            Key::Home => {
+                self.scroll_page_to(0.0);
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.scroll_page_to(f32::MAX);
+                EventResult::Consumed
+            }
             Key::Tab => {
                 // Cycle through pages within category
                 let pages = self.current_category.pages();
@@ -7975,6 +8168,11 @@ impl SettingsState {
             // Releasing outside is the ordinary way to finish a slider gesture,
             // so this must not be conditional on the pointer still being over
             // the track.
+            // The page's scrollbar, let go of.
+            MouseEventKind::Release(MouseButton::Left) if self.page_bar_grab.is_some() => {
+                self.page_bar_grab = None;
+                EventResult::Consumed
+            }
             MouseEventKind::Release(MouseButton::Left) => match self.dragging.take() {
                 Some(slider) => {
                     // How loud the desktop's sounds now are, heard when the
@@ -7998,6 +8196,15 @@ impl SettingsState {
                 self.scroll_dropdown_by(rows);
                 EventResult::Consumed
             }
+            // Over the page, the wheel scrolls it: by pixels, a long page
+            // being read rather than stepped through a row at a time.
+            MouseEventKind::Scroll { dy, .. } if evt.x >= SIDEBAR_WIDTH => {
+                if self.scroll_page_by(wheel::pixels(*dy, ITEM_HEIGHT)) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -8010,6 +8217,21 @@ impl SettingsState {
             match layout.item_at(mx, my) {
                 Some(index) => self.apply_dropdown_selection(index),
                 None => self.open_dropdown = None,
+            }
+            return EventResult::Consumed;
+        }
+
+        // The page's scrollbar: its thumb is taken hold of, and a press on
+        // the column above or below it moves the page a view that way.
+        if let Some((track, thumb)) = self.page_bar()
+            && track.contains(mx, my)
+        {
+            if thumb.contains(mx, my) {
+                self.page_bar_grab = Some(my - thumb.y);
+            } else if my < thumb.y {
+                self.scroll_page_by(-self.page_step());
+            } else {
+                self.scroll_page_by(self.page_step());
             }
             return EventResult::Consumed;
         }
@@ -8436,6 +8658,12 @@ impl SettingsState {
     }
 
     fn handle_hover(&mut self, mx: f32, my: f32) -> EventResult {
+        // A held scrollbar thumb follows the pointer anywhere, as a held
+        // slider does below.
+        if let Some(grab) = self.page_bar_grab {
+            self.drag_page_bar_to(my, grab);
+            return EventResult::Consumed;
+        }
         // A held slider follows the pointer anywhere, including off the track
         // and out over the sidebar. Dropping the value the moment the pointer
         // strays above or below a six-pixel bar would make the control
@@ -8462,12 +8690,17 @@ impl SettingsState {
         } else {
             self.row_at(mx, my)
         };
+        let bar = self
+            .page_bar()
+            .is_some_and(|(track, _)| track.contains(mx, my));
         let changed = category != self.sidebar_hovered
             || search != self.search_hovered
-            || page != self.page_hovered;
+            || page != self.page_hovered
+            || bar != self.page_bar_hovered;
         self.sidebar_hovered = category;
         self.search_hovered = search;
         self.page_hovered = page;
+        self.page_bar_hovered = bar;
         if changed {
             EventResult::Consumed
         } else {
@@ -13614,7 +13847,7 @@ mod tests {
     pub(super) fn hit_bands(state: &SettingsState) -> Vec<(RowHit, (f32, f32, f32, f32))> {
         let mut sink = RectSink {
             x: SettingsState::content_x(),
-            y: SettingsState::content_top(),
+            y: state.page_top(),
             rects: Vec::new(),
         };
         state.build_page(&mut sink);
@@ -14563,6 +14796,352 @@ mod tests {
         });
     }
 
+    // --- A page longer than the window scrolls ------------------------------------
+
+    /// The wheel turned one notch at (`x`, `y`): towards the page's end for a
+    /// negative `dy`, as a wheel turned towards the user sends.
+    fn turn_wheel(state: &mut SettingsState, x: f32, y: f32, dy: f32) -> EventResult {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }))
+    }
+
+    /// The last of the Sound page's event rows -- the bottom of a page longer
+    /// than the window.
+    fn last_event() -> DropdownId {
+        DropdownId::EventSound(appearance::sounds::SHELL_EVENTS.len() - 1)
+    }
+
+    /// A point over the page, clear of every control's band and of the
+    /// scrollbar, for the wheel.
+    fn over_the_page(state: &SettingsState) -> (f32, f32) {
+        (state.window_width - 60.0, state.window_height / 2.0)
+    }
+
+    /// Where the window drew the text `text`, if it drew it.
+    fn drawn_at(state: &SettingsState, text: &str) -> Option<(f32, f32)> {
+        state.render_tree().commands.iter().find_map(|c| match c {
+            RenderCommand::Text { text: t, x, y, .. } if t == text => Some((*x, *y)),
+            _ => None,
+        })
+    }
+
+    /// **A page longer than the window scrolls, and a row that was below the
+    /// window is drawn on screen and pressed where it is drawn.** Settings'
+    /// pages did not scroll at all, and what ran past the window's bottom
+    /// could not be reached: the Sound page's last events, among others.
+    #[test]
+    fn a_page_longer_than_the_window_scrolls_to_its_last_row() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        let last = last_event();
+        let label = appearance::sounds::SHELL_EVENTS
+            .last()
+            .expect("an event")
+            .label;
+        let (_, below) = center_of(&state, RowHit::Dropdown(last)).expect("the last event's row");
+        assert!(
+            below > state.window_height,
+            "the page fits the window, so this proves nothing: {below}"
+        );
+
+        // The wheel over the sidebar is the sidebar's.
+        assert_eq!(
+            turn_wheel(&mut state, 10.0, 400.0, -1.0),
+            EventResult::Ignored
+        );
+        assert!(
+            state.page_scroll.abs() < f32::EPSILON,
+            "the wheel over the sidebar scrolled the page"
+        );
+
+        let (wx, wy) = over_the_page(&state);
+        let mut notches = 0;
+        while turn_wheel(&mut state, wx, wy, -1.0) == EventResult::Consumed {
+            notches += 1;
+            assert!(notches < 100, "the wheel never reached the page's end");
+        }
+        assert!(notches > 0, "the wheel did not scroll the page");
+
+        // Drawn on screen, and pressed there.
+        let (x, y) = center_of(&state, RowHit::Dropdown(last)).expect("the last event's row");
+        assert!(
+            y > SettingsState::content_top() && y + ITEM_HEIGHT / 2.0 <= state.window_height,
+            "at the page's end its last row is not on screen: {y}"
+        );
+        let (_, label_y) = drawn_at(&state, label).expect("the last event's label is drawn");
+        assert!(
+            (label_y - (y - ITEM_HEIGHT / 2.0 + 14.0)).abs() < 1.0,
+            "the label is drawn at {label_y}, its row pressed at {y}"
+        );
+        let (_, anchored) = state
+            .anchor_at(AnchorId::Dropdown(last))
+            .expect("the list's button is drawn");
+        assert!(
+            (anchored - (y - ITEM_HEIGHT / 2.0)).abs() < 1.0,
+            "the list would open under {anchored}, its row is pressed at {y}"
+        );
+        state.handle_click(x, y);
+        assert_eq!(state.open_dropdown, Some(last));
+
+        // And the wheel over an open list scrolls the list, not the page.
+        let layout = state.dropdown_layout().expect("the list is open");
+        let scrolled = state.page_scroll;
+        turn_wheel(&mut state, layout.x + 10.0, layout.y + 10.0, 1.0);
+        assert!((state.page_scroll - scrolled).abs() < f32::EPSILON);
+    }
+
+    /// **The page scrolls no further than its ends**, and a page that grows
+    /// shorter is not left scrolled past its new end.
+    #[test]
+    fn a_page_scrolls_no_further_than_its_ends() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        let (wx, wy) = over_the_page(&state);
+        assert_eq!(
+            turn_wheel(&mut state, wx, wy, 1.0),
+            EventResult::Ignored,
+            "the page scrolled up past its top"
+        );
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+        for _ in 0..100 {
+            turn_wheel(&mut state, wx, wy, -1.0);
+        }
+        assert!(state.page_scroll > 0.0);
+        assert!((state.page_scroll - state.max_page_scroll()).abs() < 0.01);
+        assert_eq!(turn_wheel(&mut state, wx, wy, -1.0), EventResult::Ignored);
+
+        // The sounds switched off take the section's rows away: the page is
+        // shorter, and what it was scrolled to is past its end.
+        let long = state.max_page_scroll();
+        state.appearance.settings.sounds.enabled = false;
+        assert!(
+            state.max_page_scroll() < long,
+            "the page did not get shorter"
+        );
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: wx,
+            y: wy,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            state.page_scroll <= state.max_page_scroll() + 0.01,
+            "left scrolled past the end: {} of {}",
+            state.page_scroll,
+            state.max_page_scroll()
+        );
+    }
+
+    /// **Another page opens at its top.**
+    #[test]
+    fn another_page_opens_at_its_top() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        state.handle_event(&key_press(Key::End));
+        assert!(state.page_scroll > 0.0, "End did not scroll the page");
+        state.go_to_page(SettingsPage::Display);
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+    }
+
+    /// **Page Down and Page Up move a view less a row; Home and End go to the
+    /// ends** -- with nothing typed into: a box that has the keyboard keeps
+    /// its Home and End.
+    #[test]
+    fn the_keys_scroll_the_page() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        // A window short enough for the page to run more than a view past it.
+        state.window_height = 500.0;
+        let step = state.window_height - SettingsState::content_top() - ITEM_HEIGHT;
+        assert!(
+            state.max_page_scroll() > step,
+            "the page is too short to show a step"
+        );
+        state.handle_event(&key_press(Key::PageDown));
+        assert!(
+            (state.page_scroll - step).abs() < 0.01,
+            "Page Down moved {}, not {step}",
+            state.page_scroll
+        );
+        state.handle_event(&key_press(Key::PageUp));
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+        state.handle_event(&key_press(Key::End));
+        assert!((state.page_scroll - state.max_page_scroll()).abs() < 0.01);
+        state.handle_event(&key_press(Key::Home));
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+
+        state.search_focused = true;
+        state.handle_event(&key_press(Key::End));
+        assert!(
+            state.page_scroll.abs() < f32::EPSILON,
+            "the search box's End scrolled the page"
+        );
+    }
+
+    /// **The scrollbar is there only for a page that does not fit; its thumb,
+    /// taken hold of, scrolls the page, and a press beside it moves a view.**
+    #[test]
+    fn the_scrollbar_scrolls_a_page_that_does_not_fit() {
+        let fits = fully_expanded(SettingsPage::Proxy);
+        assert!(
+            fits.max_page_scroll().abs() < f32::EPSILON,
+            "the Proxy page does not fit"
+        );
+        assert!(
+            fits.page_bar().is_none(),
+            "a page that fits has a scrollbar"
+        );
+
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        // A window short enough for the page to run more than a view past it.
+        state.window_height = 500.0;
+        let (track, thumb) = state.page_bar().expect("the long page has a scrollbar");
+        assert!(
+            (thumb.y - track.y).abs() < 0.01,
+            "at the top, the thumb is not at the top"
+        );
+        let painted = state.render_tree().commands.iter().any(|c| {
+            matches!(
+                c,
+                RenderCommand::FillRect { y, height, .. }
+                    if (*y - thumb.y).abs() < 0.5 && (*height - thumb.h).abs() < 0.5
+            )
+        });
+        assert!(painted, "the scrollbar's thumb is not drawn");
+
+        // A press on the column below the thumb: a view down.
+        state.handle_click(track.x + track.w / 2.0, track.bottom() - 1.0);
+        let step = state.window_height - SettingsState::content_top() - ITEM_HEIGHT;
+        assert!(
+            (state.page_scroll - step).abs() < 0.01,
+            "{}",
+            state.page_scroll
+        );
+        state.handle_event(&key_press(Key::Home));
+
+        // The thumb, held and dragged past the bottom: the end.
+        let (track, thumb) = state.page_bar().expect("still a scrollbar");
+        let held = (thumb.x + thumb.w / 2.0, thumb.y + thumb.h / 2.0);
+        for (x, y, kind) in [
+            (held.0, held.1, MouseEventKind::Press(MouseButton::Left)),
+            (held.0, track.bottom() + 200.0, MouseEventKind::Move),
+            (
+                held.0,
+                track.bottom() + 200.0,
+                MouseEventKind::Release(MouseButton::Left),
+            ),
+        ] {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }));
+        }
+        assert!(
+            (state.page_scroll - state.max_page_scroll()).abs() < 0.01,
+            "the thumb dragged past the bottom left the page at {}",
+            state.page_scroll
+        );
+        assert!(state.page_bar_grab.is_none(), "the thumb is still held");
+
+        // A press on the column above the thumb: a view up.
+        let (track, _) = state.page_bar().expect("still a scrollbar");
+        let before = state.page_scroll;
+        state.handle_click(track.x + track.w / 2.0, track.y + 1.0);
+        assert!(
+            (before - state.page_scroll - step).abs() < 0.01,
+            "a press above the thumb moved {before} -> {}",
+            state.page_scroll
+        );
+    }
+
+    /// **A row scrolled under the header is not pressed through it, nor said
+    /// why it is disabled through it** -- and the reasons' boxes move with
+    /// the page.
+    #[test]
+    fn a_row_under_the_header_is_not_pressed_through_it() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        let top = SettingsState::content_top();
+        let switch = RowHit::Toggle(ToggleId::SystemSounds);
+
+        // The switch scrolled half under the header: its lower half, on the
+        // page, is pressed; its upper half, under the header, is not.
+        let (_, (x, y, w, h)) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| *what == switch)
+            .expect("the sounds' switch");
+        state.scroll_page_to(y - top + h / 2.0);
+        let (_, (_, y, _, h)) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| *what == switch)
+            .expect("the sounds' switch");
+        assert!(
+            y < top && y + h > top,
+            "the switch is not half under the header"
+        );
+        assert_eq!(state.row_at(x + w / 2.0, top + h / 4.0), Some(switch));
+        assert_eq!(
+            state.row_at(x + w / 2.0, top - h / 4.0),
+            None,
+            "the switch was pressed through the header"
+        );
+
+        // A disabled row the same: its box moved with the page, and a pointer
+        // resting on the header over its upper half is not on it.
+        state.scroll_page_to(0.0);
+        let ((bx, by, bw, bh), _) = state
+            .disabled_controls()
+            .into_iter()
+            .next_back()
+            .expect("the Sound page's device rows are disabled");
+        state.scroll_page_to(by - top + bh / 2.0);
+        let ((_, moved, _, _), _) = state
+            .disabled_controls()
+            .into_iter()
+            .next_back()
+            .expect("the same row");
+        assert!(
+            (moved - (top - bh / 2.0)).abs() < 0.01,
+            "the disabled row's box did not move with the page: {moved}"
+        );
+        rest_at(&mut state, bx + bw / 2.0, top - bh / 4.0);
+        wait(&mut state, 600);
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "a disabled row under the header said why through it"
+        );
+        rest_at(&mut state, bx + bw / 2.0, top + bh / 4.0);
+        wait(&mut state, 600);
+        assert!(
+            reason_on_screen(&state).is_some(),
+            "the disabled row's half on the page does not say why"
+        );
+    }
+
+    /// **A field lets the keyboard go when the page changes.** The
+    /// Background page's exclusion box kept it, so what was typed on the page
+    /// the sidebar went to filled a box no longer on screen.
+    #[test]
+    fn a_field_lets_the_keyboard_go_when_the_page_changes() {
+        let mut state = fully_expanded(SettingsPage::Wallpaper);
+        state.focused_field = Some(FieldId::ExclusionDraft);
+        type_text(&mut state, "*.gif");
+        assert_eq!(
+            state.exclusion_draft.text(),
+            "*.gif",
+            "the box did not take what was typed"
+        );
+        state.go_to_page(SettingsPage::Display);
+        assert_eq!(state.focused_field, None, "the box kept the keyboard");
+        type_text(&mut state, "abc");
+        assert_eq!(
+            state.exclusion_draft.text(),
+            "*.gif",
+            "what was typed on another page went into the hidden box"
+        );
+    }
+
     // --- Notes wrap to their column --------------------------------------------
 
     /// What a note draws, through the sink that paints a page: each line's
@@ -15033,23 +15612,24 @@ mod tests {
         }
     }
 
-    /// **Every row on the Sound page is inert, and nothing has to refuse it.**
+    /// **The Sound page's device rows are inert, and nothing has to refuse
+    /// them.**
     ///
     /// `unavailable_row` registers no hit band at all, so there is no handler
-    /// that could forget. This asserts the page offers *no* click target
-    /// whatsoever, which is the strongest form of that claim and the one that
-    /// cannot rot when a handler is edited: a test that clicked each row and
-    /// checked nothing changed would still pass if a band reappeared and its
-    /// handler happened to be a no-op today.
+    /// that could forget. This asserts the page offers no click target beyond
+    /// the System Sounds section's, which is the strongest form of that claim
+    /// and the one that cannot rot when a handler is edited: a test that
+    /// clicked each row and checked nothing changed would still pass if a band
+    /// reappeared and its handler happened to be a no-op today.
     ///
-    /// It also fails the day somebody adds a working control here, which is
-    /// correct -- that is the day the page stops being unavailable, and the
-    /// doc comment on `build_sound_page` stops being true.
+    /// It also fails the day somebody adds a working control to the devices,
+    /// the input or the per-program volumes, which is correct -- that is the
+    /// day they stop being unavailable, and the doc comment on
+    /// `build_sound_page` stops being true.
     ///
-    /// Since 2026-10-10 the System Sounds section has controls -- the desktop
-    /// reads them (`the_system_sounds_are_chosen_on_the_sound_page_and_reach_
-    /// the_file`) -- so the claim narrows to the devices, the input and the
-    /// per-program volumes, which still reach nothing.
+    /// Until 2026-10-10 the claim was the whole page's. The System Sounds
+    /// section has controls since -- the desktop reads them
+    /// (`the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file`).
     #[test]
     fn the_sound_devices_offer_nothing_to_click() {
         let state = fully_expanded(SettingsPage::Sound);

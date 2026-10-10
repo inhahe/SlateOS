@@ -1278,7 +1278,7 @@ MUTATIONS += [
     ),
     (
         "the reasons are asked of the page from another place",
-        "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: Self::content_top(),",
+        "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: self.page_top(),",
         "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: 0.0,",
         [WHY_BUTTONS, WHY_ROWS],
     ),
@@ -1613,6 +1613,192 @@ MUTATIONS += [
         [SOUNDS_HEARD],
     ),
 ]
+
+
+# Pages scroll (2026-10-10): a page longer than the window ran past its
+# bottom, where nothing could be reached. One offset where every walk of the
+# page starts; the wheel, the page keys and a scrollbar move it.
+#
+# Not a row: whether the scrollbar is lit under the pointer
+# (`page_bar_hovered`), which only changes its colour.
+SCROLL_LAST = "a_page_longer_than_the_window_scrolls_to_its_last_row"
+SCROLL_ENDS = "a_page_scrolls_no_further_than_its_ends"
+SCROLL_NEW_PAGE = "another_page_opens_at_its_top"
+SCROLL_KEYS = "the_keys_scroll_the_page"
+SCROLL_BAR = "the_scrollbar_scrolls_a_page_that_does_not_fit"
+SCROLL_HEADER = "a_row_under_the_header_is_not_pressed_through_it"
+
+MUTATIONS += [
+    (
+        "the page's walks ignore the scroll",
+        "        Self::content_top() - self.page_scroll\n",
+        "        Self::content_top()\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "the page is drawn where it was before it scrolled",
+        "            page_y - self.page_scroll,\n",
+        "            page_y,\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "the scrollbar is not drawn",
+        "        self.render_page_bar(&mut tree);\n",
+        "",
+        [SCROLL_BAR],
+    ),
+    (
+        "a page's rows are not measured",
+        "        sink.y + PAGE_FOOT\n",
+        "        PAGE_FOOT\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "a page scrolls until its last row has gone",
+        "        (self.page_height() - self.page_view_height()).max(0.0)\n",
+        "        self.page_height().max(0.0)\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "a page scrolls past its end",
+        "        self.page_scroll = to.clamp(0.0, self.max_page_scroll());\n",
+        "        self.page_scroll = to.max(0.0);\n",
+        [SCROLL_ENDS],
+    ),
+    (
+        "a page grown shorter is left scrolled past its end",
+        "        if self.clamp_page_scroll() {\n            result = EventResult::Consumed;\n        }\n",
+        "",
+        [SCROLL_ENDS],
+    ),
+    (
+        "another page opens where the last was scrolled to",
+        "        self.page_scroll = 0.0;\n        self.page_bar_grab = None;\n",
+        "        self.page_bar_grab = None;\n",
+        [SCROLL_NEW_PAGE],
+    ),
+    (
+        "the wheel over the sidebar scrolls the page",
+        "            MouseEventKind::Scroll { dy, .. } if evt.x >= SIDEBAR_WIDTH => {\n",
+        "            MouseEventKind::Scroll { dy, .. } => {\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "the wheel scrolls the page the wrong way",
+        "                if self.scroll_page_by(wheel::pixels(*dy, ITEM_HEIGHT)) {\n",
+        "                if self.scroll_page_by(-wheel::pixels(*dy, ITEM_HEIGHT)) {\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "Page Down moves a whole view, the row at the edge with it",
+        "        (self.page_view_height() - ITEM_HEIGHT).max(ITEM_HEIGHT)\n",
+        "        self.page_view_height().max(ITEM_HEIGHT)\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "Page Down goes up",
+        "            Key::PageDown => {\n                self.scroll_page_by(self.page_step());\n",
+        "            Key::PageDown => {\n                self.scroll_page_by(-self.page_step());\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "Page Up goes down",
+        "            Key::PageUp => {\n                self.scroll_page_by(-self.page_step());\n",
+        "            Key::PageUp => {\n                self.scroll_page_by(self.page_step());\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "End does not go to the end",
+        "                self.scroll_page_to(f32::MAX);\n",
+        "                self.scroll_page_to(0.0);\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "Home does not go to the top",
+        "            Key::Home => {\n                self.scroll_page_to(0.0);\n",
+        "            Key::Home => {\n                self.scroll_page_to(f32::MAX);\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "a page that fits has a scrollbar",
+        "        if max <= 0.0 {\n            return None;\n        }\n        let view = self.page_view_height();\n",
+        "        let view = self.page_view_height();\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "the thumb is not taken hold of",
+        "                self.page_bar_grab = Some(my - thumb.y);\n",
+        "",
+        [SCROLL_BAR],
+    ),
+    (
+        "a press below the thumb moves the page up",
+        "            } else {\n                self.scroll_page_by(self.page_step());\n            }\n            return EventResult::Consumed;\n",
+        "            } else {\n                self.scroll_page_by(-self.page_step());\n            }\n            return EventResult::Consumed;\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a press above the thumb moves the page down",
+        "            } else if my < thumb.y {\n                self.scroll_page_by(-self.page_step());\n",
+        "            } else if my < thumb.y {\n                self.scroll_page_by(self.page_step());\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a held thumb does not follow the pointer",
+        "        if let Some(grab) = self.page_bar_grab {\n            self.drag_page_bar_to(my, grab);\n            return EventResult::Consumed;\n        }\n",
+        "",
+        [SCROLL_BAR],
+    ),
+    (
+        "the thumb is never let go",
+        "                self.page_bar_grab = None;\n                EventResult::Consumed\n",
+        "                EventResult::Consumed\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a drag of the thumb moves the page a pixel's worth",
+        "        self.scroll_page_to(fraction * self.max_page_scroll());\n",
+        "        self.scroll_page_to(fraction);\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a press on the header reaches the row under it",
+        "        if my < Self::content_top() {\n            return None;\n        }\n",
+        "",
+        [SCROLL_HEADER],
+    ),
+    (
+        "the reasons' boxes stay where the page was",
+        "            y: self.page_top(),\n            disabled: Vec::new(),\n",
+        "            y: Self::content_top(),\n            disabled: Vec::new(),\n",
+        [SCROLL_HEADER],
+    ),
+    (
+        "a reason is said through the header",
+        "            Some(at) if !covered && at.1 >= Self::content_top() => {\n",
+        "            Some(at) if !covered => {\n",
+        [SCROLL_HEADER],
+    ),
+    (
+        "a list opens where its button was before the page scrolled",
+        "            y: self.page_top(),\n            found: None,\n",
+        "            y: Self::content_top(),\n            found: None,\n",
+        [SCROLL_LAST],
+    ),
+]
+
+# A field lets the keyboard go when the page changes (2026-10-10): the
+# Background page's exclusion box kept it, and took what was typed on the
+# next page.
+MUTATIONS += [
+    (
+        "a field keeps the keyboard on another page",
+        "        // settings.\n        self.focused_field = None;\n",
+        "        // settings.\n",
+        ["a_field_lets_the_keyboard_go_when_the_page_changes"],
+    ),
+]
+
 
 RECYCLEBINS = [
     (

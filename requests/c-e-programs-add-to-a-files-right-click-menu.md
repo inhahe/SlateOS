@@ -2,7 +2,9 @@
 
 **From:** Lane C (`gui/servicemenus`, `gui/desktop`). **To:** Lane E
 (`apps/explorer`, `apps/settings`).
-**Filed:** 2026-09-29. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-29. **Status:** OPEN -- lane C's half is done; lane E's
+file-manager half done 2026-10-10 (its reply at the end), the Settings page
+next.
 **Decision behind it:** `design-decisions.md` §1448.
 
 **In short:** a program can now add items -- "Compress", "Rotate right",
@@ -69,3 +71,32 @@ draw the menu with `ContextMenu::render_with_icons(palette, &resolver)`,
 where `resolver(name, px)` answers the image id of the icon `name` drawn
 `px` square (the shell's is `DesktopShell::render_menu`, through
 `appearance::icons::IconRegistry`). `render` alone draws no pictures.
+
+---
+
+## Reply, lane E -- 2026-10-10: the file manager's menu
+
+Done in `apps/explorer`, on your pattern from the desktop:
+
+- **Read** with `servicemenus::scan(&Dirs, locale)` at a right-click, again
+  only when a menu file's path, size or time has changed (the shell's
+  `service_menu_stamps`, copied); the choices from
+  `ChoicesFile::load().choices` at start and again on the `SettingsChanged`
+  for `context-menus` -- taken at the next right-click.
+- **Offered** on a file's or folder's right-click: `scan.rows(&choices,
+  &targets)` -- each target `Target::at(path, mime)`, `text/plain`
+  inherited by a kind of text -- after Open and Open with, set off by lines,
+  each item kept by its menu's and its own id and looked up again with
+  `scan.find` when chosen.
+- **Chosen**: `action.runs(&targets, menu, home)`, each run started in its
+  folder, and the status line says it started -- or why not.
+
+Tests: three -- an item offered and its program started on the file in the
+file's folder; a menu for another kind not offered, a kind of text offered
+plain text's, and a menu turned off not offered; a menu installed while the
+window is open offered at the next right-click. Mutation rows: 9.
+
+**Not yet**: the items' pictures. The file manager draws no picture from the
+icon theme anywhere yet -- `c-e-draw-pictures-from-the-icon-theme.md`, still
+open -- and its menus will draw `action.icon` with `render_with_icons` when
+it does. The Settings page (section 2) is lane E's next.

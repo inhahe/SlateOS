@@ -1318,6 +1318,27 @@ pub struct ExplorerState {
     /// row chosen starts the program it showed, whatever was installed
     /// since.
     open_with: Vec<desktopentry::App>,
+    /// What programs add to a file's right-click menu (`gui/servicemenus`,
+    /// design-decisions §1448): every service menu found, read again when a
+    /// file of one has changed (`service_seen`).
+    service_menus: servicemenus::Scan,
+    /// Which of them the user turned on or off: `context-menus.yaml`, read
+    /// again when Settings announces a change to it.
+    service_choices: servicemenus::Choices,
+    /// Where service menus are looked for. None in a window a test makes,
+    /// as `app_dirs`; `main` sets the environment's.
+    service_dirs: servicemenus::Dirs,
+    /// The service-menu files as they were when last read -- each one's
+    /// path, size and time -- so a right-click reads them again only after
+    /// one is installed, removed or rewritten.
+    service_seen: Option<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>>,
+    /// The service items of the menu open, at their numbers from
+    /// [`MENU_SERVICE_BASE`]: each one's menu and item by name -- `None` for
+    /// a submenu's own row -- and the files the menu was opened on.
+    service_offer: (Vec<Option<(OsString, String)>>, Vec<servicemenus::Target>),
+    /// How a service item's program is started: as [`launch`](Self::launch),
+    /// in the folder its command names, if it names one.
+    launch_in: fn(&OsStr, &[OsString], Option<&Path>) -> std::io::Result<()>,
     /// The context menu a right-click opened, if any.
     ///
     /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
@@ -1548,6 +1569,15 @@ impl ExplorerState {
             launch: start_program,
             app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
             open_with: Vec::new(),
+            service_menus: servicemenus::Scan::default(),
+            service_choices: servicemenus::Choices::default(),
+            service_dirs: servicemenus::Dirs {
+                user: None,
+                system: Vec::new(),
+            },
+            service_seen: None,
+            service_offer: (Vec::new(), Vec::new()),
+            launch_in: start_program_in,
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
@@ -1769,6 +1799,100 @@ impl ExplorerState {
         self.status_message = match Opener::of(&app, &path) {
             Some(opener) => self.start(&opener, &name),
             None => format!("{} cannot be started with a file", app.name),
+        };
+        true
+    }
+
+    /// Read the service menus again if a file of one has been installed,
+    /// removed or rewritten since the last read -- or for the first time.
+    fn refresh_service_menus(&mut self) {
+        let stamps = service_menu_stamps(&self.service_dirs);
+        if self.service_seen.as_ref() == Some(&stamps) {
+            return;
+        }
+        self.service_seen = Some(stamps);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        self.service_menus = servicemenus::scan(&self.service_dirs, locale.as_ref());
+    }
+
+    /// Put what programs add to a file's right-click menu into the file
+    /// menu, after Open and Open with and set off by lines
+    /// (design-decisions §1448): the service menus on for the files chosen,
+    /// laid out as KDE's file manager lays them out
+    /// (`servicemenus::Scan::rows`), each row's menu and item kept by name
+    /// for when it is chosen. A program ported from Linux that ships a
+    /// service menu adds its items here as it would there.
+    fn offer_service_menus(&mut self, items: &mut Vec<MenuItem>) {
+        self.refresh_service_menus();
+        let targets: Vec<servicemenus::Target> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&index| self.entries.get(index))
+            .map(|entry| service_target(&entry.path))
+            .collect();
+        let rows = self.service_menus.rows(&self.service_choices, &targets);
+        let mut offer = Vec::new();
+        let built = service_menu_items(&rows, &mut offer);
+        self.service_offer = (offer, targets);
+        if built.is_empty() {
+            return;
+        }
+        let at = items.len().min(2);
+        items.splice(
+            at..at,
+            std::iter::once(MenuItem::Separator)
+                .chain(built)
+                .chain(std::iter::once(MenuItem::Separator)),
+        );
+    }
+
+    /// Run the file menu's service item `id`, if it is one: its command for
+    /// the files the menu was opened on -- one program per file where the
+    /// command takes one at a time -- each in the folder it names, and say
+    /// so. Answers whether the id was one of these.
+    fn service_action(&mut self, id: u64) -> bool {
+        let Some(index) = id
+            .checked_sub(MENU_SERVICE_BASE)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return false;
+        };
+        let (offer, targets) = std::mem::take(&mut self.service_offer);
+        let Some(entry) = offer.get(index) else {
+            return false;
+        };
+        // A submenu's own row runs nothing.
+        let Some((menu_id, action_id)) = entry else {
+            return true;
+        };
+        // Looked up by name: the menus may have been read again since this
+        // one opened, and a menu gone since has nothing left to run.
+        let Some((menu, action)) = self.service_menus.find(menu_id, action_id) else {
+            self.status_message = String::from("That item's menu is no longer installed");
+            return true;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let name = action.name.clone();
+        let launch_in = self.launch_in;
+        self.status_message = match action.runs(&targets, menu, home.as_deref()) {
+            Ok(runs) => {
+                let mut failed: Option<std::io::Error> = None;
+                for run in runs {
+                    let mut argv = run.argv.into_iter();
+                    let Some(program) = argv.next() else {
+                        continue;
+                    };
+                    let args: Vec<OsString> = argv.collect();
+                    if let Err(e) = launch_in(&program, &args, run.dir.as_deref()) {
+                        failed.get_or_insert(e);
+                    }
+                }
+                match failed {
+                    None => format!("Started {name}"),
+                    Some(e) => format!("Could not start {name}: {e}"),
+                }
+            }
+            Err(e) => format!("Could not start {name}: {e}"),
         };
         true
     }
@@ -3143,7 +3267,9 @@ impl ExplorerState {
             .map(|entry| self.programs_opening(&entry.path))
             .unwrap_or_default();
         let items = if on_row.is_some() {
-            self.file_menu_items()
+            let mut items = self.file_menu_items();
+            self.offer_service_menus(&mut items);
+            items
         } else {
             self.folder_menu_items()
         };
@@ -3847,6 +3973,7 @@ impl ExplorerState {
             || self.failure_action(id)
             || self.sort_action(id)
             || self.open_with_action(id)
+            || self.service_action(id)
         {
             return;
         }
@@ -6298,6 +6425,10 @@ const MENU_SORT_BASE: u64 = 6000;
 /// The file menu's "Open with" submenu; its rows are the base plus one, plus
 /// their place in `ExplorerState::open_with`.
 const MENU_OPEN_WITH_BASE: u64 = 7000;
+/// The first id of the file menu's service items -- what programs add to it
+/// (`gui/servicemenus`) -- numbered in their order, a submenu's own row
+/// included.
+const MENU_SERVICE_BASE: u64 = 8000;
 /// The sorts the menu offers, in its order.
 const SORTS: [(SortBy, &str); 5] = [
     (SortBy::Name, "Name"),
@@ -6569,6 +6700,12 @@ impl ExplorerState {
         // window while a dialog is up here is still what this window's next
         // save has to start from.
         if let Event::SettingsChanged { group } = event {
+            // Which service menus are on: Settings' Context Menus page, or a
+            // hand edit -- taken at the next right-click.
+            if group.file_name() == servicemenus::CONFIG_NAME {
+                self.service_choices = servicemenus::ChoicesFile::load().choices;
+                return false;
+            }
             return group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();
         }
         // A modal owns the INPUT while it is up. Falling through to the
@@ -7957,6 +8094,101 @@ fn start_program(program: &OsStr, args: &[OsString]) -> std::io::Result<()> {
     process::Command::new(program).args(args).spawn().map(drop)
 }
 
+/// [`start_program`], in the folder `dir` where one is given: what a service
+/// menu's item runs in -- its file's folder, or the folder its menu names.
+fn start_program_in(program: &OsStr, args: &[OsString], dir: Option<&Path>) -> std::io::Result<()> {
+    let mut command = process::Command::new(program);
+    command.args(args);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    command.spawn().map(drop)
+}
+
+/// Every service-menu file where they are read from, with its size and the
+/// time it was last written, in order: what changes when a menu is
+/// installed, removed or edited -- the desktop's rule for reading them again
+/// (`gui/desktop/src/session.rs`, `service_menu_stamps`). The directories'
+/// own files only, as the scan reads them.
+fn service_menu_stamps(
+    dirs: &servicemenus::Dirs,
+) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
+    let mut stamps = Vec::new();
+    for dir in dirs.searched() {
+        // A directory that is not there has no menus -- the ordinary state
+        // of most of them.
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        // An entry the listing cannot give is one the scan cannot read
+        // either.
+        for path in listing.filter_map(Result::ok).map(|item| item.path()) {
+            if path.extension() != Some(OsStr::new("desktop")) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_file() {
+                stamps.push((path, meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    stamps.sort();
+    stamps
+}
+
+/// `path` as a service menu sees it: its kind by its extension, and
+/// `text/plain` too when that kind is text -- a shell script is offered what
+/// a text file is. The desktop's `service_target`, for the same menus.
+fn service_target(path: &Path) -> servicemenus::Target {
+    let extension = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+    let kind = filetypes::detect_from_extension(extension);
+    let mut target = servicemenus::Target::at(path, kind.mime_type);
+    if kind.is_text && !target.is_dir && target.mime != "text/plain" {
+        target.inherits.push(String::from("text/plain"));
+    }
+    target
+}
+
+/// The menu rows for `rows`, numbered from [`MENU_SERVICE_BASE`] in order,
+/// each item's menu and id recorded in `offer` at its number -- `None` for a
+/// submenu's own row. The desktop's `service_menu_items`, for the same rows.
+fn service_menu_items(
+    rows: &[servicemenus::Row<'_>],
+    offer: &mut Vec<Option<(OsString, String)>>,
+) -> Vec<MenuItem> {
+    let mut built = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = MENU_SERVICE_BASE.saturating_add(u64::try_from(offer.len()).unwrap_or(u64::MAX));
+        built.push(match row {
+            servicemenus::Row::Separator => MenuItem::Separator,
+            servicemenus::Row::Item { menu, action } => {
+                offer.push(Some((menu.id.clone(), action.id.clone())));
+                MenuItem::Action {
+                    id,
+                    label: action.name.clone(),
+                    shortcut: None,
+                    icon: action.icon.clone(),
+                    enabled: true,
+                    checked: None,
+                }
+            }
+            servicemenus::Row::Submenu { label, icon, rows } => {
+                offer.push(None);
+                MenuItem::Submenu {
+                    id,
+                    label: label.clone(),
+                    icon: icon.clone(),
+                    enabled: true,
+                    children: service_menu_items(rows, offer),
+                }
+            }
+        });
+    }
+    built
+}
+
 /// The programs this machine has: those installed here, read as the start
 /// menu reads them, with SlateOS's own (`programs::built_in`) behind them --
 /// an installed entry with the same id replaces SlateOS's. The rule
@@ -7994,6 +8226,10 @@ fn main() -> std::process::ExitCode {
     // Where installed programs' entries are, for opening a file nobody chose
     // a program for and for Open With: as the start menu reads them.
     explorer.app_dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
+    // And what programs add to a file's right-click menu, with which of them
+    // the user turned on or off.
+    explorer.service_dirs = servicemenus::Dirs::standard();
+    explorer.service_choices = servicemenus::ChoicesFile::load().choices;
     oswindow::app::launch_with("explorer", args.display.as_deref(), &mut explorer)
 }
 
@@ -10983,6 +11219,193 @@ mod tests {
         let mut state = state_at(root);
         let _ = state.render();
         state
+    }
+
+    // ---- what programs add to a file's menu (service menus) -------------
+
+    /// A program started in a folder: what, with what, and where.
+    type StartedIn = (OsString, Vec<OsString>, Option<PathBuf>);
+
+    thread_local! {
+        static LAUNCHED_IN: std::cell::RefCell<Vec<StartedIn>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A starter in a folder that starts nothing and writes down what it was
+    /// asked.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the launch_in field's, which the real spawn fills"
+    )]
+    fn record_launch_in(
+        program: &OsStr,
+        args: &[OsString],
+        dir: Option<&Path>,
+    ) -> std::io::Result<()> {
+        LAUNCHED_IN.with(|l| {
+            l.borrow_mut().push((
+                program.to_os_string(),
+                args.to_vec(),
+                dir.map(Path::to_path_buf),
+            ));
+        });
+        Ok(())
+    }
+
+    /// What was started in a folder since the last ask, clearing it.
+    fn launched_in() -> Vec<StartedIn> {
+        LAUNCHED_IN.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    /// A service menu for text, as a program ported from Linux might ship one.
+    const SHOUT: &str = "[Desktop Entry]\nType=Service\nMimeType=text/plain;\nActions=shout;\n\n[Desktop Action shout]\nName=Shout it\nExec=shout %f\n";
+
+    /// A window over `root`, holding `notes.txt`, looking for service menus in
+    /// the system data folder `share` -- the menu `text` in it as `name`,
+    /// unless `text` is empty.
+    fn with_service_menu(root: &Path, share: &Path, name: &str, text: &str) -> ExplorerState {
+        let dir = share.join("kio").join("servicemenus");
+        std::fs::create_dir_all(&dir).expect("the menus folder");
+        if !text.is_empty() {
+            std::fs::write(dir.join(name), text).expect("the menu");
+        }
+        std::fs::create_dir_all(root).expect("the folder shown");
+        let mut state = one_file(root, "notes.txt");
+        state.service_dirs = servicemenus::Dirs {
+            user: None,
+            system: vec![share.to_path_buf()],
+        };
+        state.launch_in = record_launch_in;
+        launched_in();
+        state
+    }
+
+    /// The top-level rows of the menu up, by label.
+    fn menu_labels(state: &ExplorerState) -> Vec<String> {
+        state
+            .menu
+            .as_ref()
+            .map(|menu| {
+                menu.items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        MenuItem::Action { label, .. } | MenuItem::Submenu { label, .. } => {
+                            Some(label.clone())
+                        }
+                        MenuItem::Separator => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **What a program adds to a file's right-click menu is offered there,
+    /// and starts the program on the file, in the file's folder**
+    /// (`requests/c-e-programs-add-to-a-files-right-click-menu.md`): a menu in
+    /// the format KDE's file manager reads, as a program ported from Linux
+    /// ships one.
+    #[test]
+    fn a_service_menus_item_is_offered_and_starts_its_program_on_the_file() {
+        let scratch = temp_dir("service_menu");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", SHOUT);
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        let labels = menu_labels(&state);
+        let at = labels
+            .iter()
+            .position(|l| l == "Shout it")
+            .unwrap_or_else(|| panic!("the item is not offered: {labels:?}"));
+        assert!(
+            at >= 2,
+            "the item comes before Open and Open with: {labels:?}"
+        );
+        let shout = menu_row(&state, "Shout it");
+        press_at(&mut state, shout);
+        let started = launched_in();
+        assert_eq!(started.len(), 1, "{started:?}");
+        let (program, args, dir) = &started[0];
+        assert_eq!(program, "shout");
+        assert_eq!(args, &[root.join("notes.txt").into_os_string()]);
+        assert_eq!(
+            dir.as_deref().and_then(|d| std::fs::canonicalize(d).ok()),
+            std::fs::canonicalize(&root).ok(),
+            "the program does not start in the file's folder"
+        );
+        assert_eq!(state.status_message, "Started Shout it");
+    }
+
+    /// **A service menu is offered only for the kinds of file it names, and
+    /// only while the user leaves it on.**
+    #[test]
+    fn a_service_menu_is_offered_only_for_its_kinds_and_while_it_is_on() {
+        let scratch = temp_dir("service_menu_kinds");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let pictures = SHOUT.replace("text/plain", "image/png");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", &pictures);
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        assert!(
+            !menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu for pictures is offered for a text file"
+        );
+
+        // A kind of text is text: a menu for plain text is offered for
+        // Markdown, as the shared MIME database's sub-class says.
+        let scratch = temp_dir("service_menu_text");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", SHOUT);
+        write(&root.join("readme.md"), "# Hello");
+        state.load_directory();
+        let _ = state.render();
+        let (x, y) = row_centre(&state, "readme.md");
+        state.open_context_menu(x, y);
+        assert!(
+            menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu for plain text is not offered for Markdown"
+        );
+
+        let scratch = temp_dir("service_menu_off");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", SHOUT);
+        state.refresh_service_menus();
+        let menu = state.service_menus.menus.first().expect("read").clone();
+        state.service_choices.set(&menu, false);
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        assert!(
+            !menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu the user turned off is offered"
+        );
+    }
+
+    /// **A menu installed while the window is open is offered at the next
+    /// right-click**, without a restart: the menus are read again when a
+    /// file of one changes.
+    #[test]
+    fn a_service_menu_installed_later_is_offered_at_the_next_right_click() {
+        let scratch = temp_dir("service_menu_later");
+        let root = scratch.dir().join("files");
+        let share = scratch.dir().join("share");
+        let mut state = with_service_menu(&root, &share, "shout.desktop", "");
+        let (x, y) = row_centre(&state, "notes.txt");
+        state.open_context_menu(x, y);
+        assert!(!menu_labels(&state).iter().any(|l| l == "Shout it"));
+        state.menu = None;
+        std::fs::write(
+            share.join("kio").join("servicemenus").join("shout.desktop"),
+            SHOUT,
+        )
+        .expect("installed");
+        state.open_context_menu(x, y);
+        assert!(
+            menu_labels(&state).iter().any(|l| l == "Shout it"),
+            "a menu installed since the window opened is not offered"
+        );
     }
 
     // ---- the context menu and the pointer -------------------------------

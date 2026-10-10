@@ -1293,6 +1293,7 @@ dependencies = [
  "programs",
  "recyclebin",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "tararchive",
  "textfind",
@@ -1488,7 +1489,12 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "osfont",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "textline",
 ]
 
 [[package]]

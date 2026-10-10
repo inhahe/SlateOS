@@ -1515,6 +1515,71 @@ MAIN += [
     ),
 ]
 
+# What programs add to a file's right-click menu (2026-10-10, requests/c-e-
+# programs-add-to-a-files-right-click-menu.md): the service menus on for the
+# file, laid out as the desktop lays them out, each starting its program in
+# the file's folder; read again when a menu is installed.
+S_OFFERED = "a_service_menus_item_is_offered_and_starts_its_program_on_the_file"
+S_KINDS = "a_service_menu_is_offered_only_for_its_kinds_and_while_it_is_on"
+S_LATER = "a_service_menu_installed_later_is_offered_at_the_next_right_click"
+
+MAIN += [
+    (
+        "the service menus are never read again",
+        "        if self.service_seen.as_ref() == Some(&stamps) {\n",
+        "        if self.service_seen.is_some() {\n",
+        [S_LATER],
+    ),
+    (
+        "the service menus are not read",
+        "        self.service_menus = servicemenus::scan(&self.service_dirs, locale.as_ref());\n",
+        "        let _ = locale;\n",
+        [S_OFFERED],
+    ),
+    (
+        "the service items are not put in the file menu",
+        "            self.offer_service_menus(&mut items);\n",
+        "",
+        [S_OFFERED],
+    ),
+    (
+        "the service items come before Open",
+        "        let at = items.len().min(2);\n",
+        "        let at = items.len().min(0);\n",
+        [S_OFFERED],
+    ),
+    (
+        "a menu the user turned off is offered",
+        "        let rows = self.service_menus.rows(&self.service_choices, &targets);\n",
+        "        let rows = self\n            .service_menus\n            .rows(&servicemenus::Choices::default(), &targets);\n",
+        [S_KINDS],
+    ),
+    (
+        "a text kind is not offered what text is",
+        "        target.inherits.push(String::from(\"text/plain\"));\n",
+        "",
+        [S_KINDS],
+    ),
+    (
+        "a service item runs nothing",
+        "            || self.service_action(id)\n",
+        "",
+        [S_OFFERED],
+    ),
+    (
+        "a service item's program starts where its starter is",
+        "                    if let Err(e) = launch_in(&program, &args, run.dir.as_deref()) {\n",
+        "                    if let Err(e) = launch_in(&program, &args, None) {\n",
+        [S_OFFERED],
+    ),
+    (
+        "a service item started is not said",
+        "                    None => format!(\"Started {name}\"),\n",
+        "                    None => String::new(),\n",
+        [S_OFFERED],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
     "binview.rs": BINVIEW,

@@ -19,6 +19,10 @@ programs = { path = "../../gui/programs" }
 # The installed programs' desktop entries, read as the start menu reads them,
 # and the command line an entry starts its program with on a file.
 desktopentry = { path = "../../gui/desktopentry" }
+# What programs add to a file's right-click menu -- service menus, in the
+# format KDE's file manager reads (design-decisions §1448) -- and which the
+# user turned on or off: the same rows the desktop's icons offer.
+servicemenus = { path = "../../gui/servicemenus" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

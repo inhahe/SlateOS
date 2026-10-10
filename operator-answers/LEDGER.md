@@ -10,6 +10,25 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-10: `dotnet/runtime` instead of Mono; the ports listed in roadmap-detailed.md
+
+- **Given:** 2026-10-10, in chat to lane E's session. It answers lane E's
+  report that Mono 6.14 cannot run the operator's two C# programs, both of
+  them .NET 8 with a WPF window. It is not the answer to a queued question,
+  so there is no file in the integration tree.
+- **Processed:** 2026-10-10 by lane E, the same hour:
+  - recorded as §1246;
+  - the ports the operator asked for by name, listed in
+    `roadmap-detailed.md` §6.13;
+  - lanes D and B told by notice.
+- **Copy:** `operator-answers/2026-10-10-chat-dotnet-runtime-instead-of-mono.txt`
+- **Content:** sha256 `88f42c1431aa236b08d6bfaa4ba59e2066d1d7b6da1630c68d4f76ab651d3d64`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| the .NET port is `dotnet/runtime`, not Mono | D, B | §1246 (written by lane E) | relayed 2026-10-10 (D: its Mono item in `roadmap.md` becomes `dotnet/runtime`; B: the §1050 list in lane B's backlog still names Mono) |
+| the ports asked for by name, listed in `roadmap-detailed.md` | E | `roadmap-detailed.md` §6.13 | recorded |
+
 ## chat, 2026-10-10: a consent prompt takes no keystrokes
 
 - **Given:** 2026-10-10, in chat to lane E's session -- a rule, not the answer

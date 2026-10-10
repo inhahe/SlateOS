@@ -3262,26 +3262,33 @@ word; text inside them that says "lane C" is history.
   prerequisite of the two items that open this list. Do not start until the
   large-initiative ordering reaches it.
 
-- `[E]` **The operator's backup program, LithicBackup, reimplemented for
-  SlateOS** (design-decisions §1050, the operator's answer to B-Q18: "a
+- `[E]` **The operator's backup program, LithicBackup, on SlateOS**
+  (design-decisions §1050, the operator's answer to B-Q18: "a
   reimplementation of `d:\visual studio projects\backup` in a language we
   support, or if we get Mono ported, we can just run it on that"). Adopted
   2026-10-10 from the list in lane B's backlog. The program is C# for .NET 8
   (`net8.0-windows`): about 50,000 lines in 168 files, a WPF window, and
   Windows underneath it -- the NTFS change journal says what changed, IMAPI2
-  burns the discs, Win32 names the volumes. **Mono will not run it.** Lane D's
-  Mono 6.14 is the .NET Framework 4 runtime and cannot load a .NET 8 program;
-  WPF exists only on Windows; and the journal and the burner are Windows
-  calls. So it is reimplemented, the operator's first route:
-  - the engine on `apps/snapstore`, the store `apps/backup` and System
-    Restore share;
-  - its schedules as `apps/backup` already keeps them (C-Q21, §1426);
-  - the window in our toolkit;
-  - the feature list from the program's own `design.md`, `roadmap.md` and
-    `known-issues.md`.
+  burns the discs, Win32 names the volumes. Mono 6.14 cannot load a .NET 8
+  program, so the operator changed the .NET port to `dotnet/runtime` (§1246).
+  Even then, running it needs more than the runtime: WPF exists only on
+  Windows, and the journal and the burner are Windows calls. The operator's
+  two routes:
+  - **Run it on .NET:** its window rewritten (in Avalonia, itself a port, or
+    against our toolkit), and its Windows services swapped for SlateOS's own.
+  - **Reimplement it:**
+    - the engine on `apps/snapstore`, the store `apps/backup` and System
+      Restore share;
+    - its schedules as `apps/backup` already keeps them (C-Q21, §1426);
+    - the window in our toolkit;
+    - the feature list from the program's own `design.md`, `roadmap.md` and
+      `known-issues.md`.
 
-  Copying a file that is open and changing waits on the VSS equivalent in
-  `roadmap-detailed.md` (the operator's request of 2026-08-21).
+  Which route is chosen when the work starts, depending on how far
+  `dotnet/runtime` has got by then. Either way, copying a file that is open
+  and changing waits on the VSS equivalent in `roadmap-detailed.md` (the
+  operator's request of 2026-08-21). The operator's whole list of ports is
+  `roadmap-detailed.md` §6.13.
 
 - `[E]` **The operator's WinDirStat fork on SlateOS** (design-decisions
   §1050, B-Q18: "QDirStat, or better, port my own fork of WinDirStat that can

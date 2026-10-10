@@ -2291,6 +2291,10 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
         WinForms/WPF do not exist here, so a C#-native notepad would need
         Avalonia or a binding to our own toolkit regardless. **Porting Mono does
         not by itself get this app running.**
+        *2026-10-10: the runtime to port is now `dotnet/runtime`, not Mono
+        (design-decisions §1246). This notepad targets .NET 8
+        (`net8.0-windows`, WPF), which Mono 6.14 cannot load. Under any
+        runtime, its window still has to be rewritten.*
   - [ ] *Lane A's read, non-binding:* these are answers to different questions.
         Route 1 delivers the editor; route 2 delivers a language runtime and
         should be prioritised as such — against CPython-style ambitions, not
@@ -2537,7 +2541,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
-- [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
+- [-] Port a debugger (gdb/lldb) — *2026-10-10: GDB 18.1 links and is on the image; running a program under it waits on the kernel's `ptrace` (`roadmap.md`, lane D).* Both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
 
 #### Programming Language Support
 - [ ] Rust (native, first-class — kernel language)
@@ -2550,6 +2554,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Ruby (via CRuby/MRI port)
 - [ ] Nim (native compiler, needs C backend which uses gcc)
 - [ ] Zig (self-hosted compiler, minimal runtime)
+- [ ] C#, F# and Visual Basic (via `dotnet/runtime` — requires `mem.jit` capability). This is the operator's choice over Mono, made 2026-10-10 (design-decisions §1246), because their own C# programs target .NET 8. The list of ports they asked for is §6.13.
 
 _Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
 
@@ -3789,6 +3794,72 @@ _Several independent watchdogs, each with its own deadline, each able to trip al
 - [ ] Per-incident history with retention/size caps, in the same shape as the crash-dump lifecycle in Phase 1.5
 - [ ] Process Explorer (§4.3) shows live watch state — which processes are not responding, and what each is blocked on
 - [ ] **Reports stay on the machine.** They contain window titles, file paths and process names. Capability-gated to read another user's incidents; never uploaded anywhere, consistent with the project's no-telemetry rule. Explicit, reviewable export for a user who chooses to send one to a developer.
+
+### 6.13 Ports the operator asked for by name
+
+_The operator's own list of things to port or bring over, kept here in one
+place, each item with where its work is described and tracked. Added
+2026-10-10 at the operator's request. The list comes from their answer to
+B-Q18 on 2026-09-27 (design-decisions §1050, quoted there word for word) and
+from two requests of 2026-08-21. `roadmap.md` is the authority on progress;
+the flags here say only where each item stood on 2026-10-10._
+
+**Asked for on 2026-09-27 (B-Q18, §1050):**
+
+- [ ] **Chromium** — §4.7. A joint task led by lane E, waiting on the POSIX
+      layer, the GPU stack and networking.
+- [ ] **.NET, so C# programs run directly: `dotnet/runtime`** — §4.8 →
+      Programming Language Support. The operator first asked for Mono, "dotnet
+      support for Linux". On 2026-10-10 they changed it to `dotnet/runtime`
+      (design-decisions §1246): Mono 6.14 implements .NET Framework 4 and
+      cannot load the .NET 8 programs they want to run. Lane D's Mono 6.14
+      work is where the port starts. That work links against `libc.a` and is
+      on the image, but has not yet been seen running.
+- [ ] **Xonsh** — §2.7, "xonsh as an optional shell". It needs CPython's
+      interactive mode, or fastpy's planned JIT REPL.
+- [-] **YSH** — §2.7. It comes with genuine Oils (`oils-for-unix`), which
+      builds and links against `libc.a` and is not yet on the image (lane B,
+      design-decisions §1043).
+- [ ] **Nushell, on SlateOS** — §2.7. The `[x]` it was once given measured a
+      Windows build (`nu.exe`), not SlateOS.
+- [ ] **The operator's WinDirStat fork, or QDirStat.**
+  - **The fork:** `D:/visual studio projects/dirsize/windirstat`, C++ on MFC
+    and Win32, about 39,000 lines. It has All Files, Largest Files, Duplicate
+    Files, Search Results, File Watcher, Extension and Treemap views; logical
+    against physical size; saved and reloaded scans; and cleanup from the
+    window. MFC is Windows-only, so a port means a new window layer under the
+    fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported.
+  - **The plan:** compare the two, then either port the fork's logic or bring
+    its features to diskanalyzer (lane E, `roadmap.md`).
+  - **QDirStat** is built on Qt, which nothing here has ported.
+- [-] **A capable debugger, like cdb** — §4.8, "Port a debugger (gdb/lldb)".
+      GDB 18.1 and gdbserver link against `libc.a` and are on the image as
+      `/bin/gnu-gdb` and `/bin/gdbserver`. Running a program under them waits
+      on the kernel's `ptrace` (lane D, `roadmap.md`). LLDB needs LLVM and
+      Clang ported first.
+- [ ] **The operator's backup program, LithicBackup.**
+  - **The program:** `D:/visual studio projects/backup`, C# for .NET 8
+    (`net8.0-windows`), about 50,000 lines in 168 files. It has a WPF window,
+    and Windows services under it: the NTFS change journal, IMAPI2 for
+    burning discs, and Win32 volume names.
+  - **The operator's two routes:** reimplement it in a language SlateOS
+    supports, or run it once .NET runs here.
+  - **Running it needs more than the runtime.** WPF exists only on Windows,
+    so its window is rewritten either way. Its Windows services are replaced
+    by SlateOS's own: §2.3's change journal, and §4.10's VSS equivalent.
+  - **The choice** waits on `dotnet/runtime` running here (lane E,
+    `roadmap.md`). `apps/backup` (§4.4) is SlateOS's own backup program,
+    which a reimplementation would build on.
+
+**Asked for on 2026-08-21:**
+
+- [ ] **A VSS equivalent** — §4.10: a frozen, readable view of a live
+      volume, so a backup copies files that are open and changing.
+- [ ] **The operator's notepad** — §4.2, "Bring over the operator's existing
+      notepad". `D:/visual studio projects/notepad` (NotepadRedo) is also
+      .NET 8 with a WPF window, so the same two routes apply.
 
 ---
 

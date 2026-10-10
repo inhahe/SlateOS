@@ -77,12 +77,14 @@ textline, torrent. The desktop's wiring, as a worked example:
 **`apps/fieldmenu`** holds your dozen lines once for every program:
 `FieldMenu<F>` -- the menu and the field it is for, `F` the program's own
 name for its fields -- with `open(field, input.edit_menu(), x, y,
-viewport)`, then every mouse event and key routed through `mouse` / `key`
-before the window's own handling, answering `NotUp` (the window's),
-`Taken`, `Chosen(field, id)` (have the field `edit_command(id)`) or
-`RightPressElsewhere(x, y)` (open that field's menu, if one is there);
-`tick` / `due_in` for the dimmed rows' reasons, and `render`. Modal while
-up, as your desktop's is; a press on a dimmed row leaves it up.
+viewport)`, then every event routed through `event` before the window's own
+handling, answering `Window` (the window's), `Taken`, `Chosen(field, id)`
+(have the field `edit_command(id)`) or `RightPressElsewhere(x, y)` (open
+that field's menu, if one is there); `tick(elapsed_ms)` and `due_in()` for
+the dimmed rows' reasons -- the menu keeps its own clock -- and `render`.
+Modal while up, as your desktop's is; a press on a dimmed row leaves it up,
+and what is let go and the pointer leaving are still the window's, so a
+drag it had going ends where the button comes up.
 
 **Settings** uses it for the sidebar's search and every field on its pages
 (the Background page's pattern, the window-rule editor's six). The
@@ -101,6 +103,13 @@ Then the QR code maker (its boxes), the torrent client (its magnet box)
 and the sound recorder (a marker's name), each with the same two finds: a
 clipboard of the window's own for the keys, and a box with no capacity of
 its own; and the renamer (its rule, search and extension boxes), whose keys
-already used the program's. The rest, program by program, on `fieldmenu`:
-calendar, email, finance, flashcards, jsonviewer, notes, paint,
-procexplorer, regextester, reminders, snippets, stickynotes.
+already used the program's. Then the process explorer (its filter box and
+New Task box; the process list keeps its own menu, and a right press on a
+process while a box's menu is up opens the process's) and the mail client
+(From, To, Cc, Subject and the message body, with Undo and Redo in the
+body), whose window kept a clipboard of its own and copied it into the body
+before every key: gone, the lines, the body and the menu all on the
+program's. Every program's box starts as `textline::field_holding(text,
+capacity)`. The rest, program by program, on `fieldmenu`: calendar,
+finance, flashcards, jsonviewer, notes, paint, regextester, reminders,
+snippets, stickynotes.

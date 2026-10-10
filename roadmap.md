@@ -4509,7 +4509,13 @@ lane C's `guitk`.
         `h264_ps.c`/`h2645_vui.c`; eight conformance streams' SPS and PPS
         checked against FFmpeg's `trace_headers` field by field, scaling
         lists against the standard's fall-back rules.
-      - `[ ]` SEI, slice headers, references, CAVLC and CABAC, prediction,
+      - `[x]` SEI (2026-10-10): `h264_sei.c`/`h2645_sei.c` -- recovery
+        points, the x264 version (read as `sscanf` reads it: it turns on
+        FFmpeg's workarounds for old x264 builds), picture timing, A/53
+        captions, film grain, frame packing, orientation, HDR metadata;
+        stopping where FFmpeg stops on damage. Five FATE samples' SEI held
+        to `trace_headers`.
+      - `[ ]` Slice headers, references, CAVLC and CABAC, prediction,
         reconstruction, the loop filter, error concealment, the decoder.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).
   - `[-]` Sound: a WebM file's is Opus or Vorbis.

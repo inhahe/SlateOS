@@ -12,10 +12,14 @@
 //!   Exp-Golomb codes most syntax is written in.
 //! - `nal`: `h2645_parse.c` -- a packet split into NAL units, after start
 //!   codes or after lengths, and unescaped.
+//! - `ps`: `h264_ps.c` and `h2645_vui.c` -- sequence and picture parameter
+//!   sets; `tables` the data tables they and the rest read.
+//! - `sei`: `h264_sei.c` and `h2645_sei.c` -- supplemental enhancement
+//!   information: recovery points, the x264 version, picture timing,
+//!   captions, film grain, and what is about the picture rather than in it.
 //!
 //! The rest is being translated in this order, each part against FFmpeg's
-//! output before the next: parameter sets
-//! (`h264_ps.c`, `h2645_vui.c`), SEI (`h264_sei.c`, `h2645_sei.c`), slice
+//! output before the next: slice
 //! headers and pictures (`h264_slice.c`, `h264_picture.c`), references
 //! (`h264_refs.c`), CAVLC and CABAC (`h264_cavlc.c`, `cabac.c`,
 //! `h264_cabac.c`), motion vector prediction (`h264_mvpred.h`,
@@ -36,6 +40,7 @@
 mod bits;
 mod nal;
 mod ps;
+mod sei;
 mod tables;
 
 /// Why a packet or a stream could not be decoded.

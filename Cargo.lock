@@ -1311,6 +1311,13 @@ name = "fdisk"
 version = "0.1.0"
 
 [[package]]
+name = "fieldmenu"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
 name = "file"
 version = "0.1.0"
 dependencies = [

@@ -6,16 +6,16 @@
 //! The toolkit gives the rows (`TextInput::edit_menu`, `TextArea::edit_menu`)
 //! and does what a chosen row says (`edit_command`); what is left to each
 //! window is the same handful of lines, and [`FieldMenu`] is those lines:
-//! the menu and which field it is for, the presses, keys, pointer, wheel and
-//! clock routed to it while it is up, and its drawing.
+//! the menu and which field it is for, the presses, keys, pointer and wheel
+//! routed to it while it is up, its clock, and its drawing.
 //!
 //! ```ignore
 //! // A right press over a field: its menu, where the press landed.
 //! self.field_menu.open(Field::Search, self.search.edit_menu(), x, y, viewport);
 //!
-//! // Every mouse event and key, before the window's own handling:
-//! match self.field_menu.mouse(&event) {
-//!     Outcome::NotUp => {}                        // the window's, as ever
+//! // Every event, before the window's own handling:
+//! match self.field_menu.event(&event) {
+//!     Outcome::Window => {}                       // the window's, as ever
 //!     Outcome::Taken => return Consumed,
 //!     Outcome::Chosen(field, id) => {             // the field does it
 //!         self.input(field).edit_command(id);
@@ -26,16 +26,26 @@
 //!         return Consumed;
 //!     }
 //! }
+//!
+//! // Each tick, beside whatever else the window's ticks do -- the menu keeps
+//! // its own clock -- and the tick it asks for:
+//! let reason_shown = self.field_menu.tick(elapsed_ms);
+//! fn tick_interval(&self) -> Option<Duration> {
+//!     self.field_menu.due_in().map(Duration::from_millis)
+//! }
 //! ```
 //!
 //! **Modal while up**, as any menu is: every press goes to it -- a row
 //! chosen with the left button is done, a press outside puts it away and
 //! reaches nothing under it -- and every key: the arrows move through its
 //! rows, Enter does the lit one, Escape puts it away, and none reaches the
-//! field. A press on a dimmed row leaves it up: nothing happened.
+//! field. A press on a dimmed row leaves it up: nothing happened. What is let
+//! go -- a button, a key -- and the pointer leaving the window or coming back
+//! are still the window's, so a drag it had going when the menu came up ends
+//! where the button comes up, and its hover goes out.
 
 use guitk::editmenu::EditCommand;
-use guitk::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
 use guitk::palette::Palette;
 use guitk::render::RenderCommand;
@@ -43,8 +53,10 @@ use guitk::render::RenderCommand;
 /// What the menu made of an event. See the module docs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Outcome<F> {
-    /// The menu is not up: the event is the window's.
-    NotUp,
+    /// The event is the window's: the menu is not up, or it leaves this one
+    /// to the window -- a button or a key let go, the pointer leaving or
+    /// coming back, any event that is neither a key nor the pointer.
+    Window,
     /// The menu took the event; there is nothing more to do but draw.
     Taken,
     /// The row `id` was chosen for the field: have the field do it
@@ -59,6 +71,9 @@ pub enum Outcome<F> {
 /// names a field the window's way: an enum of its fields, an index.
 pub struct FieldMenu<F> {
     up: Option<(ContextMenu, F)>,
+    /// Milliseconds of the window's ticks, summed: the time a dimmed row's
+    /// wait is counted on.
+    clock_ms: u64,
 }
 
 /// The field the menu is up for, if it is: the toolkit's menu prints nothing
@@ -67,13 +82,16 @@ impl<F: std::fmt::Debug> std::fmt::Debug for FieldMenu<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FieldMenu")
             .field("up_for", &self.up.as_ref().map(|(_, field)| field))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl<F> Default for FieldMenu<F> {
     fn default() -> Self {
-        Self { up: None }
+        Self {
+            up: None,
+            clock_ms: 0,
+        }
     }
 }
 
@@ -81,7 +99,10 @@ impl<F: Copy> FieldMenu<F> {
     /// No menu up.
     #[must_use]
     pub const fn new() -> Self {
-        Self { up: None }
+        Self {
+            up: None,
+            clock_ms: 0,
+        }
     }
 
     /// Whether the menu is up.
@@ -141,10 +162,22 @@ impl<F: Copy> FieldMenu<F> {
         self.up = None;
     }
 
+    /// An event, before the window's own handling: a key or the pointer is
+    /// [`key`](Self::key)'s or [`mouse`](Self::mouse)'s, and anything else
+    /// is the window's -- a tick included, which the window hands
+    /// [`tick`](Self::tick) beside its own ticks' work. See [`Outcome`].
+    pub fn event(&mut self, event: &Event) -> Outcome<F> {
+        match event {
+            Event::Mouse(mouse) => self.mouse(mouse),
+            Event::Key(key) => self.key(key),
+            _ => Outcome::Window,
+        }
+    }
+
     /// A mouse event. See [`Outcome`] and the module docs.
     pub fn mouse(&mut self, event: &MouseEvent) -> Outcome<F> {
         let Some((menu, field)) = self.up.as_mut() else {
-            return Outcome::NotUp;
+            return Outcome::Window;
         };
         let field = *field;
         match event.kind {
@@ -186,15 +219,23 @@ impl<F: Copy> FieldMenu<F> {
                 menu.handle_scroll(event.x, event.y, dy);
                 Outcome::Taken
             }
-            _ => Outcome::Taken,
+            // The window's still: a drag it had going ends where the button
+            // comes up, and its hover follows the pointer out and back in.
+            MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => {
+                Outcome::Window
+            }
         }
     }
 
-    /// A key. Every key is the menu's while it is up; see [`Outcome`].
+    /// A key. Every key pressed is the menu's while it is up, and every key
+    /// let go the window's; see [`Outcome`].
     pub fn key(&mut self, key: &KeyEvent) -> Outcome<F> {
         let Some((menu, field)) = self.up.as_mut() else {
-            return Outcome::NotUp;
+            return Outcome::Window;
         };
+        if !key.pressed {
+            return Outcome::Window;
+        }
         let field = *field;
         match menu.handle_key(key) {
             Some(MenuAction::Selected(id)) => {
@@ -209,19 +250,22 @@ impl<F: Copy> FieldMenu<F> {
         }
     }
 
-    /// The window's clock reads `now_ms`: a dimmed row the pointer rests on
-    /// says why when its wait is over. Whether that changed what is drawn.
-    pub fn tick(&mut self, now_ms: u64) -> bool {
-        self.up.as_mut().is_some_and(|(menu, _)| menu.tick(now_ms))
+    /// Let `elapsed_ms` pass -- what a tick of the window's says: a dimmed
+    /// row the pointer rests on says why when its wait is over. Whether that
+    /// changed what is drawn.
+    pub fn tick(&mut self, elapsed_ms: u64) -> bool {
+        self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        let now = self.clock_ms;
+        self.up.as_mut().is_some_and(|(menu, _)| menu.tick(now))
     }
 
-    /// How long until the menu wants a tick, if it does: at least a
-    /// millisecond, so a window's clock moves to start the wait.
+    /// How long until the menu wants a tick, in milliseconds, if it does: at
+    /// least one, so a tick comes to start the wait.
     #[must_use]
-    pub fn due_in(&self, now_ms: u64) -> Option<u64> {
+    pub fn due_in(&self) -> Option<u64> {
         self.up
             .as_ref()
-            .and_then(|(menu, _)| menu.due_in(now_ms))
+            .and_then(|(menu, _)| menu.due_in(self.clock_ms))
             .map(|ms| ms.max(1))
     }
 

@@ -777,18 +777,10 @@ impl RunBox {
     /// The box as it opens: an empty line, and no complaint.
     fn new() -> Self {
         Self {
-            input: box_holding(RUN_BOX_CAPACITY),
+            input: textline::field_holding("", RUN_BOX_CAPACITY),
             error: None,
         }
     }
-}
-
-/// An empty box that typing and pasting -- by key or from its right-click
-/// menu -- fill to at most `capacity` characters.
-fn box_holding(capacity: usize) -> TextInput {
-    let mut input = TextInput::new();
-    input.set_capacity(Some(capacity));
-    input
 }
 
 /// The box a right-click menu is up for.
@@ -877,9 +869,6 @@ pub struct ProcessExplorerState {
     /// Paste, Delete, Select all -- while it is up, and the box it is for
     /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
     field_menu: fieldmenu::FieldMenu<MenuField>,
-    /// The window's clock, moved by its ticks: a dimmed row of the menu the
-    /// pointer rests on says why when its wait is over.
-    clock_ms: u64,
     /// How programs are started; see [`Spawner`].
     spawner: Spawner,
     /// Whether the search box is focused.
@@ -981,10 +970,9 @@ impl ProcessExplorerState {
             show_help: false,
             run_box: None,
             field_menu: fieldmenu::FieldMenu::new(),
-            clock_ms: 0,
             spawner: spawn_program,
             filter_focused: false,
-            filter_editor: box_holding(FILTER_CAPACITY),
+            filter_editor: textline::field_holding("", FILTER_CAPACITY),
             filter_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_picker: features::WindowPicker::new(),
@@ -1472,27 +1460,18 @@ impl ProcessExplorerState {
         // reaching nothing under it -- a right press there being taken as the
         // window would take it, so a right-click on a process opens that
         // process's menu instead.
-        match event {
-            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Taken => return EventResult::Consumed,
-                fieldmenu::Outcome::Chosen(field, id) => {
-                    self.do_field_menu_row(field, id);
-                    return EventResult::Consumed;
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => {
+                self.do_field_menu_row(field, id);
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::RightPressElsewhere(..) => {
+                if let Event::Mouse(mouse) = event {
+                    return self.handle_mouse(mouse);
                 }
-                fieldmenu::Outcome::RightPressElsewhere(..) => return self.handle_mouse(mouse),
-            },
-            Event::Key(key) => match self.field_menu.key(key) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Chosen(field, id) => {
-                    self.do_field_menu_row(field, id);
-                    return EventResult::Consumed;
-                }
-                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
-                    return EventResult::Consumed;
-                }
-            },
-            _ => {}
+            }
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
@@ -1503,8 +1482,8 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
             Event::Tick { elapsed_ms } => {
-                self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
-                let _menu_changed = self.field_menu.tick(self.clock_ms);
+                // Drawn whatever the menu's wait did: every tick refreshes.
+                let _menu_changed = self.field_menu.tick(*elapsed_ms);
                 self.ms_since_refresh = self.ms_since_refresh.saturating_add(*elapsed_ms);
                 if self.ms_since_refresh >= self.refresh_interval.ms() {
                     self.ms_since_refresh = 0;
@@ -4238,10 +4217,7 @@ impl App for ProcessExplorerState {
     /// while a box's right-click menu waits to say why a row is dimmed.
     fn tick_interval(&self) -> Option<Duration> {
         let refresh = Duration::from_millis(self.refresh_interval.ms());
-        let menu = self
-            .field_menu
-            .due_in(self.clock_ms)
-            .map(Duration::from_millis);
+        let menu = self.field_menu.due_in().map(Duration::from_millis);
         Some(menu.map_or(refresh, |menu| menu.min(refresh)))
     }
 

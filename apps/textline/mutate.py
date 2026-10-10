@@ -291,9 +291,21 @@ MUTATIONS += [
     ),
     (
         "a paste by key reads no program's clipboard",
-        "    let clipboard = guitk::clipboard::text();\n",
-        "    let clipboard = String::new();\n",
+        "        guitk::clipboard::text()\n    } else {\n",
+        "        String::new()\n    } else {\n",
         [SHARED],
+    ),
+    (
+        "pastes names another key than the paste",
+        "    key.key == Key::V && is_ctrl_chord(key.modifiers)\n",
+        "    key.key == Key::C && is_ctrl_chord(key.modifiers)\n",
+        ["pastes_is_the_key_apply_key_pastes_on"],
+    ),
+    (
+        "a field holding a capacity holds none",
+        "    input.set_text(text);\n    input.set_capacity(Some(capacity));\n    input\n}\n",
+        "    input.set_text(text);\n    input\n}\n",
+        ["a_field_holding_a_capacity_fills_to_it"],
     ),
 ]
 

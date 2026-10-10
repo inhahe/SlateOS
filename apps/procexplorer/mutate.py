@@ -186,14 +186,6 @@ MUTATIONS = [
         [CTRL_N, WHY],
     ),
     (
-        "a copy is not kept",
-        "                    if let Some(copied) = edit.copied {\n"
-        "                        self.clipboard = copied;\n"
-        "                    }",
-        "                    let _ = &edit.copied;",
-        [PASTE],
-    ),
-    (
         "every key clears the complaint",
         "                    if edit.handled {\n                        run_box.error = None;\n                    }",
         "                    run_box.error = None;",
@@ -431,18 +423,9 @@ MUTATIONS += [
         [PLAIN],
     ),
     (
-        # What the box did before the editor: type whatever text a key
-        # carried, a chord's letter among it.
         "the filter types a chord's letter",
-        "                self.sync_filter_editor();\n"
-        "                let before = self.filter_editor.text().to_owned();\n",
-        "                if key.types_text() && !textline::types_into_field(key) {\n"
-        "                    self.filter_text.push_str(&key.text);\n"
-        "                    self.rebuild_visible_list();\n"
-        "                    return EventResult::Consumed;\n"
-        "                }\n"
-        "                self.sync_filter_editor();\n"
-        "                let before = self.filter_editor.text().to_owned();\n",
+        '            _ => {\n                self.sync_filter_editor();\n                let before = self.filter_editor.text().to_owned();\n',
+        '            _ => {\n                if !key.text.is_empty() && !textline::types_into_field(key) {\n                    self.filter_text.push_str(&key.text);\n                    self.rebuild_visible_list();\n                    return EventResult::Consumed;\n                }\n                self.sync_filter_editor();\n                let before = self.filter_editor.text().to_owned();\n',
         [EDITS],
     ),
     (
@@ -567,15 +550,15 @@ MUTATIONS += [
         [FM_RUN],
     ),
     (
-        "the New Task box holds no capacity",
-        "            input: box_holding(RUN_BOX_CAPACITY),\n",
-        "            input: TextInput::new(),\n",
+        'the New Task box holds no capacity',
+        '            input: textline::field_holding("", RUN_BOX_CAPACITY),\n',
+        '            input: textline::field_holding("", usize::MAX),\n',
         [FM_RUN],
     ),
     (
-        "the filter box holds no capacity",
-        "            filter_editor: box_holding(FILTER_CAPACITY),\n",
-        "            filter_editor: TextInput::new(),\n",
+        'the filter box holds no capacity',
+        '            filter_editor: textline::field_holding("", FILTER_CAPACITY),\n',
+        '            filter_editor: textline::field_holding("", usize::MAX),\n',
         [FM_FILTER],
     ),
     (
@@ -613,17 +596,15 @@ MUTATIONS += [
         [FM_FILTER],
     ),
     (
-        "a key the menu took reaches the box under it",
-        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n"
-        "                    return EventResult::Consumed;\n"
-        "                }\n",
-        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        'a key the menu took reaches the box under it',
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
         [FM_MODAL],
     ),
     (
         "a right press on a process under a box's menu opens nothing",
-        "                fieldmenu::Outcome::RightPressElsewhere(..) => return self.handle_mouse(mouse),\n",
-        "                fieldmenu::Outcome::RightPressElsewhere(..) => return EventResult::Consumed,\n",
+        '                    return self.handle_mouse(mouse);\n',
+        '                    return EventResult::Consumed;\n',
         [FM_MODAL],
     ),
     (
@@ -634,8 +615,8 @@ MUTATIONS += [
     ),
     (
         "the window's ticks do not move the menu's clock",
-        "                let _menu_changed = self.field_menu.tick(self.clock_ms);\n",
-        "",
+        '                let _menu_changed = self.field_menu.tick(*elapsed_ms);\n',
+        '',
         [FM_CLOCK],
     ),
     (

@@ -190,12 +190,37 @@ pub fn apply_key_on_clipboard(
     capacity: usize,
     font_size: f32,
 ) -> LineEdit {
-    let clipboard = guitk::clipboard::text();
+    // Read for the key that pastes alone: the clipboard may hold megabytes,
+    // and every other key -- each letter typed -- would copy them for nothing.
+    let clipboard = if pastes(key) {
+        guitk::clipboard::text()
+    } else {
+        String::new()
+    };
     let edit = apply_key(input, key, capacity, &clipboard, font_size);
     if let Some(copied) = &edit.copied {
         guitk::clipboard::set_text(copied);
     }
     edit
+}
+
+/// Whether `key` is [`apply_key`]'s paste: Ctrl+V as a chord
+/// ([`is_ctrl_chord`]).
+#[must_use]
+pub fn pastes(key: &KeyEvent) -> bool {
+    key.key == Key::V && is_ctrl_chord(key.modifiers)
+}
+
+/// A field holding `text`, which typing and pasting -- by key or from its
+/// right-click menu -- fill to at most `capacity` characters: how a program's
+/// one-line boxes start. The text it starts with is not cut, so a longer one
+/// a file holds is shown whole.
+#[must_use]
+pub fn field_holding(text: &str, capacity: usize) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_text(text);
+    input.set_capacity(Some(capacity));
+    input
 }
 
 /// Type `typed` into `input` over its selection, stopping at `capacity`
@@ -367,6 +392,51 @@ mod tests {
         let mut input = TextInput::new();
         input.set_text(text);
         input
+    }
+
+    /// **`pastes` is the key `apply_key` pastes on, and no other**, whatever
+    /// is held with it: the program's clipboard is read for that key alone,
+    /// so a key that pasted without being it would paste nothing.
+    #[test]
+    fn pastes_is_the_key_apply_key_pastes_on() {
+        let mut combinations = Vec::new();
+        for bits in 0_u8..16 {
+            combinations.push(Modifiers {
+                shift: bits & 1 != 0,
+                ctrl: bits & 2 != 0,
+                alt: bits & 4 != 0,
+                super_key: bits & 8 != 0,
+            });
+        }
+        for modifiers in combinations {
+            for (k, text) in [(Key::V, "v"), (Key::C, "c"), (Key::Unknown(0), "v")] {
+                let stroke = held(k, text, modifiers);
+                let mut input = field("");
+                apply_key(&mut input, &stroke, 100, "PASTED", 13.0);
+                assert_eq!(
+                    input.text() == "PASTED",
+                    pastes(&stroke),
+                    "{k:?} with {modifiers:?}"
+                );
+            }
+        }
+    }
+
+    /// **A field holding a capacity is filled to it and no further**, and
+    /// keeps whole a longer text it starts with -- a draft's or a rule's,
+    /// read from a file.
+    #[test]
+    fn a_field_holding_a_capacity_fills_to_it() {
+        let mut input = field_holding("ab", 4);
+        input.insert_text("cdef");
+        assert_eq!(input.text(), "abcd");
+        let long = field_holding("a long start", 4);
+        assert_eq!(
+            long.text(),
+            "a long start",
+            "the text it starts with was cut"
+        );
+        assert_eq!(long.capacity(), Some(4));
     }
 
     /// **A key held with Alt or the Windows key is not the field's**: the

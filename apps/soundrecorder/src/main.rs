@@ -2077,9 +2077,6 @@ pub struct SoundRecorderApp {
     /// all -- while it is up
     /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
     field_menu: fieldmenu::FieldMenu<()>,
-    /// The window's clock for the menu, moved by its ticks: a dimmed row the
-    /// pointer rests on says why when its wait is over.
-    menu_clock_ms: u64,
     pub picker: FilePicker,
     pub picker_for: PickerFor,
     pub panel: Panel,
@@ -2140,7 +2137,6 @@ impl SoundRecorderApp {
             marker_scroll: 0,
             rename: None,
             field_menu: fieldmenu::FieldMenu::new(),
-            menu_clock_ms: 0,
             picker: FilePicker::default(),
             picker_for: PickerFor::Open,
             panel: Panel::Library,
@@ -2590,34 +2586,19 @@ impl SoundRecorderApp {
         }
         // The name box's right-click menu takes the presses and the keys
         // while it is up, as any menu does.
-        match event {
-            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Taken => return EventResult::Consumed,
-                fieldmenu::Outcome::Chosen((), id) => {
-                    if let Some(input) = self.rename.as_mut() {
-                        let _edit = input.edit_command(id);
-                    }
-                    return EventResult::Consumed;
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen((), id) => {
+                if let Some(input) = self.rename.as_mut() {
+                    let _edit = input.edit_command(id);
                 }
-                fieldmenu::Outcome::RightPressElsewhere(x, y) => {
-                    let _another = self.open_field_menu(x, y);
-                    return EventResult::Consumed;
-                }
-            },
-            Event::Key(key) => match self.field_menu.key(key) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Chosen((), id) => {
-                    if let Some(input) = self.rename.as_mut() {
-                        let _edit = input.edit_command(id);
-                    }
-                    return EventResult::Consumed;
-                }
-                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
-                    return EventResult::Consumed;
-                }
-            },
-            _ => {}
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
         }
         match event {
             Event::Resize { width, height } => {
@@ -2632,8 +2613,7 @@ impl SoundRecorderApp {
                 // would report a duration that drifts from the audio.
                 self.tick(*elapsed_ms);
                 let saved = self.check_auto_save(*elapsed_ms);
-                self.menu_clock_ms = self.menu_clock_ms.saturating_add(*elapsed_ms);
-                let reason = self.field_menu.tick(self.menu_clock_ms);
+                let reason = self.field_menu.tick(*elapsed_ms);
                 if self.state == RecordingState::Recording || saved || reason {
                     EventResult::Consumed
                 } else {
@@ -2798,11 +2778,7 @@ impl SoundRecorderApp {
             self.status_line = String::from("Choose a marker to name first");
             return;
         };
-        let mut input = TextInput::new();
-        input.set_text(&label);
-        // Typing and pasting -- by key or from the box's right-click menu --
-        // stop at the label's capacity.
-        input.set_capacity(Some(LABEL_CAPACITY));
+        let mut input = textline::field_holding(&label, LABEL_CAPACITY);
         input.select_all();
         self.rename = Some(input);
         self.panel = Panel::Recording;
@@ -4038,10 +4014,7 @@ impl App for SoundRecorderApp {
             (self.state == RecordingState::Recording).then(|| Duration::from_millis(100));
         // And the name box's menu, while a dimmed row the pointer rests on
         // waits to say why.
-        let menu = self
-            .field_menu
-            .due_in(self.menu_clock_ms)
-            .map(Duration::from_millis);
+        let menu = self.field_menu.due_in().map(Duration::from_millis);
         match (recording, menu) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

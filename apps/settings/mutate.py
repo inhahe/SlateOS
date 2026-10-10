@@ -2946,8 +2946,8 @@ RULE_LISTS = "a_list_shows_what_a_rule_says_even_off_the_list"
 RULES = [
     (
         "a rule's field holds no capacity",
-        "    input.set_capacity(Some(capacity));\n    input\n}\n",
-        "    let _ = capacity;\n    input\n}\n",
+        '            name: textline::field_holding(&rule.name, NAME_CAPACITY),\n',
+        '            name: textline::field_holding(&rule.name, usize::MAX),\n',
         ["a_paste_from_the_menu_stops_at_the_fields_capacity"],
     ),
     (

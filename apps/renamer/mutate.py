@@ -329,15 +329,9 @@ MUTATIONS += [
         [RN_MENU],
     ),
     (
-        "the menu's keys reach the box too",
-        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n                    return EventResult::Consumed;\n                }\n",
-        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
-        [RN_MENU],
-    ),
-    (
-        "a press the menu took reaches the window too",
-        "                fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
-        "                fieldmenu::Outcome::Taken => {}\n",
+        'a press the menu took reaches the window too',
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
         [RN_MENU],
     ),
     (
@@ -347,15 +341,15 @@ MUTATIONS += [
         [RN_MENU],
     ),
     (
-        "no clock while the menu waits",
-        "        self.field_menu\n            .due_in(self.clock_ms)\n            .map(Duration::from_millis)\n",
-        "        None\n",
+        'no clock while the menu waits',
+        '        self.field_menu.due_in().map(Duration::from_millis)\n',
+        '        None\n',
         [RN_CLOCK],
     ),
     (
-        "the clock does not move the menu",
-        "                if self.field_menu.tick(self.clock_ms) {\n",
-        "                if false {\n",
+        'the clock does not move the menu',
+        '            && self.field_menu.tick(*elapsed_ms)\n',
+        '            && self.field_menu.tick(0)\n',
         [RN_CLOCK],
     ),
 ]

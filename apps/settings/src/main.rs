@@ -9405,7 +9405,7 @@ impl SettingsState {
             if self.why_disabled.tick(self.clock_ms) {
                 result = EventResult::Consumed;
             }
-            if self.field_menu.tick(self.clock_ms) {
+            if self.field_menu.tick(*elapsed_ms) {
                 result = EventResult::Consumed;
             }
         }
@@ -9464,7 +9464,7 @@ impl SettingsState {
         // through its rows, Enter does the lit one, Escape puts it away --
         // none of them reaches the field or the page under it.
         match self.field_menu.key(evt) {
-            fieldmenu::Outcome::NotUp => {}
+            fieldmenu::Outcome::Window => {}
             fieldmenu::Outcome::Chosen(field, id) => {
                 self.do_field_menu_row(id, field);
                 return EventResult::Consumed;
@@ -9742,7 +9742,7 @@ impl SettingsState {
         // nothing under it, a right press there opening that field's own --
         // and the pointer and the wheel over it.
         match self.field_menu.mouse(evt) {
-            fieldmenu::Outcome::NotUp => {}
+            fieldmenu::Outcome::Window => {}
             fieldmenu::Outcome::Taken => return EventResult::Consumed,
             fieldmenu::Outcome::Chosen(field, id) => {
                 self.do_field_menu_row(id, field);
@@ -10775,7 +10775,7 @@ impl oswindow::app::App for SettingsState {
     fn tick_interval(&self) -> Option<std::time::Duration> {
         // And a text field's menu, whose dimmed rows say why while the
         // pointer rests on one, on the same clock.
-        let menu = self.field_menu.due_in(self.clock_ms);
+        let menu = self.field_menu.due_in();
         let why = self.why_disabled.due_in(self.clock_ms);
         match (why, menu) {
             (Some(a), Some(b)) => Some(a.min(b)),

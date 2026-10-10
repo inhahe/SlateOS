@@ -2322,14 +2322,6 @@ const NOTICE_H: f32 = 48.0;
 /// trackers is a few kilobytes; this is past any.
 const MAX_MAGNET_CHARS: usize = 8192;
 
-/// An empty box that typing and pasting -- by key or from its right-click
-/// menu -- fill to at most `capacity` characters.
-fn box_holding(capacity: usize) -> TextInput {
-    let mut input = TextInput::new();
-    input.set_capacity(Some(capacity));
-    input
-}
-
 /// The sidebar's filters, in the order the number keys choose them.
 const FILTERS: [TorrentFilter; 7] = [
     TorrentFilter::All,
@@ -2644,9 +2636,6 @@ pub struct TorrentApp {
     /// Select all -- while it is up
     /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
     field_menu: fieldmenu::FieldMenu<()>,
-    /// The window's clock, moved by its ticks: a dimmed row of the menu the
-    /// pointer rests on says why when its wait is over.
-    clock_ms: u64,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
     /// The user's focus width, which the text boxes draw their focus mark
@@ -2840,7 +2829,7 @@ impl TorrentApp {
             global_download_speed: SpeedTracker::new(60, 1000),
             global_upload_speed: SpeedTracker::new(60, 1000),
             show_add_dialog: false,
-            magnet_input: box_holding(MAX_MAGNET_CHARS),
+            magnet_input: textline::field_holding("", MAX_MAGNET_CHARS),
             magnet_error: None,
             add_save_path: ClientSettings::default().default_save_path.clone(),
             sessions: HashMap::new(),
@@ -2848,7 +2837,6 @@ impl TorrentApp {
             search_active: false,
             transfer_scroll: 0,
             field_menu: fieldmenu::FieldMenu::new(),
-            clock_ms: 0,
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
@@ -3007,24 +2995,14 @@ impl TorrentApp {
         }
         // The magnet box's right-click menu takes the presses and the keys
         // while it is up, as any menu does.
-        match event {
-            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Taken => return EventResult::Consumed,
-                fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
-                fieldmenu::Outcome::RightPressElsewhere(x, y) => {
-                    let _another = self.open_field_menu(x, y);
-                    return EventResult::Consumed;
-                }
-            },
-            Event::Key(key) => match self.field_menu.key(key) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
-                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
-                    return EventResult::Consumed;
-                }
-            },
-            _ => {}
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen((), id) => return self.do_menu_row(id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
         }
         match event {
             Event::Key(key) if key.pressed => {
@@ -3034,9 +3012,8 @@ impl TorrentApp {
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Tick { elapsed_ms } => {
-                // The menu's clock beside the transfers'.
-                self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
-                let reason = self.field_menu.tick(self.clock_ms);
+                // The menu's wait beside the transfers'.
+                let reason = self.field_menu.tick(*elapsed_ms);
                 match self.handle_tick(*elapsed_ms) {
                     EventResult::Ignored if !reason => EventResult::Ignored,
                     _ => EventResult::Consumed,
@@ -5234,10 +5211,7 @@ impl App for TorrentApp {
     fn tick_interval(&self) -> Option<Duration> {
         // The magnet box's menu, while a dimmed row the pointer rests on
         // waits to say why.
-        let menu = self
-            .field_menu
-            .due_in(self.clock_ms)
-            .map(Duration::from_millis);
+        let menu = self.field_menu.due_in().map(Duration::from_millis);
         if self.sessions.is_empty() {
             return menu;
         }

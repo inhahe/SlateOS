@@ -1189,9 +1189,6 @@ struct RenamerApp {
     /// while it is up, and the box it is for
     /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
     field_menu: fieldmenu::FieldMenu<Focus>,
-    /// The window's clock, moved by its ticks: a dimmed row of the menu the
-    /// pointer rests on says why when its wait is over.
-    clock_ms: u64,
     /// What the pointer is over.
     hover: Option<Target>,
     /// Every box the last paint recorded, for hover and the wheel.
@@ -1241,7 +1238,6 @@ impl RenamerApp {
             search_text: String::new(),
             focus: Focus::List,
             field_menu: fieldmenu::FieldMenu::new(),
-            clock_ms: 0,
             draft: TextInput::new(),
             draft_invalid: false,
             rule_menu: None,
@@ -1852,30 +1848,19 @@ impl RenamerApp {
         }
         // A box's right-click menu takes the presses and the keys while it is
         // up, as any menu does.
-        match event {
-            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Taken => return EventResult::Consumed,
-                fieldmenu::Outcome::Chosen(focus, id) => return self.do_menu_row(focus, id),
-                fieldmenu::Outcome::RightPressElsewhere(x, y) => {
-                    let _another = self.open_field_menu(x, y);
-                    return EventResult::Consumed;
-                }
-            },
-            Event::Key(key) => match self.field_menu.key(key) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Chosen(focus, id) => return self.do_menu_row(focus, id),
-                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
-                    return EventResult::Consumed;
-                }
-            },
-            Event::Tick { elapsed_ms } => {
-                self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
-                if self.field_menu.tick(self.clock_ms) {
-                    return EventResult::Consumed;
-                }
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(focus, id) => return self.do_menu_row(focus, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
             }
-            _ => {}
+        }
+        if let Event::Tick { elapsed_ms } = event
+            && self.field_menu.tick(*elapsed_ms)
+        {
+            return EventResult::Consumed;
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
@@ -4528,9 +4513,7 @@ impl App for RenamerApp {
     /// rests on is waiting to say why; nothing else here ages -- a rename's
     /// time is read when it happens.
     fn tick_interval(&self) -> Option<Duration> {
-        self.field_menu
-            .due_in(self.clock_ms)
-            .map(Duration::from_millis)
+        self.field_menu.due_in().map(Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {

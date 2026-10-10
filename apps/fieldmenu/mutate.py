@@ -64,13 +64,13 @@ MUTATIONS = [
     (
         "a key the menu does nothing with reaches the field",
         "            Some(MenuAction::None) | None => Outcome::Taken,\n",
-        "            Some(MenuAction::None) | None => Outcome::NotUp,\n",
+        "            Some(MenuAction::None) | None => Outcome::Window,\n",
         [KEYS],
     ),
     (
-        "with no menu up, a press is taken",
-        "            return Outcome::NotUp;\n        };\n        let field = *field;\n        match event.kind {\n",
-        "            return Outcome::Taken;\n        };\n        let field = *field;\n        match event.kind {\n",
+        'with no menu up, a press is taken',
+        '            return Outcome::Window;\n        };\n        let field = *field;\n        match event.kind {\n',
+        '            return Outcome::Taken;\n        };\n        let field = *field;\n        match event.kind {\n',
         [KEYS],
     ),
     (
@@ -86,15 +86,15 @@ MUTATIONS = [
         [DRAWN],
     ),
     (
-        "the clock moves no wait on",
-        "        self.up.as_mut().is_some_and(|(menu, _)| menu.tick(now_ms))\n",
-        "        self.up.as_mut().is_some_and(|(_menu, _)| false)\n",
+        'the clock moves no wait on',
+        '        self.up.as_mut().is_some_and(|(menu, _)| menu.tick(now))\n',
+        '        self.up.as_mut().is_some_and(|(_menu, _)| false)\n',
         [CLOCK],
     ),
     (
-        "no tick is asked for",
-        "            .and_then(|(menu, _)| menu.due_in(now_ms))\n",
-        "            .and_then(|(_menu, _)| None::<u64>)\n",
+        'no tick is asked for',
+        '            .and_then(|(menu, _)| menu.due_in(self.clock_ms))\n',
+        '            .and_then(|(_menu, _)| None::<u64>)\n',
         [CLOCK],
     ),
     (
@@ -105,6 +105,33 @@ MUTATIONS = [
     ),
 ]
 
+
+MUTATIONS += [
+    (
+        "a button let go is the menu's",
+        '            MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => {\n                Outcome::Window\n            }\n',
+        '            MouseEventKind::Release(_) | MouseEventKind::Enter | MouseEventKind::Leave => {\n                Outcome::Taken\n            }\n',
+        ["what_is_let_go_and_the_pointer_leaving_are_the_windows"],
+    ),
+    (
+        "a key let go is the menu's",
+        '        if !key.pressed {\n            return Outcome::Window;\n        }\n',
+        '',
+        ["what_is_let_go_and_the_pointer_leaving_are_the_windows"],
+    ),
+    (
+        "the window's ticks are not counted",
+        '        self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);\n',
+        '',
+        [CLOCK],
+    ),
+    (
+        'one call leaves a key to the window',
+        '            Event::Key(key) => self.key(key),\n',
+        '            Event::Key(_) => Outcome::Window,\n',
+        ["one_call_routes_an_event"],
+    ),
+]
 
 if __name__ == "__main__":
     only = sys.argv[1:] or None

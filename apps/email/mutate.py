@@ -150,18 +150,6 @@ MUTATIONS = [
     # The body is the toolkit's multi-line field
     # (requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md).
     (
-        "a copy in the body is kept from the lines",
-        "                    (compose.body.clipboard() != clipboard)\n                        .then(|| compose.body.clipboard().to_owned())",
-        "                    None::<String>",
-        ["the_body_wraps_undoes_a_word_and_shares_the_clipboard"],
-    ),
-    (
-        "the body pastes its own clipboard, not the window's",
-        "                    compose.body.set_clipboard(clipboard.clone());",
-        "",
-        ["a_copy_in_a_line_pastes_into_the_body"],
-    ),
-    (
         "the body grows past its capacity",
         "        <= BODY_CAPACITY\n}",
         "        <= usize::MAX\n}",
@@ -448,9 +436,9 @@ MUTATIONS += [
         [E_CAP],
     ),
     (
-        "a line holds no capacity",
-        "    input.set_capacity(Some(FIELD_CAPACITY));\n    input.set_text(text);\n",
-        "    input.set_text(text);\n",
+        'a line holds no capacity',
+        '    textline::field_holding(text, FIELD_CAPACITY)\n',
+        '    textline::field_holding(text, usize::MAX)\n',
         [E_CAP],
     ),
     (
@@ -461,10 +449,8 @@ MUTATIONS += [
     ),
     (
         "Escape reaches the form under a field's menu",
-        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n"
-        "                    return EventResult::Consumed;\n"
-        "                }\n",
-        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
         [E_ESC],
     ),
     (
@@ -475,14 +461,14 @@ MUTATIONS += [
     ),
     (
         "the window's ticks do not move the menu's clock",
-        "                return if self.field_menu.tick(self.clock_ms) {\n",
-        "                return if false {\n",
+        '            return if self.field_menu.tick(*elapsed_ms) {\n',
+        '            return if self.field_menu.tick(0) {\n',
         [E_CLOCK],
     ),
     (
         "the window asks no tick for the menu's wait",
-        "            .due_in(self.clock_ms)\n            .map(Duration::from_millis)\n",
-        "            .due_in(self.clock_ms)\n            .map(Duration::from_millis)\n            .filter(|_| false)\n",
+        '        self.field_menu.due_in().map(Duration::from_millis)\n',
+        '        self.field_menu.due_in().map(Duration::from_millis).filter(|_| false)\n',
         [E_CLOCK],
     ),
 ]

@@ -2084,10 +2084,7 @@ pub struct Compose {
 /// [`FIELD_CAPACITY`] characters; a longer `text`, from a draft's file, is
 /// kept whole.
 fn field_with(text: &str) -> TextInput {
-    let mut input = TextInput::new();
-    input.set_capacity(Some(FIELD_CAPACITY));
-    input.set_text(text);
-    input
+    textline::field_holding(text, FIELD_CAPACITY)
 }
 
 /// What a key would put into the body, for its cap: the typed characters,
@@ -2396,9 +2393,6 @@ pub struct EmailApp {
     /// Select all, and Undo and Redo in the body -- while it is up, and the
     /// field it is for (`requests/c-e-text-fields-have-a-right-click-menu.md`).
     field_menu: fieldmenu::FieldMenu<ComposeField>,
-    /// The window's clock, moved by the ticks the menu asks for: a dimmed
-    /// row the pointer rests on says why when its wait is over.
-    clock_ms: u64,
     /// How wide carets are drawn: the user's `caret_width_scale` applied.
     caret_width: f32,
     /// The user's focus width, which the text boxes draw their focus mark
@@ -2472,7 +2466,6 @@ impl EmailApp {
             picker: FilePicker::default(),
             picker_for: PickerFor::Open,
             field_menu: fieldmenu::FieldMenu::new(),
-            clock_ms: 0,
             caret_width: textedit::CARET_WIDTH,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             list_scroll: 0,
@@ -3046,38 +3039,25 @@ impl EmailApp {
         // up, as any menu does: a row chosen, a press outside putting it away
         // and reaching nothing under it -- and Escape putting it away without
         // closing the message.
-        match event {
-            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Taken => return EventResult::Consumed,
-                fieldmenu::Outcome::Chosen(field, id) => {
-                    self.do_field_menu_row(field, id);
-                    return EventResult::Consumed;
-                }
-                fieldmenu::Outcome::RightPressElsewhere(x, y) => {
-                    let _another = self.open_field_menu(x, y);
-                    return EventResult::Consumed;
-                }
-            },
-            Event::Key(key) => match self.field_menu.key(key) {
-                fieldmenu::Outcome::NotUp => {}
-                fieldmenu::Outcome::Chosen(field, id) => {
-                    self.do_field_menu_row(field, id);
-                    return EventResult::Consumed;
-                }
-                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
-                    return EventResult::Consumed;
-                }
-            },
-            Event::Tick { elapsed_ms } => {
-                self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
-                return if self.field_menu.tick(self.clock_ms) {
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                };
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => {
+                self.do_field_menu_row(field, id);
+                return EventResult::Consumed;
             }
-            _ => {}
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
+        // The menu's are the only ticks this window asks for.
+        if let Event::Tick { elapsed_ms } = event {
+            return if self.field_menu.tick(*elapsed_ms) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
         }
         match event {
             Event::Key(key) if key.pressed => {
@@ -5191,9 +5171,7 @@ impl App for EmailApp {
     /// are read again when asked (F5). A field's right-click menu asks for a
     /// tick only while the pointer rests on a dimmed row, to say why.
     fn tick_interval(&self) -> Option<Duration> {
-        self.field_menu
-            .due_in(self.clock_ms)
-            .map(Duration::from_millis)
+        self.field_menu.due_in().map(Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {

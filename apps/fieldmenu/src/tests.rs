@@ -123,10 +123,10 @@ fn presses_on_a_dimmed_row_outside_and_with_the_right_button() {
 fn the_keys_are_the_menus_while_it_is_up() {
     let input = field("hello", true);
     let mut menu: FieldMenu<u8> = FieldMenu::new();
-    assert_eq!(menu.key(&key(Key::Escape)), Outcome::NotUp);
+    assert_eq!(menu.key(&key(Key::Escape)), Outcome::Window);
     assert_eq!(
         menu.mouse(&mouse(1.0, 1.0, MouseEventKind::Press(MouseButton::Left))),
-        Outcome::NotUp
+        Outcome::Window
     );
 
     menu.open(2, input.edit_menu(), 100.0, 100.0, VIEWPORT);
@@ -194,28 +194,100 @@ fn it_is_drawn_while_up_and_takes_the_pointer() {
 fn a_dimmed_row_says_why_on_the_clock() {
     let input = field("hello", false);
     let mut menu = FieldMenu::new();
-    assert_eq!(menu.due_in(0), None);
+    assert_eq!(menu.due_in(), None);
+    // A clock already far along: the menu counts its waits from when they
+    // start, not from nought.
+    assert!(!menu.tick(90_000));
     menu.open(4_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
     let (x, y) = middle(&menu, EditCommand::Copy);
     assert_eq!(
         menu.mouse(&mouse(x, y, MouseEventKind::Move)),
         Outcome::Taken
     );
-    let mut now = 0;
+    let mut waited = 0;
     let mut said = false;
     for _ in 0..40 {
-        let Some(wait) = menu.due_in(now) else {
+        let Some(wait) = menu.due_in() else {
             break;
         };
         assert!(wait >= 1, "a tick of nought");
-        now += wait;
-        if menu.tick(now) && menu.menu().and_then(ContextMenu::showing_reason).is_some() {
+        waited += wait;
+        if menu.tick(wait) && menu.menu().and_then(ContextMenu::showing_reason).is_some() {
             said = true;
             break;
         }
     }
     assert!(said, "the dimmed row never said why");
+    assert!(
+        waited >= 400,
+        "the reason came after {waited} ms, before the toolkit's delay"
+    );
     menu.close();
-    assert_eq!(menu.due_in(now), None);
-    assert!(!menu.tick(now));
+    assert_eq!(menu.due_in(), None);
+    assert!(!menu.tick(1));
+}
+
+/// **What is let go, and the pointer leaving, are the window's while the
+/// menu is up**: a drag the window had going when the menu came up ends
+/// where the button comes up, and its hover goes out -- the menu stays.
+#[test]
+fn what_is_let_go_and_the_pointer_leaving_are_the_windows() {
+    let input = field("hello", true);
+    let mut menu = FieldMenu::new();
+    menu.open(5_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(
+        menu.mouse(&mouse(
+            300.0,
+            300.0,
+            MouseEventKind::Release(MouseButton::Left)
+        )),
+        Outcome::Window,
+        "the menu took the release that ends the window's drag"
+    );
+    assert_eq!(
+        menu.mouse(&mouse(-1.0, -1.0, MouseEventKind::Leave)),
+        Outcome::Window,
+        "the menu took the pointer leaving"
+    );
+    let mut let_go = key(Key::A);
+    let_go.pressed = false;
+    assert_eq!(
+        menu.key(&let_go),
+        Outcome::Window,
+        "the menu took a key let go"
+    );
+    assert!(menu.is_up(), "what passed to the window put the menu away");
+}
+
+/// **One call routes an event**: a key or the pointer to the menu, as
+/// `key` and `mouse` take them, and anything else to the window -- a tick
+/// among them, which `tick` counts.
+#[test]
+fn one_call_routes_an_event() {
+    let input = field("hello", true);
+    let mut menu = FieldMenu::new();
+    assert_eq!(
+        menu.event(&Event::Key(key(Key::Escape))),
+        Outcome::Window,
+        "with no menu up, a key is the window's"
+    );
+    menu.open(6_u8, input.edit_menu(), 100.0, 100.0, VIEWPORT);
+    assert_eq!(menu.event(&Event::Key(key(Key::A))), Outcome::Taken);
+    assert_eq!(menu.event(&Event::Tick { elapsed_ms: 16 }), Outcome::Window);
+    assert_eq!(
+        menu.event(&Event::Resize {
+            width: 800,
+            height: 600
+        }),
+        Outcome::Window
+    );
+    assert_eq!(
+        menu.event(&Event::Mouse(mouse(
+            700.0,
+            500.0,
+            MouseEventKind::Press(MouseButton::Right)
+        ))),
+        Outcome::RightPressElsewhere(700.0, 500.0)
+    );
+    assert!(!menu.is_up());
 }

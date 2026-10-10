@@ -2592,6 +2592,85 @@ MUTATIONS += [
 ]
 
 
+# The Network page reads the machine (2026-10-10): its interfaces as the
+# kernel publishes them, through hwquery as the Network Manager reads them,
+# read on entry and on Refresh; Network Connections opens the Network
+# Manager, which is where an interface is changed.
+NET_LIST = "the_network_page_lists_the_machines_interface"
+NET_NONE = "an_unconfigured_interface_and_no_interface_say_so"
+NET_AGAIN = "the_network_page_reads_the_interfaces_again"
+NET_OPEN = "network_connections_opens_the_network_manager"
+
+MUTATIONS += [
+    (
+        "the interfaces are not read on entering the Network page",
+        "        if page == SettingsPage::NetworkStatus {\n            self.network_note = None;\n            self.refresh_network();\n        }\n",
+        "",
+        [NET_LIST, NET_AGAIN],
+    ),
+    (
+        "Refresh reads nothing",
+        "            RowHit::Press(ButtonId::RefreshNetwork) => self.refresh_network(),\n",
+        "            RowHit::Press(ButtonId::RefreshNetwork) => {}\n",
+        [NET_AGAIN],
+    ),
+    (
+        "a link that is up reads disconnected",
+        '                        Some(true) => ("Connected", pal.ink(pal.green)),',
+        '                        Some(true) => ("Disconnected", pal.ink(pal.green)),',
+        [NET_LIST],
+    ),
+    (
+        "a link that is down reads connected",
+        '                        Some(false) => ("Disconnected", pal.subtext0),',
+        '                        Some(false) => ("Connected", pal.subtext0),',
+        [NET_NONE],
+    ),
+    (
+        "an address the kernel says is none reads not reported",
+        '        hwquery::Address::Unassigned => ("None assigned", pal.subtext0),',
+        '        hwquery::Address::Unassigned => (NOT_REPORTED, pal.subtext0),',
+        [NET_NONE],
+    ),
+    (
+        "the hardware address is not shown",
+        '                    s.value_row("Hardware address", mac, pal.text);\n',
+        "                    let _ = mac;\n",
+        [NET_LIST],
+    ),
+    (
+        "the gateway is not shown",
+        '                        ("Gateway", &adapter.gateway),\n',
+        "",
+        [NET_LIST],
+    ),
+    (
+        "a machine with no card says nothing",
+        '                s.note("This machine has no network card the system found.", 28.0);\n',
+        "",
+        [NET_NONE],
+    ),
+    (
+        "a read that failed says nothing",
+        '                s.problem(&format!("The network interfaces could not be read: {why}"));\n',
+        "                let _ = why;\n",
+        [NET_OPEN],
+    ),
+    (
+        "Network Connections starts nothing",
+        "            RowHit::Press(ButtonId::OpenNetworkManager) => self.open_network_manager(),\n",
+        "            RowHit::Press(ButtonId::OpenNetworkManager) => {}\n",
+        [NET_OPEN],
+    ),
+    (
+        "a start that failed is said to be opening",
+        '            Err(e) => format!("Could not start Network Connections ({NETWORK_MANAGER}): {e}"),',
+        '            Err(_e) => String::from("Opening Network Connections."),',
+        [NET_OPEN],
+    ),
+]
+
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",

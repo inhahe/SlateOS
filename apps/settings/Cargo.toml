@@ -47,6 +47,10 @@ servicemenus = { path = "../../gui/servicemenus" }
 # rather than emoji, which no font here draws: named while drawing, handed to
 # the loop with the thumbnails through `App::take_images`.
 themeicons = { path = "../themeicons" }
+# The machine's network interfaces for the Network page, read as the
+# Network Manager and System Information read them: from what the kernel
+# publishes (`/proc/net`).
+hwquery = { path = "../hwquery" }
 # The Mouse page, on exactly the same terms: the compositor is what decides
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.
@@ -97,6 +101,8 @@ datetimesettings = { path = "../../gui/datetimesettings" }
 # Settings binary does not link a display server.
 [dev-dependencies]
 compositor = { path = "../../gui/compositor" }
+# A fixture tree of the machine's interfaces (`SyscallProvider::at`).
+hwquery = { path = "../hwquery", features = ["testing"] }
 # Theme folders for the theme picker's tests, so none of the machine's is read.
 scratchdir = { path = "../../userspace/scratchdir" }
 

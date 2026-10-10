@@ -809,9 +809,19 @@ pub struct SettingsState {
     /// Why the calendar's events could not be read, or what came of the
     /// last press that started the calendar.
     calendar_note: Option<String>,
-    /// Starts another program -- the calendar, at an event's colour. The
-    /// tests stand in for it, so none of them starts a program.
+    /// Starts another program -- the calendar, at an event's colour; the
+    /// Network Manager. The tests stand in for it, so none of them starts a
+    /// program.
     starter: fn(&str, &[&str]) -> std::io::Result<()>,
+    /// The machine's network interfaces as the Network page shows them, or
+    /// why they could not be read; `None` until the page is first entered.
+    network: Option<Result<Vec<hwquery::NetworkAdapterInfo>, String>>,
+    /// What came of the last press on "Network Connections".
+    network_note: Option<String>,
+    /// Under test, the root the interfaces are read under: a fixture tree,
+    /// or (by default) a directory that does not exist.
+    #[cfg(test)]
+    machine_root: String,
     /// What each offered category resolves to, alongside the raw list.
     ///
     /// Computed when the associations are, from the same document, so the two
@@ -1792,6 +1802,12 @@ impl SettingsState {
         if page == SettingsPage::ContextMenus {
             self.refresh_service_menus();
         }
+        // The interfaces, read on entry: one may have come up, or been
+        // changed in the Network Manager, since the page was last shown.
+        if page == SettingsPage::NetworkStatus {
+            self.network_note = None;
+            self.refresh_network();
+        }
         // The themes that recommend fonts, read on entry as the Themes page
         // reads them.
         if page == SettingsPage::Fonts {
@@ -2516,6 +2532,10 @@ impl SettingsState {
             calendar_events: Vec::new(),
             calendar_note: None,
             starter: start_program,
+            network: None,
+            network_note: None,
+            #[cfg(test)]
+            machine_root: String::from("no-machine-under-test"),
             default_app_categories: Vec::new(),
             default_roles: Vec::new(),
             app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
@@ -3015,6 +3035,24 @@ const EVENT_SOUND_CHOICES: [&str; 3] = ["The theme's", "Off", "A file of my own.
 /// Where the calendar is: the desktop starts programs by their path under
 /// `/usr/bin` (`gui/desktop/src/launcher.rs`).
 const CALENDAR: &str = "/usr/bin/calendar";
+
+/// Where the Network Manager is, for the Network page's "Network
+/// Connections" button.
+const NETWORK_MANAGER: &str = "/usr/bin/netmanager";
+
+/// What the Network page says of a value nothing publishes.
+const NOT_REPORTED: &str = "Not reported";
+
+/// An address as the Network page shows it, and its ink: the address; "None
+/// assigned" where the kernel says there is none; [`NOT_REPORTED`] where
+/// nothing says -- the last two dimmed, being no address.
+fn address_shown<'a>(address: &'a hwquery::Address, pal: &Palette) -> (&'a str, Color) {
+    match address {
+        hwquery::Address::Is(text) => (text.as_str(), pal.text),
+        hwquery::Address::Unassigned => ("None assigned", pal.subtext0),
+        hwquery::Address::NotReported => (NOT_REPORTED, pal.subtext0),
+    }
+}
 
 /// How many of the events an accent hides are named, each with its button;
 /// past that, one button opens the calendar.
@@ -3863,6 +3901,10 @@ enum ButtonId {
     OpenCalendar,
     /// Read the calendar's events again.
     LookAgain,
+    /// Read the machine's network interfaces again, on the Network page.
+    RefreshNetwork,
+    /// Open the Network Manager, where an interface is changed.
+    OpenNetworkManager,
     /// Open or close the `n`-th third-party notice on the About page.
     Notice(usize),
     /// Choose the picture up from the morning.
@@ -7046,43 +7088,103 @@ impl SettingsState {
     /// loads one -- so a nameserver typed here would be stored in this
     /// window's memory until it closed. Same for the proxy, whose page below
     /// says so in its own words.
+    /// The Network page: the machine's interfaces as the kernel publishes
+    /// them (`/proc/net`, read through `hwquery` as the Network Manager reads
+    /// it) -- each one's link, hardware address, IPv4 address, netmask,
+    /// gateway and DNS server -- read on entering the page and on Refresh.
+    ///
+    /// Read-only, and on purpose: the Network Manager (`apps/netmanager`) is
+    /// where an interface is changed, through the kernel's
+    /// `SYS_NET_IF_CONFIG`, administrator only; a second place to change one
+    /// address would be two configurators each unaware of the other's edits.
+    /// The page opens it. Until 2026-10-10 the page said nothing could list
+    /// the interfaces, two weeks after the Network Manager had begun to.
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
         s.section("Network Adapters");
-        s.note(
-            "This system cannot list its network interfaces yet. Nothing here can ask which are present, whether any is connected, or what address it holds.",
-            44.0,
-        );
-        s.unavailable_row(
-            "Interfaces",
-            "Cannot be listed",
-            "Nothing on this system can list its network interfaces yet.",
+        match &self.network {
+            None => {}
+            Some(Err(why)) => {
+                s.problem(&format!("The network interfaces could not be read: {why}"));
+            }
+            Some(Ok(adapters)) if adapters.is_empty() => {
+                s.note("This machine has no network card the system found.", 28.0);
+            }
+            Some(Ok(adapters)) => {
+                for adapter in adapters {
+                    let (link, ink) = match adapter.up {
+                        Some(true) => ("Connected", pal.ink(pal.green)),
+                        Some(false) => ("Disconnected", pal.subtext0),
+                        None => (NOT_REPORTED, pal.subtext0),
+                    };
+                    s.value_row(&adapter.name, link, ink);
+                    let mac = if adapter.mac_address.is_empty() {
+                        NOT_REPORTED
+                    } else {
+                        adapter.mac_address.as_str()
+                    };
+                    s.value_row("Hardware address", mac, pal.text);
+                    for (label, address) in [
+                        ("IPv4 address", &adapter.ipv4),
+                        ("Subnet mask", &adapter.subnet),
+                        ("Gateway", &adapter.gateway),
+                        ("DNS server", &adapter.dns),
+                    ] {
+                        let (text, ink) = address_shown(address, &pal);
+                        s.value_row(label, text, ink);
+                    }
+                    s.gap();
+                }
+            }
+        }
+        s.button_row(
+            "Read the adapters again",
+            "Refresh",
+            pal.text,
+            Press::Does(RowHit::Press(ButtonId::RefreshNetwork)),
         );
         s.gap();
-
-        s.section("IP Configuration");
+        s.section("Change Settings");
         s.note(
-            "There is no interface to configure, and nothing on this system reads an address typed here.",
-            28.0,
-        );
-        s.unavailable_row(
-            "IPv4 address",
-            "Unknown",
-            "No network interface can be listed yet, so there is no address to show or set.",
-        );
-        s.unavailable_row(
-            "Gateway",
-            "Unknown",
-            "No network interface can be listed yet, so there is no gateway to show or set.",
-        );
-        s.gap();
-
-        s.section("DNS");
-        s.note(
-            "No program on this system loads a resolver configuration, so a nameserver set here would reach nothing. The format is defined -- `net/dns` parses `resolv.conf` -- but nothing reads the file.",
+            "An adapter's address, netmask, gateway and DNS server are changed in Network Connections, and an administrator's rights are needed to apply them.",
             44.0,
         );
-        s.unavailable_row("Preferred DNS", "Not configured", "Nothing on this system reads a nameserver setting yet, so one set here would do nothing.");
-        s.unavailable_row("Alternate DNS", "Not configured", "Nothing on this system reads a nameserver setting yet, so one set here would do nothing.");
+        s.button_row(
+            "Network Connections",
+            "Open",
+            pal.text,
+            Press::Does(RowHit::Press(ButtonId::OpenNetworkManager)),
+        );
+        if let Some(note) = &self.network_note {
+            s.note(note, 28.0);
+        }
+    }
+
+    /// Read the machine's interfaces, replacing what the page showed.
+    fn refresh_network(&mut self) {
+        use hwquery::HardwareProvider as _;
+        self.network = Some(self.machine().query_network().map_err(|e| e.to_string()));
+    }
+
+    /// Where the interfaces are read: the machine.
+    #[cfg(not(test))]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::new()
+    }
+
+    /// Under test, a fixture tree ([`Self::machine_root`]), so no test's
+    /// outcome depends on the computer it runs on.
+    #[cfg(test)]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::at(&self.machine_root)
+    }
+
+    /// Start the Network Manager, saying under its button what came of it.
+    fn open_network_manager(&mut self) {
+        self.network_note = Some(match (self.starter)(NETWORK_MANAGER, &[]) {
+            Ok(()) => String::from("Opening Network Connections."),
+            Err(e) => format!("Could not start Network Connections ({NETWORK_MANAGER}): {e}"),
+        });
     }
 
     /// The Proxy page.
@@ -9813,6 +9915,8 @@ impl SettingsState {
                 self.start_calendar(&["--event-colour", &id], &what);
             }
             RowHit::Press(ButtonId::OpenCalendar) => self.start_calendar(&[], "your events"),
+            RowHit::Press(ButtonId::RefreshNetwork) => self.refresh_network(),
+            RowHit::Press(ButtonId::OpenNetworkManager) => self.open_network_manager(),
             RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),
             RowHit::Press(ButtonId::Notice(index)) => self.toggle_notice(index),
             RowHit::Press(ButtonId::ChooseDayWallpaper) => self.open_schedule_dialog(true),
@@ -17844,6 +17948,146 @@ mod tests {
             );
             assert!(!is_on(&state));
         });
+    }
+
+    // --- The Network page -------------------------------------------------------
+
+    /// The Network page over a machine whose `/proc/net` says `text` -- or,
+    /// with `None`, one that publishes nothing at all.
+    fn network_page(text: Option<&str>) -> (scratchdir::ScratchDir, SettingsState) {
+        let dir = scratchdir::ScratchDir::new("settings-network");
+        if let Some(text) = text {
+            std::fs::create_dir_all(dir.dir().join("proc")).expect("the fixture");
+            std::fs::write(dir.dir().join("proc").join("net"), text).expect("the fixture");
+        }
+        let mut state = SettingsState::new();
+        state.machine_root = dir
+            .dir()
+            .to_str()
+            .expect("a scratch path in text")
+            .to_owned();
+        state.starter = record_start;
+        state.current_category = SettingsCategory::Network;
+        state.go_to_page(SettingsPage::NetworkStatus);
+        (dir, state)
+    }
+
+    /// **The Network page lists the machine's interface as the kernel
+    /// publishes it** -- its link, hardware address and every address --
+    /// where it said nothing on the system could list one, two weeks after
+    /// the Network Manager had begun to.
+    #[test]
+    fn the_network_page_lists_the_machines_interface() {
+        let (_dir, state) = network_page(Some(
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.2.2\n  DNS:     10.0.2.3\n",
+        ));
+        let said = drawn_texts(&state);
+        for words in [
+            "eth0",
+            "Connected",
+            "52:54:00:12:34:56",
+            "10.0.2.15",
+            "255.255.255.0",
+            "10.0.2.2",
+            "10.0.2.3",
+        ] {
+            assert!(
+                said.iter().any(|t| t == words),
+                "{words:?} is not shown: {said:?}"
+            );
+        }
+        assert!(
+            !said.iter().any(|t| t.contains("cannot list")),
+            "the page still says nothing can list the interfaces"
+        );
+    }
+
+    /// **An interface down and unconfigured says so** -- disconnected, its
+    /// addresses none assigned rather than zeros -- and a machine with no
+    /// card says that.
+    #[test]
+    fn an_unconfigured_interface_and_no_interface_say_so() {
+        let (_dir, state) = network_page(Some(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        ));
+        let said = drawn_texts(&state);
+        assert!(said.iter().any(|t| t == "Disconnected"), "{said:?}");
+        assert!(
+            said.iter().filter(|t| *t == "None assigned").count() >= 4,
+            "an unassigned address is not said to be none: {said:?}"
+        );
+        assert!(!said.iter().any(|t| t == "0.0.0.0"), "{said:?}");
+
+        let (_dir, state) = network_page(Some(
+            "Interface: eth0  (DOWN)\n  MAC:     00:00:00:00:00:00\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        ));
+        assert!(
+            drawn_texts(&state)
+                .iter()
+                .any(|t| t.starts_with("This machine has no network card")),
+            "a machine with no card does not say so"
+        );
+    }
+
+    /// **Refresh reads the interfaces again**, and entering the page does:
+    /// an interface brought up in the Network Manager is shown up.
+    #[test]
+    fn the_network_page_reads_the_interfaces_again() {
+        let (dir, mut state) = network_page(Some(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        ));
+        std::fs::write(
+            dir.dir().join("proc").join("net"),
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.2.2\n  DNS:     10.0.2.3\n",
+        )
+        .expect("the fixture");
+        assert!(drawn_texts(&state).iter().any(|t| t == "Disconnected"));
+        press_on(&mut state, RowHit::Press(ButtonId::RefreshNetwork));
+        assert!(
+            drawn_texts(&state).iter().any(|t| t == "Connected"),
+            "Refresh did not read the interface again"
+        );
+
+        std::fs::write(dir.dir().join("proc").join("net"), "").expect("the fixture");
+        state.go_to_page(SettingsPage::NetworkStatus);
+        assert!(
+            !drawn_texts(&state).iter().any(|t| t == "Connected"),
+            "entering the page did not read the interfaces again"
+        );
+    }
+
+    /// **"Network Connections" opens the Network Manager**, where an
+    /// interface is changed, and says so -- or why it could not.
+    #[test]
+    fn network_connections_opens_the_network_manager() {
+        let (_dir, mut state) = network_page(None);
+        // A machine that publishes no interfaces at all says why.
+        assert!(
+            drawn_texts(&state)
+                .join(" ")
+                .contains("The network interfaces could not be read:"),
+            "a read that failed says nothing"
+        );
+        let _earlier = STARTED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        press_on(&mut state, RowHit::Press(ButtonId::OpenNetworkManager));
+        STARTED.with(|s| {
+            assert_eq!(*s.borrow(), vec![(NETWORK_MANAGER.to_owned(), vec![])]);
+        });
+        assert!(
+            drawn_texts(&state)
+                .iter()
+                .any(|t| t == "Opening Network Connections."),
+            "the press says nothing"
+        );
+
+        state.starter = refuse_start;
+        press_on(&mut state, RowHit::Press(ButtonId::OpenNetworkManager));
+        assert!(
+            drawn_texts(&state)
+                .join(" ")
+                .contains("Could not start Network Connections (/usr/bin/netmanager)"),
+            "a start that failed is not said"
+        );
     }
 
     // --- Notes wrap to their column --------------------------------------------

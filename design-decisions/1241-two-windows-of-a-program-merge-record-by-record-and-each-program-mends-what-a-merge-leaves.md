@@ -3,7 +3,8 @@
 **Date:** 2026-10-09 · **Decided by:** Claude (operator-approved scope: §1239 chose two windows where they are useful, each saving only its own changes; how a save does that, and what each program does where the two windows' changes meet, are Claude's) · **Lane:** E
 
 **In short:** With two windows of Notes, Contacts, the kanban board,
-Snippets, Reminders or the e-book reader open, each window's save used to
+Snippets, Reminders, the e-book reader, Flashcards or Finance open, each
+window's save used to
 write its own copy over the file, so the window that saved last threw away
 the other's work. Now a save reads the file first and adds only what this
 window changed, one record (a note, a card, a book) at a time; and a window
@@ -52,7 +53,22 @@ again by any window. Each program mends it before writing:
 | Kanban | a card whose column the other window deleted | this window's column for it, else the first column -- or archived when the board has no column left | a card must be somewhere it can be seen |
 | Snippets | a snippet or folder in a folder the other window deleted | the top level | what deleting a folder does to the snippets in it; restoring the folder would undo the deletion |
 | E-book reader | a book being read that another window took out (and not moved in here) | back to the library, saying so | rather than a reader showing a book the library no longer has |
-| Snippets, Reminders | an item another window deleted while this one's editor was open on it | the editor's Save puts it back, with the edit | an edit here beats a deletion elsewhere, as in the merge; it was dropped without a word |
+| Snippets, Reminders, Flashcards, Finance | an item another window deleted while this one's editor was open on it | the editor's Save puts it back, with the edit | an edit here beats a deletion elsewhere, as in the merge; it was dropped without a word |
+| Finance | a transaction in an account the other window deleted (either window) | the account comes back, from this window's copy or the file's | a transaction must be in an account, and the reader refuses one that is not; as Notes' notebooks |
+| Finance | a budget set for one category in both windows | the later save's -- budgets merge by category, not by id | there is one budget per category |
+| Flashcards | a deck another window deleted while this one changed it | this window's next save writes its file again | each deck is a file of its own; an edit here beats a deletion elsewhere |
+
+**Closing while a save is failing.** A window whose last save failed holds
+a change no file has, and closing it then loses that change. Notes,
+Contacts, the kanban board, Reminders, Snippets, Flashcards and Finance ask
+first (`apps/unsaved`: Save tries again and goes only if that works, Don't
+save goes, Cancel stays); the e-book reader, which keeps only places and the
+shelf, says so once and goes at the second close. Finance and Flashcards
+went at once until 2026-10-10 -- a review or a transaction lost without a
+word. A window that could not read its file when it opened is the
+exception: it keeps nothing from then on and has said so from the start,
+so it goes without asking (its every save would be refused anyway, since a
+save reads the file first).
 
 | Alternative | Why not |
 |---|---|
@@ -64,5 +80,7 @@ again by any window. Each program mends it before writing:
 **Reversal.** The merge is `recordfile::merge_by`; each program's repairs are
 one function: `restore_needed_notebooks` (notes), `ContactStore::merged`
 (contacts), `merge::mend` (kanban), `mend_library` (snippets), `EbookApp::adopt`
-(the e-book reader), and the editors' Save (`App::save_edit` in snippets,
-`RemindersApp::save_form`).
+(the e-book reader), `merge_ledgers` (finance), and the editors' Save
+(`App::save_edit` in snippets, `RemindersApp::save_form`, the card and
+transaction forms in flashcards and finance). The close question is each
+program's `request_close`.

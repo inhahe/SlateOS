@@ -2678,7 +2678,7 @@ fn render_toggle(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, enabled: 
 /// band the pointer grabs, and the origin a drag measures from all come from
 /// here — a slider whose visible track and draggable range differ is the same
 /// class of defect the page-sink split exists to prevent, and this is the same
-/// remedy [`pill_rect`] applies to pills.
+/// remedy [`pill_layout`] applies to pills.
 fn slider_track(x: f32, y: f32) -> (f32, f32) {
     (x, y + (ITEM_HEIGHT - SLIDER_HEIGHT) / 2.0)
 }
@@ -2815,38 +2815,81 @@ fn render_section_header(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, t
 // the numbers: a second copy is how a button ends up drawn in one place and
 // clicked in another, and the drift is invisible until someone tries it.
 
-/// Width of one pill.
-const PILL_WIDTH: f32 = 72.0;
-/// Distance from one pill's left edge to the next.
-const PILL_PITCH: f32 = 80.0;
+/// The narrowest a pill is drawn, so a row of short labels ("Mon", "Off") is
+/// still a row of targets worth aiming at.
+const PILL_MIN_WIDTH: f32 = 44.0;
+// `pill_layout` clamps a pill's width between the two: `clamp` panics on
+// bounds the wrong way round.
+const _: () = assert!(PILL_MIN_WIDTH < VALUE_WIDTH);
+/// The room either side of a pill's label.
+const PILL_PAD_X: f32 = 10.0;
+/// The gap between two pills, beside each other and from one line of them to
+/// the next.
+const PILL_GAP: f32 = 8.0;
 const PILL_HEIGHT: f32 = 28.0;
 /// How far below the row's top edge the pills sit.
 const PILL_INSET_Y: f32 = 8.0;
+/// The size a pill's label is drawn at.
+const PILL_TEXT_SIZE: f32 = 12.0;
 /// Distance from the content's left edge to the first pill — the same right
 /// column the toggles and dropdowns on other rows use, which is why it is that
 /// column's constant rather than a second copy of the number.
 const PILL_ROW_X: f32 = CONTROL_COLUMN_DX;
 
-/// The rectangle of pill `index` in a row drawn at (`x`, `y`), as
-/// `(x, y, width, height)`. The only place a pill's position is computed —
-/// both the drawing and the click band come from here.
-fn pill_rect(index: usize, x: f32, y: f32) -> (f32, f32, f32, f32) {
-    #[allow(clippy::cast_precision_loss)]
-    let px = x + (index as f32) * PILL_PITCH;
-    (px, y + PILL_INSET_Y, PILL_WIDTH, PILL_HEIGHT)
+/// Where each pill of a row goes, as `(x, y, width, height)` from the control
+/// column's left edge and the row's top, and how tall the row is. The only
+/// place a pill's position is computed — both the drawing and the click band
+/// come from here.
+///
+/// Each pill is as wide as its label needs, never narrower than
+/// [`PILL_MIN_WIDTH`], and they run along the control column ([`VALUE_WIDTH`]
+/// wide), a pill that would pass its edge beginning the next line: the row
+/// grows a line for it. Until 2026-10-10 every pill was 72 pixels at an
+/// 80-pixel pitch, so the column held three: the quiet-hours days ran 250
+/// pixels past the page, off a window of the width it is laid out for, and a
+/// longer label ran out of its pill.
+fn pill_layout(labels: &[&str]) -> (Vec<(f32, f32, f32, f32)>, f32) {
+    let mut rects = Vec::with_capacity(labels.len());
+    let (mut x, mut y) = (0.0, PILL_INSET_Y);
+    for label in labels {
+        let width = (text::measure(label, PILL_TEXT_SIZE, FontWeightHint::Regular)
+            + 2.0 * PILL_PAD_X)
+            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH);
+        if x > 0.0 && x + width > VALUE_WIDTH {
+            x = 0.0;
+            y += PILL_HEIGHT + PILL_GAP;
+        }
+        rects.push((x, y, width, PILL_HEIGHT));
+        x += width + PILL_GAP;
+    }
+    (rects, ITEM_HEIGHT + (y - PILL_INSET_Y))
 }
 
-/// Draw a row of pills, the selected one filled with the accent color.
-fn render_pill_row(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, items: &[(&str, bool)]) {
-    for (idx, (label, active)) in items.iter().enumerate() {
-        let (px, py, pw, ph) = pill_rect(idx, x, y);
+/// Draw a row of pills at `rects` (from [`pill_layout`], placed), the
+/// selected one filled with the accent color. A label too wide for the
+/// column is cut with an ellipsis rather than run out of its pill.
+fn render_pill_row(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    rects: &[(f32, f32, f32, f32)],
+    items: &[(&str, bool)],
+) {
+    for (&(px, py, pw, ph), (label, active)) in rects.iter().zip(items) {
         let (bg, fg) = if *active {
             (pal.accent, pal.crust)
         } else {
             (pal.surface1, pal.subtext0)
         };
         fill_rounded(tree, px, py, pw, ph, bg, 6.0);
-        tree.text(px + 10.0, py + 7.0, label, fg, 12.0);
+        text_elided(
+            tree,
+            px + PILL_PAD_X,
+            py + 7.0,
+            label,
+            fg,
+            PILL_TEXT_SIZE,
+            pw - 2.0 * PILL_PAD_X,
+        );
     }
 }
 
@@ -3233,7 +3276,7 @@ fn render_swatch(
 // each row as the cursor passes it; `HitSink` paints nothing and remembers
 // which row's band contained the pointer. The row drawn at a given y *is* the
 // row clicked there, because a single function put both of them there — the
-// same collapse `pill_rect` above already applies within one row, and
+// same collapse `pill_layout` above already applies within one row, and
 // `dropdown_layout` applies to the popup.
 
 /// Distance from the content column's left edge to the column the row controls
@@ -3270,6 +3313,18 @@ const ROW_HIT_WIDTH: f32 = 620.0;
 /// never runs past the controls it explains, at any window size the page is
 /// laid out for.
 const NOTE_WIDTH: f32 = ROW_HIT_WIDTH - 2.0 * ROW_HIT_INSET;
+
+/// How wide a value beside a row's label may be drawn: from the control
+/// column to where a note ends, so a value and the notes about it share one
+/// right edge.
+const VALUE_WIDTH: f32 = NOTE_WIDTH - CONTROL_COLUMN_DX;
+
+/// The size an opened licence's text is drawn at, smaller than a note's: it
+/// is read through, not glanced at, and is long.
+const LICENCE_SIZE: f32 = 11.0;
+
+/// How far apart an opened licence's lines are.
+const LICENCE_LINE_HEIGHT: f32 = 15.0;
 
 /// The size a note is drawn at.
 const NOTE_SIZE: f32 = 13.0;
@@ -3992,7 +4047,12 @@ trait PageSink {
     /// while the room below it was whatever its caller had guessed the line
     /// count would be.
     fn note(&mut self, text: &str, height: f32) {
-        let pal = &self.palette();
+        let ink = self.palette().subtext0;
+        self.note_in(text, height, ink);
+    }
+
+    /// A note in `ink`, wrapped and spaced as [`Self::note`].
+    fn note_in(&mut self, text: &str, height: f32, ink: Color) {
         let lines = text::wrap(text, NOTE_WIDTH, NOTE_SIZE, FontWeightHint::Regular);
         let mut needed = NOTE_GAP;
         for _ in &lines {
@@ -4001,11 +4061,19 @@ trait PageSink {
         self.draw(move |tree, x, y| {
             let mut line_y = y + 4.0;
             for line in &lines {
-                tree.text(x, line_y, line, pal.subtext0, NOTE_SIZE);
+                tree.text(x, line_y, line, ink, NOTE_SIZE);
                 line_y += NOTE_LINE_HEIGHT;
             }
         });
         self.advance(height.max(needed));
+    }
+
+    /// Why something failed -- a change that could not be kept, a file that
+    /// could not be read -- in red, wrapped as a note is: the whole reason,
+    /// however long, where a value row would cut it at the column's edge.
+    fn problem(&mut self, text: &str) {
+        let pal = self.palette();
+        self.note_in(text, 28.0, pal.ink(pal.red));
     }
 
     /// A labelled row: text on the left, `control` drawn at the control
@@ -4115,24 +4183,38 @@ trait PageSink {
         });
     }
 
-    /// A row that only reports a value; nothing to click.
+    /// A row that only reports a value; nothing to click. A value wider than
+    /// the room beside its label ([`VALUE_WIDTH`]) is cut with an ellipsis:
+    /// a text command does not wrap, so until 2026-10-10 a long one -- a
+    /// program's name, a font family's -- ran on past the row and, in a
+    /// window as narrow as the page is laid out for, off the window. Say why
+    /// something failed with [`Self::problem`], which wraps, not here.
     fn value_row(&mut self, label: &str, value: &str, color: Color) {
         self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
-            tree.text(cx, y + 14.0, value, color, 13.0);
+            text_elided(tree, cx, y + 14.0, value, color, 13.0, VALUE_WIDTH);
         });
     }
 
-    /// A row whose control is a strip of pills, one of them selected.
+    /// A row whose control is a strip of pills, one of them selected: as
+    /// many lines of them as the control column needs ([`pill_layout`]).
     fn pill_row(&mut self, label: &str, id: PillId, items: &[(&str, bool)]) {
         let pal = &self.palette();
-        let pill_x = self.x() + PILL_ROW_X;
-        let y = self.y();
-        for idx in 0..items.len() {
-            let (px, py, pw, ph) = pill_rect(idx, pill_x, y);
+        let labels: Vec<&str> = items.iter().map(|(label, _)| *label).collect();
+        let (offsets, height) = pill_layout(&labels);
+        let placed = |x: f32, y: f32| -> Vec<(f32, f32, f32, f32)> {
+            offsets
+                .iter()
+                .map(|&(dx, dy, w, h)| (x + dx, y + dy, w, h))
+                .collect()
+        };
+        for (idx, (px, py, pw, ph)) in placed(self.x() + PILL_ROW_X, self.y())
+            .into_iter()
+            .enumerate()
+        {
             self.hit_rect(px, py, pw, ph, RowHit::Pill(id, idx));
         }
-        self.row(label, None, ITEM_HEIGHT, |tree, _cx, y| {
-            render_pill_row(tree, pal, pill_x, y, items);
+        self.row(label, None, height, |tree, cx, y| {
+            render_pill_row(tree, pal, &placed(cx, y), items);
         });
     }
 
@@ -5318,7 +5400,7 @@ impl SettingsState {
             );
         }
         if let Some(error) = &self.rules_error {
-            s.value_row("Not kept", error, pal.ink(pal.red));
+            s.problem(error);
         }
         let blocked = self.rules_blocked();
         if !self.rule_problems.is_empty() {
@@ -7521,7 +7603,7 @@ impl SettingsState {
             );
         }
         if let Some(error) = &self.bin_error {
-            s.value_row("Not kept", error, pal.ink(pal.red));
+            s.problem(error);
         }
 
         for (index, row) in self.bin_rows.iter().enumerate() {
@@ -8024,7 +8106,7 @@ impl SettingsState {
                 20.0,
             ),
             Some(NoticesShown::Failed(why)) => {
-                s.value_row("Could not be read", why, pal.peach);
+                s.problem(&format!("The licence notices could not be read: {why}"));
             }
             Some(NoticesShown::Loaded(list)) => {
                 for (index, notice) in list.iter().enumerate() {
@@ -8044,16 +8126,36 @@ impl SettingsState {
                             s.section(&text.name);
                             match &text.shown {
                                 Ok(body) => {
-                                    for line in body.lines() {
-                                        let line = line.to_string();
-                                        let colour = pal.subtext0;
+                                    // Wrapped to the column with every byte
+                                    // kept -- indentation, blank lines: a
+                                    // licence's paragraphs are as its authors
+                                    // broke them, often one to a line, and a
+                                    // text command does not wrap.
+                                    let colour = pal.subtext0;
+                                    // The file's last line ending ends a line
+                                    // rather than beginning an empty one, as
+                                    // `str::lines` reads it.
+                                    let body = body.strip_suffix('\n').map_or(body.as_str(), |b| {
+                                        b.strip_suffix('\r').unwrap_or(b)
+                                    });
+                                    for range in text::wrap_ranges(
+                                        body,
+                                        NOTE_WIDTH,
+                                        LICENCE_SIZE,
+                                        FontWeightHint::Regular,
+                                    ) {
+                                        let line = body.get(range).unwrap_or_default();
+                                        let line =
+                                            line.strip_suffix('\r').unwrap_or(line).to_owned();
                                         s.draw(move |tree, x, y| {
-                                            tree.text(x, y, &line, colour, 11.0);
+                                            tree.text(x, y, &line, colour, LICENCE_SIZE);
                                         });
-                                        s.advance(15.0);
+                                        s.advance(LICENCE_LINE_HEIGHT);
                                     }
                                 }
-                                Err(why) => s.value_row("Could not be read", why, pal.peach),
+                                Err(why) => {
+                                    s.problem(&format!("This licence could not be read: {why}"));
+                                }
                             }
                         }
                     }
@@ -17284,6 +17386,316 @@ mod tests {
         assert_eq!(drawn_note("Short.", 28.0).0.len(), 1);
     }
 
+    /// **No text on any page runs past the rows it belongs to**: on every
+    /// page, with every switch on, every text in the page's column ends where
+    /// its notes do -- drawn short, cut with an ellipsis, or wrapped. A text
+    /// command does not wrap, so until 2026-10-10 a long value or a long
+    /// reason ran on past its row and, in a window as narrow as the page is
+    /// laid out for, off the window.
+    #[test]
+    fn no_text_on_any_page_runs_past_its_rows() {
+        let left = SettingsState::content_x();
+        let right = left + NOTE_WIDTH;
+        let mut past = Vec::new();
+        for page in all_pages() {
+            let state = fully_expanded(page);
+            for command in &state.render_tree().commands {
+                let RenderCommand::Text {
+                    x,
+                    text: drawn,
+                    font_size,
+                    font_weight,
+                    max_width,
+                    ..
+                } = command
+                else {
+                    continue;
+                };
+                // The sidebar's, left of the page.
+                if *x < left - 0.5 {
+                    continue;
+                }
+                let wide = text::measure(drawn, *font_size, *font_weight);
+                let ends = x + max_width.map_or(wide, |most| wide.min(most));
+                if ends > right + 0.5 {
+                    past.push(format!(
+                        "{}: {drawn:?} ends at {ends}, past {right}",
+                        page.label()
+                    ));
+                }
+            }
+        }
+        assert!(past.is_empty(), "{}", past.join("\n"));
+    }
+
+    /// **A value too wide for the room beside its label is cut with an
+    /// ellipsis at the notes' edge**, and a short one is drawn whole.
+    #[test]
+    fn a_value_too_wide_for_its_row_is_cut_at_the_notes_edge() {
+        let drawn = |value: &str| {
+            let mut tree = RenderTree::new();
+            let mut sink = DrawSink {
+                tree: &mut tree,
+                pal: Palette::for_mode(false),
+                x: 0.0,
+                y: 0.0,
+            };
+            sink.value_row("Program", value, Color::BLACK);
+            tree.commands
+                .into_iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        x,
+                        text,
+                        max_width,
+                        overflow,
+                        ..
+                    } if text == value => Some((x, max_width, overflow)),
+                    _ => None,
+                })
+                .expect("the value is drawn")
+        };
+        let long = "An Exceedingly Long Program Name That No Row Beside A Label Could Hold Whole";
+        let (x, most, overflow) = drawn(long);
+        assert!(
+            text::measure(long, 13.0, FontWeightHint::Regular) > VALUE_WIDTH,
+            "the fixture is not too wide"
+        );
+        assert_eq!(most, Some(VALUE_WIDTH));
+        assert_eq!(overflow, TextOverflow::Ellipsis);
+        assert!(
+            (x + VALUE_WIDTH - NOTE_WIDTH).abs() < 0.01,
+            "the value's room ends at {}, not at the notes' edge {NOTE_WIDTH}",
+            x + VALUE_WIDTH
+        );
+        let (_, most, _) = drawn("Notes");
+        assert!(
+            most.is_some_and(|m| text::measure("Notes", 13.0, FontWeightHint::Regular) < m),
+            "a short value would be cut"
+        );
+    }
+
+    /// **An opened licence is wrapped to the column with every byte kept**: a
+    /// paragraph on one line -- the common way a licence is written -- is
+    /// drawn as lines that end inside the column, its indentation and blank
+    /// lines as written and a line's carriage return not drawn. Until
+    /// 2026-10-10 each line of the file was one text command, so such a
+    /// paragraph ran off the window.
+    #[test]
+    fn an_opened_licence_wraps_to_the_column_and_keeps_every_byte() {
+        settingsfile::testing::with_scratch_config("settings-about-wrap", |root| {
+            let bundle = root.join("licenses");
+            std::fs::create_dir_all(bundle.join("long-1.0")).expect("the bundle");
+            std::fs::write(
+                bundle.join("index.yaml"),
+                "notices:\n  long-1.0:\n    component: 'long'\n    version: '1.0'\n    licence: 'MIT'\n    from: 'crates.io'\n    texts:\n      - 'long-1.0/LICENSE'\n",
+            )
+            .expect("the index");
+            let paragraph = "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction.";
+            std::fs::write(
+                bundle.join("long-1.0").join("LICENSE"),
+                format!("Copyright (c) Somebody\r\n\r\n{paragraph}\r\n    Indented line.\r\n"),
+            )
+            .expect("the licence");
+            let mut app = SettingsState::new();
+            app.notices_dir = bundle;
+            app.go_to_page(SettingsPage::About);
+            press_row(&mut app, RowHit::Press(ButtonId::Notice(0)));
+            let lines: Vec<(String, f32)> = app
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        text, font_size, x, ..
+                    } if (*font_size - LICENCE_SIZE).abs() < 0.01 => Some((text.clone(), *x)),
+                    _ => None,
+                })
+                .collect();
+            let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+            assert!(texts.len() >= 4, "{texts:?}");
+            let paragraph_lines = texts.get(2..texts.len() - 1).unwrap_or_default();
+            assert!(
+                paragraph_lines.len() > 1,
+                "the paragraph was not wrapped: {texts:?}"
+            );
+            for (line, x) in &lines {
+                assert!(!line.contains('\r'), "{line:?} draws a carriage return");
+                let ends =
+                    x + text::measure(line.trim_end(), LICENCE_SIZE, FontWeightHint::Regular);
+                assert!(
+                    ends <= SettingsState::content_x() + NOTE_WIDTH + 0.5,
+                    "{line:?} runs past the column"
+                );
+            }
+            assert_eq!(texts.first(), Some(&"Copyright (c) Somebody"));
+            assert_eq!(texts.get(1), Some(&""), "the blank line is not kept");
+            assert_eq!(
+                texts.last(),
+                Some(&"    Indented line."),
+                "the indentation is lost"
+            );
+            assert_eq!(
+                paragraph_lines.concat(),
+                paragraph,
+                "a byte of the paragraph was lost"
+            );
+        });
+    }
+
+    /// **Why something failed is said in full, in red, wrapped to the
+    /// column** -- not cut at the column's edge as a value is.
+    #[test]
+    fn a_problem_is_said_in_full_in_red() {
+        let mut tree = RenderTree::new();
+        let pal = Palette::for_mode(false);
+        let mut sink = DrawSink {
+            tree: &mut tree,
+            pal,
+            x: 0.0,
+            y: 0.0,
+        };
+        let why = "The rules could not be kept: the folder they are written to is a file \
+                   another program put there, and nothing can be written beneath a file.";
+        sink.problem(why);
+        let lines: Vec<(String, Color)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } => Some((text.clone(), *color)),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() > 1, "a long reason was not wrapped: {lines:?}");
+        for (line, color) in &lines {
+            assert_eq!(*color, pal.ink(pal.red), "{line:?} is not in red");
+            assert!(
+                text::width(line, NOTE_SIZE) <= NOTE_WIDTH + 0.5,
+                "{line:?} runs past the column"
+            );
+        }
+        let said: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            said.join(" "),
+            why.split_whitespace().collect::<Vec<_>>().join(" "),
+            "a word of the reason was lost"
+        );
+    }
+
+    /// **A row of pills wraps within the control column and grows a line for
+    /// each line of pills**, every pill as wide as its label needs and none
+    /// overlapping another; a label too wide for the whole column gets a pill
+    /// as wide as the column and is cut with an ellipsis.
+    #[test]
+    fn a_pill_row_wraps_in_its_column_and_grows() {
+        let days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let (rects, height) = pill_layout(&days);
+        assert_eq!(rects.len(), days.len());
+        let mut lines: Vec<f32> = Vec::new();
+        for (&(x, y, w, h), label) in rects.iter().zip(days) {
+            assert!(
+                x >= 0.0 && x + w <= VALUE_WIDTH + 0.01,
+                "{label} runs out of the column"
+            );
+            assert!(
+                w >= text::measure(label, PILL_TEXT_SIZE, FontWeightHint::Regular)
+                    + 2.0 * PILL_PAD_X
+                    - 0.01,
+                "{label}'s pill is too narrow for it"
+            );
+            assert!((h - PILL_HEIGHT).abs() < 0.01);
+            if !lines.iter().any(|l| (l - y).abs() < 0.01) {
+                lines.push(y);
+            }
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for b in rects.iter().skip(i + 1) {
+                let apart =
+                    a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+                assert!(apart, "{a:?} and {b:?} overlap");
+            }
+        }
+        assert!(lines.len() > 1, "seven days fit one line of {VALUE_WIDTH}");
+        #[allow(clippy::cast_precision_loss, reason = "a handful of lines")]
+        let grown = ITEM_HEIGHT + (lines.len() - 1) as f32 * (PILL_HEIGHT + PILL_GAP);
+        assert!(
+            (height - grown).abs() < 0.01,
+            "{} lines of pills in a row {height} tall, not {grown}",
+            lines.len()
+        );
+
+        // Drawn, the row takes that height, and an overlong label is cut.
+        let long = "A label far too long for any column that a row of pills could offer it";
+        let mut tree = RenderTree::new();
+        let mut sink = DrawSink {
+            tree: &mut tree,
+            pal: Palette::for_mode(false),
+            x: 0.0,
+            y: 0.0,
+        };
+        sink.pill_row(
+            "Days",
+            PillId::QuietDays,
+            &[("Mon", true), (long, false), ("Tue", false)],
+        );
+        let after = sink.y;
+        let (_, three_tall) = pill_layout(&["Mon", long, "Tue"]);
+        assert!(
+            (after - three_tall).abs() < 0.01,
+            "the row took {after}, its pills {three_tall}"
+        );
+        let cut = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if text == long => Some((*max_width, *overflow)),
+                _ => None,
+            })
+            .expect("the long label is drawn");
+        assert_eq!(
+            cut,
+            (Some(VALUE_WIDTH - 2.0 * PILL_PAD_X), TextOverflow::Ellipsis)
+        );
+    }
+
+    /// **A licence that cannot be read says why, in full** -- one text of a
+    /// notice missing, and a bundle whose index cannot be read at all.
+    #[test]
+    fn a_licence_that_cannot_be_read_says_why() {
+        settingsfile::testing::with_scratch_config("settings-about-unreadable", |root| {
+            let bundle = root.join("licenses");
+            std::fs::create_dir_all(&bundle).expect("the bundle");
+            std::fs::write(
+                bundle.join("index.yaml"),
+                "notices:\n  gone-1.0:\n    component: 'gone'\n    licence: 'MIT'\n    from: 'crates.io'\n    texts:\n      - 'gone-1.0/LICENSE'\n",
+            )
+            .expect("the index");
+            let mut app = SettingsState::new();
+            app.notices_dir = bundle.clone();
+            app.go_to_page(SettingsPage::About);
+            press_row(&mut app, RowHit::Press(ButtonId::Notice(0)));
+            let said = drawn_texts(&app).join(" ");
+            assert!(
+                said.contains("This licence could not be read:"),
+                "a missing licence text does not say so: {said}"
+            );
+
+            std::fs::write(bundle.join("index.yaml"), "licences: none\n")
+                .expect("an index with no notices list");
+            app.go_to_page(SettingsPage::About);
+            let said = drawn_texts(&app).join(" ");
+            assert!(
+                said.contains("The licence notices could not be read:"),
+                "an unreadable index does not say so: {said}"
+            );
+        });
+    }
+
     // --- The account picture grid ------------------------------------------
     //
     // Six tiles that used to be painted inside one closure and hit-tested
@@ -18175,11 +18587,14 @@ mod tests {
     fn test_a_click_in_the_gap_between_pills_changes_nothing() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Themes;
-        let (px, py) = center_of(&state, RowHit::Pill(PillId::Transparency, 0))
+        let (px, py, pw, ph) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| *what == RowHit::Pill(PillId::Transparency, 0))
+            .map(|(_, band)| band)
             .expect("the transparency row has pills");
         // Between the first and second pill: past the first pill's right edge,
         // short of where the second begins.
-        state.handle_click(px + PILL_WIDTH / 2.0 + 2.0, py);
+        state.handle_click(px + pw + PILL_GAP / 2.0, py + ph / 2.0);
         assert_eq!(
             state.appearance.settings.transparency,
             AppearanceSettings::default().transparency
@@ -19920,6 +20335,29 @@ mod tests {
                 Some(std::time::Duration::from_hours(7 * 24))
             );
             assert!(format!("{:?}", state.render_tree()).contains("1 week"));
+        });
+    }
+
+    /// **A default limit that cannot be kept says why, in full** -- the
+    /// settings file blocked by a folder of its name.
+    #[test]
+    fn a_default_limit_that_cannot_be_kept_says_why() {
+        with_scratch_config("settings-bins-default-blocked", |root| {
+            let mut state = bins_page(root);
+            let file = settingsfile::testing::scratch_path(root, recyclebin::USER_SETTINGS);
+            std::fs::create_dir_all(&file).expect("a folder where the file goes");
+            state.show_dropdown(DropdownId::BinDefault(recyclebins::LimitKind::Age));
+            let items = state.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|t| t == "1 week")
+                .expect("a week is offered");
+            state.apply_dropdown_selection(at);
+            let said = drawn_texts(&state).join(" ");
+            assert!(
+                said.contains("The default could not be kept:"),
+                "a default that could not be kept does not say so: {said}"
+            );
         });
     }
 

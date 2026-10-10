@@ -410,8 +410,8 @@ MUTATIONS = [
     ),
     (
         'an opened notice shows none of its text',
-        '                                    for line in body.lines() {',
-        '                                    for line in body.lines().take(0) {',
+        '                                        let line = body.get(range).unwrap_or_default();',
+        '                                        let line = body.get(range.start..range.start).unwrap_or_default();',
         ['the_about_page_lists_the_notices_and_opens_one'],
     ),
     (
@@ -2281,6 +2281,119 @@ MUTATIONS += [
         "        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {\n",
         "        if theme.is_built_in() && self.themes.is_empty() {\n",
         [F_NONE],
+    ),
+]
+
+
+# Text fits its row (2026-10-10): a value beside a label is cut with an
+# ellipsis at the notes' edge, why something failed is said in full in red,
+# an opened licence is wrapped with every byte kept, and a row of pills is
+# laid out from its labels and wraps within the control column.
+FIT_ALL = "no_text_on_any_page_runs_past_its_rows"
+FIT_VALUE = "a_value_too_wide_for_its_row_is_cut_at_the_notes_edge"
+FIT_LICENCE = "an_opened_licence_wraps_to_the_column_and_keeps_every_byte"
+FIT_PROBLEM = "a_problem_is_said_in_full_in_red"
+FIT_PILLS = "a_pill_row_wraps_in_its_column_and_grows"
+FIT_UNREAD = "a_licence_that_cannot_be_read_says_why"
+FIT_BIN = "a_default_limit_that_cannot_be_kept_says_why"
+FIT_GAP = "test_a_click_in_the_gap_between_pills_changes_nothing"
+
+MUTATIONS += [
+    (
+        "a value runs on past its row",
+        "            text_elided(tree, cx, y + 14.0, value, color, 13.0, VALUE_WIDTH);\n",
+        "            tree.text(cx, y + 14.0, value, color, 13.0);\n",
+        [FIT_VALUE],
+    ),
+    (
+        "a value's room ends past the notes' edge",
+        "const VALUE_WIDTH: f32 = NOTE_WIDTH - CONTROL_COLUMN_DX;\n",
+        "const VALUE_WIDTH: f32 = NOTE_WIDTH - CONTROL_COLUMN_DX + 40.0;\n",
+        [FIT_VALUE],
+    ),
+    (
+        "a row of pills never wraps",
+        "        if x > 0.0 && x + width > VALUE_WIDTH {\n",
+        "        if x > 0.0 && x + width > VALUE_WIDTH * 4.0 {\n",
+        [FIT_ALL, FIT_PILLS],
+    ),
+    (
+        "a row of pills that wraps does not grow",
+        "    (rects, ITEM_HEIGHT + (y - PILL_INSET_Y))\n",
+        "    (rects, ITEM_HEIGHT)\n",
+        [FIT_PILLS],
+    ),
+    (
+        "a pill is never wider than the narrowest",
+        "            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH);\n",
+        "            .clamp(PILL_MIN_WIDTH, PILL_MIN_WIDTH);\n",
+        [FIT_PILLS],
+    ),
+    (
+        "a pill may be wider than the column",
+        "            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH);\n",
+        "            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH * 2.0);\n",
+        [FIT_PILLS],
+    ),
+    (
+        "pills touch",
+        "        x += width + PILL_GAP;\n",
+        "        x += width;\n",
+        [FIT_GAP],
+    ),
+    (
+        "a pill's label runs out of its pill",
+        "        text_elided(\n            tree,\n            px + PILL_PAD_X,\n            py + 7.0,\n            label,\n            fg,\n            PILL_TEXT_SIZE,\n            pw - 2.0 * PILL_PAD_X,\n        );\n",
+        "        tree.text(px + PILL_PAD_X, py + 7.0, label, fg, PILL_TEXT_SIZE);\n",
+        [FIT_PILLS],
+    ),
+    (
+        "why something failed is not said in red",
+        "        self.note_in(text, 28.0, pal.ink(pal.red));\n",
+        "        self.note_in(text, 28.0, pal.subtext0);\n",
+        [FIT_PROBLEM],
+    ),
+    (
+        "a note is drawn in black whatever its ink",
+        "                tree.text(x, line_y, line, ink, NOTE_SIZE);\n",
+        "                tree.text(x, line_y, line, Color::BLACK, NOTE_SIZE);\n",
+        [FIT_PROBLEM],
+    ),
+    (
+        "an opened licence is not wrapped",
+        "                                        NOTE_WIDTH,\n                                        LICENCE_SIZE,\n",
+        "                                        NOTE_WIDTH * 10.0,\n                                        LICENCE_SIZE,\n",
+        [FIT_LICENCE],
+    ),
+    (
+        "a licence line draws its carriage return",
+        "line.strip_suffix('\\r').unwrap_or(line).to_owned();",
+        "line.to_owned();",
+        [FIT_LICENCE],
+    ),
+    (
+        "a licence's last line ending begins an empty line",
+        "let body = body.strip_suffix('\\n').map_or(body.as_str(), |b| {",
+        "let body = Some(body.as_str()).map_or(body.as_str(), |b| {",
+        [FIT_LICENCE],
+    ),
+    (
+        "a licence that cannot be read says nothing",
+        "                                    s.problem(&format!(\"This licence could not be read: {why}\"));\n",
+        "                                    let _ = why;\n",
+        [FIT_UNREAD],
+    ),
+    (
+        "notices that cannot be read say nothing",
+        "                s.problem(&format!(\"The licence notices could not be read: {why}\"));\n",
+        "                let _ = why;\n",
+        [FIT_UNREAD],
+    ),
+    (
+        "a default limit that could not be kept says nothing",
+        "        if let Some(error) = &self.bin_error {\n            s.problem(error);\n        }\n",
+        "        if let Some(_error) = &self.bin_error {}\n",
+        [FIT_BIN],
     ),
 ]
 

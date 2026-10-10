@@ -2079,9 +2079,13 @@ pub struct Compose {
     pub body_drag: bool,
 }
 
-/// A text field holding `text`, with the caret at its end.
+/// A text field holding `text`, with the caret at its end. Typing and
+/// pasting -- by key or from its right-click menu -- fill it to at most
+/// [`FIELD_CAPACITY`] characters; a longer `text`, from a draft's file, is
+/// kept whole.
 fn field_with(text: &str) -> TextInput {
     let mut input = TextInput::new();
+    input.set_capacity(Some(FIELD_CAPACITY));
     input.set_text(text);
     input
 }
@@ -2140,9 +2144,9 @@ impl Compose {
     fn new(from: &str) -> Self {
         let mut compose = Self {
             from: field_with(from),
-            to: TextInput::new(),
-            cc: TextInput::new(),
-            subject: TextInput::new(),
+            to: field_with(""),
+            cc: field_with(""),
+            subject: field_with(""),
             body: TextArea::new(),
             attachments: Vec::new(),
             in_reply_to: None,
@@ -2388,8 +2392,13 @@ pub struct EmailApp {
 
     pub picker: FilePicker,
     pub picker_for: PickerFor,
-    /// What a copy or a cut in a field took, for a paste.
-    clipboard: String,
+    /// A compose field's right-click menu -- Cut, Copy, Paste, Delete,
+    /// Select all, and Undo and Redo in the body -- while it is up, and the
+    /// field it is for (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<ComposeField>,
+    /// The window's clock, moved by the ticks the menu asks for: a dimmed
+    /// row the pointer rests on says why when its wait is over.
+    clock_ms: u64,
     /// How wide carets are drawn: the user's `caret_width_scale` applied.
     caret_width: f32,
     /// The user's focus width, which the text boxes draw their focus mark
@@ -2462,7 +2471,8 @@ impl EmailApp {
             doomed: None,
             picker: FilePicker::default(),
             picker_for: PickerFor::Open,
-            clipboard: String::new(),
+            field_menu: fieldmenu::FieldMenu::new(),
+            clock_ms: 0,
             caret_width: textedit::CARET_WIDTH,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             list_scroll: 0,
@@ -3032,6 +3042,43 @@ impl EmailApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // A field's right-click menu takes every press and key while it is
+        // up, as any menu does: a row chosen, a press outside putting it away
+        // and reaching nothing under it -- and Escape putting it away without
+        // closing the message.
+        match event {
+            Event::Mouse(mouse) => match self.field_menu.mouse(mouse) {
+                fieldmenu::Outcome::NotUp => {}
+                fieldmenu::Outcome::Taken => return EventResult::Consumed,
+                fieldmenu::Outcome::Chosen(field, id) => {
+                    self.do_field_menu_row(field, id);
+                    return EventResult::Consumed;
+                }
+                fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                    let _another = self.open_field_menu(x, y);
+                    return EventResult::Consumed;
+                }
+            },
+            Event::Key(key) => match self.field_menu.key(key) {
+                fieldmenu::Outcome::NotUp => {}
+                fieldmenu::Outcome::Chosen(field, id) => {
+                    self.do_field_menu_row(field, id);
+                    return EventResult::Consumed;
+                }
+                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {
+                    return EventResult::Consumed;
+                }
+            },
+            Event::Tick { elapsed_ms } => {
+                self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+                return if self.field_menu.tick(self.clock_ms) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            _ => {}
+        }
         match event {
             Event::Key(key) if key.pressed => {
                 let before = self.selected_message;
@@ -3245,37 +3292,30 @@ impl EmailApp {
             }
             _ => {
                 let m = self.body_metrics();
-                let clipboard = self.clipboard.clone();
                 let Some(compose) = self.compose.as_mut() else {
                     return EventResult::Ignored;
                 };
-                let copied = if compose.field == ComposeField::Body {
+                // The lines, the body and their right-click menu all copy to
+                // and paste from the program's clipboard, so a copy in one
+                // pastes in another.
+                if compose.field == ComposeField::Body {
                     // Past what a message holds, nothing more goes in.
-                    if let Some(inserted) = would_insert(key, &clipboard)
+                    if let Some(inserted) = would_insert(key, &guitk::clipboard::text())
                         && !body_fits(&compose.body, &inserted)
                     {
                         return EventResult::Consumed;
                     }
-                    // One clipboard for the window: the lines' and the
-                    // body's are the same, so a copy in one pastes in the
-                    // other.
-                    compose.body.set_clipboard(clipboard.clone());
                     if compose.body.edit_key(key, &m) == KeyEdit::Unhandled {
                         return EventResult::Ignored;
                     }
-                    (compose.body.clipboard() != clipboard)
-                        .then(|| compose.body.clipboard().to_owned())
                 } else {
                     let field = compose.field;
                     let Some(input) = compose.line_mut(field) else {
                         return EventResult::Ignored;
                     };
-                    textline::apply_key(input, key, FIELD_CAPACITY, &clipboard, 13.0).copied
-                };
-                compose.confirm_close = false;
-                if let Some(text) = copied {
-                    self.clipboard = text;
+                    let _edit = textline::apply_key_on_clipboard(input, key, FIELD_CAPACITY, 13.0);
                 }
+                compose.confirm_close = false;
             }
         }
         EventResult::Consumed
@@ -4777,7 +4817,60 @@ impl EmailApp {
                     .press(event.x - left, event.y - top, 2, false, &m);
                 EventResult::Consumed
             }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// A right press at (`x`, `y`): over a field of the message being
+    /// written, its menu where the press landed -- the field given the
+    /// keyboard, its caret and selection left as they are (design-decisions
+    /// 1454), so Cut and Copy act on what the user selected. Anywhere else,
+    /// nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        let Some(Target::Field(field)) = self.target_at(x, y) else {
+            return EventResult::Ignored;
+        };
+        let viewport = (self.width(), self.height());
+        let Some(compose) = self.compose.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let menu = if field == ComposeField::Body {
+            compose.body.edit_menu()
+        } else {
+            let Some(input) = compose.line(field) else {
+                return EventResult::Ignored;
+            };
+            input.edit_menu()
+        };
+        compose.field = field;
+        self.field_menu.open(field, menu, x, y, viewport);
+        EventResult::Consumed
+    }
+
+    /// The menu's row `id`, chosen for `field`: done to it as its key would
+    /// be -- and, as by key, a paste that would take the body past what a
+    /// message holds is refused.
+    fn do_field_menu_row(&mut self, field: ComposeField, id: guitk::menu::MenuItemId) {
+        let m = self.body_metrics();
+        let Some(compose) = self.compose.as_mut() else {
+            return;
+        };
+        let edit = if field == ComposeField::Body {
+            let pasting = guitk::editmenu::EditCommand::from_id(id)
+                == Some(guitk::editmenu::EditCommand::Paste);
+            if pasting && !body_fits(&compose.body, &guitk::clipboard::text()) {
+                return;
+            }
+            compose.body.edit_command(id, &m)
+        } else {
+            match compose.line_mut(field) {
+                Some(input) => input.edit_command(id),
+                None => return,
+            }
+        };
+        if edit != KeyEdit::Unhandled {
+            compose.confirm_close = false;
         }
     }
 
@@ -5091,13 +5184,16 @@ impl App for EmailApp {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// No clock.
+    /// No clock, but a field menu's.
     ///
     /// Nothing here ages. Mail arrives over a network and this tree has none,
     /// so no message arrives while the window is open, and the files it reads
-    /// are read again when asked (F5).
+    /// are read again when asked (F5). A field's right-click menu asks for a
+    /// tick only while the pointer rests on a dimmed row, to say why.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.field_menu
+            .due_in(self.clock_ms)
+            .map(Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -5114,7 +5210,9 @@ impl App for EmailApp {
         self.size.set((width, height));
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.field_menu.render(&self.palette));
+        tree
     }
 }
 
@@ -7263,7 +7361,7 @@ mod tests {
         Event::Mouse(MouseEvent { x, y, kind })
     }
 
-    /// **The body wraps, undoes a word at a time, and shares the window's
+    /// **The body wraps, undoes a word at a time, and shares the program's
     /// clipboard.** Its lines ran off the right of the box and scrolled
     /// sideways, it had no undo, and it was lane E's interim field.
     #[test]
@@ -7302,8 +7400,8 @@ mod tests {
         assert_eq!(subject.as_deref(), Some(body_text(&app).as_str()));
     }
 
-    /// A copy made in a line pastes into the body: the window has one
-    /// clipboard, and the body's own is filled from it before every key.
+    /// A copy made in a line pastes into the body: the lines and the body
+    /// share the program's clipboard.
     #[test]
     fn a_copy_in_a_line_pastes_into_the_body() {
         let mut app = writing_a_body();
@@ -7402,13 +7500,190 @@ mod tests {
             BODY_CAPACITY,
             "a letter went past the cap"
         );
-        app.clipboard = String::from("more");
+        guitk::clipboard::set_text("more");
         app.handle_event(&key_ev(Key::V, true));
         assert_eq!(
             body_text(&app).len(),
             BODY_CAPACITY,
             "a paste went past the cap"
         );
+    }
+
+    // --- The compose fields' right-click menu ------------------------------
+    // (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+
+    /// The middle of a compose field's box.
+    fn field_middle(app: &EmailApp, field: ComposeField) -> (f32, f32) {
+        let r = app.field_rect(field);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// A right press on `field`.
+    fn right_press_on(app: &mut EmailApp, field: ComposeField) -> EventResult {
+        let (x, y) = field_middle(app, field);
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)))
+    }
+
+    /// Choose the menu's row for `command`, with a press on it.
+    fn choose(app: &mut EmailApp, command: guitk::editmenu::EditCommand) {
+        let (x, y) = app.field_menu.row_middle(command).expect("the row");
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+    }
+
+    /// **A field's right-click menu cuts, copies and pastes, between the
+    /// lines and the body and with the keys**: the right-click gives the
+    /// field the keyboard, and everything is on the program's clipboard.
+    #[test]
+    fn a_fields_right_click_menu_copies_and_pastes_between_fields() {
+        use guitk::editmenu::EditCommand;
+        let mut app = writing_a_body();
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Subject;
+        }
+        type_into(&mut app, "Quarterly figures");
+
+        assert_eq!(
+            right_press_on(&mut app, ComposeField::Subject),
+            EventResult::Consumed
+        );
+        assert_eq!(app.field_menu.field(), Some(ComposeField::Subject));
+        choose(&mut app, EditCommand::SelectAll);
+        assert!(!app.field_menu.is_up(), "the menu stayed up");
+        right_press_on(&mut app, ComposeField::Subject);
+        choose(&mut app, EditCommand::Copy);
+        assert_eq!(guitk::clipboard::text(), "Quarterly figures");
+
+        right_press_on(&mut app, ComposeField::Body);
+        assert_eq!(
+            app.compose.as_ref().map(|c| c.field),
+            Some(ComposeField::Body),
+            "the right-click did not give the body the keyboard"
+        );
+        choose(&mut app, EditCommand::Paste);
+        assert_eq!(body_text(&app), "Quarterly figures");
+
+        // Cut from the To line, and the keys paste it into Cc.
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::To;
+        }
+        type_into(&mut app, "ann@example.com");
+        app.handle_event(&key_ev(Key::A, true));
+        right_press_on(&mut app, ComposeField::To);
+        choose(&mut app, EditCommand::Cut);
+        let line = |app: &EmailApp, field| {
+            app.compose
+                .as_ref()
+                .and_then(|c| c.line(field))
+                .map(|i| i.text().to_owned())
+        };
+        assert_eq!(line(&app, ComposeField::To).as_deref(), Some(""));
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Cc;
+        }
+        app.handle_event(&key_ev(Key::V, true));
+        assert_eq!(
+            line(&app, ComposeField::Cc).as_deref(),
+            Some("ann@example.com")
+        );
+
+        // Off the fields, nothing.
+        assert_eq!(
+            app.handle_event(&mouse_at(
+                4.0,
+                300.0,
+                MouseEventKind::Press(MouseButton::Right)
+            )),
+            EventResult::Ignored
+        );
+        assert!(!app.field_menu.is_up());
+    }
+
+    /// **Escape puts a field's menu away and leaves the message open**: the
+    /// menu takes the keys while it is up, and Escape is the form's way out.
+    #[test]
+    fn escape_puts_a_fields_menu_away_and_leaves_the_message_open() {
+        let mut app = writing_a_body();
+        type_into(&mut app, "draft");
+        right_press_on(&mut app, ComposeField::Body);
+        assert!(app.field_menu.is_up());
+        app.handle_event(&key_ev(Key::Escape, false));
+        assert!(!app.field_menu.is_up(), "Escape left the menu up");
+        // Over unsaved work the form's Escape only asks first, so the form
+        // still being open says nothing: that it was not asked does.
+        assert!(
+            app.compose.as_ref().is_some_and(|c| !c.confirm_close),
+            "Escape reached the form"
+        );
+        assert_eq!(body_text(&app), "draft");
+    }
+
+    /// **A paste from the menu stops where one by key does**: a line at its
+    /// capacity, and the body refusing what would take it past what a
+    /// message holds.
+    #[test]
+    fn a_paste_from_the_menu_stops_at_each_fields_capacity() {
+        use guitk::editmenu::EditCommand;
+        let mut app = writing_a_body();
+        guitk::clipboard::set_text(&"s".repeat(FIELD_CAPACITY + 5));
+        right_press_on(&mut app, ComposeField::Subject);
+        choose(&mut app, EditCommand::Paste);
+        let subject = app
+            .compose
+            .as_ref()
+            .map(|c| c.subject.text().chars().count());
+        assert_eq!(subject, Some(FIELD_CAPACITY));
+
+        if let Some(compose) = app.compose.as_mut() {
+            compose.body.set_text(&"x".repeat(BODY_CAPACITY - 1));
+        }
+        guitk::clipboard::set_text("more");
+        right_press_on(&mut app, ComposeField::Body);
+        choose(&mut app, EditCommand::Paste);
+        assert_eq!(
+            body_text(&app).len(),
+            BODY_CAPACITY - 1,
+            "a paste went past the cap"
+        );
+    }
+
+    /// **The menu is drawn, and the window has a clock only while the menu
+    /// waits**: none at rest, one while the pointer rests on a dimmed row,
+    /// whose ticks bring the row's reason up.
+    #[test]
+    fn the_menu_is_drawn_and_a_dimmed_row_says_why_on_its_own_clock() {
+        use guitk::editmenu::EditCommand;
+        let mut app = writing_a_body();
+        assert_eq!(App::tick_interval(&app), None, "a clock at rest");
+        let drawn = |app: &mut EmailApp| {
+            let (w, h) = (app.width(), app.height());
+            App::render(app, w, h)
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.starts_with("Paste")))
+        };
+        assert!(!drawn(&mut app));
+        right_press_on(&mut app, ComposeField::Body);
+        assert!(drawn(&mut app), "the menu is not drawn");
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Move));
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = App::tick_interval(&app) else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
     }
 
     /// The carets are as wide as the user asked for.

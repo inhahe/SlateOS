@@ -404,6 +404,89 @@ STORE_MUTATIONS = [
     ),
 ]
 
+# The compose fields' right-click menu (2026-10-10, requests/c-e-text-fields-
+# have-a-right-click-menu.md): Cut, Copy, Paste, Delete and Select all (Undo
+# and Redo in the body) through apps/fieldmenu; the lines, the body and the
+# menu share the program's clipboard; each line holds its capacity and the
+# body refuses a paste past what a message holds, as by key.
+E_COPY = "a_fields_right_click_menu_copies_and_pastes_between_fields"
+E_ESC = "escape_puts_a_fields_menu_away_and_leaves_the_message_open"
+E_CAP = "a_paste_from_the_menu_stops_at_each_fields_capacity"
+E_CLOCK = "the_menu_is_drawn_and_a_dimmed_row_says_why_on_its_own_clock"
+
+MUTATIONS += [
+    (
+        "a right press on a field opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(event.x, event.y),\n",
+        "",
+        [E_COPY, E_ESC],
+    ),
+    (
+        "the right-click leaves the keyboard where it was",
+        "        compose.field = field;\n        self.field_menu.open(field, menu, x, y, viewport);\n",
+        "        self.field_menu.open(field, menu, x, y, viewport);\n",
+        [E_COPY],
+    ),
+    (
+        "a row chosen for a line does nothing",
+        "                Some(input) => input.edit_command(id),\n",
+        "                Some(_input) => KeyEdit::Unhandled,\n",
+        [E_COPY],
+    ),
+    (
+        "a row chosen for the body does nothing",
+        "            compose.body.edit_command(id, &m)\n",
+        "            KeyEdit::Unhandled\n",
+        [E_COPY],
+    ),
+    (
+        "a paste from the menu goes past the body's cap",
+        "            if pasting && !body_fits(&compose.body, &guitk::clipboard::text()) {\n"
+        "                return;\n"
+        "            }\n",
+        "",
+        [E_CAP],
+    ),
+    (
+        "a line holds no capacity",
+        "    input.set_capacity(Some(FIELD_CAPACITY));\n    input.set_text(text);\n",
+        "    input.set_text(text);\n",
+        [E_CAP],
+    ),
+    (
+        "the lines' keys keep a clipboard the menu does not share",
+        "                    let _edit = textline::apply_key_on_clipboard(input, key, FIELD_CAPACITY, 13.0);\n",
+        "                    let _edit = textline::apply_key(input, key, FIELD_CAPACITY, \"\", 13.0);\n",
+        [E_COPY],
+    ),
+    (
+        "Escape reaches the form under a field's menu",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "                fieldmenu::Outcome::Taken | fieldmenu::Outcome::RightPressElsewhere(..) => {}\n",
+        [E_ESC],
+    ),
+    (
+        "a field's menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [E_CLOCK],
+    ),
+    (
+        "the window's ticks do not move the menu's clock",
+        "                return if self.field_menu.tick(self.clock_ms) {\n",
+        "                return if false {\n",
+        [E_CLOCK],
+    ),
+    (
+        "the window asks no tick for the menu's wait",
+        "            .due_in(self.clock_ms)\n            .map(Duration::from_millis)\n",
+        "            .due_in(self.clock_ms)\n            .map(Duration::from_millis)\n            .filter(|_| false)\n",
+        [E_CLOCK],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing, which is right for one

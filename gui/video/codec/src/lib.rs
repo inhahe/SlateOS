@@ -91,6 +91,17 @@
 //! it, BT.2020's for an HDR transfer. Held to the light ffprobe reads and to
 //! Chrome's pixels (`tests/hdr.rs`).
 //!
+//! An ordinary (SDR) picture whose colour is said whole -- all four parts in
+//! one place, as Chrome takes a colour: the file for VP8 and VP9, AV1's
+//! sequence header, VP9's colour space read as all four -- in primaries or
+//! a curve not sRGB's (BT.601's, which most standard-definition video says;
+//! BT.2020's; Display P3's; a power of 2.2) is converted to sRGB's as Chrome
+//! converts it (design-decisions §1381, [`Colour::converted`]). Held to
+//! Chrome's own pixels (`tests/sdr.rs`). What Chrome does with a colour
+//! said in pieces or not at all -- BT.601 at the studio range, unconverted
+//! -- is not copied: such a picture is pieced together and guessed as above
+//! (`open-questions/F-Q11.md`).
+//!
 //! # Time
 //!
 //! In nanoseconds, on the file's own clock: a frame's [`Frame::time`] is
@@ -176,6 +187,12 @@ pub struct ColourHint {
     pub full_range: Option<bool>,
     /// The mastering display and content light level the file says.
     pub light: Light,
+    /// The colour said whole here, as Chrome takes it: all four parts said,
+    /// each a code Chrome names ([`Colour::whole`]); `None` where any part
+    /// is missing. Where it is not `None` it agrees with the four above,
+    /// except where Chrome reads this place differently (VP9's colour
+    /// space, whose one field Chrome takes for all four).
+    pub whole: Option<Colour>,
 }
 
 /// What a video says of its light, by which an HDR picture is mapped to the

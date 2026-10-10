@@ -1,19 +1,21 @@
-"""Mutation test for imagecodec's HDR AVIF: which pictures are shown as Chrome
-shows HDR (src/avif/convert.rs), and the content light level they are tone
+"""Mutation test for imagecodec's AVIF colour as Chrome shows it: which
+pictures Chrome converts -- HDR, and SDR whose primaries or curve are not
+sRGB's (src/avif/convert.rs) -- and the content light level HDR is tone
 mapped by, from the `clli` box to the conversion (src/avif/setup.rs,
 src/avif/decode.rs).
 
-Each row puts back one way of not showing an HDR AVIF as Chrome shows it --
-the light not read, a picture Chrome takes for ordinary taken for HDR or the
-other way about -- and names the tests that have to notice: the module's own,
-and `tests/avif_hdr.rs`, which holds the decoding to Chrome 154's own
-screenshots (`tests/data/generate_avif_hdr.py`).
+Each row puts back one way of not showing an AVIF as Chrome shows it -- the
+light not read, a picture Chrome converts left alone or the other way about
+-- and names the tests that have to notice: the module's own, and
+`tests/avif_hdr.rs` and `tests/avif_sdr.rs`, which hold the decoding to
+Chrome 154's own screenshots (`tests/data/generate_avif_hdr.py`,
+`generate_avif_sdr.py`).
 
 Breaks one piece of production code at a time and checks that the tests
 which claim to cover it are the ones that fail.  A test that passes against
 a broken program is not testing the program.
 
-The sweep runs the crate's unit tests and `tests/avif_hdr.rs` alone: the
+The sweep runs the crate's unit tests and those two alone: the
 crate's other suites decode libavif's and libjpeg-turbo's whole test sets,
 and name nothing here.
 
@@ -29,9 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "avif"
-TARGETS = ("--lib", "--test", "avif_hdr")
+TARGETS = ("--lib", "--test", "avif_hdr", "--test", "avif_sdr")
 
-WHICH = "hdr_is_what_chrome_takes_for_hdr"
+WHICH = "what_chrome_converts_is_what_its_avif_decoder_reads"
+SDR = "sdr_conversions_are_chrome_s_within_a_level"
 PATCHES = "hdr_patches_are_chrome_s_pixel_for_pixel"
 MOVES = "the_content_light_level_moves_the_tone_map"
 
@@ -65,6 +68,24 @@ CONVERT = [
         "    let matrix_named = matches!(matrix, 0..=2 | 4..=9 | 11);",
         "    let matrix_named = true;",
         [WHICH],
+    ),
+    (
+        "an unspecified transfer is no curve",
+        "    let transfer = if image.transfer == UNSPECIFIED {\n        SRGB",
+        "    let transfer = if image.transfer == UNSPECIFIED {\n        UNSPECIFIED",
+        [WHICH, SDR],
+    ),
+    (
+        "sRGB's own colour is converted",
+        "    (!srgb).then_some((transfer, primaries))",
+        "    Some((transfer, primaries))",
+        [WHICH],
+    ),
+    (
+        "SDR is not converted",
+        "    (!srgb).then_some((transfer, primaries))",
+        "    transfer.is_hdr().then_some((transfer, primaries))",
+        [WHICH, SDR],
     ),
 ]
 

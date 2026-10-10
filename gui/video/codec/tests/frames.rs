@@ -3,6 +3,12 @@
 //! frames, times, durations and key frames ffprobe shows, and each frame's
 //! pixels as libavif converts the planes ffmpeg's decoders make. That script
 //! says where every answer comes from, and why each fixture is there.
+//!
+//! Except the pixels of the fixtures whose colour Chrome converts
+//! ([`CONVERTED`], design-decisions §1381): those are Chrome's, which
+//! `tests/sdr.rs` holds them to. Here they are held to everything else, and
+//! their frames told apart -- for the seeks -- by the pixels this crate
+//! makes of them played straight through.
 
 #![allow(
     clippy::unwrap_used,
@@ -56,6 +62,22 @@ const FIXTURES: [&str; 35] = [
     "vp9_rotate_270.mkv",
     "vp9_mirror.mkv",
     "vp9_mirror_turn.mkv",
+];
+
+/// The fixtures whose colour Chrome converts to sRGB's, as it reads them:
+/// each says its colour whole -- VP9's colour space, which Chrome reads as
+/// all four parts, or an MP4 `colr` -- in primaries or a curve not sRGB's.
+/// BT.601's (`vp9_full_range.webm`, `vp9_444.webm`: SMPTE 170M's primaries,
+/// as Chrome reads VP9's BT.601), BT.2020's (`vp9_10bit_bt2020.webm`, by
+/// VP9's colour space, its file leaving the transfer unsaid;
+/// `vp9_colr.mp4`), and SMPTE 240M's (`vp9_smpte240.webm`). The rest say
+/// BT.709, sRGB or nothing whole.
+const CONVERTED: [&str; 5] = [
+    "vp9_full_range.webm",
+    "vp9_10bit_bt2020.webm",
+    "vp9_444.webm",
+    "vp9_smpte240.webm",
+    "vp9_colr.mp4",
 ];
 
 /// One frame as the answers give it.
@@ -117,12 +139,54 @@ fn open(name: &str) -> Video<File> {
     Video::open(File::open(path(name)).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
+/// A fixture's answers, as the tests hold its frames to them: the
+/// generator's, but for a fixture Chrome converts, whose frames' pixels are
+/// this crate's played straight through -- the rest of each frame having
+/// been held to the generator's first.
+fn reference(name: &str) -> (HashMap<String, String>, Vec<Line>) {
+    let (info, mut want) = answers(name);
+    if CONVERTED.contains(&name) {
+        let mut video = open(name);
+        let mut ours = Vec::new();
+        while let Some(frame) = video.next_frame().unwrap_or_else(|e| panic!("{name}: {e}")) {
+            ours.push(line(&frame));
+        }
+        assert_eq!(ours.len(), want.len(), "{name}: the frames");
+        for (k, (w, o)) in want.iter_mut().zip(ours).enumerate() {
+            let ffprobe = (w.time, w.duration, w.key, &w.size);
+            assert_eq!(
+                ffprobe,
+                (o.time, o.duration, o.key, &o.size),
+                "{name}: frame {k}"
+            );
+            w.md5 = o.md5;
+        }
+    }
+    (info, want)
+}
+
+/// Exactly the fixtures [`CONVERTED`] names are converted as Chrome
+/// converts their colour.
+#[test]
+fn the_fixtures_chrome_converts_are_converted() {
+    for name in FIXTURES {
+        let mut video = open(name);
+        let picture = video.next_picture().unwrap().expect("a picture");
+        assert_eq!(
+            picture.colour().converted(),
+            CONVERTED.contains(&name),
+            "{name}: {:?}",
+            picture.colour()
+        );
+    }
+}
+
 /// What the file says of its video, and every frame -- its time, duration,
 /// key-frame flag, size, and every pixel -- as ffprobe and libavif have it.
 #[test]
 fn every_fixture_plays_as_ffmpeg_and_libavif_show_it() {
     for name in FIXTURES {
-        let (info, want) = answers(name);
+        let (info, want) = reference(name);
         let mut video = open(name);
         let i = *video.info();
         let said = [
@@ -171,7 +235,7 @@ fn a_picture_converted_later_is_the_same_frame() {
         "vp9_alpha.webm",
         "vp8_alpha.webm",
     ] {
-        let (_, want) = answers(name);
+        let (_, want) = reference(name);
         let mut video = open(name);
         let mut k = 0;
         while let Some(picture) = video.next_picture().unwrap() {
@@ -192,7 +256,7 @@ fn a_picture_converted_later_is_the_same_frame() {
 #[test]
 fn every_seek_lands_on_the_frame_showing_then() {
     for name in FIXTURES {
-        let (_, want) = answers(name);
+        let (_, want) = reference(name);
         let mut video = open(name);
         let last = want.last().unwrap().time;
         for target in [

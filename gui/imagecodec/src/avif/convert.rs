@@ -9,22 +9,28 @@
 //! go through too, so that the two agree. This hands it the picture as
 //! libavif's `avifImage` would describe it.
 //!
-//! An HDR picture -- PQ or HLG by its code points -- is shown as Chrome
-//! shows it on an sRGB screen instead (design-decisions §1378):
-//! `yuv::managed`, by the `clli` box's MaxCLL, the one HDR metadata Chrome's AVIF
-//! decoder takes. Which pictures those are is Chrome's call too
-//! (`AVIFImageDecoder`'s `GetColorSpace`): unspecified code points are
-//! MIAF's defaults (BT.709 primaries, the sRGB curve, BT.601's matrix); code
-//! points Chrome has no name for make it fall back to an ordinary BT.709
-//! picture; and an ICC profile, when there is one, is the picture's colour
-//! instead of its code points -- so none of those is HDR.
+//! A picture whose colour Chrome converts is shown as Chrome shows it on an
+//! sRGB screen instead (`yuv::managed`): an HDR one -- PQ or HLG by its code
+//! points -- tone mapped by the `clli` box's MaxCLL, the one HDR metadata
+//! Chrome's AVIF decoder takes (design-decisions §1378); and an SDR one
+//! whose primaries or curve are not sRGB's -- BT.2020's, Display P3's,
+//! BT.601's, a power of 2.2 -- its colours converted to sRGB's (§1381).
+//! Chrome decodes an AVIF to its Y'CbCr planes and converts them on the GPU
+//! as it does video, in floating point, which `yuv::managed` is -- held to
+//! Chrome's own pixels (`tests/avif_hdr.rs`, `tests/avif_sdr.rs`). Which
+//! pictures those are is Chrome's call too (`AVIFImageDecoder`'s
+//! `GetColorSpace`): unspecified code points are MIAF's defaults (BT.709
+//! primaries, the sRGB curve, BT.601's matrix); code points Chrome has no
+//! name for make it fall back to an ordinary BT.709 picture; and an ICC
+//! profile, when there is one, is the picture's colour instead of its code
+//! points -- so none of those is converted.
 
 use alloc::vec::Vec;
 
 use super::Error;
 use super::decode::{Decoded, Plane, Yuv};
 use super::setup::YuvFormat;
-use yuv::managed::{self, Conversion, Light, Signal, Transfer};
+use yuv::managed::{self, Conversion, Light, SdrCurve, Signal, Transfer};
 use yuv::reformat::{self, Format, Picture, Reformat};
 
 /// Why a picture cannot be converted: `AVIF_RESULT_REFORMAT_FAILED`.
@@ -75,11 +81,12 @@ fn convert<T: Reformat>(image: &Yuv<T>) -> Result<Vec<u32>, Error> {
         alpha: image.alpha.as_ref().map(Plane::view),
         alpha_premultiplied: image.alpha_premultiplied,
     };
-    let converted = match hdr_of(image) {
+    let converted = match managed_of(image) {
         None => reformat::to_argb(&picture),
         Some((transfer, primaries)) => {
             // The curves' tables, a millisecond or two: made for each
-            // picture, as this crate keeps nothing between pictures.
+            // picture, as this crate keeps nothing between pictures. The
+            // light is only HDR's tone map's.
             let signal = Signal::new(transfer);
             let light = Light {
                 max_cll: image.light.map_or(0.0, |(max_cll, _)| f32::from(max_cll)),
@@ -95,16 +102,19 @@ fn convert<T: Reformat>(image: &Yuv<T>) -> Result<Vec<u32>, Error> {
     })
 }
 
-/// Whether Chrome shows `image` as HDR, and if so its transfer and the
+/// Whether Chrome converts `image`'s colour, and if so the transfer and the
 /// primaries it takes it to have: `AVIFImageDecoder`'s `GetColorSpace` and
 /// `media::VideoColorSpace`'s validity, for a picture whose colour is its
 /// code points (not an ICC profile). Unspecified primaries are BT.709, an
 /// unspecified transfer the sRGB curve and an unspecified matrix BT.601 (as
 /// grey's always is); a code Chrome has no name for (`GetPrimaryID`,
 /// `GetTransferID`, `GetMatrixID`) leaves the colour unspecified, which
-/// Chrome shows as ordinary BT.709.
-fn hdr_of<T>(image: &Yuv<T>) -> Option<(Transfer, u16)> {
+/// Chrome shows as ordinary BT.709. Converted: HDR, and SDR whose primaries
+/// or curve are not sRGB's, where Chrome has a curve for its transfer.
+fn managed_of<T>(image: &Yuv<T>) -> Option<(Transfer, u16)> {
     const UNSPECIFIED: u16 = 2;
+    /// sRGB's transfer, MIAF's default.
+    const SRGB: u16 = 13;
     if image.icc {
         return None;
     }
@@ -112,6 +122,11 @@ fn hdr_of<T>(image: &Yuv<T>) -> Option<(Transfer, u16)> {
         1
     } else {
         image.primaries
+    };
+    let transfer = if image.transfer == UNSPECIFIED {
+        SRGB
+    } else {
+        image.transfer
     };
     let matrix = if image.format == YuvFormat::Yuv400 || image.matrix == UNSPECIFIED {
         6
@@ -123,10 +138,9 @@ fn hdr_of<T>(image: &Yuv<T>) -> Option<(Transfer, u16)> {
     if !primaries_named || !matrix_named {
         return None;
     }
-    // An unspecified transfer is the sRGB curve: not HDR.
-    Transfer::from_h273(image.transfer)
-        .filter(|t| t.is_hdr())
-        .map(|transfer| (transfer, primaries))
+    let transfer = Transfer::from_h273(transfer)?;
+    let srgb = primaries == 1 && transfer == Transfer::Sdr(SdrCurve::Srgb);
+    (!srgb).then_some((transfer, primaries))
 }
 
 #[cfg(test)]
@@ -206,37 +220,57 @@ mod tests {
         assert_eq!(to_argb(&Decoded::Eight(short)), Err(BAD_SIZE));
     }
 
-    /// Which pictures Chrome shows as HDR, and with what primaries: PQ and
-    /// HLG by their code points; unspecified primaries are BT.709's and an
-    /// unspecified matrix BT.601's (MIAF's defaults); a code Chrome has no
-    /// name for makes it an ordinary picture, as does an ICC profile.
+    /// Which pictures Chrome converts, and by what: PQ and HLG by their code
+    /// points; SDR whose primaries or curve are not sRGB's, an unspecified
+    /// transfer being the sRGB curve and unspecified primaries BT.709's
+    /// (MIAF's defaults); none whose code points Chrome has no name for,
+    /// whose curve it has none for, or whose colour is an ICC profile.
     #[test]
-    fn hdr_is_what_chrome_takes_for_hdr() {
+    fn what_chrome_converts_is_what_its_avif_decoder_reads() {
+        use SdrCurve::{Gamma22, Srgb};
         let image = |primaries: u16, transfer: u16, matrix: u16| Yuv {
             primaries,
             transfer,
             ..grey(YuvFormat::Yuv420, matrix)
         };
-        assert_eq!(hdr_of(&image(9, 16, 9)), Some((Transfer::Pq, 9)));
-        assert_eq!(hdr_of(&image(9, 18, 9)), Some((Transfer::Hlg, 9)));
-        // Not HDR: an ordinary transfer, or an unspecified one (the sRGB
-        // curve's).
-        assert_eq!(hdr_of(&image(9, 1, 9)), None);
-        assert_eq!(hdr_of(&image(9, 2, 9)), None);
+        assert_eq!(managed_of(&image(9, 16, 9)), Some((Transfer::Pq, 9)));
+        assert_eq!(managed_of(&image(9, 18, 9)), Some((Transfer::Hlg, 9)));
+        // SDR in BT.2020's primaries, by any curve Chrome takes for the sRGB
+        // one -- an unspecified one among them.
+        for transfer in [1, 2, 6, 13, 14, 15] {
+            assert_eq!(
+                managed_of(&image(9, transfer, 9)),
+                Some((Transfer::Sdr(Srgb), 9)),
+                "transfer {transfer}"
+            );
+        }
+        // BT.709's primaries and the sRGB curve, said or by MIAF's
+        // defaults: not converted. Another curve: converted.
+        assert_eq!(managed_of(&image(1, 1, 1)), None);
+        assert_eq!(managed_of(&image(2, 2, 2)), None);
+        assert_eq!(
+            managed_of(&image(1, 4, 1)),
+            Some((Transfer::Sdr(Gamma22), 1))
+        );
+        // A curve Chrome has none for: nothing converted.
+        assert_eq!(managed_of(&image(9, 11, 9)), None);
         // Unspecified primaries are BT.709's; an unspecified matrix passes.
-        assert_eq!(hdr_of(&image(2, 16, 2)), Some((Transfer::Pq, 1)));
+        assert_eq!(managed_of(&image(2, 16, 2)), Some((Transfer::Pq, 1)));
         // Primaries and matrices Chrome names, and those it does not.
-        assert_eq!(hdr_of(&image(22, 16, 9)), Some((Transfer::Pq, 22)));
-        assert_eq!(hdr_of(&image(12, 16, 11)), Some((Transfer::Pq, 12)));
+        assert_eq!(managed_of(&image(22, 16, 9)), Some((Transfer::Pq, 22)));
+        assert_eq!(
+            managed_of(&image(12, 13, 11)),
+            Some((Transfer::Sdr(Srgb), 12))
+        );
         for primaries in [0, 3, 13, 21, 23] {
             assert_eq!(
-                hdr_of(&image(primaries, 16, 9)),
+                managed_of(&image(primaries, 16, 9)),
                 None,
                 "primaries {primaries}"
             );
         }
         for matrix in [3, 10, 12, 14] {
-            assert_eq!(hdr_of(&image(9, 16, matrix)), None, "matrix {matrix}");
+            assert_eq!(managed_of(&image(9, 16, matrix)), None, "matrix {matrix}");
         }
         // Grey's matrix is BT.601's, whatever it says.
         let grey_hdr = Yuv {
@@ -244,12 +278,12 @@ mod tests {
             transfer: 16,
             ..grey(YuvFormat::Yuv400, 12)
         };
-        assert_eq!(hdr_of(&grey_hdr), Some((Transfer::Pq, 9)));
+        assert_eq!(managed_of(&grey_hdr), Some((Transfer::Pq, 9)));
         // An ICC profile is the picture's colour instead.
         let profiled = Yuv {
             icc: true,
             ..image(9, 16, 9)
         };
-        assert_eq!(hdr_of(&profiled), None);
+        assert_eq!(managed_of(&profiled), None);
     }
 }

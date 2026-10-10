@@ -1608,32 +1608,32 @@ DVB_ROWS = [
 COLOUR = [
     (
         "an unsaid transfer is PQ",
-        "            .unwrap_or(TRANSFER_BT709),",
-        "            .unwrap_or(16),",
+        "        transfer: said_transfer.unwrap_or(TRANSFER_BT709),",
+        "        transfer: said_transfer.unwrap_or(16),",
         [HDR_TRANSFER],
     ),
     (
         "the file's transfer stands over the bitstream's",
-        "        transfer: bitstream\n            .transfer\n            .or(container.transfer)",
-        "        transfer: container\n            .transfer\n            .or(bitstream.transfer)",
-        [HDR],
+        "    let said_transfer = bitstream.transfer.or(container.transfer);",
+        "    let said_transfer = container.transfer.or(bitstream.transfer);",
+        ["the_bitstream_wins_then_the_file"],
     ),
     (
         "an AV1 transfer that says nothing is taken",
-        "            transfer: said(u16::from(c.transfer), false),",
-        "            transfer: Some(u16::from(c.transfer)),",
-        [HDR],
+        "        let transfer = said(transfer, false);",
+        "        let transfer = Some(transfer);",
+        ["av1_s_code_points_say_what_they_name"],
     ),
     (
         "Matroska's transfer is not read",
-        "            transfer: u16::try_from(c.transfer_characteristics)\n                .ok()\n                .and_then(|t| said(t, false)),",
-        "            transfer: None,",
+        "        let transfer = u16::try_from(c.transfer_characteristics)\n            .ok()\n            .and_then(|t| said(t, false));",
+        "        let transfer = None;",
         [HDR, HDR_UNSAID],
     ),
     (
         "MP4's transfer is not read",
-        "            transfer: said(c.transfer, false),",
-        "            transfer: None,",
+        "            said(c.transfer, false),",
+        "            None,",
         [HDR, HDR_UNSAID],
     ),
     (
@@ -1708,7 +1708,7 @@ COLOUR = [
 SHOWN = [
     (
         "HDR is shown as ordinary video",
-        "        match Transfer::from_h273(colour.transfer) {",
+        "        match colour.managed() {",
         "        match None::<Transfer> {",
         [CHROME],
     ),
@@ -1732,9 +1732,103 @@ SHOWN = [
     ),
     (
         "HDR's primaries are taken for BT.709's",
-        "let map = Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));",
-        "let map = Conversion::new(signal(transfer), 1, hdr_light(look.light));",
+        "Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));",
+        "Conversion::new(signal(transfer), 1, hdr_light(look.light));",
         [CHROME],
+    ),
+]
+
+# A colour said whole, as Chrome takes it (colour.rs), and which pictures
+# take Chrome's conversion (picture.rs): the unit tests, and Chrome's own
+# pixels for twelve fixtures (tests/sdr.rs).
+SDR_TARGETS = ("--lib", "--test", "sdr")
+SDR_CHROME = "sdr_first_frames_are_chrome_s"
+WHOLE_PARTS = "a_colour_is_whole_when_every_part_is_said_and_named"
+VP9_WHOLES = "vp9_colour_spaces_are_chrome_s_wholes"
+WHOSE = "whose_whole_colour_stands_is_the_decoder_s"
+CONVERTS = "chrome_converts_whole_colours_that_are_not_srgb_s"
+
+WHOLE = [
+    (
+        "libvpx's decoder asks the bitstream first",
+        "        Prefer::File => container.whole.or(bitstream.whole),",
+        "        Prefer::File => bitstream.whole.or(container.whole),",
+        [WHOSE, SDR_CHROME],
+    ),
+    (
+        "dav1d's decoder asks the file first",
+        "        Prefer::Bitstream => bitstream.whole.or(container.whole),",
+        "        Prefer::Bitstream => container.whole.or(bitstream.whole),",
+        [WHOSE, SDR_CHROME],
+    ),
+    (
+        "a colour without its range is whole",
+        "(matrix?, primaries?, transfer?, full_range?);",
+        "(matrix?, primaries?, transfer?, full_range.unwrap_or(false));",
+        [WHOLE_PARTS, WHOSE],
+    ),
+    (
+        "a code Chrome has no name for makes a colour whole",
+        "    (named_matrix(matrix) && named_primaries(primaries) && named_transfer(transfer)).then_some(",
+        "    (named_matrix(matrix) || named_primaries(primaries) || named_transfer(transfer)).then_some(",
+        [WHOLE_PARTS],
+    ),
+    (
+        "BT.2020's constant-luminance matrix is named",
+        "    matches!(m, 0 | 1 | 4..=9 | 11)",
+        "    matches!(m, 0 | 1 | 4..=11)",
+        [WHOLE_PARTS],
+    ),
+    (
+        "Matroska's derived range is the full one",
+        "            1 | 3 => Some(false),\n            2 => Some(true),",
+        "            1 => Some(false),\n            2 | 3 => Some(true),",
+        [WHOLE_PARTS],
+    ),
+    (
+        "VP9's BT.601 is FFmpeg's BT.470BG primaries",
+        "            1 | 3 => Some((PRIMARIES_SMPTE170M, 6, MATRIX_BT601)),",
+        "            1 | 3 => Some((PRIMARIES_BT470BG, 6, MATRIX_BT601)),",
+        [VP9_WHOLES, SDR_CHROME],
+    ),
+    (
+        "VP9's BT.2020 at 8 bits takes the 10-bit curve",
+        "            _ => TRANSFER_BT709,\n        };",
+        "            _ => 14,\n        };",
+        [VP9_WHOLES],
+    ),
+    (
+        "VP9's colour space is not read whole",
+        "            whole: chrome.map(|(primaries, transfer, matrix)| Colour {",
+        "            whole: chrome.filter(|_| false).map(|(primaries, transfer, matrix)| Colour {",
+        [VP9_WHOLES, WHOSE, SDR_CHROME],
+    ),
+    (
+        "sRGB's own colour said whole is converted",
+        "        (transfer.is_hdr() || (self.whole && !srgb)).then_some(transfer)",
+        "        (transfer.is_hdr() || self.whole).then_some(transfer)",
+        [CONVERTS, SDR_CHROME],
+    ),
+    (
+        "a colour pieced together is converted",
+        "        (transfer.is_hdr() || (self.whole && !srgb)).then_some(transfer)",
+        "        (transfer.is_hdr() || !srgb).then_some(transfer)",
+        [CONVERTS],
+    ),
+]
+
+WHOLE_SHOWN = [
+    (
+        "AV1 asks the file first",
+        "            Planes::Av1(p) => (Prefer::Bitstream, ColourHint::av1(p)),",
+        "            Planes::Av1(p) => (Prefer::File, ColourHint::av1(p)),",
+        [SDR_CHROME],
+    ),
+    (
+        "VP9's depth is taken for 8 bits",
+        "ColourHint::vp9(space, full_range, picture.bit_depth()),",
+        "ColourHint::vp9(space, full_range, 8),",
+        ["vp9_s_bt2020_takes_its_curve_from_its_depth"],
     ),
 ]
 
@@ -1756,6 +1850,8 @@ if __name__ == "__main__":
         (SRC / "lib.rs", LIB),
         (SRC / "colour.rs", COLOUR, COLOUR_TARGETS),
         (SRC / "picture.rs", SHOWN, COLOUR_TARGETS),
+        (SRC / "colour.rs", WHOLE, SDR_TARGETS),
+        (SRC / "picture.rs", WHOLE_SHOWN, SDR_TARGETS),
     ]
     names = [name for _, rows, *_ in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

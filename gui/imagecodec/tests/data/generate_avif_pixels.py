@@ -24,7 +24,13 @@ samples are read as limited range; the AV1 sequence header still says full,
 and libavif, like this crate, takes the container's word), and premultiplied
 alpha, by adding a `prem` reference from the colour item to the alpha item.
 Other matrices are likewise written into the `colr` box after encoding, for
-the ones libavif refuses to convert and so will not encode.
+the ones libavif refuses to convert and so will not encode. And the BT.2020
+fixtures, encoded with BT.2020's primaries, have BT.709's written into their
+`colr` box (`COLR_PRIMARIES`): they hold libavif's BT.2020 *matrix* to
+Pillow, which ignores primaries, while a picture whose box names BT.2020's
+primaries is converted to sRGB's as Chrome converts it -- by this crate too
+(design-decisions 1381) -- and so is no longer Pillow's. Pillow's pixels are
+the same either way (checked when the boxes were rewritten, 2026-10-10).
 
 Run from this directory: python generate_avif_pixels.py
 """
@@ -234,7 +240,16 @@ FIXTURES = {
 }
 
 
-def encode(spec):
+# Fixtures whose `colr` primaries are rewritten after encoding (see above).
+COLR_PRIMARIES = {
+    "8_444a_2020": 1,
+    "8_444_2020_limited": 1,
+    "10_422a_2020_limited": 1,
+    "12_444a_2020": 1,
+}
+
+
+def encode(name, spec):
     width, height, depth, fmt, alpha, full, primaries, matrix, prem, override = spec
     channels = (2 if alpha else 1) if fmt == "400" else (4 if alpha else 3)
     pixels = pattern(width, height, depth, channels)
@@ -253,6 +268,8 @@ def encode(spec):
         data = set_colr(data, full_range=False)
     if override is not None:
         data = set_colr(data, matrix=override)
+    if name in COLR_PRIMARIES:
+        data = set_colr(data, primaries=COLR_PRIMARIES[name])
     if prem:
         data = add_prem(data)
     return data
@@ -275,7 +292,7 @@ def main():
         "# the last column pins each fixture file by SHA-256.",
     ]
     for name, spec in FIXTURES.items():
-        data = encode(spec)
+        data = encode(name, spec)
         path = f"{OUT_PREFIX}{name}.avif"
         with open(path, "wb") as f:
             f.write(data)

@@ -4679,11 +4679,22 @@ lane C's `guitk`.
   - `[ ]` HDR's speed, the rest: step 1 (Y'CbCr and its chroma in floating
     point, some two fifths of a frame now) and the tone map's `exp2f` in
     its curved middle, eight pixels at a time to the same bits.
-  - `[ ]` SDR video's colours to sRGB as Chrome converts them: every
-    primaries other than BT.709's (BT.601's 525- and 625-line ones too,
-    BT.2020 SDR, P3), and the transfers Chrome does not take for the sRGB
-    curve (gamma 2.2 and 2.8, linear, SMPTE 240M). Probed 2026-10-10 in
-    Chrome 154: up to 77 levels apart from what is shown today.
+  - `[x]` SDR video's colours to sRGB as Chrome converts them (§1381):
+    every primaries other than BT.709's (BT.601's two too, BT.2020 SDR,
+    P3) and the curves Chrome does not take for the sRGB one, where the
+    video says its colour whole as Chrome takes it -- held to Chrome 154's
+    screenshots (`gui/video/codec/tests/sdr.rs`).
+  - `[x]` SDR AVIF's colours the same: Chrome's AVIF decoder converts by
+    its `nclx` (MIAF's defaults for what is unspecified), on the GPU as
+    video -- held to Chrome's screenshots
+    (`gui/imagecodec/tests/avif_sdr.rs`).
+  - `[ ]` Ordinary video and AVIF converted as Chrome's GPU converts them:
+    floating point with the exact constants, not libyuv's fixed point,
+    whose capped blue weight puts saturated blues up to 15 levels off
+    (`known-issues/F-ordinary-video-is-libyuv-s-arithmetic-not-chrome-s.md`);
+    measure 4K's speed first, and tell lane E.
+  - `[ ]` Video that does not fully say its colours: Chrome's BT.601 or
+    the players' guess -- `open-questions/F-Q11.md`, the operator's.
   - `[ ]` skcms, for the profiles PNG, JPEG, WebP, AVIF and icons carry.
   - `[ ]` Gain maps (ISO 21496-1: UltraHDR JPEG, AVIF `tmap`), and HDR
     screens' headroom, once screens report their colours.

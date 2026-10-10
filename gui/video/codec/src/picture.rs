@@ -6,9 +6,11 @@
 //! converts only the ones it shows ([`Picture::to_frame`]).
 //!
 //! The conversion is `gui/video/yuv`'s port of libavif's, by the colour
-//! [`crate::colour`] settles on -- or, for HDR (a PQ or HLG transfer),
-//! `yuv::managed`'s transcription of Chrome's, by the colour and the light the
-//! picture says it holds (design-decisions §1378). A frame large enough to be
+//! [`crate::colour`] settles on -- or, where Chrome converts the colour,
+//! `yuv::managed`'s transcription of Chrome's ([`Colour::converted`]): HDR
+//! (a PQ or HLG transfer), by the colour and the light the picture says it
+//! holds (design-decisions §1378), and SDR video that says its colour whole
+//! in primaries or a curve not sRGB's (§1381). A frame large enough to be
 //! worth it is converted in bands of rows, one to each core (`to_argb_rows`,
 //! whose every band is exactly those rows of the whole picture). VP9's 4:4:0
 //! -- chroma at full width and half height, which neither libyuv nor libavif
@@ -24,7 +26,7 @@ use yuv::managed::{self, Conversion, SdrCurve, Signal, Transfer};
 use yuv::reformat::{self, Format, Reformat};
 use yuv::{Plane, PlaneBuf};
 
-use crate::colour::{self, Colour};
+use crate::colour::{self, Colour, Prefer};
 use crate::decoder::Packet;
 use crate::{ColourHint, Error, Frame, Light};
 
@@ -90,21 +92,27 @@ impl Picture {
         }
     }
 
-    /// The colour it is converted by: its bitstream's, the file's where the
-    /// bitstream is silent, and a guess from its size where both are.
+    /// The colour it is converted by: one its bitstream or its file says
+    /// whole, the one Chrome's decoder for it asks first; else its
+    /// bitstream's, the file's where the bitstream is silent, and a guess from
+    /// its size where both are (`crate::colour`).
     pub fn colour(&self) -> Colour {
         let (width, height) = self.size();
-        let said = match &self.planes {
-            Planes::Vp8 { picture, .. } => {
-                ColourHint::vp8(picture.color_space(), picture.clamping_type())
-            }
+        let (prefer, said) = match &self.planes {
+            Planes::Vp8 { picture, .. } => (
+                Prefer::File,
+                ColourHint::vp8(picture.color_space(), picture.clamping_type()),
+            ),
             Planes::Vp9 { picture, .. } => {
                 let (space, full_range) = picture.color();
-                ColourHint::vp9(space, full_range)
+                (
+                    Prefer::File,
+                    ColourHint::vp9(space, full_range, picture.bit_depth()),
+                )
             }
-            Planes::Av1(p) => ColourHint::av1(p),
+            Planes::Av1(p) => (Prefer::Bitstream, ColourHint::av1(p)),
         };
-        colour::resolve(said, self.hint, width, height)
+        colour::resolve(prefer, said, self.hint, width, height)
     }
 
     /// What it says of its light -- the display it was mastered on, and how
@@ -149,7 +157,7 @@ impl Picture {
         // Only HDR is shown by its light.
         let look = Look {
             colour,
-            light: match Transfer::from_h273(colour.transfer).filter(|t| t.is_hdr()) {
+            light: match colour.managed().filter(|t| t.is_hdr()) {
                 Some(_) => self.light(),
                 None => Light::default(),
             },
@@ -174,11 +182,12 @@ struct Look {
 }
 
 /// How a picture's rows become pixels: libavif's conversion, or Chrome's
-/// handling of HDR by a tone map.
+/// colour-managed one -- HDR's tone map, or an SDR picture's colours
+/// converted to sRGB's.
 #[derive(Clone, Copy)]
 enum Way<'a> {
     Ordinary,
-    Hdr(&'a Conversion<'a>),
+    Managed(&'a Conversion<'a>),
 }
 
 impl Way<'_> {
@@ -191,7 +200,7 @@ impl Way<'_> {
     ) -> Result<(), reformat::Error> {
         match self {
             Self::Ordinary => reformat::to_argb_rows(picture, first, out),
-            Self::Hdr(map) => managed::to_argb_rows(picture, map, first, out),
+            Self::Managed(map) => managed::to_argb_rows(picture, map, first, out),
         }
     }
 }
@@ -296,12 +305,12 @@ impl<T: Sample> Planar<'_, T> {
             alpha: self.alpha,
             alpha_premultiplied: false,
         };
-        match Transfer::from_h273(colour.transfer).filter(|t| t.is_hdr()) {
+        match colour.managed() {
             None => in_bands(&picture, Way::Ordinary, out),
             Some(transfer) => {
                 let map =
                     Conversion::new(signal(transfer), colour.primaries, hdr_light(look.light));
-                in_bands(&picture, Way::Hdr(&map), out)
+                in_bands(&picture, Way::Managed(&map), out)
             }
         }
     }
@@ -668,6 +677,7 @@ mod tests {
             primaries: 1,
             transfer: 1,
             full_range: false,
+            whole: true,
         };
         let planar = Planar {
             width: 2,
@@ -718,6 +728,7 @@ mod tests {
                     primaries: 1,
                     transfer: 1,
                     full_range: false,
+                    whole: true,
                 },
                 light: Light::default(),
             },
@@ -772,7 +783,7 @@ mod tests {
                 let mut out = Vec::new();
                 split(&picture, Way::Ordinary, &mut out, bands).unwrap();
                 assert_eq!(out, whole, "{depth}-bit {subsampling:?} in {bands} bands");
-                split(&picture, Way::Hdr(&map), &mut out, bands).unwrap();
+                split(&picture, Way::Managed(&map), &mut out, bands).unwrap();
                 assert_eq!(
                     out, hdr_whole,
                     "HDR {depth}-bit {subsampling:?} in {bands} bands"

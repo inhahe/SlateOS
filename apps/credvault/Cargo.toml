@@ -2,7 +2,7 @@
 name = "credvault"
 version = "0.1.0"
 edition = "2024"
-description = "The SlateOS password vault -- its entries and its sealed file -- shared by the password manager and the credential service"
+description = "The SlateOS password vault -- its entries, its sealed file and where it is kept -- shared by the password manager and the credential service"
 publish = false
 
 [features]

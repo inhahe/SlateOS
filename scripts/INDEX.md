@@ -382,6 +382,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/q45_apply.py` | Q45: give every `RenderCommand::Text` construction an explicit `overflow`. |
 | `scripts/q45_survey.py` | Survey every `RenderCommand::Text {` site before Q45 edits a single one. |
 | `scripts/qemu-probe.py` | Ask a throwaway QEMU a question, and always get the process back. |
+| `scripts/questions-for-you.py` | Rebuilds `questions-for-you/`: the operator's questions not yet answered. |
 | `scripts/quote-names-why.py` | Derive the `--why` for `quote-names-wire.py` from the crate's own source. |
 | `scripts/quote-names-wire.py` | Wire the `quoting` crate into a crate that `quote-names.py --fix` just edited. |
 | `scripts/quote-names.py` | Diagnostics that name a file must route the name through `quote`. |
@@ -575,4 +576,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_565 scripts._
+_566 scripts._

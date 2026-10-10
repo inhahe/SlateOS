@@ -23,4 +23,10 @@ that "a stale frame is queued" and "the first seek was taken" are established
 facts rather than likely ones. Then re-run the two rows until they are caught
 as named. Until then, the rows stay `[??]` in a full sweep.
 
-**Also open:** the row "the picture a seek asks for is passed over like any other" (added 2026-10-04 with the fix for that race) survives: `the_picture_a_seek_asks_for_is_not_passed_over_for_a_clock_left_behind` passes against the mutant even after a first picture is handed over before the seek. Find why the test does not reach the passing-over loop, then make it fail as named.
+**Closed alongside, 2026-10-09:** the row "the picture a seek asks for is
+passed over like any other", added with the fix for that race, survived its
+first test because the test film made every picture a key frame -- a key-frame
+seek then lands on the time itself, and nothing lies between to pass over. The
+film now takes a key-frame interval, and
+`a_key_frame_seek_hands_over_the_key_frame_not_the_pictures_after_it` seeks
+between key frames; the row is caught as named.

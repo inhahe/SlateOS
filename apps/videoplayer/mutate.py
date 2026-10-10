@@ -828,14 +828,15 @@ GRADE_MUTATIONS = [
 ]
 
 PICTURES_MUTATIONS += [
-    # 2026-10-04: the thread passed the first picture after a seek over
-    # against a clock the window had not moved yet, so a seek-bar drag
-    # sometimes showed the frame after the key frame it asked for.
+    # 2026-10-04: the thread passed the first picture after a seek over for
+    # the pictures between it and the time sought, which the seek makes the
+    # clock -- so a seek-bar drag sometimes showed the last picture before
+    # the time instead of the key frame it asked for.
     (
         "the picture a seek asks for is passed over like any other",
         "            first_since_seek = true;\n            ahead = match source.seek(time, mode) {\n",
         "            ahead = match source.seek(time, mode) {\n",
-        ["the_picture_a_seek_asks_for_is_not_passed_over_for_a_clock_left_behind"],
+        ["a_key_frame_seek_hands_over_the_key_frame_not_the_pictures_after_it"],
     ),
     (
         "a picture is not put through the grade",

@@ -383,10 +383,13 @@ fn decode<S: Source>(
     let mut ahead: Ahead<S::Picture> = Ahead::Nothing;
     let mut asked: Option<Ask> = None;
     // The first picture after a seek is the one the seek asked for, and the
-    // window shows it whatever the clock says (`Pictures::fresh`). Passing
-    // it over against a clock the window has not moved yet -- a drag's first
-    // key frame, measured against where the film was before the drag --
-    // showed the picture after it instead, whenever this thread won the race.
+    // window shows it whatever the clock says (`Pictures::fresh`). The clock
+    // is the time sought until the window next moves it (`Pictures::seek`),
+    // so after a key-frame seek every picture between the key frame and that
+    // time is already due. Passing the key frame over for them showed a
+    // seek-bar drag the last picture before the time instead -- decoded the
+    // long way, which is what a key-frame seek is there to avoid -- whenever
+    // this thread got there before the window held the clock.
     let mut first_since_seek = true;
     loop {
         // The newest seek asked for: an older one waiting behind it is moot.
@@ -451,35 +454,37 @@ fn decode<S: Source>(
         let mut picture = picture;
         let mut interrupted = false;
         let passing_since = std::time::Instant::now();
-        while !first_since_seek {
-            match asks.try_recv() {
-                Ok(ask) => {
-                    // A seek makes this picture moot as well.
-                    asked = Some(ask);
-                    interrupted = true;
-                    break;
+        if !first_since_seek {
+            loop {
+                match asks.try_recv() {
+                    Ok(ask) => {
+                        // A seek makes this picture moot as well.
+                        asked = Some(ask);
+                        interrupted = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return,
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => return,
-            }
-            match source.next() {
-                Ok(Some(after))
-                    if S::time(&after) <= clock.load(Ordering::Relaxed)
-                        && passing_since.elapsed() < LONGEST_UNSHOWN =>
-                {
-                    picture = after;
-                }
-                Ok(Some(after)) => {
-                    ahead = Ahead::Picture(after);
-                    break;
-                }
-                Ok(None) => {
-                    ahead = Ahead::End;
-                    break;
-                }
-                Err(why) => {
-                    ahead = Ahead::Failed(why);
-                    break;
+                match source.next() {
+                    Ok(Some(after))
+                        if S::time(&after) <= clock.load(Ordering::Relaxed)
+                            && passing_since.elapsed() < LONGEST_UNSHOWN =>
+                    {
+                        picture = after;
+                    }
+                    Ok(Some(after)) => {
+                        ahead = Ahead::Picture(after);
+                        break;
+                    }
+                    Ok(None) => {
+                        ahead = Ahead::End;
+                        break;
+                    }
+                    Err(why) => {
+                        ahead = Ahead::Failed(why);
+                        break;
+                    }
                 }
             }
         }
@@ -558,6 +563,8 @@ mod tests {
         fail_at: Option<usize>,
         /// How long each picture takes to decode.
         delay: Duration,
+        /// Every how many pictures a key frame comes: 1, every picture.
+        key_every: usize,
     }
 
     impl Film {
@@ -570,6 +577,7 @@ mod tests {
                     converted: Arc::clone(&converted),
                     fail_at: None,
                     delay: Duration::ZERO,
+                    key_every: 1,
                 },
                 converted,
             )
@@ -608,10 +616,14 @@ mod tests {
         }
 
         fn seek(&mut self, time: i64, mode: SeekMode) -> Result<(), String> {
-            // The latest picture at or before the time, for both modes: every
-            // picture of this film is a key frame.
-            let _ = mode;
-            self.at = self.times.iter().rposition(|&t| t <= time).unwrap_or(0);
+            // As `videocodec` lands: an exact seek on the latest picture at
+            // or before the time, a key-frame seek on the latest key frame
+            // at or before it.
+            let exact = self.times.iter().rposition(|&t| t <= time).unwrap_or(0);
+            self.at = match mode {
+                SeekMode::Exact => exact,
+                SeekMode::KeyFrame => exact - exact % self.key_every.max(1),
+            };
             Ok(())
         }
     }
@@ -704,32 +716,37 @@ mod tests {
     }
 
     #[test]
-    fn the_picture_a_seek_asks_for_is_not_passed_over_for_a_clock_left_behind() {
-        // The window moves the clock after it asks for a seek -- a drag
-        // holds it -- so the thread can decode the seek's picture while the
-        // clock still says where the film was. That picture is shown
-        // whatever the clock says, so it must not be passed over against it.
+    fn a_key_frame_seek_hands_over_the_key_frame_not_the_pictures_after_it() {
+        // A key-frame seek asks for the key frame at or before the time --
+        // what a seek-bar drag shows, because reaching it costs nothing.
+        // `Pictures::seek` sets the clock to the time sought, so every
+        // picture between the key frame and that time is already due by it.
+        // The key frame is the one the seek asked for, and is not passed
+        // over for them.
         let times: Vec<i64> = (0..100).map(|i| i * 40).collect();
-        let (film, _) = Film::new(&times);
+        let (mut film, _) = Film::new(&times);
+        film.key_every = 5; // key frames at 0, 200, 400 ...
         let mut pictures =
             Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         // A picture handed over first, so that the seek below is not the
         // film's start, where the thread begins as if just sought.
-        assert!(pictures.wait(Duration::from_secs(10)), "nothing came");
-        // Only the clock matters here: it is left at 3 s, whatever shows.
-        let _whatever_shows = pictures.show_at(3_000);
-        pictures.seek(400, SeekMode::KeyFrame);
-        while pictures.due().is_none() {
-            assert!(
-                pictures.wait(Duration::from_secs(10)),
-                "nothing came after the seek"
-            );
-        }
-        let due = pictures.due().unwrap_or(i64::MAX);
-        assert!(
-            due <= 400,
-            "the seek's picture was passed over for the one at {due}"
+        assert!(pictures.wait(WAIT), "nothing came");
+        let first_after = |pictures: &mut Pictures| {
+            while pictures.due().is_none() {
+                assert!(pictures.wait(WAIT), "nothing came after the seek");
+            }
+            pictures.due()
+        };
+
+        pictures.seek(330, SeekMode::KeyFrame);
+        assert_eq!(
+            first_after(&mut pictures),
+            Some(200),
+            "the key frame was passed over for a picture after it"
         );
+        // An exact seek lands on the picture showing at the time.
+        pictures.seek(330, SeekMode::Exact);
+        assert_eq!(first_after(&mut pictures), Some(320));
     }
 
     #[test]

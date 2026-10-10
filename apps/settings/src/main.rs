@@ -930,6 +930,12 @@ pub enum DropdownId {
     /// colours and beside the animation speed, which scales it
     /// (`animation_theme`, §1446).
     AnimationTheme,
+    /// The shape of windows' frames -- a theme's `window-decorations`, chosen
+    /// apart from its colours (`decoration_theme`, design-decisions §1456).
+    DecorationTheme,
+    /// How the taskbar is finished -- a theme's `taskbar-panel`, its gloss and
+    /// its gaps, chosen apart from its colours (`panel_theme`, §1460).
+    PanelTheme,
     /// The clock's time zone, or the machine's own.
     TimeZone,
     /// A zone to add a world clock for.
@@ -1000,7 +1006,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 28] = [
+    pub const FIXED: [Self; 30] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::NotifHistory,
@@ -1012,6 +1018,8 @@ impl DropdownId {
         Self::IconTheme,
         Self::WidgetTheme,
         Self::AnimationTheme,
+        Self::DecorationTheme,
+        Self::PanelTheme,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
@@ -1259,6 +1267,30 @@ impl SettingsState {
             format!("{} -- cannot be used: it {problem}", info.name)
         } else {
             format!("{} -- no motion", info.name)
+        }
+    }
+
+    /// A theme's row in the Window frames list: its name, or why it cannot
+    /// be chosen -- unreadable, or with no `window-decorations` to offer.
+    fn decoration_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_decorations() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- no window frames", info.name)
+        }
+    }
+
+    /// A theme's row in the Taskbar panel list: its name, or why it cannot
+    /// be chosen -- unreadable, or with no `taskbar-panel` to offer.
+    fn panel_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_panel() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- no taskbar panel", info.name)
         }
     }
 
@@ -4667,6 +4699,20 @@ impl SettingsState {
         if let Some(problem) = self.appearance.settings.widget_theme.problem() {
             s.note(problem, 28.0);
         }
+        // Windows' frames and the taskbar's finish, two more axes chosen
+        // apart from the colours (lane C, c-e-choose-the-window-frames-in-
+        // settings and c-e-choose-the-taskbar-panel-in-settings): set before
+        // only by editing `appearance.yaml` by hand.
+        let frames_name = self.theme_name(self.appearance.settings.decoration_theme.id());
+        s.dropdown_row("Window frames", DropdownId::DecorationTheme, &frames_name);
+        if let Some(problem) = self.appearance.settings.decoration_theme.problem() {
+            s.note(problem, 28.0);
+        }
+        let panel_name = self.theme_name(self.appearance.settings.panel_theme.id());
+        s.dropdown_row("Taskbar panel", DropdownId::PanelTheme, &panel_name);
+        if let Some(problem) = self.appearance.settings.panel_theme.problem() {
+            s.note(problem, 28.0);
+        }
         s.gap();
 
         // The automatic mode's hours, where it is chosen. "System (Auto)" is
@@ -6452,6 +6498,30 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, at)
             }
+            DropdownId::DecorationTheme => {
+                let items = self
+                    .themes
+                    .iter()
+                    .map(Self::decoration_theme_item)
+                    .collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| {
+                        t.id.as_os_str() == self.appearance.settings.decoration_theme.id()
+                    })
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::PanelTheme => {
+                let items = self.themes.iter().map(Self::panel_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.panel_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
             DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
                 let day = dropdown_id == DropdownId::DayWallpaperFrom;
                 let current = day_and_night(&self.appearance.settings.wallpaper_schedule)
@@ -7664,6 +7734,22 @@ impl SettingsState {
                 {
                     self.appearance.settings.animation_theme =
                         appearance::themes::AnimationTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::DecorationTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_decorations()
+                {
+                    self.appearance.settings.decoration_theme =
+                        appearance::themes::DecorationTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::PanelTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_panel()
+                {
+                    self.appearance.settings.panel_theme =
+                        appearance::themes::PanelTheme::load_from(&self.theme_dirs, &info.id);
                 }
             }
             DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
@@ -9319,6 +9405,35 @@ mod tests {
             Some("meta:\n  name: Still\nanimation:\n  enabled: false\n"),
             false,
         );
+        // The other two ways of moving, so each has a theme to describe.
+        theme(
+            "even",
+            Some("meta:\n  name: Even\nanimation:\n  duration-ms: 120\n  easing: linear\n"),
+            false,
+        );
+        theme(
+            "glide",
+            Some("meta:\n  name: Glide\nanimation:\n  duration-ms: 250\n  easing: ease-out\n"),
+            false,
+        );
+        // One whose file cannot be read at all: it is not text.
+        theme("broken", None, false);
+        std::fs::write(
+            dir.dir().join("broken").join("theme.yaml"),
+            b"meta:\n  name: \xff\xfe\n",
+        )
+        .expect("theme file");
+        // And one each of windows' frames and the taskbar's finish.
+        theme(
+            "framed",
+            Some("meta:\n  name: Framed\nwindow-decorations:\n  title-bar:\n    height: 40\n"),
+            false,
+        );
+        theme(
+            "flatbar",
+            Some("meta:\n  name: Flat Bar\ntaskbar-panel:\n  gloss: 0\n"),
+            false,
+        );
         dir
     }
 
@@ -9460,6 +9575,23 @@ mod tests {
             "the motion is not described: {texts:?}"
         );
         assert!(texts.iter().any(|t| t == "Bouncy"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Rounded"), "{texts:?}");
+
+        // Each way of moving is described as itself, with its own time.
+        for (name, said) in [
+            (
+                "Even",
+                "Moves at an even pace, 120 ms a move at Normal speed.",
+            ),
+            (
+                "Glide",
+                "Glides in and settles, 250 ms a move at Normal speed.",
+            ),
+        ] {
+            pick(&mut app, DropdownId::AnimationTheme, name);
+            let texts = drawn_texts(&app);
+            assert!(texts.iter().any(|t| t == said), "{said:?}: {texts:?}");
+        }
 
         pick(&mut app, DropdownId::AnimationTheme, "Still");
         let texts = drawn_texts(&app);
@@ -9467,13 +9599,244 @@ mod tests {
             texts.iter().any(|t| t.starts_with("Nothing moves")),
             "{texts:?}"
         );
+        // A theme with no motion changes nothing chosen from this list.
+        pick(&mut app, DropdownId::AnimationTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.animation_theme.id(),
+            OsStr::new("still")
+        );
 
-        // Each list chose its own axis only.
+        // Each list chose its own axis only, and opens on the one chosen.
         assert_eq!(app.appearance.settings.color_theme.id(), colors.as_os_str());
         assert_eq!(
             app.appearance.settings.widget_theme.id(),
             OsStr::new("rounded")
         );
+        assert_eq!(ticked_in(&mut app, DropdownId::WidgetTheme), "Rounded");
+        assert_eq!(ticked_in(&mut app, DropdownId::AnimationTheme), "Still");
+    }
+
+    /// The item a dropdown opens on, ticked; the dropdown is put away again.
+    fn ticked_in(app: &mut SettingsState, id: DropdownId) -> String {
+        app.show_dropdown(id);
+        let layout = app.dropdown_layout().expect("a layout");
+        app.open_dropdown = None;
+        layout
+            .items
+            .get(layout.selected)
+            .cloned()
+            .unwrap_or_else(|| panic!("{} is past the list's end", layout.selected))
+    }
+
+    /// Each of a theme's axes has a row of its own on the Themes page, and a
+    /// press on the row opens that axis's list.
+    #[test]
+    fn each_theme_axis_row_opens_its_own_list() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        for id in [
+            DropdownId::WidgetTheme,
+            DropdownId::AnimationTheme,
+            DropdownId::DecorationTheme,
+            DropdownId::PanelTheme,
+        ] {
+            app.open_dropdown = None;
+            let (cx, cy) = center_of(&app, RowHit::Dropdown(id))
+                .unwrap_or_else(|| panic!("the page draws no row for {id:?}"));
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(app.open_dropdown, Some(id));
+        }
+    }
+
+    /// Windows' frames and the taskbar's finish are chosen in lists of their
+    /// own, each apart from every other axis; a theme with nothing for a list
+    /// cannot be chosen from it (lane C, c-e-choose-the-window-frames-in-
+    /// settings and c-e-choose-the-taskbar-panel-in-settings). Both could be
+    /// set only by editing `appearance.yaml` by hand.
+    #[test]
+    fn window_frames_and_the_taskbar_panel_are_chosen_apart() {
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let colors = app.appearance.settings.color_theme.id().to_os_string();
+        let controls = app.appearance.settings.widget_theme.id().to_os_string();
+        let pick = |app: &mut SettingsState, id: DropdownId, row: &str| {
+            app.show_dropdown(id);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|i| i.starts_with(row))
+                .unwrap_or_else(|| panic!("{row} is not listed: {items:?}"));
+            app.apply_dropdown_selection(at);
+            items
+        };
+
+        let items = pick(&mut app, DropdownId::DecorationTheme, "Framed");
+        assert!(
+            items.contains(&"Nord -- no window frames".to_string()),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.appearance.settings.decoration_theme.id(),
+            OsStr::new("framed")
+        );
+        pick(&mut app, DropdownId::DecorationTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.decoration_theme.id(),
+            OsStr::new("framed"),
+            "a theme with no frames was chosen for them"
+        );
+
+        let items = pick(&mut app, DropdownId::PanelTheme, "Flat Bar");
+        assert!(
+            items.contains(&"Nord -- no taskbar panel".to_string()),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.appearance.settings.panel_theme.id(),
+            OsStr::new("flatbar")
+        );
+        pick(&mut app, DropdownId::PanelTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.panel_theme.id(),
+            OsStr::new("flatbar"),
+            "a theme with no taskbar panel was chosen for it"
+        );
+
+        // Each list chose its own axis only, opens on the one chosen, and the
+        // page names the choices.
+        assert_eq!(app.appearance.settings.color_theme.id(), colors.as_os_str());
+        assert_eq!(
+            app.appearance.settings.widget_theme.id(),
+            controls.as_os_str()
+        );
+        assert_eq!(
+            app.appearance.settings.decoration_theme.id(),
+            OsStr::new("framed")
+        );
+        assert_eq!(ticked_in(&mut app, DropdownId::DecorationTheme), "Framed");
+        assert_eq!(ticked_in(&mut app, DropdownId::PanelTheme), "Flat Bar");
+        let texts = drawn_texts(&app);
+        assert!(texts.iter().any(|t| t == "Framed"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Flat Bar"), "{texts:?}");
+    }
+
+    /// A theme whose file cannot be read says why in every list it is in --
+    /// not that it has nothing for the list, which nobody can know -- and
+    /// cannot be chosen from any of them.
+    #[test]
+    fn a_theme_that_cannot_be_read_says_why_in_every_list() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let broken = app
+            .themes
+            .iter()
+            .find(|t| t.id.as_os_str() == std::ffi::OsStr::new("broken"))
+            .expect("control: the broken theme is listed");
+        let problem = broken
+            .problem
+            .as_ref()
+            .expect("control: the broken theme cannot be read");
+        let said = format!("{} -- cannot be used: it {problem}", broken.name);
+        for id in [
+            DropdownId::ColorTheme,
+            DropdownId::WidgetTheme,
+            DropdownId::AnimationTheme,
+            DropdownId::DecorationTheme,
+            DropdownId::PanelTheme,
+        ] {
+            let before = app.appearance.settings.clone();
+            app.show_dropdown(id);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|i| *i == said)
+                .unwrap_or_else(|| panic!("{id:?} does not say {said:?}: {items:?}"));
+            app.apply_dropdown_selection(at);
+            assert!(
+                app.appearance.settings == before,
+                "choosing the broken theme from {id:?} changed the settings"
+            );
+        }
+    }
+
+    /// A theme chosen for an axis that cannot serve it -- not there, or with
+    /// nothing for that axis -- says why under the axis's row: the desktop
+    /// draws the built-in one meanwhile and says nothing.
+    #[test]
+    fn a_theme_chosen_for_an_axis_it_cannot_serve_says_why() {
+        use appearance::themes::{AnimationTheme, DecorationTheme, PanelTheme, WidgetTheme};
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let dirs = app.theme_dirs.clone();
+        let settings = &mut app.appearance.settings;
+        settings.widget_theme = WidgetTheme::load_from(&dirs, OsStr::new("nord"));
+        settings.animation_theme = AnimationTheme::load_from(&dirs, OsStr::new("gone"));
+        settings.decoration_theme = DecorationTheme::load_from(&dirs, OsStr::new("lost"));
+        settings.panel_theme = PanelTheme::load_from(&dirs, OsStr::new("nord"));
+        let problems: Vec<String> = [
+            settings.widget_theme.problem(),
+            settings.animation_theme.problem(),
+            settings.decoration_theme.problem(),
+            settings.panel_theme.problem(),
+        ]
+        .into_iter()
+        .map(|p| p.expect("control: every axis has a problem").to_string())
+        .collect();
+        let distinct: std::collections::HashSet<&String> = problems.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "control: the problems differ: {problems:?}"
+        );
+        let texts = drawn_texts(&app);
+        for problem in &problems {
+            assert!(
+                texts.contains(problem),
+                "{problem:?} is not said: {texts:?}"
+            );
+        }
+    }
+
+    /// Window frames and a taskbar panel chosen as a person chooses them -- a
+    /// press on the row, a press on the entry -- are written to
+    /// `appearance.yaml`.
+    #[test]
+    fn window_frames_and_a_taskbar_panel_chosen_are_written() {
+        with_scratch_config("settings-frames-and-panel", |_root| {
+            let dir = scratch_themes();
+            let mut app = themes_state(&dir);
+            for (id, name) in [
+                (DropdownId::DecorationTheme, "Framed"),
+                (DropdownId::PanelTheme, "Flat Bar"),
+            ] {
+                let (cx, cy) = center_of(&app, RowHit::Dropdown(id))
+                    .unwrap_or_else(|| panic!("the page draws no row for {id:?}"));
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x: cx,
+                    y: cy,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+                assert_eq!(app.open_dropdown, Some(id));
+                let at = app
+                    .dropdown_layout()
+                    .expect("a layout")
+                    .items
+                    .iter()
+                    .position(|i| i == name)
+                    .unwrap_or_else(|| panic!("{name} is not listed"));
+                press_dropdown_item(&mut app, at);
+            }
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.decoration_theme.id(), std::ffi::OsStr::new("framed"));
+            assert_eq!(saved.panel_theme.id(), std::ffi::OsStr::new("flatbar"));
+        });
     }
 
     /// **Each look keeps its own accent** (§1421, the operator's answer to

@@ -781,6 +781,187 @@ MUTATIONS += [
     ),
 ]
 
+# -- a theme's other axes, each chosen in a list of its own: the controls and
+# the motion (2026-10-06; lane C, c-e-a-theme-can-shape-the-controls and
+# c-e-a-theme-can-set-the-motion -- written without rows then, so given them
+# here), and windows' frames and the taskbar panel (2026-10-10; lane C,
+# c-e-choose-the-window-frames-in-settings and
+# c-e-choose-the-taskbar-panel-in-settings). The four are built alike, so
+# every one gets the same eight rows: its row, the name the row shows, the
+# choice kept, a theme with nothing for the axis refused, such a theme listed
+# as such, an unreadable one listed as unreadable, the list opening on the
+# choice, and the chosen theme's problem said.
+AXES_APART = "controls_and_motion_are_chosen_apart_from_the_colours"
+FRAMES_APART = "window_frames_and_the_taskbar_panel_are_chosen_apart"
+AXIS_ROWS = "each_theme_axis_row_opens_its_own_list"
+UNREADABLE = "a_theme_that_cannot_be_read_says_why_in_every_list"
+CANNOT_SERVE = "a_theme_chosen_for_an_axis_it_cannot_serve_says_why"
+FRAMES_WRITTEN = "window_frames_and_a_taskbar_panel_chosen_are_written"
+
+
+def axis_rows(what, label, variant, field, provides, without, apart, extra=()):
+    """The eight rows every theme axis gets; `extra` are tests a choice made
+    through the page also breaks (the frames and panel are saved by one)."""
+    loader = variant
+    return [
+        (
+            f"the {what} row opens another list",
+            f'"{label}", DropdownId::{variant}, &',
+            f'"{label}", DropdownId::IconTheme, &',
+            [AXIS_ROWS, *extra],
+        ),
+        (
+            f"the {what} row names the colour theme",
+            f"_name = self.theme_name(self.appearance.settings.{field}.id());",
+            "_name = self.theme_name(self.appearance.settings.color_theme.id());",
+            [apart],
+        ),
+        (
+            f"a {what} theme chosen is not kept",
+            f"                    self.appearance.settings.{field} =\n"
+            f"                        appearance::themes::{loader}::load_from(&self.theme_dirs, &info.id);",
+            "                    let _ = &info.id;",
+            [apart, *extra],
+        ),
+        (
+            f"a theme with no {what} can be chosen for it",
+            f"                    && info.{provides}()\n",
+            "                    && !info.name.is_empty()\n",
+            [apart, UNREADABLE],
+        ),
+        (
+            f"a theme with no {what} is listed as having it",
+            f"        if info.{provides}() {{\n            info.name.clone()",
+            "        if info.problem.is_none() {\n            info.name.clone()",
+            [apart],
+        ),
+        (
+            f"an unreadable theme is listed as having no {what}",
+            '            format!("{} -- cannot be used: it {problem}", info.name)\n'
+            f'        }} else {{\n            format!("{{}} -- {without}", info.name)',
+            "            let _ = problem;\n"
+            f'            format!("{{}} -- {without}", info.name)\n'
+            f'        }} else {{\n            format!("{{}} -- {without}", info.name)',
+            [UNREADABLE],
+        ),
+        (
+            f"the {what} list opens on the colour theme",
+            f"t.id.as_os_str() == self.appearance.settings.{field}.id()",
+            "t.id.as_os_str() == self.appearance.settings.color_theme.id()",
+            [apart],
+        ),
+    ]
+
+
+def problem_row(what, field):
+    """A chosen theme's problem said under the axis's row."""
+    return (
+        f"a {what} theme that cannot be used says nothing",
+        f"        if let Some(problem) = self.appearance.settings.{field}.problem() {{\n"
+        "            s.note(problem, 28.0);",
+        f"        if let Some(problem) = self.appearance.settings.{field}.problem() {{\n"
+        "            let _ = problem;",
+        [CANNOT_SERVE],
+    )
+
+
+MUTATIONS += [
+    *axis_rows(
+        "controls",
+        "Controls",
+        "WidgetTheme",
+        "widget_theme",
+        "provides_widget_style",
+        "no control shapes",
+        AXES_APART,
+    ),
+    problem_row("controls", "widget_theme"),
+    *axis_rows(
+        "motion",
+        "Motion",
+        "AnimationTheme",
+        "animation_theme",
+        "provides_animation",
+        "no motion",
+        AXES_APART,
+    ),
+    *axis_rows(
+        "window frames",
+        "Window frames",
+        "DecorationTheme",
+        "decoration_theme",
+        "provides_decorations",
+        "no window frames",
+        FRAMES_APART,
+        extra=(FRAMES_WRITTEN,),
+    ),
+    problem_row("window frames", "decoration_theme"),
+    *axis_rows(
+        "taskbar panel",
+        "Taskbar panel",
+        "PanelTheme",
+        "panel_theme",
+        "provides_panel",
+        "no taskbar panel",
+        FRAMES_APART,
+        extra=(FRAMES_WRITTEN,),
+    ),
+    problem_row("taskbar panel", "panel_theme"),
+    # The motion's notes: what it is, then the theme's problem.
+    (
+        "the motion is not described",
+        "        for note in self.animation_theme_notes() {\n            s.note(&note, 28.0);",
+        "        for note in self.animation_theme_notes() {\n            let _ = note;",
+        [AXES_APART, CANNOT_SERVE],
+    ),
+    (
+        "a motion theme that cannot be used says nothing",
+        "        if let Some(problem) = theme.problem() {\n            notes.push(problem.to_string());",
+        "        if let Some(problem) = theme.problem() {\n            let _ = problem;",
+        [CANNOT_SERVE],
+    ),
+    (
+        "nothing moving is described as moving",
+        "    let mut notes = vec![if motion.is_still() {",
+        "    let mut notes = vec![if false {",
+        [AXES_APART],
+    ),
+    (
+        "springing is described as gliding",
+        'guitk::motion::Curve::Spring => "Springs a little past its place and back",',
+        'guitk::motion::Curve::Spring => "Glides in and settles",',
+        [AXES_APART],
+    ),
+    (
+        "an even pace is described as gliding",
+        'guitk::motion::Curve::Linear => "Moves at an even pace",',
+        'guitk::motion::Curve::Linear => "Glides in and settles",',
+        [AXES_APART],
+    ),
+    (
+        "gliding is described as an even pace",
+        'guitk::motion::Curve::EaseOut => "Glides in and settles",',
+        'guitk::motion::Curve::EaseOut => "Moves at an even pace",',
+        [AXES_APART],
+    ),
+    (
+        "every motion takes the built-in time",
+        '"{how}, {} ms a move at Normal speed.", motion.standard_ms())',
+        '"{how}, {} ms a move at Normal speed.", 200)',
+        [AXES_APART],
+    ),
+    # The colour list's own unreadable theme.
+    (
+        "an unreadable theme is listed as an icon pack",
+        '            format!("{} -- cannot be used: it {problem}", info.name)\n'
+        "        } else if info.provides_icons() {",
+        "            let _ = problem;\n"
+        '            format!("{} -- icons only", info.name)\n'
+        "        } else if info.provides_icons() {",
+        [UNREADABLE],
+    ),
+]
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",

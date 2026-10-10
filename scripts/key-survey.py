@@ -14,12 +14,15 @@ anywhere in their own strings, and the top of that list gets read by hand.
 
 Every `.rs` file in the crate is read, not just `main.rs`: 12 of 141 apps
 have more than one source file, and a sweep over `src/main.rs` alone is
-the eighth way a search says nothing.
+the eighth way a search says nothing. Every one, that is, but a test
+module's (`test_module_files`).
 """
 
 import io
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -453,13 +456,69 @@ def is_label(literal: str) -> bool:
     return not any(mark in literal for mark in (r"\x1b", r"\u{1b}", chr(27)))
 
 
-def crate_sources(crate: Path) -> list[Path]:
-    return sorted(p for p in (crate / "src").rglob("*.rs"))
+# A module declared under `#[cfg(test)]` is test code from its first line to
+# its last, with nothing in its own file to say so. The attribute sits in the
+# parent, where `live_code` blanks the declaration, and the module's file is
+# read on its own: `apps/fieldmenu/src/tests.rs` was read as the field menu's
+# live code, and the `Key::A` its tests type was reported as a key the library
+# answers and names nowhere.
+#
+# Found from the declarations, resolved as cargo resolves them, not by name:
+# test code is not always called `tests`. A declaration this misreads leaves
+# its module read as live code, which is where the survey stood before.
+_TEST_MOD_DECL = re.compile(
+    r"^[ \t]*#\[cfg\(test\)\]\s*"
+    r"(?:#\[[^\n]*\]\s*)*"
+    r"(?:pub(?:\([^)\n]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[;{]",
+    re.MULTILINE,
+)
+_PATH_ATTR = re.compile(r'#\[path\s*=\s*"(?P<path>[^"\n]+)"\s*\]')
+
+
+def _module_dir(path: Path) -> Path:
+    """Where `mod x;` in the file `path` looks for `x`: beside a crate root --
+    `lib.rs`, `main.rs`, a file directly in `src/bin` -- or a `mod.rs`, and in
+    the directory named for the file otherwise."""
+    in_bin = path.parent.name == "bin" and path.parent.parent.name == "src"
+    if path.name in ("lib.rs", "main.rs", "mod.rs") or in_bin:
+        return path.parent
+    return path.parent / path.stem
+
+
+def test_module_files(texts: dict[Path, str]) -> set[Path]:
+    """Which of a crate's source files -- `texts` maps each one's path to its
+    contents -- a build compiles only for its tests: the modules declared under
+    `#[cfg(test)]`, and every file beneath one."""
+    files: set[Path] = set()
+    dirs: list[Path] = []
+    for path, text in texts.items():
+        if "#[cfg(test)]" not in text:
+            continue
+        # Comments blanked, so a commented-out declaration is not one; literals
+        # kept, for `#[path = "..."]`.
+        code = rustlex.strip_noise(text, keep_literals=True)
+        for decl in _TEST_MOD_DECL.finditer(code):
+            attr = _PATH_ATTR.search(decl.group(0))
+            if attr:
+                # Relative to the declaring file's own directory.
+                files.add(Path(os.path.normpath(path.parent / attr["path"])))
+                continue
+            base = _module_dir(path) / decl["name"]
+            files.update((base.parent / f"{base.name}.rs", base / "mod.rs"))
+            dirs.append(base)
+    return {p for p in texts if p in files or any(d in p.parents for d in dirs)}
 
 
 def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
-    files = crate_sources(crate)
-    if not files:
+    texts: dict[Path, str] = {}
+    for path in sorted((crate / "src").rglob("*.rs")):
+        try:
+            texts[path] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    tests_only = test_module_files(texts)
+    sources = [src for path, src in texts.items() if path not in tests_only]
+    if not sources:
         return None
 
     matched: set[str] = set()
@@ -468,11 +527,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
     has_list = False
     kept_sources: list[str] = []
 
-    for path in files:
-        try:
-            src = io.open(path, encoding="utf-8").read()
-        except (OSError, UnicodeDecodeError):
-            continue
+    for src in sources:
         live, _test = rustlex.live_code(src)
         for m in LIST_RE.finditer(live):
             # The literal that follows the declaration, up to its closing
@@ -661,7 +716,80 @@ def _self_test() -> int:
         ("f/{ap:.1}", set(), "control: an aperture, which even has a slash"),
         ("add(a: u32, b: u32)", set(), "control: a doc fixture"),
     ]
+    # `test_module_files` cases: one crate's tree, each declaration shape in
+    # it, and which of its files are its tests'. Paths only; nothing is read.
+    nl = chr(10)
+    src = Path("probe") / "src"
+    tree = {
+        src / "lib.rs": nl.join([
+            "mod real;",
+            "mod other;",
+            "#[cfg(test)]",
+            "mod tests;",
+            "#[cfg(test)]",
+            '#[path = "oracle_cases.rs"]',
+            "mod oracle;",
+            "#[cfg(test)]",
+            "mod inline {",
+            "    mod deeper;",
+            "}",
+            "/*",
+            "#[cfg(test)]",
+            "mod commented_out;",
+            "*/",
+        ]),
+        src / "tests.rs": "mod helper;",
+        src / "tests" / "helper.rs": "",
+        src / "oracle_cases.rs": "",
+        src / "inline" / "deeper.rs": "",
+        src / "commented_out.rs": "",
+        src / "real.rs": nl.join(["#[cfg(test)]", "pub(crate) mod tests;"]),
+        src / "real" / "tests.rs": "",
+        src / "other.rs": "mod tests;",
+        src / "other" / "tests.rs": "",
+        src / "bin" / "tool.rs": nl.join(["#[cfg(test)]", "mod checks;"]),
+        src / "bin" / "checks.rs": "",
+    }
+    modules: list[tuple[Path, bool, str]] = [
+        (src / "tests.rs", True, "a module declared under cfg(test) is a test file"),
+        (src / "tests" / "helper.rs", True, "and so is every module beneath it"),
+        (src / "oracle_cases.rs", True, "a path attribute names the test file"),
+        (src / "inline" / "deeper.rs", True, "a file beneath an inline test module"),
+        (src / "real" / "tests.rs", True, "a pub(crate) one, beside a non-root file"),
+        (src / "bin" / "checks.rs", True, "a binary's root resolves beside itself"),
+        (src / "lib.rs", False, "control: the crate root"),
+        (src / "other" / "tests.rs", False, "control: called `tests`, never gated"),
+        (src / "commented_out.rs", False, "control: a declaration commented out"),
+    ]
+    test_files = test_module_files(tree)
     bad = 0
+    for path, want_test, why in modules:
+        ok = (path in test_files) == want_test
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       {path} is{'' if want_test else ' not'} test code;"
+                  f" test_module_files -> {sorted(map(str, test_files))}")
+            bad += 1
+    # And the survey reads none of a test module: the key a test presses is
+    # reported only once the module is no longer gated.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe"
+        (probe / "src").mkdir(parents=True)
+        (probe / "src" / "tests.rs").write_text("fn t() { press(Key::A); }", encoding="utf-8")
+        (probe / "src" / "lib.rs").write_text(nl.join(["#[cfg(test)]", "mod tests;"]), encoding="utf-8")
+        gated = survey(probe)
+        (probe / "src" / "lib.rs").write_text("mod tests;", encoding="utf-8")
+        ungated = survey(probe)
+    surveyed: list[tuple[object, object, str]] = [
+        (gated, None, "the survey skips a test module's file"),
+        (ungated, (1, 1, ["A"], False), "control: the same file, ungated, is read"),
+    ]
+    for got_survey, want_survey, why in surveyed:
+        ok = got_survey == want_survey
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       survey -> {got_survey!r}, wanted {want_survey!r}")
+            bad += 1
     for text, want_read, why in labels_read:
         got_read = label_keys(text)
         ok = got_read == want_read
@@ -708,7 +836,10 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    total = len(cases) + len(named) + len(payloads) + len(labels) + len(typed) + len(labels_read)
+    total = (
+        len(cases) + len(named) + len(payloads) + len(labels) + len(typed)
+        + len(labels_read) + len(modules) + len(surveyed)
+    )
     print(f"self-test ok -- {total} case(s)")
     return 0
 
